@@ -1,0 +1,3 @@
+config:
+  # Prose is wrapped (or not) by the author.
+  MD013: false
