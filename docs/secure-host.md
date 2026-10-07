@@ -3,77 +3,215 @@
 Agent security is just CI security. An agent is one more untrusted step
 of a job, like a build script from a pull request or a dependency's
 install hook, and what protects a job from one protects it from the
-others. So the hardening is a step of its own, `agentic-job sandbox
-setup`, that any job can run first, whether or not an agent runs
-afterwards; `agentic-job run` builds on it and does not own it.
+others. So the hardening is a step of its own that any job can run
+first, whether or not an agent runs afterwards: the action in
+[`secure-host/`](../secure-host/action.yml). The reusable workflow's
+agent job uses the same action and does not own it.
 
-## What the step does
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get install -y libfoo-dev   # root: before the step
+      - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+      - run: make check                           # the runner's user, no root
+      - shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+        run: ./untrusted.sh                       # the sandbox user
+```
 
-As root, once, on a machine that is thrown away after the job:
+[`example-secure-host.yml`](../.github/workflows/example-secure-host.yml)
+is a whole job of this shape, and CI runs it on every pull request: it
+builds and tests after the lock, as both users, saves a cache and
+uploads an artifact, and ends with `sandbox check` passing again.
 
-- creates the sandbox user, with its own home and subordinate uids, and
-  closes to it the runner's home, the job's directories and everything
-  else a runner image leaves open to every local user: world-writable
-  system paths, the image's environment file, the hosted compute
-  agent's directory, tailscaled's socket;
+## What the step does to the host
+
+It gets the `agentic-job` binary (below), runs `agentic-job sandbox
+setup` as root, and then `agentic-job sandbox check`. Setup, once, on a
+machine that is thrown away after the job:
+
+- creates a second unprivileged user, the sandbox user, with its own
+  home and subordinate uids, and closes to it the runner's home, the
+  job's directories and everything else a runner image leaves open to
+  every local user: world-writable system paths, the image's
+  environment file, the hosted compute agent's directory, tailscaled's
+  socket;
 - takes away that user's sudo, polkit actions, cron, at and lingering,
   and stops the daemons that listen for every local user
-  (`sandbox.stop-services`);
+  (`stop-services`), the container daemon first of all;
 - loads network rules keyed on that user's uids, and starts the egress
-  proxy that is its only way out;
-- installs the caller's packages and the agent programs, and runs the
-  caller's script as the sandbox user, for toolchains;
-- last, takes root away from the runner's user too: from here on no
-  step of the job has root, and the one privileged command left is the
-  helper ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
+  proxy that is its only way out: reads anywhere but a threat feed,
+  writes only by rule, never the cloud metadata service or the tailnet;
+- last, takes root away from the runner's user too: a sudo rule read
+  last denies it everything, polkit denies it, the daemons of its
+  root-equivalent groups are stopped, and setuid-root programs no
+  package owns lose the bit
+  ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
 
-`agentic-job sandbox check` then proves each of these as the runner's
-user and as the sandbox user, with a positive control for every probe
-([sandbox-check.md](sandbox-check.md)).
+The check then proves each of these as the runner's user and as the
+sandbox user, with a positive control for every probe
+([sandbox-check.md](sandbox-check.md)), and the step fails if one does
+not hold.
 
-## A job that runs no agent
+## What a later step can count on, and what it cannot
 
-CI's own `sandbox` job is one: it installs the binary, runs setup with
-[a configuration for the hosted
-image](../crates/agentic-job/tests/data/sandbox/ci.toml), runs the
-check, and then runs tests as the runner's user, without root, with
-every protection it removes put back through a root service it started
-before setup. A job of yours does the same:
+**No step after this one has root.** Not a `run:` step, not another
+action, not a post step, not the runner's own cleanup. So nothing later
+in the job can undo the step: load a kernel module, change the network
+rules, stop the proxy, read what only root reads, or leave something
+behind as root. The one privileged command left to the runner's user is
+`/usr/local/libexec/agentic-job helper`, which enters the sandbox as the
+sandbox user and nothing more general
+([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
+
+**The sandbox user has nothing of the job's.** No file of the runner's
+(the checkout included), no variable of the step's, no token and no way
+to ask for the job's identity token, no local daemon but the ones the
+configuration names, and the network only through the proxy.
+
+**The runner's user is still the runner's user.** The lock takes its
+root, not what it owns. A step that runs as it reads the checkout, the
+caches, the job's token and every secret a step is given, reaches the
+network freely, and can change the files of the actions the job has
+downloaded, the ones whose post steps run later. Code the job does not
+trust therefore runs as the sandbox user; the lock is what keeps a
+mistake there, or in any step, from becoming root.
+
+It is not a container and not a virtual machine. It is a uid boundary
+on one kernel: a kernel flaw crosses it, and so does local IPC that
+answers any user (the system bus, a world-connectable socket), which
+the check finds and the configuration has to stop or accept by name. On
+the hosted image the resolver answers the sandbox user too, so names can
+leave through DNS ([sandbox-check.md](sandbox-check.md#the-network-probes)).
+
+It secures what runs after it. A step before it runs with the runner's
+sudo, and nothing holds a job to the order: that is what a compiler
+would add (docs/compiler.md, on the docs pull request), a fixed shape of
+job in which only the setup step has root. The reusable workflow has
+that shape by construction.
+
+## What a job has to know
+
+**Order: everything that needs root comes before the step.** Package
+installs, a `setup-*` action that writes outside the runner's own
+directories, starting a service, joining a tailnet, pulling or building
+with the container daemon. After it:
+
+| What | After the step |
+| --- | --- |
+| `run:` steps, JavaScript actions | work, as the runner's user |
+| `actions/checkout`, `actions/cache`, `actions/upload-artifact`, a Rust or Node cache | work: they read and write the runner's own files. A cache's post step saves after the lock |
+| `setup-node`, `setup-python`, `setup-go` and the like | work where they install into the runner's tool cache; one that calls `sudo` does not |
+| `sudo` anything, `apt-get`, writing under `/etc` or `/usr` | refused |
+| `docker`, Docker container actions, `services:` and `container:` on the job | gone: the daemon is stopped, since its group is root by another name. A job that needs them is not a job for this step; rootless podman, installed before it, is the container tool the sandbox user has |
+| A post step that calls `sudo` | fails or warns, as that action decides. `tailscale/github-action`'s logout only warns, and its ephemeral node expires |
+
+CI exercises the rows it can: the checkout, a Rust cache saved by its
+post step, an artifact upload, `sudo` and `docker` refused. The rest
+follows from who owns which files and has not been run here.
+
+**Running as the sandbox user.** `agentic-job sandbox exec -- COMMAND`
+runs a command as the sandbox user, in its home, and ends with the
+command's exit state. As a step's shell it takes the script by file,
+since the sandbox user could not read it where the runner wrote it:
 
 ```yaml
-- run: sudo install -m 0755 agentic-job /usr/local/bin/agentic-job
-- run: sudo agentic-job sandbox setup --config .github/agentic-job/host.toml
-- run: agentic-job sandbox check
-# From here on, nothing in this job has root.
+- shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+  run: |
+    cd src && make check
 ```
 
-The configuration is the `[sandbox]`, `[egress]` and `[setup]` tables of
-the run's configuration file; the rest may be left out. A step that is
-to run as the sandbox user runs through the helper, which is the one
-command the runner's user may still run as root:
+The script arrives on standard input, so a command in it that reads its
+own standard input would read the rest of the script: give such a
+command `< /dev/null`. None of the step's `env:` reaches it. Variables
+for the sandbox user are the configuration's (`[sandbox] env`), and the
+egress proxy's are set for it.
+
+**Files go in and out as bytes on a pipe**, since neither user reads the
+other's files:
 
 ```yaml
-- run: sudo /usr/local/libexec/agentic-job helper enter --chdir /home/runner-sandbox -- make check
+- run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
+- run: agentic-job sandbox exec -- cat src/report.xml > "$RUNNER_TEMP/report.xml"
 ```
 
-`run0` wants its standard streams to be sockets where SELinux is
-enforcing (the RHEL runners), which a step's pipes are not: there, a
-command the step wraps in `socat` or a small program of its own is
-needed, as `run` does for the agent. On the hosted Ubuntu runners the
-step's pipes work.
+What comes back is data the sandbox user wrote. Take single files, or
+an archive the job uploads without unpacking; do not unpack one over
+the checkout.
 
-## What it does not do
+**Toolchains for the sandbox user** are the system's. The hosted image
+keeps rustup and its tool cache in the runner's home, which is closed:
+install what the sandbox user builds with from packages before the
+step, or with the `script` input, which runs as the sandbox user and
+can put a toolchain in its home.
 
-It secures what runs after it. A step before setup runs with the
-runner's sudo, and nothing holds a job to the order: that is what a
-compiler would add (docs/compiler.md, on the docs pull request), a fixed shape of job in
-which only the setup step has root. The reusable workflow has that shape
-by construction: every step of its agent job after setup is this
-repository's, and a caller's setup script runs as the sandbox user.
+**Time.** On a hosted runner setup takes two to five minutes, nearly
+all of it one walk of the image's filesystem for world-writable paths
+([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)),
+and the check under a minute. The binary is fetched in a second when a
+release fits the action's commit, and built in about two minutes when
+none does.
 
-It is a uid boundary, not a container: local IPC that answers any user
-(the system bus, a daemon's world-connectable socket) crosses it, which
-the check finds and the configuration has to stop or accept by name.
-And a machine that is not thrown away after the job keeps a runner's
-user without root: `sandbox.lock-runner = false` keeps its sudo, at the
-price of everything above.
+## Inputs and outputs
+
+Every input is optional. An empty one leaves what the configuration
+file says, and the file's own default where it says nothing.
+
+| Input | What it sets |
+| --- | --- |
+| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables. Default: [the action's own](../secure-host/hosted.toml), for GitHub's hosted `ubuntu-26.04`. Another image listens on other sockets: `sandbox check` names each one left |
+| `lock` | `false` keeps the runner's sudo: the host is hardened for the sandbox user only, and every later step has root. Default `true` |
+| `egress` | `false` starts no proxy and leaves the sandbox user's network open but for the metadata service and the tailnet. Default `true` |
+| `egress-policy` | The proxy's write rules, a file, in place of [the binary's](../egress/policy.toml). An allowlist of hosts is not there yet ([agentic-job#116](https://github.com/cgwalters-forge/agentic-job/issues/116)) |
+| `stop-services` | systemd units to stop, in place of the file's list |
+| `sandbox-user` | The second user's name. Default `runner-sandbox` |
+| `runner-user` | The user the job's steps run as. Default: the one that runs the step |
+| `script` | A file: a script setup runs as the sandbox user at its end |
+| `check` | `false` skips `sandbox check`. Default `true` |
+| `binary` | An `agentic-job` already on the machine, in place of fetching or building one |
+| `build` | `true` builds the binary even where a release fits |
+
+The second user is always created: the network rules and most of the
+probes are about it, and one that is never used costs a line in
+`/etc/passwd`.
+
+Outputs: `sandbox-user` and `sandbox-home`, and `fetched` (`true` for a
+release's binary, `false` for a build).
+
+## Where the binary comes from
+
+[`secure-host/release.json`](../secure-host/release.json) names a
+release of this repository, the SHA-256 of each binary it published,
+and a digest of the source it was built from: the content, modes and
+names of `Cargo.lock`, `Cargo.toml`, `crates` and `egress`.
+[`binary.mjs`](../secure-host/binary.mjs) computes the same digest of
+the action's own commit. When the two agree it fetches the release's
+binaries and checks them against the checksums; a file that does not
+match stops the job. When they do not agree, which is any commit that
+changed the source since the release, it builds the binary from that
+source, which needs rustup on the runner.
+
+So a job that names the action by a commit has named the binary: the
+checksums are in the file at that commit. What ties a release's bytes
+to its source is this repository's release workflow and nothing a
+caller can check for itself, so a job that would sooner build than
+trust that passes `build: true`.
+
+## Without the action
+
+The action is three commands, and a job on another CI system runs them
+itself:
+
+```sh
+sudo install -m 0755 agentic-job /usr/local/bin/agentic-job
+sudo agentic-job sandbox setup --config host.toml
+agentic-job sandbox check
+```
+
+`agentic-job config --host` writes such a file from single settings
+(`--boolean sandbox.lock-runner=true`), each taken as the value of one
+key and never read as TOML. A machine that is not thrown away after the
+job keeps a runner's user without root: `sandbox.lock-runner = false`
+keeps its sudo, at the price of everything above.
