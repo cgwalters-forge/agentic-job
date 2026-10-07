@@ -17,10 +17,12 @@ use regex::Regex;
 
 use super::{ItemKind, Outcome};
 
-/// The most of each piece of text, in bytes, and of all of it; the task
-/// file `run` accepts is 256 KiB.
+/// The most of each piece of text, in bytes, and of all of it. With the
+/// caller's own task (`event::MAX_TASK_BYTES`, 64 KiB) and the lines
+/// around the pieces, the file stays under the 256 KiB `run` accepts;
+/// `the_file_fits_what_run_accepts` holds the sum.
 pub const MAX_FIELD_BYTES: usize = 64 * 1024;
-pub const MAX_TEXT_BYTES: usize = 192 * 1024;
+pub const MAX_TEXT_BYTES: usize = 160 * 1024;
 
 /// The most lines of each piece.
 pub const MAX_FIELD_LINES: usize = 2000;
@@ -31,32 +33,25 @@ const TRUNCATED: &str = "\n[cut: the text went on]";
 /// already says the text may hold three.
 const MIN_FENCE: usize = 4;
 
-/// ANSI escape sequences: CSI, OSC (ended by BEL or ST) and the single
-/// character ones.
-static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
-        .expect("a valid pattern")
-});
-
-/// Characters that mean nothing to a reader but hide text from one:
-/// zero-width spaces and joiners, bidi controls, invisible operators,
-/// the byte-order mark. gh-aw strips these too.
-fn is_invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+/// What is not text. First, so that a whole sequence goes and not just
+/// its escape: ANSI escape sequences (CSI, OSC ended by BEL or ST, and
+/// the single character ones). Then every control character but tab and
+/// newline, every format character (Unicode category Cf: zero-width
+/// spaces and joiners, bidi controls, soft hyphens, the byte-order mark,
+/// and the tag block that hides text inside an emoji), and the line and
+/// paragraph separators. gh-aw strips most of these too.
+static STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])|[\p{Cc}\p{Cf}\u{2028}\u{2029}--[\t\n]]",
     )
-}
+    .expect("a valid pattern")
+});
 
 /// Strip what is not text, and cap the size. Tabs and newlines stay;
 /// a carriage return goes, so that a line cannot overwrite itself in a
 /// terminal.
 pub fn sanitize(text: &str) -> String {
-    let text = ANSI_RE.replace_all(text, "");
-    let mut out: String = text
-        .chars()
-        .filter(|c| (!c.is_control() || *c == '\n' || *c == '\t') && !is_invisible(*c))
-        .collect();
+    let mut out = STRIP_RE.replace_all(text, "").into_owned();
     let mut cut = false;
     if out.len() > MAX_FIELD_BYTES {
         let mut end = MAX_FIELD_BYTES;
@@ -118,6 +113,23 @@ pub fn render(task: Option<&str>, outcome: &Outcome) -> String {
         out.push_str(&format!(
             "This run was started by a {} event by {}.\n\n",
             decision.event, decision.actor
+        ));
+    }
+    // The one way to name the head that holds no text of the event: the
+    // number, and the commit id when the head is the repository's own.
+    if let Some(item) = decision
+        .item
+        .as_ref()
+        .filter(|item| item.kind == ItemKind::PullRequest)
+    {
+        let commit = decision
+            .head
+            .as_ref()
+            .map(|head| format!(", at commit {}", head.sha))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "The pull request's head can be fetched from the repository as refs/pull/{}/head{commit}.\n\n",
+            item.number
         ));
     }
     out.push_str(
@@ -184,10 +196,67 @@ mod tests {
             ("tab\tkept", "tab\tkept"),
             ("zero\u{200B}width\u{FEFF}", "zerowidth"),
             ("bidi\u{202E}flip", "bidiflip"),
+            ("soft\u{AD}hyphen", "softhyphen"),
+            ("tag\u{E0041}\u{E007F}block", "tagblock"),
+            ("line\u{2028}paragraph\u{2029}", "lineparagraph"),
+            ("lone\x1bescape", "loneescape"),
+            ("kept: é 日本 🎉 \u{200D}", "kept: é 日本 🎉 "),
         ];
         for (text, expected) in cases {
             assert_eq!(sanitize(text), expected, "{text:?}");
         }
+    }
+
+    /// The caller's task at its cap, every piece of the event's text over
+    /// its cap, and the lines around them: the file fits what `run` reads.
+    #[test]
+    fn the_file_fits_what_run_accepts() {
+        use super::super::{Decision, Head, Item, ReactTo, SCHEMA, Text};
+        let piece = "p".repeat(MAX_FIELD_BYTES * 2);
+        let outcome = Outcome {
+            decision: Decision {
+                schema: SCHEMA.to_string(),
+                admitted: true,
+                reason: String::new(),
+                event: "pull_request_review_comment".to_string(),
+                action: Some("created".to_string()),
+                actor: "a".repeat(39),
+                role: Some("admin".to_string()),
+                item: Some(Item {
+                    kind: ItemKind::PullRequest,
+                    number: u64::MAX,
+                    url: Some("u".repeat(super::super::MAX_URL_BYTES)),
+                }),
+                command: Some("agent".to_string()),
+                base: None,
+                head: Some(Head {
+                    git_ref: String::new(),
+                    sha: "f".repeat(40),
+                }),
+                concurrency: String::new(),
+                react_to: Some(ReactTo::ReviewComment { id: u64::MAX }),
+            },
+            text: Text {
+                author: "a".repeat(39),
+                request: Some(piece.clone()),
+                title: Some(piece.clone()),
+                body: Some(piece.clone()),
+                diff: Some(piece),
+            },
+        };
+        let task = "t".repeat(super::super::MAX_TASK_BYTES as usize);
+        let rendered = render(Some(&task), &outcome);
+        assert!(
+            rendered.len() <= crate::run::MAX_TASK_BYTES as usize,
+            "{} bytes",
+            rendered.len()
+        );
+        // Two pieces fit the budget and two are left out, each saying so.
+        assert_eq!(
+            rendered.matches("[left out: the text is too long]").count(),
+            2
+        );
+        assert_eq!(rendered.matches(TRUNCATED).count(), 2);
     }
 
     #[test]

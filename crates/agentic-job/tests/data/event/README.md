@@ -11,3 +11,10 @@ They were not recorded from a live run.
 Everything refers to one invented repository, `octo/repo` (id 100), unless
 the file name says otherwise (`pull_request-fork.json` has a head repository
 `mallory/repo`, id 999).
+
+`pull-13.json`, `pull-13-fork.json` and `pull-15.json` are the response of
+`GET /repos/octo/repo/pulls/N`, as the workflow fetches it for a comment on
+a pull request (`--pull-request`): #13 with its head in the repository and
+with its head in `mallory/repo`, and #15, another pull request than the one
+`issue_comment-pr-command.json` is on. `pull_request-labeled.json` is
+`pull_request-same-repo.json` with the action `labeled`.

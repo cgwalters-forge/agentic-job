@@ -24,6 +24,9 @@ struct Case {
     actor: &'static str,
     /// The permission response, or none given.
     permission: Option<&'static str>,
+    /// For a comment on a pull request, the pull request as the workflow
+    /// fetched it, or none given.
+    pull_request: Option<&'static str>,
     /// Admitted, or refused with a reason holding this text.
     expect: Expect,
 }
@@ -47,6 +50,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(12),
             concurrency: "issue-12",
@@ -60,7 +64,8 @@ const CASES: &[Case] = &[
         event: "issue_comment-pr-command.json",
         actor: "alice",
         permission: Some("permission-maintain.json"),
-        expect: Refused("admitted only with forks = true"),
+        pull_request: None,
+        expect: Refused("admitted only with the pull request fetched"),
     },
     Case {
         name: "a command on a pull request's conversation, where forks are allowed",
@@ -69,9 +74,10 @@ const CASES: &[Case] = &[
         event: "issue_comment-pr-command.json",
         actor: "alice",
         permission: Some("permission-maintain.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(13),
-            concurrency: "issue-13",
+            concurrency: "pull-13",
             command: Some("agent"),
         },
     },
@@ -82,6 +88,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-sender-not-author.json",
         actor: "carol",
         permission: Some("permission-admin-carol.json"),
+        pull_request: None,
         expect: Refused("is not the comment's author alice"),
     },
     Case {
@@ -91,6 +98,7 @@ const CASES: &[Case] = &[
         event: "issues-opened.json",
         actor: "bob",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Refused("the permission given is alice's, not bob's"),
     },
     Case {
@@ -100,6 +108,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(12),
             concurrency: "issue-12",
@@ -113,6 +122,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: Some("permission-read.json"),
+        pull_request: None,
         expect: Refused("has the role \"read\""),
     },
     Case {
@@ -122,6 +132,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: Some("permission-triage.json"),
+        pull_request: None,
         expect: Refused("has the role \"triage\""),
     },
     Case {
@@ -131,6 +142,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: Some("permission-triage.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(12),
             concurrency: "issue-12",
@@ -144,6 +156,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "alice",
         permission: None,
+        pull_request: None,
         expect: Refused("no permission of alice was given"),
     },
     Case {
@@ -153,6 +166,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-no-command.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Refused("does not start with a command"),
     },
     Case {
@@ -162,6 +176,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-command-not-first.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Refused("does not start with a command"),
     },
     Case {
@@ -171,6 +186,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-bot.json",
         actor: "dependabot[bot]",
         permission: None,
+        pull_request: None,
         expect: Admitted {
             item: Some(12),
             concurrency: "issue-12",
@@ -184,6 +200,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-bot.json",
         actor: "dependabot[bot]",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("is a bot the bounds do not list"),
     },
     Case {
@@ -193,6 +210,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-github-actions.json",
         actor: "github-actions[bot]",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("that is a loop"),
     },
     Case {
@@ -202,6 +220,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-edited.json",
         actor: "carol",
         permission: Some("permission-admin-carol.json"),
+        pull_request: None,
         expect: Refused("the action \"edited\" does not start a run"),
     },
     Case {
@@ -211,6 +230,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-issue-command.json",
         actor: "carol",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("is not the event's sender alice"),
     },
     Case {
@@ -220,6 +240,7 @@ const CASES: &[Case] = &[
         event: "issue_comment-hostile-body.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(12),
             concurrency: "issue-12",
@@ -233,6 +254,7 @@ const CASES: &[Case] = &[
         event: "issues-opened.json",
         actor: "bob",
         permission: Some("permission-write-bob.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(14),
             concurrency: "issue-14",
@@ -246,6 +268,7 @@ const CASES: &[Case] = &[
         event: "issues-labeled.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(14),
             concurrency: "issue-14",
@@ -259,6 +282,7 @@ const CASES: &[Case] = &[
         event: "pull_request-same-repo.json",
         actor: "bob",
         permission: Some("permission-write-bob.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(15),
             concurrency: "pull-15",
@@ -272,6 +296,7 @@ const CASES: &[Case] = &[
         event: "pull_request-fork.json",
         actor: "mallory",
         permission: Some("permission-write-mallory.json"),
+        pull_request: None,
         expect: Refused("head is in mallory/repo"),
     },
     Case {
@@ -281,6 +306,7 @@ const CASES: &[Case] = &[
         event: "pull_request-fork.json",
         actor: "mallory",
         permission: Some("permission-write-mallory.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(16),
             concurrency: "pull-16",
@@ -294,6 +320,7 @@ const CASES: &[Case] = &[
         event: "pull_request-synchronize.json",
         actor: "bob",
         permission: Some("permission-write-bob.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(15),
             concurrency: "pull-15",
@@ -307,6 +334,7 @@ const CASES: &[Case] = &[
         event: "pull_request_review_comment.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Admitted {
             item: Some(15),
             concurrency: "pull-15",
@@ -320,6 +348,7 @@ const CASES: &[Case] = &[
         event: "schedule.json",
         actor: "alice",
         permission: None,
+        pull_request: None,
         expect: Admitted {
             item: None,
             concurrency: "schedule",
@@ -333,6 +362,7 @@ const CASES: &[Case] = &[
         event: "workflow_dispatch.json",
         actor: "alice",
         permission: Some("permission-write.json"),
+        pull_request: None,
         expect: Admitted {
             item: None,
             concurrency: "dispatch",
@@ -346,6 +376,7 @@ const CASES: &[Case] = &[
         event: "workflow_dispatch.json",
         actor: "alice",
         permission: Some("permission-read.json"),
+        pull_request: None,
         expect: Refused("has the role \"read\""),
     },
     Case {
@@ -355,6 +386,7 @@ const CASES: &[Case] = &[
         event: "issues-opened.json",
         actor: "bob",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("do not let a issues event"),
     },
     Case {
@@ -364,6 +396,7 @@ const CASES: &[Case] = &[
         event: "discussion-created.json",
         actor: "bob",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("do not let a discussion event"),
     },
     Case {
@@ -373,7 +406,70 @@ const CASES: &[Case] = &[
         event: "issues-opened.json",
         actor: "bob",
         permission: Some("permission-admin.json"),
+        pull_request: None,
         expect: Refused("is not octo/other"),
+    },
+    Case {
+        name: "a command on a pull request's conversation, with the pull request fetched",
+        allow: "allow.toml",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-maintain.json"),
+        pull_request: Some("pull-13.json"),
+        expect: Admitted {
+            item: Some(13),
+            concurrency: "pull-13",
+            command: Some("agent"),
+        },
+    },
+    Case {
+        name: "a command on a fork pull request's conversation, with the pull request fetched",
+        allow: "allow.toml",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-maintain.json"),
+        pull_request: Some("pull-13-fork.json"),
+        expect: Refused("head is in mallory/repo"),
+    },
+    Case {
+        name: "a command on a pull request's conversation, with another pull request fetched",
+        allow: "allow.toml",
+        event_name: "issue_comment",
+        event: "issue_comment-pr-command.json",
+        actor: "alice",
+        permission: Some("permission-maintain.json"),
+        pull_request: Some("pull-15.json"),
+        expect: Refused("the pull request given is #15, and the comment is on #13"),
+    },
+    Case {
+        name: "a pull request labeled",
+        allow: "allow.toml",
+        event_name: "pull_request",
+        event: "pull_request-labeled.json",
+        actor: "bob",
+        permission: Some("permission-write-bob.json"),
+        pull_request: None,
+        expect: Admitted {
+            item: Some(15),
+            concurrency: "pull-15",
+            command: None,
+        },
+    },
+    Case {
+        name: "a pull_request_target event is read as a pull request",
+        allow: "allow.toml",
+        event_name: "pull_request_target",
+        event: "pull_request-same-repo.json",
+        actor: "bob",
+        permission: Some("permission-write-bob.json"),
+        pull_request: None,
+        expect: Admitted {
+            item: Some(15),
+            concurrency: "pull-15",
+            command: None,
+        },
     },
 ];
 
@@ -394,6 +490,9 @@ fn run(case: &Case, out: &Path) -> Output {
         .args(["--out".as_ref(), out.as_os_str()]);
     if let Some(permission) = case.permission {
         command.args(["--actor-permission".as_ref(), data(permission).as_os_str()]);
+    }
+    if let Some(pull_request) = case.pull_request {
+        command.args(["--pull-request".as_ref(), data(pull_request).as_os_str()]);
     }
     command.output().expect("the binary runs")
 }
@@ -467,6 +566,14 @@ fn pull_request_targets() {
         "1111111111111111111111111111111111111111"
     );
     assert_eq!(decision["react_to"]["kind"], "issue");
+    let task = std::fs::read_to_string(dir.path().join("task.md")).expect("task.md");
+    assert!(
+        task.contains(
+            "fetched from the repository as refs/pull/15/head, at commit \
+             1111111111111111111111111111111111111111."
+        ),
+        "{task}"
+    );
 
     let fork = CASES
         .iter()
