@@ -154,6 +154,16 @@ impl Kind {
         !matches!(self, Self::Fake)
     }
 
+    /// Where the agent sends its model requests, of the two addresses
+    /// ENDPOINT has: none for an agent that makes none.
+    pub fn api_url(self, endpoint: &Endpoint) -> Option<&str> {
+        match self {
+            Self::Claude => Some(&endpoint.anthropic_url),
+            Self::Opencode => Some(&endpoint.openai_url),
+            Self::Fake => None,
+        }
+    }
+
     /// The one file of the agent's that holds the run token, under the
     /// sandbox user's home.
     pub const fn token_file(self) -> Option<&'static str> {

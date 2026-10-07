@@ -8,10 +8,11 @@
 //! other. A job that pasted its inputs into a file could not say that.
 //!
 //! The result is parsed as `sandbox setup` and `run` will parse it, and
-//! held to what `sandbox setup` checks, so a key that does not exist or
-//! a value of the wrong type stops the job here, before a machine is set
-//! up for it. What only `run` checks (that a run has a timeout and a
-//! cap, that `github-oidc` has an audience) still stops it there.
+//! held to everything either checks of the file alone
+//! ([`super::checked`]): a key that does not exist, a value of the wrong
+//! type, a run with no timeout or cap, an agent with no inference proxy,
+//! `github-oidc` with no audience. Each stops the job here, before a
+//! machine is set up for it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -151,9 +152,7 @@ fn compose(args: &Args) -> Result<String> {
     }
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
-    let config = Config::parse(&text)?;
-    config.sandbox.validate()?;
-    config.setup.validate()?;
+    Config::parse(&text)?.check()?;
     Ok(text)
 }
 
@@ -185,6 +184,10 @@ mod tests {
         }
     }
 
+    /// The least a run's configuration says: an agent, and limits.
+    const RUN: &[&str] = &["agent.name=fake"];
+    const LIMITS: &[&str] = &["limits.timeout-minutes=10", "limits.budget=100"];
+
     fn composed(args: &Args) -> Config {
         let text = compose(args).unwrap_or_else(|err| panic!("{args:?}: {err:#}"));
         Config::parse(&text).unwrap()
@@ -197,12 +200,17 @@ mod tests {
             &[
                 "inference.url=http://100.64.0.1:18080",
                 "inference.register=github-oidc",
+                "inference.audience=proxy",
                 "agent.name=fake",
                 "sandbox.check.control-url=https://example.com/",
             ],
             &["limits.timeout-minutes= 75 ", "limits.budget=500"],
-            &["setup.packages=just  gcc-c++\njq"],
+            &[
+                "setup.packages=just  gcc-c++\njq",
+                "egress.direct=http://100.64.0.1:18080",
+            ],
         ));
+        assert_eq!(config.egress.direct, ["http://100.64.0.1:18080"]);
         assert_eq!(config.inference.url, "http://100.64.0.1:18080");
         assert_eq!(config.inference.register, Some(Register::GithubOidc));
         assert_eq!(config.agent.name, "fake");
@@ -253,14 +261,14 @@ mod tests {
             "a = b = c",
             "\\\" \\u0000 \u{7f} \t",
         ];
+        let plain = composed(&args(None, RUN, LIMITS, &[]));
         for text in hostile {
-            let config = composed(&args(None, &[&format!("agent.model={text}")], &[], &[]));
+            let model = format!("agent.model={text}");
+            let config = composed(&args(None, &[RUN[0], &model], LIMITS, &[]));
             assert_eq!(config.agent.model.as_deref(), Some(text));
-            let rest = Config {
-                agent: Default::default(),
-                ..config
-            };
-            assert_eq!(rest, Config::default(), "{text:?} set another key");
+            let mut rest = config;
+            rest.agent.model = None;
+            assert_eq!(rest, plain, "{text:?} set another key");
         }
     }
 
@@ -341,6 +349,35 @@ mod tests {
                 vec![],
                 vec!["agent.name=fake"],
                 "invalid type: sequence",
+            ),
+            // What `run` would refuse, minutes later.
+            (
+                vec!["agent.name=fake"],
+                vec![],
+                vec![],
+                "limits.timeout-minutes is not set",
+            ),
+            (
+                vec!["agent.name=fake"],
+                vec!["limits.timeout-minutes=5", "limits.max-requests=50"],
+                vec![],
+                "limits.max-requests = 50 would not bind",
+            ),
+            (
+                vec!["agent.name=claude"],
+                LIMITS.to_vec(),
+                vec![],
+                "the agent claude needs inference",
+            ),
+            (
+                vec![
+                    "agent.name=claude",
+                    "inference.url=http://127.0.0.1:18080",
+                    "inference.register=github-oidc",
+                ],
+                LIMITS.to_vec(),
+                vec![],
+                "needs the audience",
             ),
         ];
         for (string, integer, list, names) in cases {

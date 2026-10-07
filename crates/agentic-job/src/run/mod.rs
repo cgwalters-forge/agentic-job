@@ -63,6 +63,7 @@ use self::clone::Checkout;
 use self::enter::Sandbox;
 use self::inference::{Ended, Endpoint, Identity, OidcRequest, Retry, Run};
 use self::upload::{Gate, Staging};
+use crate::config::checked::Checked;
 use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::policy;
@@ -297,46 +298,24 @@ fn own_tokens() -> impl Iterator<Item = String> {
     })
 }
 
-/// The limits, with the proxy's part in them checked: a cap on model
-/// requests binds only where the proxy counts them.
-fn limits(config: &config::Limits, endpoint: Option<&Endpoint>) -> Result<Limits> {
-    let limits = Limits::from_config(config)?;
-    let uncounted = match endpoint {
-        None => Some("the run has no inference proxy"),
-        Some(endpoint) if !endpoint.mode.has_run_api() => {
-            Some("register = \"token-file\" has no run API")
-        }
-        Some(_) => None,
-    };
-    if let (Some(cap), Some(why)) = (limits.max_requests, uncounted) {
-        bail!(
-            "limits.max-requests = {cap} would not bind: nothing counts this run's model \
-             requests ({why}). Remove it and cap the run with limits.budget, or say \
-             limits.uncapped = true"
-        );
-    }
-    if limits.max_requests.is_none() && limits.budget_aic.is_none() {
-        eprintln!(
-            "warning: this run is UNCAPPED (limits.uncapped = true): only its timeout of {}s \
-             and the proxy's own limits bound what it spends",
-            limits.timeout_s
-        );
-    }
-    Ok(limits)
-}
-
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
         let config = load_config(&args.config)?;
-        let kind = Kind::parse(&config.agent.name)?;
-        agent::check(kind, &config.agent)?;
-        let endpoint = Endpoint::from_config(&config.inference)?;
-        ensure!(
-            endpoint.is_some() || !kind.needs_inference(),
-            "the agent {} needs inference: set [inference] url and register",
-            kind.as_str()
-        );
-        let limits = limits(&config.limits, endpoint.as_ref())?;
+        // What `agentic-job config` held the file to, again: it is only
+        // a file by the time `run` reads it.
+        let Checked {
+            kind,
+            endpoint,
+            limits,
+            host: _,
+        } = config.check()?;
+        if limits.max_requests.is_none() && limits.budget_aic.is_none() {
+            eprintln!(
+                "warning: this run is UNCAPPED (limits.uncapped = true): only its timeout of \
+                 {}s and the proxy's own limits bound what it spends",
+                limits.timeout_s
+            );
+        }
         let read = |path: &Path| {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
         };
@@ -364,8 +343,6 @@ impl Plan {
         let run_id = run_id(&meta)?;
         let policy = policy::Policy::load(&args.policy)?;
         clone::check(&policy)?;
-        handback::author(&config.commit)?;
-        handback::check_trailers(&config.commit.trailers)?;
         upload::refuse_earlier_results(&args.out)?;
         // Asked for only where it is used: nothing else holds what lets
         // a process get the job's identity token.
@@ -980,63 +957,6 @@ pub fn run(args: &Args) -> Result<Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::inference::Mode;
-
-    fn limits_table(text: &str) -> config::Limits {
-        Config::parse(&format!("[limits]\ntimeout-minutes = 10\n{text}"))
-            .unwrap()
-            .limits
-    }
-
-    fn endpoint(mode: Mode) -> Endpoint {
-        Endpoint {
-            url: "http://proxy".into(),
-            mode,
-            anthropic_url: "http://proxy/anthropic".into(),
-            openai_url: "http://proxy/v1".into(),
-        }
-    }
-
-    /// A cap on model requests is kept where the proxy counts them, and
-    /// is never dropped where nothing does: such a configuration is
-    /// refused, so that a run is uncapped only by saying so.
-    #[test]
-    fn a_request_cap_nothing_counts_is_refused() {
-        let given = endpoint(Mode::TokenFile {
-            path: "/run/token".into(),
-        });
-        let counted = endpoint(Mode::Plain);
-        // (limits, endpoint, the cap kept or the refusal)
-        type Case<'a> = (&'a str, Option<&'a Endpoint>, Result<Option<u64>, &'a str>);
-        let cases: [Case; 8] = [
-            ("max-requests = 150", Some(&counted), Ok(Some(150))),
-            (
-                "max-requests = 150\nbudget = 500",
-                Some(&counted),
-                Ok(Some(150)),
-            ),
-            ("max-requests = 150", Some(&given), Err("would not bind")),
-            (
-                "max-requests = 150\nbudget = 500",
-                Some(&given),
-                Err("register = \"token-file\" has no run API"),
-            ),
-            ("max-requests = 150", None, Err("no inference proxy")),
-            ("budget = 500", Some(&given), Ok(None)),
-            ("uncapped = true", Some(&given), Ok(None)),
-            ("", Some(&given), Err("neither max-requests nor budget")),
-        ];
-        for (text, endpoint, want) in cases {
-            let got = limits(&limits_table(text), endpoint);
-            match (got, want) {
-                (Ok(limits), Ok(cap)) => assert_eq!(limits.max_requests, cap, "{text}"),
-                (Err(err), Err(want)) => {
-                    assert!(format!("{err:#}").contains(want), "{text}: {err:#}");
-                }
-                (got, want) => panic!("{text}: got {got:?}, wanted {want:?}"),
-            }
-        }
-    }
 
     #[test]
     fn run_ids() {

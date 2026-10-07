@@ -139,9 +139,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let text = fs::read_to_string(&args.config)
         .with_context(|| format!("reading {}", args.config.display()))?;
     let config = Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
-    config.sandbox.validate()?;
-    config.setup.validate()?;
-    let direct = network::direct(&config.egress)?;
+    let direct = config.check_host()?.direct;
     ensure!(host::is_root(), "`sandbox setup` must run as root");
     ensure!(
         host::has_program(RUN0),
