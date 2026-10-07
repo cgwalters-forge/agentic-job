@@ -21,6 +21,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::enter::{Entry, Output};
 use super::host::{self, User};
+use super::root::Root;
 use crate::config::{self, Config};
 use crate::exit::Exit;
 
@@ -112,7 +113,7 @@ impl Report {
 pub fn run(_args: &Args) -> Result<Exit> {
     ensure!(
         !host::is_root(),
-        "`sandbox check` runs as the runner's user, which it compares the sandbox user with; it uses sudo itself to enter the sandbox"
+        "`sandbox check` runs as the runner's user, which it compares the sandbox user with; it enters the sandbox through the helper"
     );
     let config = Config::load(Path::new(config::ROOT_COPY))
         .context("`agentic-job sandbox setup` writes this file")?;
@@ -135,9 +136,11 @@ pub fn run(_args: &Args) -> Result<Exit> {
 /// runner's user. `Err` is a probe that could not be made at all; a
 /// probe that came out wrong is in the report.
 pub fn probes(config: &Config, token: Option<RunToken<'_>>) -> Result<Report> {
+    let entry = Entry::new(config)?;
     let checker = Checker {
         config,
-        entry: Entry::new(config)?,
+        root: entry.root(),
+        entry,
         runner: User::current()?,
         canary: canary()?,
         report: Report::default(),
@@ -165,6 +168,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 struct Checker<'a> {
     config: &'a Config,
     entry: Entry,
+    /// How root is had for the controls that need it.
+    root: Root,
     runner: User,
     canary: String,
     report: Report,

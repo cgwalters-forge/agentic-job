@@ -27,6 +27,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `sandbox/setup.rs` | 5 | `sandbox setup` |
 | `sandbox/check/` | 5 | `sandbox check`; its probes are a function `run` calls again ([what they prove](sandbox-check.md)) |
 | `sandbox/enter.rs` | 5 | running a command as the sandbox user with `run0`; `run` starts the agent through it |
+| `sandbox/helper.rs`, `sandbox/root.rs` | 5 | `helper`, the privileged operations the runner's user keeps after setup, as root through its one sudo rule; and how the runner's user asks for each (the helper, or sudo itself where setup never ran) |
 | `sandbox/host.rs`, `sandbox/local.rs` | 5 | users and programs of the host; the listeners a user can connect to |
 | `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
 | `run/` | 6a, 6b | `run` ([below](#run)): `run/inference.rs` (run token), `run/agent.rs` and `run/launch.rs` (agent configuration), `run/clone.rs`, `run/probe.rs`, `run/enter.rs` in 6a; `run/brief.rs` (what the agent is told about handing back), `run/handback.rs`, `run/log.rs` (the job log), `run/egress.rs` (the egress proxy's log), `run/summary.rs`, `run/upload.rs` (the gate on uploads) in 6b |

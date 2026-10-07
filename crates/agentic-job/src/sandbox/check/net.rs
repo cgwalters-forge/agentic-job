@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::{CONTAINER_UID, Checker, Want};
 use crate::sandbox::enter::Output;
-use crate::sandbox::{egress, host, network};
+use crate::sandbox::{egress, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
@@ -398,7 +398,10 @@ impl Checker<'_> {
     /// to the endpoint's port, only this node's addresses have one.
     fn tailnet(&mut self) -> Result<()> {
         let user = self.user().to_owned();
-        let status = tailscale_status();
+        let status = self
+            .root
+            .tailscale_status()
+            .unwrap_or(serde_json::Value::Null);
         let endpoints = network::direct(&self.config.egress)?;
         // The URL as the configuration has it: an https endpoint is not
         // spoken to in plain HTTP.
@@ -542,16 +545,6 @@ fn url_host(url: &str) -> &str {
     host.rsplit_once(':')
         .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
         .map_or(host, |(host, _)| host)
-}
-
-/// tailscaled's status, asked as root; null when there is none.
-fn tailscale_status() -> serde_json::Value {
-    host::as_root(&["tailscale", "status", "--json"])
-        .and_then(|mut command| host::output(&mut command))
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
-        .unwrap_or(serde_json::Value::Null)
 }
 
 /// The tailnet IPv6 address of the peer whose IPv4 address is `addr`.

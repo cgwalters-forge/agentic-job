@@ -35,6 +35,9 @@ pub enum Command {
     /// Become the agent, as the sandbox user: what `run` has the session start
     #[command(name = run::launch::COMMAND, hide = true)]
     LaunchAgent(run::launch::Args),
+    /// The privileged operations the runner's user keeps after `sandbox setup`, run as root through its one sudo rule
+    #[command(name = sandbox::helper::COMMAND, hide = true, subcommand)]
+    Helper(sandbox::helper::Op),
 }
 
 impl Command {
@@ -47,6 +50,7 @@ impl Command {
             Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
             Self::LaunchAgent(args) => run::launch::run(args),
+            Self::Helper(op) => sandbox::helper::run(op),
         }
     }
 }
@@ -141,6 +145,48 @@ mod tests {
     #[test]
     fn the_hidden_prober_parses() {
         Cli::try_parse_from(["agentic-job", "sandbox", "probe-local"]).unwrap();
+    }
+
+    /// Not in the plan's table: what the runner's user has root do after
+    /// setup, each operation as `sandbox::root` spells it.
+    #[test]
+    fn the_helper_parses() {
+        let ops: &[&[&str]] = &[
+            &["ping"],
+            &["enter", "--chdir", "/home/agent", "--", "git", "status"],
+            &[
+                "enter",
+                "--chdir",
+                "/home/agent",
+                "--",
+                "sh",
+                "-c",
+                "--help",
+            ],
+            &["reap"],
+            &["egress-log-size"],
+            &["egress-log", "--from", "0"],
+            &["tailscale-status"],
+            &["pkexec-control"],
+            &["disable-linger"],
+            &["crontab-remove"],
+        ];
+        for op in ops {
+            Cli::try_parse_from(["agentic-job", "helper"].iter().chain(*op))
+                .unwrap_or_else(|err| panic!("{op:?}: {err}"));
+        }
+        for bad in [
+            &["helper"][..],
+            &["helper", "enter", "--chdir", "/home/agent"],
+            &["helper", "enter", "--", "true"],
+            &["helper", "egress-log"],
+            &["helper", "reap", "--uid", "1"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["agentic-job"].iter().chain(bad)).is_err(),
+                "{bad:?} parsed"
+            );
+        }
     }
 
     #[test]

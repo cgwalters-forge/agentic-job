@@ -13,26 +13,18 @@ use std::os::fd::OwnedFd;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
+use crate::sandbox::root::Root;
+
 /// How long a killed process gets to be gone.
 const KILL_GRACE: Duration = Duration::from_secs(10);
-/// How long each command that stops the sandbox user may take.
-const REAP_STEP_TIMEOUT: Duration = Duration::from_secs(30);
-/// How often, and how many times, the sandbox user's processes are looked
-/// for after they were killed: they do not vanish at once.
-const SURVIVOR_POLL: Duration = Duration::from_millis(200);
-const SURVIVOR_POLLS: u32 = 50;
-/// What pgrep exits with when nothing matched.
-const PGREP_NONE: i32 = 1;
 const ROOT_UID: u32 = 0;
 /// The state of a zombie in `/proc/PID/stat`.
 const ZOMBIE: &str = "Z";
-/// Becomes root for a reaper command without ever asking for a password.
-const SUDO: &[&str] = &["sudo", "-n"];
 /// Variables of this process that nothing it starts may inherit: what
 /// lets a process ask for the job's identity token and use the CI
 /// system's own services (`ACTIONS_*`), and what selects an agent's
@@ -180,66 +172,6 @@ impl Agent {
     }
 }
 
-/// Runs one command of the reaper, as root; its standard output if it
-/// could be run. Failures are expected (a session already gone, a user
-/// with no manager) and the survivor check is what counts.
-async fn privileged(argv: &[&str]) -> Option<std::process::Output> {
-    let sudo: &[&str] = if rustix::process::geteuid().is_root() {
-        &[]
-    } else {
-        SUDO
-    };
-    let argv = [sudo, argv].concat();
-    let (program, args) = argv.split_first()?;
-    let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::null()).kill_on_drop(true);
-    tokio::time::timeout(REAP_STEP_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()
-}
-
-/// The login sessions of the user UID, the agent's among them.
-async fn sessions(uid: &str) -> Vec<String> {
-    let listing = Command::new("loginctl")
-        .args(["show-user", uid, "--property=Sessions", "--value"])
-        .stdin(Stdio::null())
-        .output()
-        .await;
-    match listing {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// The processes of the user UID that are still there, as pgrep lists
-/// them.
-async fn survivors(uid: &str) -> Result<Option<String>> {
-    let out = Command::new("pgrep")
-        .args(["-l", "-u", uid])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .context("running pgrep")?;
-    match out.status.code() {
-        Some(0) => Ok(Some(
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
-        )),
-        Some(PGREP_NONE) => Ok(None),
-        _ => bail!(
-            "pgrep -u {uid} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-    }
-}
-
 /// The user the agent runs as, known to exist and to be safe to stop.
 ///
 /// The session stops it when [`super::run`] returns. A caller that drops
@@ -248,12 +180,14 @@ async fn survivors(uid: &str) -> Result<Option<String>> {
 pub struct SandboxUser {
     name: String,
     uid: u32,
+    root: Root,
 }
 
 impl SandboxUser {
     /// Looks NAME up, and refuses a user whose processes must not all be
-    /// killed: root, and the one this process runs as.
-    pub async fn find(name: &str) -> Result<Self> {
+    /// killed: root, and the one this process runs as. ROOT is how the
+    /// stopping, which is root's to do, is had.
+    pub async fn find(name: &str, root: Root) -> Result<Self> {
         let uid: u32 = Command::new("id")
             .args(["-u", "--", name])
             .stdin(Stdio::null())
@@ -272,49 +206,23 @@ impl SandboxUser {
         Ok(Self {
             name: name.to_owned(),
             uid,
+            root,
         })
     }
 
-    /// Stops everything the user is running, and makes sure of it.
-    ///
-    /// Its sessions go first: a session scope holds every process started
-    /// in it, including ones that left their process group (setsid,
-    /// double forks). Then, as backstops, the user's slice (its service
-    /// manager and what that started), a manager it may have kept by
-    /// enabling lingering, and stray processes of its uid.
+    /// Stops everything the user is running, and makes sure of it: its
+    /// sessions, its slice, a lingering manager, and stray processes of
+    /// its uid (`sandbox::helper::reap` says how). By uid throughout, the one
+    /// `find` checked: a name could come to mean another user between
+    /// the check and the kill. On a thread: the sequence blocks on each
+    /// command, and a signal here must not leave it half done.
     pub async fn reap(&self) -> Result<()> {
-        reap(&self.name, self.uid).await
+        let (uid, root, name) = (self.uid, self.root, self.name.clone());
+        tokio::task::spawn_blocking(move || root.reap(uid))
+            .await
+            .context("stopping the sandbox user")?
+            .with_context(|| format!("stopping {name}"))
     }
-}
-
-/// By uid throughout, the one `SandboxUser::find` checked: a name could
-/// come to mean another user between the check and the kill.
-async fn reap(user: &str, uid: u32) -> Result<()> {
-    let slice = format!("user-{uid}.slice");
-    let manager = format!("user@{uid}.service");
-    let uid = &uid.to_string();
-    let sessions = sessions(uid).await;
-    if !sessions.is_empty() {
-        let ids: Vec<&str> = sessions.iter().map(String::as_str).collect();
-        privileged(&[&["loginctl", "kill-session", "--signal=KILL"], &ids[..]].concat()).await;
-        privileged(&[&["loginctl", "terminate-session"], &ids[..]].concat()).await;
-    }
-    privileged(&["systemctl", "kill", "--signal=KILL", &slice]).await;
-    privileged(&["loginctl", "disable-linger", uid]).await;
-    privileged(&["loginctl", "terminate-user", uid]).await;
-    for _ in 0..SURVIVOR_POLLS {
-        privileged(&["pkill", "-KILL", "-u", uid]).await;
-        if survivors(uid).await?.is_none() {
-            // Killed like that, the user's manager is left failed.
-            privileged(&["systemctl", "reset-failed", &manager]).await;
-            return Ok(());
-        }
-        tokio::time::sleep(SURVIVOR_POLL).await;
-    }
-    bail!(
-        "processes of {user} survived the end of the session: {}",
-        survivors(uid).await?.unwrap_or_default()
-    )
 }
 
 /// Whether process PID exists and is more than a zombie nobody has
@@ -336,6 +244,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    /// How often, and how many times, a killed process is looked for: it
+    /// does not vanish at once.
+    const SURVIVOR_POLL: Duration = Duration::from_millis(200);
+    const SURVIVOR_POLLS: u32 = 50;
 
     fn sh(script: &str) -> Vec<String> {
         ["sh", "-c", script].map(str::to_owned).to_vec()
@@ -420,7 +333,7 @@ mod tests {
             (own.trim(), "cannot be the sandbox user"),
         ];
         for (name, want) in cases {
-            let Err(err) = SandboxUser::find(name).await else {
+            let Err(err) = SandboxUser::find(name, Root::Sudo).await else {
                 panic!("{name} was taken as a sandbox user");
             };
             assert!(format!("{err:#}").contains(want), "{name}: {err:#}");

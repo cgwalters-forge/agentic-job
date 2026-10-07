@@ -30,9 +30,6 @@ const DECOY_WAIT: Duration = Duration::from_millis(100);
 
 const DECOY_TRIES: u32 = 50;
 
-/// The same for the one control that asks a daemon as root.
-const CONTROL_LIMIT: &[&str] = &["timeout", "--kill-after=10", "60"];
-
 /// Fails only if `$1` can be neither listed nor entered: a directory of
 /// mode 0711 hides its names and still gives up every file whose name is
 /// known.
@@ -181,14 +178,19 @@ impl Checker<'_> {
     /// No sudo, no polkit action, no lingering user manager.
     pub(super) fn privileges(&mut self) -> Result<()> {
         let user = self.user().to_owned();
-        let sudo = ["sudo", "-n", "true"];
+        // The runner's user has root do something for it: everything
+        // after setup, through the helper; or sudo itself where the
+        // machine is not locked.
         self.report.expect(
             Want::Succeed,
             "sudo-control",
-            format!("{} has sudo (control)", self.runner.name),
-            host::succeeds(&mut host::command(&sudo)?),
+            format!(
+                "{} has root run a command for it through sudo (control)",
+                self.runner.name
+            ),
+            self.root.ping(),
         );
-        let got = self.sandbox_succeeds(&sudo)?;
+        let got = self.sandbox_succeeds(&["sudo", "-n", "true"])?;
         self.report
             .expect(Want::Fail, "sudo", format!("{user} has no sudo"), got);
 
@@ -197,7 +199,7 @@ impl Checker<'_> {
                 Want::Succeed,
                 "polkit-control",
                 "root runs a command through pkexec (control)",
-                host::succeeds(&mut host::as_root(&["pkexec", "true"])?),
+                self.root.pkexec_control(),
             );
             let got = self.sandbox_succeeds(&["sh", "-c", PKEXEC_FROM_A_SHELL])?;
             self.report.expect(
@@ -223,7 +225,7 @@ impl Checker<'_> {
         let enabled = self.sandbox_succeeds(&["loginctl", "enable-linger"])?;
         if enabled {
             // Do not leave what the probe was there to find.
-            let _ = host::run(&mut host::as_root(&["loginctl", "disable-linger", &user])?);
+            let _ = self.root.disable_linger(&user);
         }
         self.report.expect(
             Want::Fail,
@@ -412,7 +414,8 @@ impl Checker<'_> {
         }
         for dir in dirs {
             let shown = dir.display().to_string();
-            if !host::succeeds(&mut host::as_root(&["test", "-d", &shown])?) {
+            // A closed directory can still be seen to be one from outside.
+            if !std::fs::metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
                 self.report.note(&format!("no {shown} on this host"));
                 continue;
             }
@@ -500,7 +503,7 @@ impl Checker<'_> {
                 .sandbox(&["crontab", "-"], b"# agentic-job sandbox check\n")?
                 .success();
             if installed {
-                let _ = host::run(&mut host::as_root(&["crontab", "-r", "-u", &user])?);
+                let _ = self.root.crontab_remove(&user);
             }
             self.report.expect(
                 Want::Fail,
@@ -650,7 +653,9 @@ impl Checker<'_> {
     /// for anyone, whatever the packet filter says.
     pub(super) fn tailscaled(&mut self) -> Result<()> {
         let user = self.user().to_owned();
-        if !host::succeeds(&mut host::as_root(&["test", "-S", TAILSCALE_SOCKET])?) {
+        // Its socket is in a directory setup closed, so the daemon is
+        // looked for by its process, which any user sees.
+        if !host::succeeds(Command::new("pgrep").args(["-x", "tailscaled"])) {
             self.report
                 .note("no tailscaled on this host, so no LocalAPI to reach");
             return Ok(());
@@ -659,14 +664,7 @@ impl Checker<'_> {
             Want::Succeed,
             "tailscale-control",
             "root uses tailscaled's LocalAPI (control)",
-            {
-                let argv: Vec<&str> = CONTROL_LIMIT
-                    .iter()
-                    .copied()
-                    .chain(["tailscale", "status", "--self"])
-                    .collect();
-                host::succeeds(&mut host::as_root(&argv)?)
-            },
+            self.root.tailscale_status().is_some(),
         );
         let got = self.sandbox_succeeds(&["tailscale", "status"])?;
         self.report.expect(

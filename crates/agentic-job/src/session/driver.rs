@@ -43,6 +43,7 @@ use super::permission::{self, Policy, Request, pick_option};
 use super::process::{self, Launch};
 use super::transcript::{Log, Tap, set_stop};
 use crate::exit::Exit;
+use crate::sandbox::root::Root;
 
 pub const RESULT_FILE: &str = "harness.json";
 /// The old tree's schema name, which readers of `harness.json` check.
@@ -269,7 +270,9 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     // Before anything is started: a user that cannot be stopped again is
     // no sandbox user.
     let sandbox = match &launch {
-        Launch::Sandbox { user, .. } => Some(process::SandboxUser::find(user).await?),
+        Launch::Sandbox { user, .. } => {
+            Some(process::SandboxUser::find(user, Root::detect()).await?)
+        }
         Launch::Direct => None,
     };
     let (stop_tx, stop_rx) = watch::channel(None);

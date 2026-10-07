@@ -27,6 +27,8 @@ use super::host::{self, User};
 use super::{egress, network};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
+use crate::run::agent::{self, Kind};
+use crate::run::inference::Endpoint;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -218,6 +220,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     if let Some(script) = &config.setup.script {
         run_setup_script(&config, script)?;
     }
+    write_managed_settings(&config)?;
     // Last, so a setup that failed leaves nothing `sandbox check` and
     // `run` would take for a finished one.
     install_file(
@@ -227,6 +230,25 @@ pub fn run(args: &Args) -> Result<Exit> {
         None,
     )?;
     Ok(Exit::Success)
+}
+
+/// The agent's managed settings, root's, from the same configuration
+/// `run` will read: `run` has no root to write them with. A
+/// configuration that names no agent `run` could start is `run`'s to
+/// refuse, not setup's.
+fn write_managed_settings(config: &Config) -> Result<()> {
+    let Ok(kind) = Kind::parse(&config.agent.name) else {
+        return Ok(());
+    };
+    let endpoint = Endpoint::from_config(&config.inference)?;
+    if let Some((path, content)) = agent::managed_settings(kind, endpoint.as_ref()) {
+        let path = Path::new(path);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        install_file(path, content.as_bytes(), MODE_FILE, None)?;
+    }
+    Ok(())
 }
 
 /// The user whose job this is: the one that called sudo, unless the
