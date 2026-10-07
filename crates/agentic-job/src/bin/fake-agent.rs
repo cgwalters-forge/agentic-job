@@ -7,7 +7,11 @@
 //! SDK, so it can misbehave.
 //!
 //! ```text
-//! fake-agent demo          play the built-in session (fake-agent-demo.json)
+//! fake-agent demo          play the built-in session (fake-agent-demo.json),
+//!                          or the one in ~/.config/fake-agent/demo.json
+//!                          if there is one: `agentic-job run` starts the
+//!                          fake agent only this way, and its tests have
+//!                          sessions of their own to play
 //! fake-agent script FILE [LATER]
 //!                          play the session in FILE, and for every prompt
 //!                          turn after the first the one in LATER (default:
@@ -60,6 +64,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const DEMO: &str = include_str!("fake-agent-demo.json");
+/// Under the home directory: a session for `demo` to play in place of
+/// the built-in one.
+const DEMO_OVERRIDE: &str = ".config/fake-agent/demo.json";
 const NAME: &str = "fake-agent";
 const SESSION: &str = "fake-session";
 const MODEL_OPTION: &str = "model";
@@ -121,10 +128,7 @@ enum Mode {
 fn parse_mode(args: &[String]) -> Result<Mode> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(match args.as_slice() {
-        ["demo"] => Mode::Script(
-            parse_script(DEMO).context("in the built-in demo")?,
-            later_default(),
-        ),
+        ["demo"] => Mode::Script(demo_script()?, later_default()),
         ["script", file] => Mode::Script(read_script(file)?, later_default()),
         ["script", file, later] => Mode::Script(read_script(file)?, read_script(later)?),
         ["fs"] => Mode::Fs,
@@ -133,6 +137,15 @@ fn parse_mode(args: &[String]) -> Result<Mode> {
         ["slow-init"] => Mode::SlowInit,
         _ => bail!("usage: {NAME} demo | script FILE [LATER] | fs | flood N | grace | slow-init"),
     })
+}
+
+/// The session `demo` plays: the user's own if there is one.
+fn demo_script() -> Result<Vec<Step>> {
+    let own = std::env::var_os("HOME").map(|home| Path::new(&home).join(DEMO_OVERRIDE));
+    match own.as_deref().map(std::fs::read_to_string) {
+        Some(Ok(text)) => parse_script(&text).with_context(|| format!("in ~/{DEMO_OVERRIDE}")),
+        _ => parse_script(DEMO).context("in the built-in demo"),
+    }
 }
 
 fn later_default() -> Vec<Step> {
