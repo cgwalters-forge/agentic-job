@@ -11,7 +11,8 @@
 //! docs/sandbox-check.md lists them.
 //!
 //! The probes are methods of `Checker` in the modules under this one:
-//! `on_host`, `run_token` and `net`.
+//! `on_host`, `run_token`, `runner` (the runner's own user, which setup
+//! has taken root from) and `net`.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -28,6 +29,7 @@ use crate::exit::Exit;
 mod net;
 mod on_host;
 mod run_token;
+mod runner;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -178,6 +180,9 @@ struct Checker<'a> {
 impl Checker<'_> {
     fn run(mut self, token: Option<RunToken<'_>>) -> Result<Report> {
         self.privileges()?;
+        if self.config.sandbox.lock_runner {
+            self.runner_privileges()?;
+        }
         let environs = self.environments()?;
         self.job_variables(&environs, token.is_some())?;
         self.files()?;

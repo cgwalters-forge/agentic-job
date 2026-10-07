@@ -58,6 +58,12 @@ pub struct Sandbox {
     /// Whose home is closed. `sandbox setup` takes it from `SUDO_USER`
     /// when this is not set.
     pub runner_user: Option<String>,
+    /// Whether `sandbox setup` ends by taking root away from the runner's
+    /// user, leaving it the one sudo rule for the helper
+    /// (`sandbox::helper`). On by default; off only for a machine that
+    /// must keep root for the runner's user after the job, which the
+    /// docs say is no machine an agent should run on.
+    pub lock_runner: bool,
     /// More directories closed to every user but their owner, besides
     /// the runner user's home and [`Sandbox::ALWAYS_PRIVATE_DIRS`]. One
     /// that does not exist is skipped.
@@ -181,6 +187,7 @@ impl Default for Sandbox {
             groups: Self::DEFAULT_GROUPS.iter().map(|&g| g.to_owned()).collect(),
             allow_existing_user: false,
             runner_user: None,
+            lock_runner: true,
             private_dirs: Vec::new(),
             stop_services: Vec::new(),
             env: BTreeMap::new(),

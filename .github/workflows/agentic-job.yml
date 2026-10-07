@@ -90,7 +90,7 @@ on:
         type: string
         default: '"ubuntu-24.04"'
       agent-runner:
-        description: The runner the agent runs on, as JSON. It is thrown away after the job, and needs sudo and systemd 257
+        description: The runner the agent runs on, as JSON. It is thrown away after the job, and needs systemd 257 and sudo for its user until `sandbox setup`, which takes it away
         type: string
         default: '"ubuntu-26.04"'
       build-binary:

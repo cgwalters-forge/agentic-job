@@ -1,8 +1,12 @@
 //! Each probe of `sandbox check` fails when its protection is removed.
 //!
-//! This changes the host it runs on, as root through sudo, and puts each
-//! thing back: it is for a machine that is thrown away, after `sandbox
-//! setup` has run there. CI's `sandbox` job runs it:
+//! This changes the host it runs on, as root, and puts each thing back:
+//! it is for a machine that is thrown away, after `sandbox setup` has run
+//! there. Setup ends by taking root away from the runner's user, this
+//! test's own, so root is had through a service CI starts before setup
+//! ([`ROOT_SOCKET`]: a shell behind a Unix socket only the runner's group
+//! may connect to), and through sudo where that service is not there.
+//! CI's `sandbox` job runs it:
 //!
 //! ```text
 //! cargo test --test sandbox_host -- --ignored --nocapture
@@ -23,11 +27,11 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, Shutdown, TcpListener};
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{SocketAddr as UnixAddr, UnixListener};
+use std::os::unix::net::{SocketAddr as UnixAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -39,6 +43,22 @@ use agentic_job::sandbox::host::User;
 use agentic_job::sandbox::{egress, network, setup};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
+
+/// Where CI's root service listens: a shell that runs what it is sent,
+/// as root, for this test alone (see the top of the file).
+const ROOT_SOCKET: &str = "/run/agentic-job-test-root.sock";
+
+/// What the shell prints after each command, with its status.
+const STATUS_MARKER: &str = "__agentic_job_test_status=";
+
+/// Sorts after the deny rules: a grant for the runner's user there wins.
+const SUDOERS_RUNNER_GRANT: &str = "/etc/sudoers.d/zzz-test-runner-grant";
+
+/// A polkit rule for the runner's user alone, read before the deny rule.
+const POLKIT_RUNNER_GRANT: &str = "/etc/polkit-1/rules.d/00-aaa-test-runner-grant.rules";
+
+/// A setuid-root copy of `true` no package owns.
+const UNOWNED_SETUID: &str = "/usr/local/bin/agentic-job-test-setuid";
 
 /// polkitd watches its rules directory; give it a moment to reload.
 const POLKIT_SETTLE: Duration = Duration::from_secs(3);
@@ -134,29 +154,56 @@ fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|&item| item.to_owned()).collect()
 }
 
-/// Runs `argv` as root; whether it succeeded.
-fn root_ok(argv: &[String]) -> bool {
-    Command::new("sudo")
-        .arg("-n")
-        .arg("--")
-        .args(argv)
-        .stdin(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+/// What a command run as root left: its status, and all it wrote.
+struct RootOutput {
+    success: bool,
+    /// The exit status, or -1 for a command ended by a signal.
+    status: i32,
+    output: String,
 }
 
-fn root(argv: &[&str]) {
-    assert!(root_ok(&strings(argv)), "sudo {argv:?} failed");
+/// `text` as one word for sh.
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// Runs `argv` as root with `input` on its standard input.
-fn root_input(argv: &[&str], input: &str) {
+/// Runs `argv` as root with `input` on its standard input, through the
+/// root service when it is there and through sudo otherwise. The
+/// service's shell gets the command as one script, with the input
+/// encoded into it and a status line after it, and sends back everything
+/// the command printed.
+fn root_run(argv: &[String], input: &str) -> RootOutput {
+    let command = argv
+        .iter()
+        .map(|arg| sh_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Ok(mut socket) = UnixStream::connect(ROOT_SOCKET) {
+        let encoded = base64_encode(input.as_bytes());
+        let script = format!(
+            "printf %s {encoded} | base64 -d | {command} 2>&1\nprintf '\\n{STATUS_MARKER}%s\\n' \"$?\"\nexit\n",
+        );
+        socket.write_all(script.as_bytes()).unwrap();
+        socket.shutdown(Shutdown::Write).unwrap();
+        let mut output = String::new();
+        socket.read_to_string(&mut output).unwrap();
+        let (printed, status) = output
+            .rsplit_once(STATUS_MARKER)
+            .unwrap_or_else(|| panic!("the root service sent no status for {argv:?}: {output}"));
+        let status: i32 = status.trim().parse().unwrap_or(-1);
+        return RootOutput {
+            success: status == 0,
+            status,
+            output: printed.trim_end().to_owned(),
+        };
+    }
     let mut child = Command::new("sudo")
         .arg("-n")
         .arg("--")
         .args(argv)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     child
@@ -165,7 +212,55 @@ fn root_input(argv: &[&str], input: &str) {
         .unwrap()
         .write_all(input.as_bytes())
         .unwrap();
-    assert!(child.wait().unwrap().success(), "sudo {argv:?} failed");
+    let out = child.wait_with_output().unwrap();
+    RootOutput {
+        success: out.status.success(),
+        status: out.status.code().unwrap_or(-1),
+        output: format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
+}
+
+/// Standard base64, for the input of a root command: only text that sh
+/// takes as one word crosses the socket.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut word = 0u32;
+        for (i, byte) in chunk.iter().enumerate() {
+            word |= u32::from(*byte) << (16 - 8 * i);
+        }
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let index = usize::try_from((word >> (18 - 6 * i)) & 0x3f).unwrap();
+                out.push(char::from(ALPHABET[index]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Runs `argv` as root; whether it succeeded.
+fn root_ok(argv: &[String]) -> bool {
+    root_run(argv, "").success
+}
+
+fn root(argv: &[&str]) {
+    assert!(root_ok(&strings(argv)), "as root, {argv:?} failed");
+}
+
+/// Runs `argv` as root with `input` on its standard input.
+fn root_input(argv: &[&str], input: &str) {
+    assert!(
+        root_run(&strings(argv), input).success,
+        "as root, {argv:?} failed"
+    );
 }
 
 /// Writes `content` to `path` as root, with `mode`.
@@ -405,6 +500,51 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             },
         ));
     }
+    if config.sandbox.lock_runner {
+        let runner_name = runner.name.clone();
+        cases.push(Case::new(
+            "a sudoers rule for the runner's user",
+            &["runner-sudo", "runner-sudo-list", "runner-sudo-rules"],
+            move || {
+                root_write(
+                    SUDOERS_RUNNER_GRANT,
+                    &format!("{runner_name} ALL=(ALL:ALL) NOPASSWD: ALL\n"),
+                    "0440",
+                );
+                Removed::by(&[], &[&["rm", "-f", SUDOERS_RUNNER_GRANT]])
+            },
+        ));
+        // With the deny rule aside and a grant for the runner's user, it
+        // gets pkexec and run0; the sandbox user, with no grant, only
+        // what polkit opens to everyone.
+        let runner_name = runner.name.clone();
+        cases.push(Case::new(
+            "the polkit deny rule, with a rule that grants the runner's user",
+            &["linger", "runner-pkexec", "runner-run0"],
+            move || {
+                let grant = format!(
+                    "polkit.addRule(function(action, subject) {{\n  if (subject.user == \"{runner_name}\") return polkit.Result.YES;\n}});\n"
+                );
+                root_write(POLKIT_RUNNER_GRANT, &grant, "0644");
+                Removed::by(
+                    &[&["mv", POLKIT_DENY, POLKIT_ASIDE]],
+                    &[
+                        &["rm", "-f", POLKIT_RUNNER_GRANT],
+                        &["mv", POLKIT_ASIDE, POLKIT_DENY],
+                    ],
+                )
+                .settling(POLKIT_SETTLE)
+            },
+        ));
+    }
+    cases.push(Case::new(
+        "a setuid-root program no package owns",
+        &["setuid-unowned"],
+        || {
+            root(&["install", "-m", "4755", "/bin/true", UNOWNED_SETUID]);
+            Removed::by(&[], &[&["rm", "-f", UNOWNED_SETUID]])
+        },
+    ));
     {
         let user = user.clone();
         cases.push(Case::new(
@@ -531,6 +671,11 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             )
         },
     ));
+    // The first stopped unit the host has, as before the lock. A unit
+    // of a daemon that a group of the runner's user leads to (docker's
+    // socket on the hosted image) is not alone: the runner's probe
+    // connects to it, which starts the service and what that requires,
+    // so the case expects those too and stops them all afterwards.
     let unit = config
         .sandbox
         .stop_services
@@ -538,16 +683,52 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
         .find(|unit| root_ok(&strings(&["systemctl", "cat", "--", unit])))
         .expect("the configuration must stop a unit this host has, for the test to start again")
         .clone();
-    cases.push(Case::new(
-        "a stopped service started",
-        &[&format!("service:{unit}")],
-        move || {
-            Removed::by(
-                &[&["systemctl", "start", &unit]],
-                &[&["systemctl", "stop", &unit]],
-            )
-        },
-    ));
+    let runner_groups: Vec<String> = Command::new("id")
+        .args(["-Gn", "--", &runner.name])
+        .output()
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let group = setup::ROOT_GROUPS.iter().find(|group| {
+        config.sandbox.lock_runner
+            && group.units.contains(&unit.as_str())
+            && runner_groups.iter().any(|name| name == group.name)
+    });
+    let woken: Vec<String> = group
+        .map(|group| {
+            group
+                .units
+                .iter()
+                .filter(|other| {
+                    **other != unit
+                        && config.sandbox.stop_services.iter().any(|s| s == *other)
+                        && root_ok(&strings(&["systemctl", "cat", "--", other]))
+                })
+                .map(|other| (*other).to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut expect = vec![format!("service:{unit}")];
+    if let Some(group) = group {
+        expect.push(format!("runner-group:{}", group.name));
+        expect.extend(woken.iter().map(|other| format!("service:{other}")));
+    }
+    let expect: Vec<&str> = expect.iter().map(String::as_str).collect();
+    cases.push(Case::new("a stopped service started", &expect, move || {
+        root(&["systemctl", "start", &unit]);
+        Removed::new(
+            std::iter::once(&unit)
+                .chain(&woken)
+                .map(|u| strings(&["systemctl", "stop", "--", u]))
+                .collect(),
+            Vec::new(),
+        )
+    }));
     cases.push(Case::new(
         "listeners any user can connect to",
         &["local-sockets", "local-tcp"],
@@ -748,21 +929,16 @@ fn each_probe_fails_when_its_protection_is_removed() {
 
     // A machine is set up once: a second job must not inherit the first's
     // sandbox user.
-    let again = Command::new("sudo")
-        .args([
-            "-n",
-            "--",
-            BIN,
-            "sandbox",
-            "setup",
-            "--config",
-            config::ROOT_COPY,
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&again.stderr);
-    assert_eq!(again.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("ran on this machine before"), "{stderr}");
+    let again = root_run(
+        &strings(&[BIN, "sandbox", "setup", "--config", config::ROOT_COPY]),
+        "",
+    );
+    assert_eq!(again.status, 2, "{}", again.output);
+    assert!(
+        again.output.contains("ran on this machine before"),
+        "{}",
+        again.output
+    );
 
     let fixture = TokenFixture::create(&runner, &entry);
     let (index, count) = shard();

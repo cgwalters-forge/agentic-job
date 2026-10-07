@@ -468,6 +468,8 @@ impl Checker<'_> {
             !found.is_empty(),
         );
 
+        self.setuid_programs()?;
+
         let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
         self.report.expect(
             Want::Succeed,
@@ -477,6 +479,54 @@ impl Checker<'_> {
                 scope.trim()
             ),
             scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
+        );
+        Ok(())
+    }
+
+    /// A setuid-root program the host's packages do not account for is
+    /// someone's own way to root, and the lock cannot know whose: setup
+    /// takes the bit off such a program, and this looks for any left.
+    /// The search is the sandbox user's, since it is on the same side of
+    /// the boundary as the probe; the control is a program every host
+    /// has.
+    fn setuid_programs(&mut self) -> Result<()> {
+        let user = self.user().to_owned();
+        let argv: Vec<String> = std::iter::once("find".to_owned())
+            .chain(setup::setuid_root_find("/"))
+            .collect();
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // find also fails for what it may not read; what it printed counts.
+        let output = self.sandbox(&argv, b"")?;
+        let found = String::from_utf8_lossy(&output.stdout);
+        let found: Vec<&str> = found.lines().filter(|line| !line.is_empty()).collect();
+        self.report.expect(
+            Want::Succeed,
+            "setuid-control",
+            format!("{user} finds a setuid-root program every host has (control)"),
+            found
+                .iter()
+                .any(|path| setup::SETUID_CONTROLS.contains(path)),
+        );
+        let unowned: Vec<&str> = found
+            .iter()
+            .copied()
+            .filter(|path| !setup::package_owned(path))
+            .collect();
+        self.report.expect(
+            Want::Fail,
+            "setuid-unowned",
+            if unowned.is_empty() {
+                format!(
+                    "every setuid-root program {user} finds belongs to a package ({} found)",
+                    found.len()
+                )
+            } else {
+                format!(
+                    "{user} finds setuid-root programs no package owns: {}",
+                    unowned.join(", ")
+                )
+            },
+            !unowned.is_empty(),
         );
         Ok(())
     }

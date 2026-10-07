@@ -123,7 +123,12 @@ which takes each as the value of one key and never reads it as TOML.
 **Runners.** `agent-runner` is the machine the agent works on: thrown
 away after the job, with passwordless sudo for the runner's user,
 systemd 257 or later (for `run0`), and `apt-get` or `dnf`. `sandbox
-setup` refuses a machine it has set up before. `runner` is for the other
+setup` refuses a machine it has set up before, and ends by taking root
+away from the runner's user: every step after it, this workflow's and
+the actions' cleanup steps, runs without it
+([docs/sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)),
+which is one more reason the machine must not be one that runs another
+job afterwards. `runner` is for the other
 three jobs and defaults to `ubuntu-24.04`; where no release fits the
 workflow's commit, the policy job builds the binary there with rustup,
 and apt for the musl compiler. Labels resolve
