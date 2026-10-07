@@ -1,4 +1,4 @@
-# Builds the static binary and its checksum, as the artifact `agentic-job`.
+# Builds the static binaries and their checksums, as the artifact `agentic-job`.
 # Called by ci (to keep the build working) and by release (to publish it).
 name: build
 
@@ -33,12 +33,15 @@ jobs:
         with:
           key: ${{ env.TARGET }}
       - run: cargo build --release --locked --target "$TARGET" -p agentic-job
-      - name: Stage the binary and its checksum
+      # The scripted agent too: a run with `agent: fake` needs it.
+      - name: Stage the binaries and their checksums
         run: |
           mkdir dist
-          cp "target/$TARGET/release/agentic-job" "dist/agentic-job-$TARGET"
           cd dist
-          sha256sum "agentic-job-$TARGET" > "agentic-job-$TARGET.sha256"
+          for name in agentic-job fake-agent; do
+            cp "../target/$TARGET/release/$name" "$name-$TARGET"
+            sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
+          done
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binary is static and runs
         run: |
