@@ -46,9 +46,11 @@ URL, the caps and the output types allowed. `redact.rs` likewise is
 step 4's and used by step 6b, which also takes the name of a patch
 (`check::patch_file_name`) and of its base header from `check`.
 
-`secure-host/` at the top of the repository holds `binary.mjs`, which
-fetches a release's binary by the checksums in `release.json` beside it
-or builds it.
+`secure-host/` at the top of the repository is the action that secures
+a host for any job ([secure-host.md](secure-host.md)): `action.yml`,
+the configuration it uses on a hosted runner, and `binary.mjs`, which
+fetches a release's binary by the checksums in `release.json` or builds
+it. The reusable workflow uses both.
 
 The egress proxy is not Rust. Step 5 puts mitmproxy's addon, policy and
 tests in `egress/` at the top of the repository, as they are in the old
