@@ -198,7 +198,6 @@ jobs:
         shard: [0, 1, 2, 3]
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
-      SHARDS: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -226,7 +225,9 @@ jobs:
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: https://oidc.invalid/stand-in
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stand-in-request-token-0123456789abcdef
-          AGENTIC_JOB_TEST_SHARD: ${{ matrix.shard }}/${{ env.SHARDS }}
+          # This job's place among the matrix's, and how many there are:
+          # a shard added to or taken from the list above is counted here.
+          AGENTIC_JOB_TEST_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
   # The reusable workflow, called as another repository would call it,
