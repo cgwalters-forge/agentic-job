@@ -27,6 +27,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `sandbox/setup.rs` | 5 | `sandbox setup` |
 | `sandbox/check/` | 5 | `sandbox check`; its probes are a function `run` calls again ([what they prove](sandbox-check.md)); `setup` and `check` together are [the step any job can run first](secure-host.md) |
 | `sandbox/enter.rs` | 5 | running a command as the sandbox user with `run0`; `run` starts the agent through it |
+| `sandbox/exec.rs` | 5 | `sandbox exec`: a step of a job as the sandbox user, where no agent runs |
 | `sandbox/helper.rs`, `sandbox/root.rs` | 5 | `helper`, the privileged operations the runner's user keeps after setup, as root through its one sudo rule; and how the runner's user asks for each (the helper, or sudo itself where setup never ran) |
 | `sandbox/host.rs`, `sandbox/local.rs` | 5 | users and programs of the host; the listeners a user can connect to |
 | `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
@@ -44,6 +45,10 @@ and a step changes only the structs of its own tables (`[sandbox]`,
 URL, the caps and the output types allowed. `redact.rs` likewise is
 step 4's and used by step 6b, which also takes the name of a patch
 (`check::patch_file_name`) and of its base header from `check`.
+
+`secure-host/` at the top of the repository holds `binary.mjs`, which
+fetches a release's binary by the checksums in `release.json` beside it
+or builds it.
 
 The egress proxy is not Rust. Step 5 puts mitmproxy's addon, policy and
 tests in `egress/` at the top of the repository, as they are in the old
