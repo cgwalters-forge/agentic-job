@@ -75,6 +75,8 @@ pub fn is_secret_shaped(bytes: &[u8]) -> bool {
 #[derive(Debug)]
 pub struct Redactor {
     rule: Regex,
+    /// The same rule over bytes, for content that is not text.
+    bytes: BytesRegex,
     count: usize,
 }
 
@@ -92,14 +94,24 @@ impl Redactor {
         let mut literals: Vec<String> = literals.into_iter().collect();
         literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
         let literals: Vec<String> = literals.iter().map(|l| regex::escape(l)).collect();
-        let parts = literals
-            .iter()
-            .map(String::as_str)
-            .chain(PATTERNS.iter().copied());
+        let rule = alternation(
+            literals
+                .iter()
+                .map(String::as_str)
+                .chain(PATTERNS.iter().copied()),
+        );
         Ok(Self {
-            rule: Regex::new(&alternation(parts))?,
+            bytes: BytesRegex::new(&format!("(?-u){rule}"))?,
+            rule: Regex::new(&rule)?,
             count: 0,
         })
+    }
+
+    /// Whether `bytes` holds a secret this would replace in text: one of
+    /// its literals, or a string shaped like a credential. For what
+    /// cannot be redacted, a patch or a file that is not text.
+    pub fn finds(&self, bytes: &[u8]) -> bool {
+        self.bytes.is_match(bytes)
     }
 
     /// `text` with every secret replaced by [`REPLACEMENT`].
@@ -262,6 +274,22 @@ mod tests {
             assert_eq!(redactor.redact(text), want);
         }
         assert_eq!(redactor.count(), 3);
+        // A literal is found in bytes that are not text, as a shape is,
+        // and finding counts nothing.
+        let mut bytes = vec![0xff, 0x00];
+        bytes.extend_from_slice("hunter2-and-more caf\u{e9}".as_bytes());
+        assert!(redactor.finds(&bytes));
+        assert!(!is_secret_shaped(&bytes));
+        assert!(redactor.finds(format!("x {} y", token("ghp_")).as_bytes()));
+        assert!(!redactor.finds(b"a short word, a.b*c(d)X"));
+        assert_eq!(redactor.count(), 3);
+    }
+
+    #[test]
+    fn a_literal_that_is_not_ascii_is_found_in_bytes() {
+        let redactor = Redactor::new(["pass\u{e9}-w\u{f6}rd-long"]).unwrap();
+        assert!(redactor.finds("the pass\u{e9}-w\u{f6}rd-long here".as_bytes()));
+        assert!(!redactor.finds("the passe-word-long here".as_bytes()));
     }
 
     #[test]
