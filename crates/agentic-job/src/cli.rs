@@ -6,6 +6,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::config::compose;
 use crate::exit::Exit;
 use crate::{check, policy, run, sandbox};
 
@@ -27,6 +28,8 @@ pub enum Command {
     Run(run::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
+    /// Write a run's configuration from a file and settings given one at a time
+    Config(compose::Args),
     /// Become the agent, as the sandbox user: what `run` has the session start
     #[command(name = run::launch::COMMAND, hide = true)]
     LaunchAgent(run::launch::Args),
@@ -39,6 +42,7 @@ impl Command {
             Self::Sandbox(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::Check(args) => check::run(args),
+            Self::Config(args) => compose::run(args),
             Self::LaunchAgent(args) => run::launch::run(args),
         }
     }
@@ -129,6 +133,27 @@ mod tests {
                 "{args:?}"
             );
         }
+    }
+
+    /// Not in the plan's table: what a workflow writes the configuration
+    /// with, from inputs that may hold anything.
+    #[test]
+    fn the_configuration_writer_parses() {
+        let cli = Cli::try_parse_from([
+            "agentic-job",
+            "config",
+            "--from",
+            "caller.toml",
+            "--string",
+            "agent.model=--help",
+            "--string",
+            "inference.url=",
+            "--integer",
+            "limits.budget=500",
+            "--list",
+            "setup.packages=just jq",
+        ]);
+        cli.unwrap();
     }
 
     /// Not in the plan's table: `sandbox check` runs it as the sandbox user.
