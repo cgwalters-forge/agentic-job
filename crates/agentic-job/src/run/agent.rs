@@ -35,6 +35,11 @@
 //! Nothing else in that repository is used: opencode would also merge
 //! other configuration files and run plugins, tools and commands found
 //! beside its configuration, none of which the provider check covers.
+//!
+//! An agent is code here, and not an entry of a table a caller writes,
+//! on purpose: what keeps its inference at the proxy is different for
+//! each one and has to be known, not described. "Adding an agent" in
+//! docs/layout.md says what a new one takes.
 
 use std::collections::BTreeMap;
 use std::io::Write;
