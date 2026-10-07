@@ -242,26 +242,13 @@ jobs:
   # an answer, and `e2e-verify` requires either the draft or exactly that
   # refusal.
   #
+  # Nothing is opened in the tracker for a run. The comments go to issue
+  # 64, which exists for them and stays closed (`with:` takes no `env`,
+  # so its number is written out three times below), and `e2e-verify`
+  # deletes them again.
+  #
   # A pull request from a fork cannot run these: its token cannot write.
-  e2e-prepare:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      issues: write
-    outputs:
-      issue: ${{ steps.issue.outputs.number }}
-    steps:
-      - name: Open a scratch issue for the run's comment
-        id: issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          url=$(gh issue create --title "Scratch issue of end-to-end run $GITHUB_RUN_ID" --body 'Closed by the run that opened it.')
-          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
-
   e2e-full:
-    needs: e2e-prepare
     permissions: &e2e-permissions
       contents: write # push the pull request's branch
       issues: write # add_comment
@@ -280,7 +267,7 @@ jobs:
       timeout: "5"
       max-requests: "0"
       budget: "100"
-      comment-target: ${{ needs.e2e-prepare.outputs.issue }}
+      comment-target: "64"
       # A quote of each kind: it must reach the handlers as it is.
       title-prefix: 'e2e "full" it''s:'
       branch-prefix: e2e/full/
@@ -292,7 +279,6 @@ jobs:
   # state of a limit, and what it had done is applied as a draft that
   # says it is partial.
   e2e-limit:
-    needs: e2e-prepare
     permissions: *e2e-permissions
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -304,7 +290,7 @@ jobs:
       config: .github/agentic-job/hosted.toml
       agent: fake
       setup: .github/agentic-job/e2e/limit.sh
-      comment-target: ${{ needs.e2e-prepare.outputs.issue }}
+      comment-target: "64"
       timeout: "10"
       max-requests: "0"
       max-tasks: "2"
@@ -316,17 +302,19 @@ jobs:
 
   e2e-verify:
     if: ${{ always() }}
-    needs: [e2e-prepare, e2e-full, e2e-limit]
+    needs: [e2e-full, e2e-limit]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write # delete the scratch branches
-      issues: write # close the scratch issues
+      issues: write # delete the comments
       pull-requests: write # close the drafts
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      ISSUE: ${{ needs.e2e-prepare.outputs.issue }}
+      ISSUE: "64"
+      # What gh-aw's handlers end each comment of this run with.
+      RUN: actions/runs/${{ github.run_id }}
       FULL: e2e/full/agent-run-${{ github.run_id }}
       LIMIT: e2e/limit/agent-run-${{ github.run_id }}
       TITLE_PREFIX: 'e2e "full" it''s:'
@@ -375,62 +363,66 @@ jobs:
             test "$(git log -1 --format='%an <%ae>' "origin/$branch") $(git diff --name-only "origin/$branch~1" "origin/$branch")" = "$AUTHOR $file"
             git log -1 --format='%H %an <%ae>%n%B' "origin/$branch" | tee -a "$GITHUB_STEP_SUMMARY"
           done <<< "$FULL docs/e2e-scratch.md"$'\n'"$LIMIT docs/e2e-partial.md"
-      - name: The comment is on the scratch issue
-        run: gh issue view "$ISSUE" --json comments --jq '.comments[].body' | grep -F 'A comment from the scripted agent of an end-to-end run.'
-      # On what was made, not only in the configuration: the pull request,
-      # or the issue gh-aw leaves in its place with the same title and body.
-      - name: The titles are the prefixed ones, and the run stopped at a limit is marked partial
+      # The comments of this run among those of the runs beside it.
+      - name: The comments are on the scratch issue, and the run stopped at a limit says so
+        env:
+          NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
+        run: |
+          gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" --jq ".[] | select(.body | contains(\"$RUN\")).body" > "$RUNNER_TEMP/comments"
+          grep -F 'A comment from the scripted agent of an end-to-end run.' "$RUNNER_TEMP/comments"
+          grep -F -A2 "$NOTE" "$RUNNER_TEMP/comments" | grep -F 'A comment from the scripted agent of a run that is stopped.'
+      # Either is right, and nothing else: a draft with the prefixed
+      # title, or the branch with the forge's refusal to let Actions open
+      # the pull request, and then no issue in its place.
+      - name: A draft pull request each, or the refusal of the setting that keeps Actions from opening one
         env:
           FULL_TITLE: 'e2e "full" it''s:docs: Scratch change of an end-to-end run'
           LIMIT_TITLE: "[partial: stopped at a limit] Wrote the first half of a scratch file."
-          NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
         run: |
           jq -e '.partial and (.handlers.create_pull_request.title_prefix == "[partial: stopped at a limit] ")' "$RUNNER_TEMP/limit/applied.json"
-          made() { gh issue view "$(jq -r '.pull_request.number // first(.made[] | select(.type == "create_pull_request").number)' "$RUNNER_TEMP/$1/applied.json")" --json title,body --jq "$2"; }
-          test "$(made full .title)" = "$FULL_TITLE"
-          test "$(made limit .title)" = "$LIMIT_TITLE"
-          made limit .body | tee -a "$GITHUB_STEP_SUMMARY" | grep -F "$NOTE"
-          gh issue view "$ISSUE" --json comments --jq '.comments[].body | select(contains("of a run that is stopped"))' | grep -F "$NOTE"
-      # Either is right, and nothing else: a draft, or the branch with the
-      # forge's refusal to let Actions open the pull request.
-      - name: A draft pull request each, or the refusal of the setting that keeps Actions from opening one
-        run: |
-          for applied in "$RUNNER_TEMP"/{full,limit}/applied.json; do
-            pr=$(jq -r '.pull_request.number // empty' "$applied")
-            if [ -n "$pr" ]; then gh pr view "$pr" --json isDraft,title,url | tee -a "$GITHUB_STEP_SUMMARY" | jq -e .isDraft
-            else jq -e '.refused and .pull_request == null' "$applied"
+          while read -r run title; do
+            pr=$(jq -r '.pull_request.number // empty' "$RUNNER_TEMP/$run/applied.json")
+            if [ -n "$pr" ]; then gh pr view "$pr" --json isDraft,title,url | tee -a "$GITHUB_STEP_SUMMARY" | jq -e --arg title "$title" '.isDraft and .title == $title'
+            else jq -e '.refused and .pull_request == null and (.made | map(.type) | unique) - ["add_comment"] == []' "$RUNNER_TEMP/$run/applied.json"
               echo "::notice::the branch was pushed and the pull request refused: this organization does not let Actions open pull requests, and the apply job has no other token (the environment agent-apply with AGENTIC_JOB_APPLY_TOKEN)"
             fi
+          done <<< "full $FULL_TITLE"$'\n'"limit $LIMIT_TITLE"
+      # gh-aw's handlers end what they open with a link to the run.
+      - name: The runs opened no issue
+        run: |
+          gh api "repos/$GH_REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
+            --jq "[.[] | select(.pull_request == null and ((.body // \"\") | contains(\"$RUN\"))).html_url]" | tee /dev/stderr | jq -e '. == []'
+      # Whatever happened before: these ask the forge what this run left
+      # and need neither the checkout nor the artifacts, each is tried
+      # whatever became of the one before it, and one that fails fails the
+      # job, so that nothing is left behind without a red run to say so.
+      - name: Remove the scratch branches
+        if: ${{ always() }}
+        run: |
+          for branch in "$FULL" "$LIMIT"; do
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
           done
-      # Whatever happened before: it asks the forge what this run left,
-      # and needs neither the checkout nor the artifacts. The branches go
-      # first, since removing them depends on nothing that can fail. Pull requests
-      # are closed as issues, which to the API they are; the issue gh-aw
-      # leaves for a refused pull request names the run's branch.
-      - name: Close what was opened and remove the scratch branches
+      # Pull requests are closed as issues, which to the API they are.
+      - name: Close the drafts
         if: ${{ always() }}
         env:
           MINE: agent-run-${{ github.run_id }}
         run: |
           set -o pipefail
-          for branch in "$FULL" "$LIMIT"; do
-            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
-          done
-          { echo "$ISSUE"
-            gh issue list --state open --label agentic-workflows --limit 100 --json number,body --jq ".[] | select(.body | contains(\"$MINE\")).number"
-            gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number"
-          } | xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url
-      # gh-aw's handlers also comment where the run was started from, to
-      # say what they made: on a pull request, two comments for each run.
-      - name: Remove the handlers' comments from the pull request
-        if: ${{ always() && github.event_name == 'pull_request' }}
+          gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number" |
+            xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url
+      # From the scratch issue, and from the pull request this run is for:
+      # gh-aw's handlers also comment where a run was started from.
+      - name: Delete the comments
+        if: ${{ always() }}
         env:
-          COMMENTS: repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments
-          MINE: actions/runs/${{ github.run_id }}
+          STARTED_FROM: ${{ github.event.pull_request.number }}
         run: |
           set -o pipefail
-          gh api --paginate "$COMMENTS" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$MINE\"))).id" |
-            xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
+          for issue in "$ISSUE" ${STARTED_FROM:+"$STARTED_FROM"}; do
+            gh api --paginate "repos/$GH_REPO/issues/$issue/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$RUN\"))).id" |
+              xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
+          done
 
   ci:
     if: ${{ always() }}
