@@ -19,14 +19,14 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::Mode;
 
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
-use super::{egress, helper, network};
+use super::{egress, helper, network, world_write};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
@@ -37,6 +37,12 @@ pub struct Args {
     /// The run's configuration (TOML); copied to /etc/agentic-job/
     #[arg(long, value_name = "FILE")]
     pub config: PathBuf,
+    /// How world-writable paths are closed: the walk, or the BPF program (a spike)
+    #[arg(long, value_enum, default_value_t = world_write::Mode::Walk)]
+    pub world_write: world_write::Mode,
+    /// The compiled program for `--world-write lsm`, bpf/world_write.bpf.o
+    #[arg(long, value_name = "FILE", required_if_eq("world_write", "lsm"))]
+    pub bpf_object: Option<PathBuf>,
 }
 
 /// Root's: the configuration `run` reads, and what else setup leaves for
@@ -341,7 +347,22 @@ pub fn run(args: &Args) -> Result<Exit> {
         ),
     }
     // After the installs, which are the last things to write as root.
-    strip_world_write()?;
+    match args.world_write {
+        world_write::Mode::Walk => strip_world_write()?,
+        world_write::Mode::Lsm => {
+            let object = args
+                .bpf_object
+                .as_deref()
+                .context("--world-write lsm needs --bpf-object")?;
+            // Fails closed: a program that does not load, or loads and
+            // does not deny, ends setup with the host unlocked and the
+            // job's step failed.
+            let loaded = world_write::load(object, world_write::Hook::Auto, &sandbox.name)?;
+            println!("{loaded}");
+            scan_setuid()?;
+        }
+    }
+    args.world_write.record()?;
     strip_unowned_setuid()?;
     fix_ssh_crypto_policy()?;
     restrict_ptrace()?;
@@ -762,6 +783,7 @@ pub fn setuid_root_find(root: &str) -> Vec<String> {
 /// slowest thing setup does, writes down the setuid-root programs it
 /// passes for [`strip_unowned_setuid`].
 fn strip_world_write() -> Result<()> {
+    let started = Instant::now();
     let fixed = host::run(
         Command::new("find")
             .args(world_writable_find("/"))
@@ -782,11 +804,29 @@ fn strip_world_write() -> Result<()> {
     if !paths.is_empty() {
         let shown: Vec<&str> = paths.iter().copied().take(10).collect();
         println!(
-            "Removed world write access from {} paths, such as:\n  {}",
+            "Removed world write access from {} paths in {:.0} s, such as:\n  {}",
             paths.len(),
+            started.elapsed().as_secs_f64(),
             shown.join("\n  ")
         );
     }
+    Ok(())
+}
+
+/// The walk's other product, where the walk does not run: the
+/// setuid-root programs, for [`strip_unowned_setuid`]. Still a pass over
+/// every inode of the root filesystem, since the bit is in the inode.
+fn scan_setuid() -> Result<()> {
+    let started = Instant::now();
+    host::run(
+        Command::new("find")
+            .args(setuid_root_find("/"))
+            .args(["-fprint", SETUID_LIST]),
+    )?;
+    println!(
+        "Listed the setuid-root programs in {:.0} s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

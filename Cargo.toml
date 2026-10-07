@@ -14,6 +14,11 @@ publish = false
 [workspace.dependencies]
 agent-client-protocol = { version = "2.2", features = ["unstable_end_turn_token_usage"] }
 anyhow = "1"
+# Loads, attaches and pins the BPF program that closes world-writable
+# paths (a spike, docs/world-write.md). Pure Rust over the bpf syscall.
+# The fork adds fmod_ret programs, which the release lacks; to be sent
+# upstream if the spike is adopted.
+aya = { git = "https://github.com/cgwalters-bot/aya", rev = "acf4dcb4db0b19a0a5e645d0d1fe9dcf79c59eff", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"

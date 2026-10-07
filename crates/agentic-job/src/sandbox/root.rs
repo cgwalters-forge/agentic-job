@@ -17,6 +17,7 @@ use anyhow::{Context, Result, ensure};
 use super::enter::Entry;
 use super::helper::{self, Exec, ViaSudo};
 use super::setup::SELF_COPY;
+use super::world_write::{self, Denial};
 use crate::config::ROOT_COPY;
 use crate::run::egress::ACCESS_LOG;
 
@@ -162,6 +163,28 @@ impl Root {
             .stdout(Stdio::piped())
             .spawn()
             .context("starting the log's reader")
+    }
+
+    /// The writes the world-write program denied since last read.
+    pub fn world_write_denials(self) -> Result<Vec<Denial>> {
+        let mut command = match self {
+            Self::Helper => Self::helper_command::<&str>("world-write-denials", &[]),
+            Self::Sudo => {
+                let exe = std::env::current_exe().context("finding this program")?;
+                let exe = exe.to_str().context("this program's path is not UTF-8")?;
+                Self::sudo_command(&[exe, "sandbox", "world-write", "denials"])?
+            }
+        };
+        let out = command
+            .stdin(Stdio::null())
+            .output()
+            .context("reading the denials")?;
+        ensure!(
+            out.status.success(),
+            "reading the denials: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        world_write::parse_denials(&String::from_utf8_lossy(&out.stdout))
     }
 
     /// `tailscale status --json`, as root; `None` where that fails.

@@ -19,6 +19,7 @@ pub mod local;
 pub mod network;
 pub mod root;
 pub mod setup;
+pub mod world_write;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -34,6 +35,9 @@ pub enum Command {
     /// Print the network rules setup would load; CI compares them with the old tree's
     #[command(hide = true)]
     NftRules(NftRulesArgs),
+    /// Close world-writable paths with a BPF program instead of the walk (a spike)
+    #[command(hide = true, subcommand)]
+    WorldWrite(world_write::Op),
 }
 
 #[derive(Debug, clap::Args)]
@@ -56,6 +60,7 @@ impl Command {
             Self::Check(args) => check::run(args),
             Self::Exec(args) => exec::run(args),
             Self::ProbeLocal => local::run(),
+            Self::WorldWrite(op) => op.run(),
             Self::NftRules(args) => {
                 let direct = args
                     .direct
