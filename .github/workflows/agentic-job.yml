@@ -551,7 +551,7 @@ jobs:
       # What gh-aw's handlers list the things they made in.
       MADE: /tmp/gh-aw/safe-output-items.jsonl
       # What the forge answers where Actions may not open pull requests.
-      REFUSAL: not permitted to create or approve pull requests
+      REFUSAL: GitHub Actions is not permitted to create or approve pull requests
     steps:
       # Without this, an environment that lacks the secret would have the
       # job quietly write with its own token instead.
@@ -627,8 +627,7 @@ jobs:
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
       # token's owner), and a pull request that fails is not to become an
-      # issue (one the forge refuses to Actions still does: see the last
-      # step). Each input is one string of the result.
+      # issue. Each input is one string of the result.
       - name: Write the handlers' configuration
         env:
           BRANCH_PREFIX: ${{ inputs.branch-prefix }}
@@ -661,8 +660,17 @@ jobs:
             '(.items[] | select(.type == "create_pull_request" or .type == "add_comment") | .body) |= "\($note)\n\n\(.)"' \
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
           mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
+      # Where the forge refuses the pull request to Actions, gh-aw's
+      # handler opens an issue in its place before it looks at
+      # `fallback_as_issue`: it knows that refusal by its words. So the
+      # refusal reaches the handler in other words, as a pull request that
+      # failed, which that setting does keep from becoming an issue; and
+      # no client the handlers use opens an issue at all for a run whose
+      # outputs have none. A handler that failed fails this step, and the
+      # last step says what that means for the job.
       - name: Apply the outputs with gh-aw's handlers
         id: apply
+        continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/agent_output.json
@@ -672,7 +680,20 @@ jobs:
           github-token: ${{ secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
-            require(`${dir}/setup_globals.cjs`).setupGlobals(core, github, context, exec, io, getOctokit);
+            const issues = "create_issue" in JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG);
+            const creates = (options, what) => options.method === "POST" && new RegExp(`^/repos/[^/]+/[^/]+/${what}$`).test(options.url);
+            const guarded = client => {
+              client.hook.before("request", options => {
+                if (!issues && creates(options, "issues")) throw new Error("an issue is not among this run's outputs, and none is opened");
+              });
+              client.hook.error("request", (error, options) => {
+                if (!creates(options, "pulls") || !String(error.message).includes(process.env.REFUSAL)) throw error;
+                core.setOutput("refused", "true");
+                throw new Error(`Actions may not open pull requests in ${options.owner}/${options.repo}; the branch ${options.head} is pushed there`);
+              });
+              return client;
+            };
+            require(`${dir}/setup_globals.cjs`).setupGlobals(core, guarded(github), context, exec, io, (...args) => guarded(getOctokit(...args)));
             await require(`${dir}/safe_output_handler_manager.cjs`).main();
       # What was made, for whoever reads the run: `pull_request` is null
       # when none was opened, and `refused` then says whether the forge
@@ -680,20 +701,14 @@ jobs:
       - name: Write applied.json
         if: ${{ always() && steps.apply.outcome != 'skipped' }}
         env:
-          # The job's own: enough to read an issue of a public repository.
-          GH_TOKEN: ${{ github.token }}
           PR: ${{ steps.apply.outputs.created_pr_number }}
           PR_URL: ${{ steps.apply.outputs.created_pr_url }}
+          REFUSED: ${{ steps.apply.outputs.refused == 'true' }}
           EXIT: ${{ needs.agent.outputs.exit }}
         run: |
           touch "$MADE"
-          instead=$(jq -rs 'map(select(.type == "create_pull_request").number)[0] // empty' "$MADE")
-          refused=false
-          if [ -z "$PR" ] && [ -n "$instead" ] && gh api "repos/$OUTPUT_REPO/issues/$instead" --jq .body | grep -qF "$REFUSAL"; then
-            refused=true
-          fi
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
-            --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$refused" '
+            --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$REFUSED" '
             {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made, refused: $refused,
              pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
              handlers: $handlers[0]}' | tee "$GH_AW_TMP/applied.json"
@@ -705,17 +720,20 @@ jobs:
           path: ${{ env.GH_AW_TMP }}/applied.json
           retention-days: 90
           if-no-files-found: error
-      # Where the forge refuses the pull request to Actions, gh-aw's
-      # handlers leave an issue saying so and report success, whatever
-      # their configuration says. A run that asked for a pull request and
-      # has none did not do what it was for.
-      - name: A pull request that was asked for was opened
+      # A run that asked for a pull request and has none did not do what
+      # it was for, and neither did one of whose outputs a handler failed.
+      # The one failure a caller may take for an answer is the forge's
+      # refusal of the pull request and of nothing else, with the branch
+      # pushed.
+      - name: Every output was applied, or only the pull request was refused
         env:
           MODE: ${{ inputs.refused-pull-request }}
+          OUTCOME: ${{ steps.apply.outcome }}
+          FAILED: ${{ steps.apply.outputs.items_failed }}
         run: |
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json") refused=$(jq .refused "$GH_AW_TMP/applied.json")
-          if [ "$asked" = 0 ] || [ "$opened" = true ]; then exit 0; fi
-          [ "$refused/$MODE" = true/branch ] ||
-            { echo "::error::the run asked for a pull request and none was opened in $OUTPUT_REPO (refused to Actions: $refused)"; exit 1; }
-          echo "::warning::the branch is pushed to $OUTPUT_REPO and the pull request was refused: GitHub Actions is $REFUSAL there. Allow it in the repository's settings, or give the apply job a token (apply-environment)"
+          if [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; }; then exit 0; fi
+          [ "$refused/$FAILED/$MODE" = true/1/branch ] ||
+            { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs, and no pull request was opened in $OUTPUT_REPO (refused to Actions: $refused)"; exit 1; }
+          echo "::warning::the branch is pushed to $OUTPUT_REPO and the pull request was refused: $REFUSAL there. Allow it in the repository's settings, or give the apply job a token (apply-environment)"
