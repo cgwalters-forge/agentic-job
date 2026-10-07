@@ -1,15 +1,46 @@
-//! A run's budget: its wall time, the model requests its caller counts
-//! for it, and the subagent tasks it starts. An agent cancelled at a limit
-//! hands back nothing, so it is told while it can still act: notices at
-//! `CONVERGE` and `FINISH` percent of the most used limit, an interruption
-//! near it (`HAND_BACK` percent of the time, `HAND_BACK_REQUESTS` before
-//! the last model request) to write its outcome, and only then the stop.
+//! A run's limits and its budget: its wall time, the model requests its
+//! caller counts for it, the subagent tasks it starts, and what the agent
+//! says it has spent. An agent cancelled at a limit hands back nothing, so
+//! it is told while it can still act: notices at `CONVERGE` and `FINISH`
+//! percent of the most used limit, an interruption near it (`HAND_BACK`
+//! percent of the time, `HAND_BACK_REQUESTS` before the last model
+//! request) to write its outcome, and only then the stop. Spending is the
+//! exception: the agent reports it after the fact, so an overrun stops the
+//! session at once.
 //!
-//! This is the arithmetic and the words; `run` delivers them over ACP.
+//! This is the arithmetic and the words; the driver delivers them over ACP.
 
 use std::time::Duration;
 
-use crate::run::Limits;
+use serde::{Deserialize, Serialize};
+
+/// One AIC is a hundredth of a dollar.
+const AIC_PER_USD: f64 = 100.0;
+
+/// What stops a session. `harness.json` records it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    pub timeout_s: u64,
+    /// In AIC, from the agent's `usage_update` cost.
+    pub budget_aic: Option<f64>,
+    /// Model requests, as the caller counts them (`Options::requests`):
+    /// ACP doesn't report them, and a subagent's aren't in the session at all.
+    #[serde(default)]
+    pub max_requests: Option<u64>,
+    /// Subagent tasks the agent may start (the digest's `tasks`).
+    #[serde(default)]
+    pub max_tasks: Option<usize>,
+}
+
+impl Limits {
+    /// The stop for a session that has spent COST_USD, if that is over
+    /// the budget.
+    pub fn overspent(&self, cost_usd: f64) -> Option<Stop> {
+        let budget = self.budget_aic?;
+        let aic = cost_usd * AIC_PER_USD;
+        (aic > budget).then(|| Stop::Budget(format!("over budget: spent {aic:.1} of {budget} AIC")))
+    }
+}
 
 /// Percent of a limit at which the agent is told to converge.
 pub const CONVERGE: u64 = 60;
@@ -23,14 +54,15 @@ pub const HAND_BACK: u64 = 95;
 pub const HAND_BACK_REQUESTS: u64 = 10;
 /// The notice levels, highest first.
 const NOTICES: [u64; 2] = [FINISH, CONVERGE];
-/// What every message of the harness to the agent starts with, so that
-/// the task brief can say what they are.
+/// What every message of the session to the agent starts with, so that
+/// the task brief can say what they are. The old tree's words: callers'
+/// briefs name them.
 pub const NOTICE_PREFIX: &str = "[bot-harness budget notice]";
 /// The labels of the notices that aren't a percentage.
 pub const LABEL_LAST_TASK: &str = "last task";
 pub const LABEL_HAND_BACK: &str = "hand back";
 
-/// Why the harness stopped the session.
+/// Why the session was stopped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
     Timeout,
@@ -235,6 +267,20 @@ mod tests {
             max_tasks,
             ..Limits::default()
         }
+    }
+
+    #[test]
+    fn overspent() {
+        let capped = Limits {
+            budget_aic: Some(10.0),
+            ..limits(None, None)
+        };
+        assert_eq!(capped.overspent(0.1), None);
+        assert_eq!(
+            capped.overspent(0.5),
+            Some(Stop::Budget("over budget: spent 50.0 of 10 AIC".to_owned()))
+        );
+        assert_eq!(limits(None, None).overspent(1e9), None);
     }
 
     fn usage(secs: u64, requests: Option<u64>, tasks: usize) -> Usage {

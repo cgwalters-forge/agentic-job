@@ -1,10 +1,14 @@
-//! Answers `session/request_permission` from a policy file.
+//! Answers `session/request_permission` from a policy.
 //!
-//! The sandbox (an unprivileged user, later a container or VM) is the
-//! security boundary; this policy is for keeping the agent away from
-//! actions a task shouldn't take (`git push`, writes outside the work
-//! tree) and for an audit trail: every decision is recorded in the ACP
-//! transcript, with the rule that made it.
+//! The sandbox is the security boundary: an agent asks only when it
+//! chooses to. This policy is for keeping the agent away from actions a
+//! task shouldn't take (`git push`, writes outside its home) and for an
+//! audit trail: every decision is recorded in the ACP transcript, with
+//! the rule that made it. It is not the safe-outputs policy of
+//! `crate::policy`, which decides what may leave the run.
+//!
+//! [`Policy::for_task`] is what a task run uses. A policy can also be
+//! written out:
 //!
 //! ```toml
 //! default = "allow"
@@ -60,9 +64,17 @@ const KINDS: &[&str] = &[
 /// Keys of a tool call's `rawInput` that hold a path, across agents
 /// (Claude Code uses `file_path`, opencode `filePath`).
 pub const PATH_KEYS: &[&str] = &["file_path", "filePath", "notebook_path", "path"];
-/// The `_meta` key under which the harness records its decision in the
-/// permission response, so the transcript says why.
+/// The `_meta` key under which the session records its decision in the
+/// permission response, so the transcript says why. The old tree's name:
+/// readers of `acp.jsonl` look for it.
 pub const META_KEY: &str = "botHarness";
+/// A task run's rules (`Policy::for_task`). Results leave through the
+/// run's outputs, checked before anything is pushed from outside the
+/// sandbox.
+const NO_PUSH: &str = "no-push";
+const NO_PUSH_COMMAND: &str = r"\bgit\b.*\bpush\b";
+const WRITES_IN_HOME_ONLY: &str = "writes-in-home-only";
+const WRITE_KINDS: &[&str] = &["edit", "delete", "move"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -144,14 +156,39 @@ impl Policy {
         }
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading the permission policy {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("in the permission policy {}", path.display()))
+    /// What a task run is held to, as in the old tree's `policy.toml`:
+    /// everything is allowed but a `git push` and a write outside HOME,
+    /// the sandbox user's home.
+    pub fn for_task(home: &Path) -> Result<Self> {
+        let strings = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
+        Self::from_file(PolicyFile {
+            default: Decision::Allow,
+            rule: vec![
+                RuleFile {
+                    name: NO_PUSH.to_owned(),
+                    decision: Decision::Deny,
+                    kind: strings(&["execute"]),
+                    command: Some(NO_PUSH_COMMAND.to_owned()),
+                    paths: Vec::new(),
+                    outside: Vec::new(),
+                },
+                RuleFile {
+                    name: WRITES_IN_HOME_ONLY.to_owned(),
+                    decision: Decision::Deny,
+                    kind: strings(WRITE_KINDS),
+                    command: None,
+                    paths: Vec::new(),
+                    outside: vec![home.to_owned()],
+                },
+            ],
+        })
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let file: PolicyFile = toml::from_str(text)?;
+        Self::from_file(toml::from_str(text)?)
+    }
+
+    fn from_file(file: PolicyFile) -> Result<Self> {
         let rules = file
             .rule
             .into_iter()
@@ -473,6 +510,46 @@ paths = ["/home/sandbox/.ssh"]
             );
             assert_eq!(v.rule.as_deref(), rule, "{kind} {input} {locations:?}");
         }
+    }
+
+    #[test]
+    fn task_policy() {
+        let policy = Policy::for_task(Path::new("/home/agent")).unwrap();
+        let cwd = Path::new("/home/agent/work/repo");
+        let cases = [
+            ("execute", json!({"command": "cargo test"}), None),
+            ("execute", json!({"command": "git push"}), Some(NO_PUSH)),
+            ("edit", json!({"path": "src/lib.rs"}), None),
+            (
+                "edit",
+                json!({"path": "/home/agent/out/outcome.json"}),
+                None,
+            ),
+            (
+                "edit",
+                json!({"path": "/etc/motd"}),
+                Some(WRITES_IN_HOME_ONLY),
+            ),
+            (
+                "delete",
+                json!({"path": "/home/agent/../runner/x"}),
+                Some(WRITES_IN_HOME_ONLY),
+            ),
+            ("read", json!({"path": "/etc/os-release"}), None),
+        ];
+        for (kind, input, rule) in cases {
+            let verdict = policy.decide(&Request::from_params(
+                &params(kind, input.clone(), &[]),
+                cwd,
+            ));
+            assert_eq!(verdict.rule.as_deref(), rule, "{kind} {input}");
+            assert_eq!(
+                verdict.decision == Decision::Deny,
+                rule.is_some(),
+                "{kind} {input}"
+            );
+        }
+        assert!(Policy::for_task(Path::new("home/agent")).is_err());
     }
 
     #[test]

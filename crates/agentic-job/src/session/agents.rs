@@ -1,5 +1,6 @@
-//! The registry of ACP agents (`agents.toml`): how to start each one's ACP
-//! server on stdio, and how to tell it the model.
+//! The registry of ACP agents (`agents.toml`, built in): how to start each
+//! one's ACP server on stdio, and how to tell it the model. To the session
+//! an agent is no more than its entry.
 //!
 //! ```toml
 //! [claude]
@@ -8,16 +9,22 @@
 //!
 //! [opencode]
 //! command = ["opencode", "acp"]
+//! notices = true
 //! ```
 //!
 //! An agent without `model-env` gets its model through its `model`
 //! session config option (ACP's `session/set_config_option`). One with
 //! `notices = true` is sent the budget's notices during its turn.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::path::Path;
+
+/// The agents this binary knows.
+const BUILTIN: &str = include_str!("agents.toml");
+/// Sets the wrapped command's environment: a wrapper passes none on.
+const ENV: &str = "env";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -65,18 +72,17 @@ pub fn parse(text: &str, name: &str) -> Result<AgentSpec> {
     Ok(spec)
 }
 
-pub fn load(path: &Path, name: &str) -> Result<AgentSpec> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading the agent registry {}", path.display()))?;
-    parse(&text, name).with_context(|| format!("in the agent registry {}", path.display()))
+/// The entry NAME of the built-in registry.
+pub fn builtin(name: &str) -> Result<AgentSpec> {
+    parse(BUILTIN, name).context("in the built-in agent registry")
 }
 
 impl AgentSpec {
-    /// The argv to spawn, and the environment to spawn it with. Behind a
-    /// WRAPPER (a command such as `sudo run0 ... --` that runs its
-    /// arguments elsewhere, and doesn't pass the environment on), env(1)
-    /// sets the environment instead, and looks the command up in the
-    /// wrapped PATH (run0 searches only its own).
+    /// The argv to spawn, and the environment to add to the spawner's
+    /// own. Behind a WRAPPER (a command such as `sudo run0 ... --` that
+    /// runs its arguments elsewhere, and doesn't pass the environment on),
+    /// env(1) sets the environment instead, and looks the command up in
+    /// the wrapped PATH (run0 searches only its own).
     pub fn command(
         &self,
         wrapper: &[String],
@@ -90,7 +96,7 @@ impl AgentSpec {
             return (self.command.clone(), env);
         }
         let mut argv = wrapper.to_vec();
-        argv.push("env".to_owned());
+        argv.push(ENV.to_owned());
         argv.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
         argv.extend(self.command.iter().cloned());
         (argv, BTreeMap::new())
@@ -176,55 +182,39 @@ command = ["opencode", "acp"]
         }
     }
 
-    #[test]
-    fn installed_launchers() {
-        // (agent, the model the run names, what the wrapped command gets)
-        let cases: [(&str, Option<&str>, &[&str]); 3] = [
-            ("opencode", Some("praxis/m"), &[]),
-            ("claude", None, &["ANTHROPIC_MODEL=opus"]),
-            ("claude", Some("sonnet"), &["ANTHROPIC_MODEL=sonnet"]),
-        ];
-        for (agent, model, vars) in cases {
-            let spec = parse(include_str!("../agents.toml"), agent).unwrap();
-            let launcher = strings(&["node", &format!("/usr/local/bin/{agent}-launch.mjs")]);
-            let (argv, env) = spec.command(&[], model);
-            assert_eq!(argv, launcher, "{agent}");
-            assert_eq!(env.len(), vars.len(), "{agent}");
-            let wrapper = strings(&["sudo", "run0", "--"]);
-            let (argv, env) = spec.command(&wrapper, model);
-            let mut expected = wrapper.clone();
-            expected.push("env".to_owned());
-            expected.extend(strings(vars));
-            expected.extend(launcher);
-            assert_eq!(argv, expected, "{agent}");
-            assert!(env.is_empty(), "{agent}");
-        }
-    }
-
-    /// runner-sandbox can't read the checkout, so agent.yml has to install
-    /// each launcher where the registry looks for it.
-    #[test]
-    fn workflow_installs_launchers() {
-        for agent in ["opencode", "claude"] {
-            let spec = parse(include_str!("../agents.toml"), agent).unwrap();
-            let launcher = spec.command.last().unwrap();
-            let install = format!("sudo install -m 0644 agent/{agent}-launch.mjs {launcher}\n");
-            assert!(
-                include_str!("../../.github/workflows/agent.yml").contains(&install),
-                "{agent}"
-            );
-        }
-    }
-
     /// Only the agents known to queue a prompt behind the step they are on
     /// are sent notices.
     #[test]
     fn notices() {
         for (agent, want) in [("opencode", true), ("fake", true), ("claude", false)] {
-            let spec = parse(include_str!("../agents.toml"), agent).unwrap();
-            assert_eq!(spec.notices, want, "{agent}");
+            assert_eq!(builtin(agent).unwrap().notices, want, "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);
+    }
+
+    /// Claude Code runs Opus unless the run names a model; opencode's is
+    /// a session option, so its command never carries one.
+    #[test]
+    fn builtin_models() {
+        let wrapper = strings(&["sudo", "run0", "--"]);
+        let cases: [(&str, Option<&str>, &[&str]); 3] = [
+            ("opencode", Some("provider/m"), &["env", "opencode", "acp"]),
+            (
+                "claude",
+                None,
+                &["env", "ANTHROPIC_MODEL=opus", "claude-agent-acp"],
+            ),
+            (
+                "claude",
+                Some("sonnet"),
+                &["env", "ANTHROPIC_MODEL=sonnet", "claude-agent-acp"],
+            ),
+        ];
+        for (agent, model, wrapped) in cases {
+            let (argv, env) = builtin(agent).unwrap().command(&wrapper, model);
+            assert_eq!(argv[wrapper.len()..], strings(wrapped), "{agent}");
+            assert!(env.is_empty(), "{agent}");
+        }
     }
 
     #[test]

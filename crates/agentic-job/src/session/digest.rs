@@ -7,7 +7,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::policy::{self, PATH_KEYS};
+use super::permission::{self, PATH_KEYS};
 
 /// Free text in log lines and the summary is cut to this many characters.
 pub const MAX_TEXT: usize = 200;
@@ -331,12 +331,12 @@ impl Digest {
         self.flush_text(out);
         let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
         let text = text
-            .strip_prefix(crate::budget::NOTICE_PREFIX)
+            .strip_prefix(super::budget::NOTICE_PREFIX)
             .unwrap_or(text);
         out.push(cut(&format!("⚠ notice to the agent: {}", text.trim())));
         self.notices.push(label.to_owned());
         if let Some(id) = id
-            && label != crate::budget::LABEL_HAND_BACK
+            && label != super::budget::LABEL_HAND_BACK
         {
             self.sent.insert(id_key(id), NOTICE_METHOD.to_owned());
         }
@@ -517,7 +517,7 @@ impl Digest {
         }
         tc.merge(call);
         tc.finish_summary(&self.cwd.clone());
-        let rule = result["_meta"][policy::META_KEY]["rule"]
+        let rule = result["_meta"][permission::META_KEY]["rule"]
             .as_str()
             .map(str::to_owned);
         let name = tc.display_name();
@@ -577,7 +577,7 @@ impl MessageLine {
 /// The label of a budget notice, for a `session/prompt` the harness sent
 /// as one (`run` marks them in `_meta`).
 fn notice_label(params: &Value) -> Option<&str> {
-    params["_meta"][policy::META_KEY]["notice"].as_str()
+    params["_meta"][permission::META_KEY]["notice"].as_str()
 }
 
 /// The model a session runs: its `model` config option (stable ACP), else
