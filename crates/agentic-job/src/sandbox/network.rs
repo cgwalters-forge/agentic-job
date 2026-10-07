@@ -1,0 +1,394 @@
+//! The network rules: nftables, keyed on the sandbox user's uid and on
+//! its subordinate uids, so that containers it starts are covered.
+//!
+//! The ruleset is the old tree's (`setup-runner-sandbox.mjs`), text for
+//! text; a corpus test in CI holds the two together. The sandbox user's
+//! uids reach no cloud metadata service and, with direct endpoints
+//! configured, nothing on the tailnet but those. With the egress proxy
+//! they reach nothing else at all but loopback, where the proxy listens,
+//! and not loopback's DNS: the proxy resolves names. The proxy's own uid
+//! opens connections only to DNS and to public addresses, so the proxy
+//! cannot be used to reach what the sandbox user may not.
+//!
+//! The tailnet rules are defence in depth under the tailnet's own access
+//! rules for the runner, which are the real control there.
+
+use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{Context, Result, bail, ensure};
+
+use super::egress;
+use super::host;
+use crate::config::Egress;
+
+pub const TABLE: &str = "runner_sandbox";
+
+/// The ruleset `sandbox setup` loaded, kept for whoever wants to read it.
+pub const RULES_FILE: &str = "/etc/agentic-job/rules.nft";
+
+const METADATA_ADDRESS: &str = "169.254.169.254";
+
+/// Tailscale's address ranges and its interface. The filter matches
+/// both: the interface because with accepted subnet routes other
+/// addresses go there too, and the ranges because the node's own tailnet
+/// address is reached over loopback.
+const TAILNET_V4: &str = "100.64.0.0/10";
+
+const TAILNET_V6: &str = "fd7a:115c:a1e0::/48";
+
+const TAILSCALE_IF: &str = "tailscale0";
+
+/// The first three groups of [`TAILNET_V6`].
+const TAILNET_V6_PREFIX: [u16; 3] = [0xfd7a, 0x115c, 0xa1e0];
+
+/// The first octet of [`TAILNET_V4`], and the range of its second.
+const TAILNET_FIRST_OCTET: u8 = 100;
+
+const TAILNET_SECOND_OCTET: std::ops::RangeInclusive<u8> = 64..=127;
+
+const DNS_PORT: u16 = 53;
+
+/// Azure's WireServer, which serves the VM's configuration.
+const WIRESERVER: &str = "168.63.129.16";
+
+/// Where the egress proxy may not connect, whatever a name resolves to:
+/// loopback, private, link-local (the metadata service), shared (the
+/// tailnet), multicast and reserved addresses, and the WireServer. DNS
+/// is allowed before these, so the proxy can use the host's resolver.
+const PROXY_DENIED_V4: &[&str] = &[
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    TAILNET_V4,
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/3",
+    WIRESERVER,
+];
+
+const PROXY_DENIED_V6: &[&str] = &[
+    "::1/128",
+    "::ffff:0:0/96",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+];
+
+/// An endpoint the sandbox user reaches directly, never through the
+/// egress proxy: the inference proxy, so that the run token does not
+/// cross the egress proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Direct {
+    pub host: Ipv4Addr,
+    pub port: u16,
+}
+
+impl Direct {
+    /// From a URL such as `http://100.101.102.103:18080/v1`. Only IPv4
+    /// literals on the tailnet: nftables matches addresses, and a name
+    /// could resolve elsewhere later.
+    pub fn parse(url: &str) -> Result<Self> {
+        let (default_port, rest) = if let Some(rest) = url.strip_prefix("http://") {
+            (80, rest)
+        } else if let Some(rest) = url.strip_prefix("https://") {
+            (443, rest)
+        } else {
+            bail!("egress.direct: '{url}' is not an http or https URL");
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        ensure!(
+            !authority.contains('@'),
+            "egress.direct: '{url}' has credentials in it"
+        );
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => (
+                host,
+                port.parse::<u16>()
+                    .ok()
+                    .filter(|&port| port != 0)
+                    .with_context(|| format!("egress.direct: '{url}' has a bad port"))?,
+            ),
+            None => (authority, default_port),
+        };
+        let address = host
+            .parse::<Ipv4Addr>()
+            .ok()
+            .filter(|address| {
+                let [first, second, ..] = address.octets();
+                first == TAILNET_FIRST_OCTET && TAILNET_SECOND_OCTET.contains(&second)
+            })
+            .with_context(|| {
+                format!("egress.direct: '{host}' is not a tailnet IPv4 address ({TAILNET_V4})")
+            })?;
+        Ok(Self {
+            host: address,
+            port,
+        })
+    }
+
+    /// The `ADDRESS . PORT` element of the nftables set.
+    fn element(&self) -> String {
+        format!("{} . {}", self.host, self.port)
+    }
+}
+
+/// Whether `address`, a name server of resolv.conf, is on the tailnet.
+fn on_tailnet(address: &str) -> bool {
+    match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let [first, second, ..] = v4.octets();
+            first == TAILNET_FIRST_OCTET && TAILNET_SECOND_OCTET.contains(&second)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => v6.segments()[..3] == TAILNET_V6_PREFIX,
+        Err(_) => false,
+    }
+}
+
+/// The name servers of `resolv_conf` that are on the tailnet. The egress
+/// proxy is kept off the tailnet, its DNS included, which answers for
+/// every node; so with such a resolver the proxy resolves nothing.
+pub fn tailnet_resolvers(resolv_conf: &str) -> Vec<&str> {
+    resolv_conf
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some("nameserver")).then(|| words.next())?
+        })
+        .filter(|address| on_tailnet(address))
+        .collect()
+}
+
+/// The direct endpoints of the configuration.
+pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
+    egress.direct.iter().map(|url| Direct::parse(url)).collect()
+}
+
+/// The ruleset for the sandbox user's `uids` (its own, and its
+/// subordinate ranges as `START-END`). Rejected rather than dropped, so
+/// a blocked connection fails at once.
+pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> String {
+    let allowed: Vec<String> = direct.iter().map(Direct::element).collect();
+    let (tailnet_set, tailnet_rules) = if allowed.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "\n  set tailnet_allowed {{ type ipv4_addr . inet_service; elements = {{ {} }} }}",
+                allowed.join(", ")
+            ),
+            format!(
+                "
+    meta skuid @sandbox_uids ip daddr . tcp dport @tailnet_allowed accept
+    meta skuid @sandbox_uids oifname \"{TAILSCALE_IF}\" counter reject
+    meta skuid @sandbox_uids ip daddr {TAILNET_V4} counter reject
+    meta skuid @sandbox_uids ip6 daddr {TAILNET_V6} counter reject"
+            ),
+        )
+    };
+    let egress_rules = proxy_uid.map_or_else(String::new, |proxy| {
+        format!(
+            "
+    meta skuid @sandbox_uids oifname \"lo\" meta l4proto {{ tcp, udp }} th dport {DNS_PORT} counter reject
+    meta skuid @sandbox_uids oifname \"lo\" ip daddr 127.0.0.0/8 accept
+    meta skuid @sandbox_uids oifname \"lo\" ip6 daddr ::1 accept
+    meta skuid @sandbox_uids counter reject
+    meta skuid {proxy} ct state established,related accept
+    meta skuid {proxy} oifname \"{TAILSCALE_IF}\" counter reject
+    meta skuid {proxy} ip daddr {TAILNET_V4} counter reject
+    meta skuid {proxy} ip6 daddr {TAILNET_V6} counter reject
+    meta skuid {proxy} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} accept
+    meta skuid {proxy} ip daddr {{ {} }} counter reject
+    meta skuid {proxy} ip6 daddr {{ {} }} counter reject",
+            PROXY_DENIED_V4.join(", "),
+            PROXY_DENIED_V6.join(", ")
+        )
+    });
+    format!(
+        "table inet {TABLE}
+delete table inet {TABLE}
+table inet {TABLE} {{
+  set sandbox_uids {{ type uid; flags interval; elements = {{ {} }} }}{tailnet_set}
+  chain output {{
+    type filter hook output priority 0; policy accept;
+    meta skuid @sandbox_uids ip daddr {METADATA_ADDRESS} counter reject{tailnet_rules}{egress_rules}
+  }}
+}}
+",
+        uids.join(", ")
+    )
+}
+
+/// Loads `ruleset`, and leaves it in [`RULES_FILE`].
+pub fn apply(ruleset: &str) -> Result<()> {
+    std::fs::write(RULES_FILE, ruleset).with_context(|| format!("writing {RULES_FILE}"))?;
+    ensure!(
+        host::has_program("nft"),
+        "nft not found: the network rules need nftables"
+    );
+    host::run(Command::new("nft").arg("-f").arg(Path::new(RULES_FILE)))
+        .context("loading the network rules")?;
+    Ok(())
+}
+
+/// What every command of the sandbox user gets so that it uses the
+/// egress proxy: the proxy, but not for loopback and the direct hosts,
+/// and its certificate authority in the forms the usual tools read.
+/// `SSL_CERT_FILE` and the like replace the system bundle, so they get
+/// the bundle with the authority added.
+pub fn proxy_environment(direct: &[Direct]) -> BTreeMap<String, String> {
+    let no_proxy = ["localhost", "127.0.0.1", "::1"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(direct.iter().map(|direct| direct.host.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let proxy = egress::proxy_url();
+    let proxied = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+        .into_iter()
+        .map(|name| (name, proxy.clone()));
+    let unproxied = ["NO_PROXY", "no_proxy"]
+        .into_iter()
+        .map(|name| (name, no_proxy.clone()));
+    let bundle = [
+        "SSL_CERT_FILE",
+        "CURL_CA_BUNDLE",
+        "CARGO_HTTP_CAINFO",
+        "GIT_SSL_CAINFO",
+        "REQUESTS_CA_BUNDLE",
+        "PIP_CERT",
+    ]
+    .into_iter()
+    .map(|name| (name, egress::CA_BUNDLE.to_owned()));
+    // Node's own fetch uses the proxy variables only with the first.
+    let node = [
+        ("NODE_USE_ENV_PROXY", "1".to_owned()),
+        ("NODE_EXTRA_CA_CERTS", egress::CA_CERT.to_owned()),
+    ];
+    proxied
+        .chain(unproxied)
+        .chain(bundle)
+        .chain(node)
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_of(url: &str) -> Direct {
+        Direct::parse(url).unwrap()
+    }
+
+    #[test]
+    fn direct_endpoints() {
+        let cases = [
+            ("http://100.101.102.103:18080/v1", "100.101.102.103 . 18080"),
+            ("http://100.64.0.1", "100.64.0.1 . 80"),
+            ("https://100.127.255.254/x?y#z", "100.127.255.254 . 443"),
+        ];
+        for (url, element) in cases {
+            assert_eq!(direct_of(url).element(), element, "{url}");
+        }
+        let bad = [
+            "100.101.102.103:18080",
+            "ftp://100.101.102.103",
+            "http://proxy.example:18080",
+            "http://10.0.0.1:18080",
+            "http://100.63.0.1",
+            "http://100.128.0.1",
+            "http://100.101.102.103:0",
+            "http://100.101.102.103:port",
+            "http://user@100.101.102.103",
+            "http://[fd7a:115c:a1e0::1]:80",
+        ];
+        for url in bad {
+            assert!(Direct::parse(url).is_err(), "{url} parsed");
+        }
+    }
+
+    /// The whole text for one case; the corpus test in CI compares every
+    /// shape with the old tree's own function.
+    #[test]
+    fn ruleset_with_everything() {
+        let uids = ["1002".to_owned(), "165536-231071".to_owned()];
+        let direct = [direct_of("http://100.101.102.103:18080")];
+        let want = r#"table inet runner_sandbox
+delete table inet runner_sandbox
+table inet runner_sandbox {
+  set sandbox_uids { type uid; flags interval; elements = { 1002, 165536-231071 } }
+  set tailnet_allowed { type ipv4_addr . inet_service; elements = { 100.101.102.103 . 18080 } }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+    meta skuid @sandbox_uids ip daddr . tcp dport @tailnet_allowed accept
+    meta skuid @sandbox_uids oifname "tailscale0" counter reject
+    meta skuid @sandbox_uids ip daddr 100.64.0.0/10 counter reject
+    meta skuid @sandbox_uids ip6 daddr fd7a:115c:a1e0::/48 counter reject
+    meta skuid @sandbox_uids oifname "lo" meta l4proto { tcp, udp } th dport 53 counter reject
+    meta skuid @sandbox_uids oifname "lo" ip daddr 127.0.0.0/8 accept
+    meta skuid @sandbox_uids oifname "lo" ip6 daddr ::1 accept
+    meta skuid @sandbox_uids counter reject
+    meta skuid 993 ct state established,related accept
+    meta skuid 993 oifname "tailscale0" counter reject
+    meta skuid 993 ip daddr 100.64.0.0/10 counter reject
+    meta skuid 993 ip6 daddr fd7a:115c:a1e0::/48 counter reject
+    meta skuid 993 meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid 993 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3, 168.63.129.16 } counter reject
+    meta skuid 993 ip6 daddr { ::1/128, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8 } counter reject
+  }
+}
+"#;
+        assert_eq!(rules(&uids, &direct, Some(993)), want);
+    }
+
+    #[test]
+    fn ruleset_without_the_proxy_or_direct_endpoints() {
+        let want = r#"table inet runner_sandbox
+delete table inet runner_sandbox
+table inet runner_sandbox {
+  set sandbox_uids { type uid; flags interval; elements = { 1002 } }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    meta skuid @sandbox_uids ip daddr 169.254.169.254 counter reject
+  }
+}
+"#;
+        assert_eq!(rules(&["1002".to_owned()], &[], None), want);
+    }
+
+    #[test]
+    fn resolvers_on_the_tailnet() {
+        let conf = "# made by tailscale\nnameserver 100.100.100.100\nnameserver fd7a:115c:a1e0::53\nnameserver 168.63.129.16\nnameserver 127.0.0.53\nsearch example.ts.net\n";
+        assert_eq!(
+            tailnet_resolvers(conf),
+            ["100.100.100.100", "fd7a:115c:a1e0::53"]
+        );
+        assert!(tailnet_resolvers("nameserver 10.0.0.2\noptions edns0\n").is_empty());
+    }
+
+    #[test]
+    fn proxy_variables() {
+        let env = proxy_environment(&[direct_of("http://100.101.102.103:18080")]);
+        let get = |name: &str| env.get(name).map(String::as_str);
+        assert_eq!(get("HTTPS_PROXY"), Some("http://127.0.0.1:3128"));
+        assert_eq!(get("http_proxy"), Some("http://127.0.0.1:3128"));
+        assert_eq!(
+            get("NO_PROXY"),
+            Some("localhost,127.0.0.1,::1,100.101.102.103")
+        );
+        assert_eq!(get("no_proxy"), get("NO_PROXY"));
+        assert_eq!(get("NODE_EXTRA_CA_CERTS"), Some("/etc/egress-proxy/ca.pem"));
+        assert_eq!(
+            get("GIT_SSL_CAINFO"),
+            Some("/etc/egress-proxy/ca-bundle.pem")
+        );
+        assert_eq!(env.len(), 14);
+    }
+}

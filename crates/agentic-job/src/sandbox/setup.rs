@@ -24,6 +24,7 @@ use rustix::fs::Mode;
 
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
+use super::{egress, network};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 
@@ -113,6 +114,8 @@ const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
 const SUBUID: &str = "/etc/subuid";
 
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
 const PRIVATE_MODE: u32 = 0o700;
 
 /// Root's files that every user reads, and the programs and directories
@@ -138,16 +141,30 @@ pub fn run(args: &Args) -> Result<Exit> {
     let config = Config::parse(&text).with_context(|| format!("in {}", args.config.display()))?;
     config.sandbox.validate()?;
     config.setup.validate()?;
+    let direct = network::direct(&config.egress)?;
     ensure!(host::is_root(), "`sandbox setup` must run as root");
     ensure!(
         host::has_program(RUN0),
-        "{RUN0} not found: the sandbox is entered with it, and it needs systemd 256 or later"
+        "{RUN0} not found: the sandbox is entered with it, and it needs systemd 257 or later"
     );
     // Root's umask is the caller's, and some images build with 000.
     rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
     let runner = runner_user(&config)?;
     // Every refusal comes before the first change.
     let existing = preflight(&config, &runner)?;
+    if config.egress.proxy {
+        let resolv_conf = match fs::read_to_string(RESOLV_CONF) {
+            Ok(text) => text,
+            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err).with_context(|| format!("reading {RESOLV_CONF}")),
+        };
+        let on_tailnet = network::tailnet_resolvers(&resolv_conf);
+        ensure!(
+            on_tailnet.is_empty(),
+            "{RESOLV_CONF} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
+            on_tailnet.join(", ")
+        );
+    }
     fs::create_dir(CONFIG_DIR).with_context(|| format!("creating {CONFIG_DIR}"))?;
     fs::set_permissions(CONFIG_DIR, fs::Permissions::from_mode(MODE_PROGRAM))
         .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
@@ -157,13 +174,37 @@ pub fn run(args: &Args) -> Result<Exit> {
         &sandbox,
         &fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?,
     )?;
-    deny_privileges(&sandbox.name)?;
     drop_image_environment()?;
     close_private_dirs(&config, &runner)?;
     stop_services(&config.sandbox.stop_services)?;
     install_self()?;
     install_packages(&config.setup.packages)?;
     install_npm(&config.setup.npm)?;
+    // After the packages: one of them may be what a rule is for (polkit,
+    // at), and a rule is written only for what is there.
+    deny_privileges(&sandbox.name)?;
+    // The proxy first, since the rules name its uid; and both after the
+    // installs, which root does on the open network.
+    let proxy_uid = config
+        .egress
+        .proxy
+        .then(|| egress::start(&config.egress))
+        .transpose()?;
+    let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
+        .chain(subuids.iter().cloned())
+        .collect();
+    network::apply(&network::rules(&uids, &direct, proxy_uid))?;
+    match proxy_uid {
+        Some(_) => println!(
+            "{} reaches the network only through the egress proxy, {}",
+            sandbox.name,
+            egress::proxy_url()
+        ),
+        None => println!(
+            "{} has no egress proxy: its network is open but for the metadata service and the tailnet",
+            sandbox.name
+        ),
+    }
     // After the installs, which are the last things to write as root.
     strip_world_write()?;
     fix_ssh_crypto_policy()?;
@@ -405,13 +446,17 @@ impl Scheduler {
     fn deny(&self, user: &str) -> Result<()> {
         let (allow, deny) = (Path::new(self.allow), Path::new(self.deny));
         // An allow list is all that is read when there is one.
-        if let Ok(allowed) = fs::read_to_string(allow) {
-            ensure!(
-                !allowed.lines().any(|line| line.trim() == user),
-                "{} lists {user}: the sandbox user must not be able to schedule commands",
-                self.allow
-            );
-            return Ok(());
+        match fs::read_to_string(allow) {
+            Ok(allowed) => {
+                ensure!(
+                    !allowed.lines().any(|line| line.trim() == user),
+                    "{} lists {user}: the sandbox user must not be able to schedule commands",
+                    self.allow
+                );
+                return Ok(());
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("reading {}", self.allow)),
         }
         match fs::read_to_string(deny) {
             Ok(text) => denial(&text, user).map_or(Ok(()), |line| {
