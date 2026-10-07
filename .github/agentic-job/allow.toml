@@ -22,3 +22,15 @@ add_comment = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 3 }
 missing_data = { max = 3 }
+
+# Which events may start a run from this repository, and who may start
+# one (`agentic-job event`, docs/events.md). Without this table no event
+# does. The roles are gh-aw's default, exactly: a reader or a triager
+# may not; a bot may only when listed; a pull request from a fork may
+# not; a comment has to start with `/agent`.
+[trigger]
+events = ["issue_comment", "pull_request", "pull_request_target", "schedule", "workflow_dispatch"]
+roles = ["admin", "maintain", "write"]
+bots = []
+forks = false
+commands = ["/agent"]
