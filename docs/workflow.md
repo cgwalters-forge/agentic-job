@@ -162,12 +162,18 @@ Both are merged there and off.
 With no `apply-environment`, the apply job uses the job's own token,
 which can write only to the calling repository: `repo` then has to be
 the calling repository, and `output-repo` is left out. Many organizations do
-not let Actions open pull requests. The handlers then push the branch,
-the forge refuses the pull request, and gh-aw leaves an issue with a
-link that opens it by hand. By default that fails the job, since a run
-that asked for a pull request and has none did not do what it was for.
-`refused-pull-request: branch` takes the pushed branch for the result
-and says so in a warning.
+not let Actions open pull requests. The handlers then push the branch
+and the forge refuses the pull request. By default that fails the job,
+since a run that asked for a pull request and has none did not do what
+it was for. `refused-pull-request: branch` takes the pushed branch for
+the result and says so in a warning, as long as the pull request is the
+only output that failed. Either way no issue is opened in the pull
+request's place: gh-aw's handler would leave one whatever its
+`fallback_as_issue` says, so the apply job hands it that refusal as a
+pull request that failed, and lets no handler open an issue for a run
+whose outputs have none. A comment that comes after the pull request
+in the same hand-back then begins with gh-aw's note that the pull
+request failed.
 
 With `apply-environment: NAME`, the apply job enters that environment of
 the calling repository and uses its secret `AGENTIC_JOB_APPLY_TOKEN`:
@@ -240,7 +246,7 @@ day. `applied.json` names what the apply job made:
 
 `made` is gh-aw's own list. `pull_request` is null when none was opened,
 and `refused` then says whether the forge refused it to Actions after
-the branch was pushed; `made` in that case lists the issue gh-aw left.
+the branch was pushed; nothing in `made` stands for it then.
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
