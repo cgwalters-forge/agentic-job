@@ -91,7 +91,7 @@ const MAX_PROBE_OUTPUT: usize = 4096;
 const PRIVATE_DIR_MODE: u32 = 0o700;
 /// The largest task taken. The old tree's was what one dispatch of a
 /// workflow can carry, a quarter of this.
-const MAX_TASK_BYTES: u64 = 256 << 10;
+pub(crate) const MAX_TASK_BYTES: u64 = 256 << 10;
 /// The run's identifier names the branch and the patch of its pull
 /// request: what a file name and a branch name can hold, and no more
 /// than gh-aw's names for either allow.

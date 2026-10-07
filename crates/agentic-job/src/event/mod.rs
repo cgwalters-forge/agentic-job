@@ -48,10 +48,17 @@ pub const EVENTS: &[&str] = &[
     "issues",
     "issue_comment",
     "pull_request",
+    "pull_request_target",
     "pull_request_review_comment",
     "schedule",
     "workflow_dispatch",
 ];
+
+/// The pull-request events: the same payload, read the same way. A
+/// `pull_request_target` workflow runs from the base branch's files, so
+/// the bounds file it reads are the repository's and not the pull
+/// request's.
+const PULL_REQUEST_EVENTS: &[&str] = &["pull_request", "pull_request_target"];
 
 /// gh-aw's default `roles:`: an exact allowlist, so `maintain` is not
 /// `write` and `admin` is not either.
@@ -61,7 +68,10 @@ pub const DEFAULT_ROLES: &[&str] = &["admin", "maintain", "write"];
 /// may be, in bytes.
 const MAX_EVENT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PERMISSION_BYTES: u64 = 64 * 1024;
-const MAX_TASK_BYTES: u64 = 64 * 1024;
+const MAX_PULL_REQUEST_BYTES: u64 = 1024 * 1024;
+/// The caller's own task. With the event's text ([`context::MAX_TEXT_BYTES`])
+/// and the lines around it, the task file stays under what `run` accepts.
+pub const MAX_TASK_BYTES: u64 = 64 * 1024;
 
 /// The actor that is every workflow's own: a run it starts is a loop.
 const GITHUB_ACTIONS: &str = "github-actions[bot]";
@@ -70,7 +80,13 @@ const GITHUB_ACTIONS: &str = "github-actions[bot]";
 /// editor may not be the author, and the text that was checked is gone.
 const ISSUE_ACTIONS: &[&str] = &["opened", "reopened", "labeled"];
 const COMMENT_ACTIONS: &[&str] = &["created"];
-const PULL_REQUEST_ACTIONS: &[&str] = &["opened", "reopened", "synchronize", "ready_for_review"];
+const PULL_REQUEST_ACTIONS: &[&str] = &[
+    "opened",
+    "reopened",
+    "synchronize",
+    "ready_for_review",
+    "labeled",
+];
 
 /// A command at the very start of the body, as gh-aw matches it: no
 /// leading whitespace, then a word boundary.
@@ -80,6 +96,18 @@ static COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static LOGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$").expect("a valid pattern")
+});
+
+/// A commit id, the one thing of a pull request's head the task file
+/// repeats unfenced.
+static SHA_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$").expect("a valid pattern"));
+
+/// A branch name as git allows one: no space or control character, none
+/// of its special characters, not starting with a dash. The pull
+/// request's base becomes the run's base, which the bounds then check.
+static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[^\s~^:?*\[\\\x00-\x1f-][^\s~^:?*\[\\\x00-\x1f]*$").expect("a valid pattern")
 });
 
 /// The event's values may start with a dash: they are a stranger's text.
@@ -105,6 +133,12 @@ pub struct Args {
     /// workflow. Without it, only a schedule or a listed bot may start a run
     #[arg(long, value_name = "FILE")]
     pub actor_permission: Option<PathBuf>,
+    /// For a comment on a pull request, the pull request itself: the response
+    /// of GET /repos/OWNER/NAME/pulls/N, fetched by the workflow, so that the
+    /// fork rule applies to its head. Without it such a comment is admitted
+    /// only where forks are
+    #[arg(long, value_name = "FILE")]
+    pub pull_request: Option<PathBuf>,
     /// The caller's own task text, put before the event's
     #[arg(long, value_name = "FILE")]
     pub task: Option<PathBuf>,
@@ -291,6 +325,8 @@ pub struct Input<'a> {
     pub actor: &'a str,
     pub repository: &'a str,
     pub permission: Option<&'a Permission>,
+    /// The pull request a comment is on, fetched by the workflow.
+    pub pull_request: Option<&'a Value>,
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -313,6 +349,15 @@ pub fn run(args: &Args) -> Result<Exit> {
         .as_deref()
         .map(load_permission)
         .transpose()?;
+    let pull_request = args
+        .pull_request
+        .as_deref()
+        .map(|path| -> Result<Value> {
+            let bytes = files::read_regular(path, MAX_PULL_REQUEST_BYTES)
+                .with_context(|| format!("reading the pull request {}", path.display()))?;
+            serde_json::from_slice(&bytes).with_context(|| format!("{}: not JSON", path.display()))
+        })
+        .transpose()?;
     let task = args
         .task
         .as_deref()
@@ -329,6 +374,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         actor: &args.actor,
         repository: &args.repository,
         permission: permission.as_ref(),
+        pull_request: pull_request.as_ref(),
     });
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
@@ -388,15 +434,21 @@ pub fn decide(input: &Input<'_>) -> Outcome {
     match read(input, &mut outcome) {
         Ok(reason) => {
             outcome.decision.admitted = true;
-            outcome.decision.reason = reason;
+            outcome.decision.reason = one_line(&reason);
         }
         Err(reason) => {
             outcome.decision.admitted = false;
-            outcome.decision.reason = reason;
+            outcome.decision.reason = one_line(&reason);
             outcome.text = Text::default();
         }
     }
     outcome
+}
+
+/// The reason is one line: the workflow writes it to a file of
+/// `name=value` lines, and a repository name in it is the payload's.
+fn one_line(reason: &str) -> String {
+    reason.replace(char::is_control, " ")
 }
 
 /// The checks, in the order a refusal should be reported: the event, the
@@ -441,8 +493,8 @@ fn read(input: &Input<'_>, outcome: &mut Outcome) -> std::result::Result<String,
     match event {
         "issues" => read_issue(input, action, outcome),
         "issue_comment" => read_comment(input, action, outcome),
-        "pull_request" => read_pull_request(input, action, outcome),
         "pull_request_review_comment" => read_review_comment(input, action, outcome),
+        pull if PULL_REQUEST_EVENTS.contains(&pull) => read_pull_request(input, action, outcome),
         other => Err(format!("{other} events are not supported")),
     }
 }
@@ -528,23 +580,39 @@ fn read_comment(
         .ok_or("no comment in the event")?;
     let issue = input.payload.get("issue").ok_or("no issue in the event")?;
     check_author(input, comment)?;
-    // The payload of a comment on a pull request says nothing about where
-    // its head is, so the fork rule cannot be applied here; until the
-    // workflow fetches the pull request, such a comment is admitted only
-    // where forks are.
     let kind = if issue.get("pull_request").is_some() {
-        if !input.trigger.forks {
-            return Err(
-                "a comment on a pull request is admitted only with forks = true, since \
-                        its payload does not say where the head is"
-                    .to_string(),
-            );
-        }
         ItemKind::PullRequest
     } else {
         ItemKind::Issue
     };
     let item = item_of(input, issue, kind)?;
+    // The payload of a comment on a pull request says nothing about where
+    // the head is. The workflow fetches the pull request and passes it in:
+    // it has to be this one, and then the fork rule applies to it as to a
+    // pull_request event. Without it, such a comment is admitted only
+    // where forks are, since the run could be about a fork's code.
+    let (base, head) = match (kind, input.pull_request) {
+        (ItemKind::Issue, _) => (None, None),
+        (ItemKind::PullRequest, Some(pull)) => {
+            let number = u64_at(pull, &["number"]).ok_or("the pull request given has no number")?;
+            if number != item.number {
+                return Err(format!(
+                    "the pull request given is #{number}, and the comment is on #{}",
+                    item.number
+                ));
+            }
+            (base_of(pull)?, check_head(input, pull)?)
+        }
+        (ItemKind::PullRequest, None) if input.trigger.forks => (None, None),
+        (ItemKind::PullRequest, None) => {
+            return Err(
+                "a comment on a pull request is admitted only with the pull request \
+                 fetched (--pull-request) or with forks = true: its payload does not \
+                 say where the head is"
+                    .to_string(),
+            );
+        }
+    };
     let body = str_at(comment, &["body"]).unwrap_or_default();
     let (command, request) = match_command(input.trigger, body)?;
     let id = u64_at(comment, &["id"]).ok_or("the comment has no id")?;
@@ -558,9 +626,14 @@ fn read_comment(
         diff: None,
     };
     let decision = &mut outcome.decision;
-    decision.concurrency = format!("issue-{}", item.number);
+    decision.concurrency = match kind {
+        ItemKind::Issue => format!("issue-{}", item.number),
+        ItemKind::PullRequest => format!("pull-{}", item.number),
+    };
     decision.react_to = Some(ReactTo::Comment { id });
     decision.command = Some(command.clone());
+    decision.base = base;
+    decision.head = head;
     let reason = format!("/{command} on #{} by {}", item.number, input.actor);
     decision.item = Some(item);
     Ok(reason)
@@ -592,7 +665,7 @@ fn read_pull_request(
     decision.react_to = Some(ReactTo::Issue {
         number: item.number,
     });
-    decision.base = str_at(pull, &["base", "ref"]).map(str::to_string);
+    decision.base = base_of(pull)?;
     decision.head = head;
     let reason = format!("pull request #{} {action} by {}", item.number, input.actor);
     decision.item = Some(item);
@@ -638,7 +711,7 @@ fn read_review_comment(
     decision.concurrency = format!("pull-{}", item.number);
     decision.react_to = Some(ReactTo::ReviewComment { id });
     decision.command = Some(command.clone());
-    decision.base = str_at(pull, &["base", "ref"]).map(str::to_string);
+    decision.base = base_of(pull)?;
     decision.head = head;
     let reason = format!(
         "/{command} on pull request #{} by {}",
@@ -681,6 +754,9 @@ fn check_head(input: &Input<'_>, pull: &Value) -> std::result::Result<Option<Hea
     if head_id == Some(repo_id) {
         let git_ref = str_at(pull, &["head", "ref"]).ok_or("the head has no ref")?;
         let sha = str_at(pull, &["head", "sha"]).ok_or("the head has no sha")?;
+        if !SHA_RE.is_match(sha) {
+            return Err("the head's sha is not a commit id".to_string());
+        }
         return Ok(Some(Head {
             git_ref: git_ref.to_string(),
             sha: sha.to_string(),
@@ -694,6 +770,15 @@ fn check_head(input: &Input<'_>, pull: &Value) -> std::result::Result<Option<Hea
         str_at(pull, &["head", "repo", "full_name"]).unwrap_or("another repository"),
         input.repository
     ))
+}
+
+/// A pull request's base branch, when it is named like one.
+fn base_of(pull: &Value) -> std::result::Result<Option<String>, String> {
+    match str_at(pull, &["base", "ref"]) {
+        Some(base) if REF_RE.is_match(base) => Ok(Some(base.to_string())),
+        Some(_) => Err("the pull request's base is not a branch name".to_string()),
+        None => Ok(None),
+    }
 }
 
 /// The body must start with one of the bounds' commands. What follows,
@@ -724,12 +809,19 @@ fn match_command(trigger: &Trigger, body: &str) -> std::result::Result<(String, 
     Ok((name.to_string(), request))
 }
 
+/// The most an item's URL may be: the repository's page and a number.
+pub(crate) const MAX_URL_BYTES: usize = 256;
+
 /// The item's number and, when it is the repository's own page, its URL.
 /// No text of the event: `event.json` is read by the workflow unfenced.
 fn item_of(input: &Input<'_>, value: &Value, kind: ItemKind) -> std::result::Result<Item, String> {
     let prefix = format!("https://github.com/{}/", input.repository);
     let url = str_at(value, &["html_url"])
-        .filter(|url| url.starts_with(&prefix) && url.chars().all(|c| c.is_ascii_graphic()))
+        .filter(|url| {
+            url.len() <= MAX_URL_BYTES
+                && url.starts_with(&prefix)
+                && url.chars().all(|c| c.is_ascii_graphic())
+        })
         .map(str::to_string);
     Ok(Item {
         kind,
@@ -783,6 +875,29 @@ mod tests {
             let got = match_command(&t, body).ok();
             let expected = expected.map(|(c, r)| (c.to_string(), r.to_string()));
             assert_eq!(got, expected, "{body:?}");
+        }
+    }
+
+    /// What keeps a reason from spanning two lines of $GITHUB_OUTPUT.
+    #[test]
+    fn a_reason_is_one_line() {
+        assert_eq!(one_line("a\nb\r\tc"), "a b  c");
+    }
+
+    #[test]
+    fn a_base_is_a_branch_name() {
+        let cases = [
+            ("main", true),
+            ("release/1.2", true),
+            ("feature.v2", true),
+            ("-x", false),
+            ("a b", false),
+            ("a\nb", false),
+            ("a~b", false),
+            ("", false),
+        ];
+        for (name, ok) in cases {
+            assert_eq!(REF_RE.is_match(name), ok, "{name:?}");
         }
     }
 

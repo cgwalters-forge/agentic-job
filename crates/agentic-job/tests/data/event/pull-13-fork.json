@@ -1,0 +1,35 @@
+{
+  "number": 13,
+  "node_id": "PR_13",
+  "title": "Add retry to the fetcher",
+  "body": "Retries fetches that fail.",
+  "user": {
+    "login": "bob",
+    "id": 2,
+    "node_id": "U_2",
+    "type": "User"
+  },
+  "state": "open",
+  "draft": false,
+  "html_url": "https://github.com/octo/repo/pull/13",
+  "created_at": "2026-01-11T09:00:00Z",
+  "labels": [],
+  "head": {
+    "label": "mallory:fetch-retry",
+    "ref": "fetch-retry",
+    "sha": "4444444444444444444444444444444444444444",
+    "repo": {
+      "id": 999,
+      "full_name": "mallory/repo"
+    }
+  },
+  "base": {
+    "label": "octo:main",
+    "ref": "main",
+    "sha": "2222222222222222222222222222222222222222",
+    "repo": {
+      "id": 100,
+      "full_name": "octo/repo"
+    }
+  }
+}
