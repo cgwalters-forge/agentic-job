@@ -29,6 +29,7 @@ pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
 pub const OUTPUT_TYPES: &[&str] = &[
     CREATE_PULL_REQUEST,
     "add_comment",
+    "create_issue",
     "noop",
     "missing_tool",
     "missing_data",
@@ -1176,12 +1177,12 @@ files = ["README.md", "AGENTS.md"]
         other_type
             .safe_outputs
             .others
-            .insert("create_issue".to_owned(), OutputLimit { max: 5 });
+            .insert("create_discussion".to_owned(), OutputLimit { max: 5 });
         let cases = [
             (
                 "a type with no configuration here",
                 other_type,
-                "create_issue",
+                "create_discussion",
             ),
             (
                 "a pull request that is not a draft",

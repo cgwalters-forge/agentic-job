@@ -205,7 +205,7 @@ on:
         type: string
         default: comment
       title-prefix:
-        description: Put before the title of a pull request the run opens
+        description: Put before the title of a pull request or an issue the run opens
         type: string
         default: ""
       branch-prefix:
@@ -836,21 +836,22 @@ jobs:
             (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
+            | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
       # The first line of what a partial run opens or posts says so too,
       # in this file's words, chosen by the exit state. A partial run with
-      # neither a pull request nor a comment would leave nothing that
-      # says it was stopped, so it is not applied.
+      # neither a pull request, an issue nor a comment would leave nothing
+      # that says it was stopped, so it is not applied.
       - name: Mark what a partial run opens or posts
         if: ${{ needs.agent.outputs.exit != '0' }}
         env:
           STOPPED: ${{ needs.agent.outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit' }}
         run: |
-          jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+          jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment" or .type == "create_issue")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
             { echo "::error::the run was stopped at $STOPPED and handed back nothing that could say so"; exit 1; }
           jq --arg note "**Partial work.** The run was stopped at $STOPPED before the task was done; this is what it handed back." \
-            '(.items[] | select(.type == "create_pull_request" or .type == "add_comment") | .body) |= "\($note)\n\n\(.)"' \
+            '(.items[] | select(.type == "create_pull_request" or .type == "add_comment" or .type == "create_issue") | .body) |= "\($note)\n\n\(.)"' \
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
           mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
       # Where the forge refuses the pull request to Actions, gh-aw's
@@ -858,9 +859,10 @@ jobs:
       # `fallback_as_issue`: it knows that refusal by its words. So the
       # refusal reaches the handler in other words, as a pull request that
       # failed, which that setting does keep from becoming an issue; and
-      # no client the handlers use opens an issue at all for a run whose
-      # outputs have none. The other words are fixed ones: gh-aw tries
-      # again for minutes when an error's text has a word like `timeout`
+      # no client the handlers use opens more issues than the run's
+      # create_issue outputs allow, none for a run without that type. The
+      # other words are fixed ones: gh-aw tries again for minutes when an
+      # error's text has a word like `timeout`
       # in it, which a repository's or a branch's name may. A handler that
       # failed fails this step, and the last step says what that means
       # for the job.
@@ -876,11 +878,16 @@ jobs:
           github-token: ${{ secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
-            const issues = "create_issue" in JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG);
+            // Issues may be opened up to the run's create_issue count, by any handler;
+            // one is counted when it is made, so a request gh-aw retries counts once.
+            let issues = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_issue?.max ?? 0;
             const creates = (options, what) => options.method === "POST" && new RegExp(`^/repos/[^/]+/[^/]+/${what}$`).test(options.url);
             const guarded = client => {
               client.hook.before("request", options => {
-                if (!issues && creates(options, "issues")) throw new Error("an issue is not among this run's outputs, and none is opened");
+                if (creates(options, "issues") && issues <= 0) throw new Error("no issue beyond this run's create_issue outputs is opened");
+              });
+              client.hook.after("request", (response, options) => {
+                if (creates(options, "issues")) issues -= 1;
               });
               client.hook.error("request", (error, options) => {
                 if (!creates(options, "pulls") || !String(error.message).includes(process.env.REFUSAL)) throw error;

@@ -99,6 +99,44 @@
       }
     }
   },
+  "create_issue": {
+    "defaultMax": 1,
+    "fields": {
+      "blocked_by": {},
+      "body": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000,
+        "minLength": 20
+      },
+      "fields": {
+        "type": "array"
+      },
+      "labels": {
+        "type": "array",
+        "itemType": "string",
+        "itemSanitize": true,
+        "itemMaxLength": 128
+      },
+      "parent": {
+        "issueOrPRNumber": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "temporary_id": {
+        "type": "string"
+      },
+      "title": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 128
+      }
+    }
+  },
   "noop": {
     "defaultMax": 2,
     "fields": {

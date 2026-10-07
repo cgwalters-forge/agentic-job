@@ -183,6 +183,11 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
+/// The output type that opens an issue, and the fields of one that act
+/// on other issues.
+const CREATE_ISSUE: &str = "create_issue";
+const ISSUE_LINKS: &[&str] = &["parent", "blocked_by"];
+
 fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or_default()
 }
@@ -211,6 +216,17 @@ fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
         {
             problems.push(format!("a {output} that is not a draft"));
         }
+    }
+    // gh-aw's handler would make the new issue a sub-issue of, or blocked
+    // by, any issue the request names; nothing bounds which, so a request
+    // that names one is refused.
+    if output == CREATE_ISSUE {
+        problems.extend(
+            ISSUE_LINKS
+                .iter()
+                .filter(|key| item.contains_key(**key))
+                .map(|key| format!("a {output} with {key}, which links another issue")),
+        );
     }
     problems
 }
@@ -559,6 +575,26 @@ mod tests {
         );
         assert_eq!(patch.bytes, patch_of("src/new.rs").len());
         assert_eq!(patch.files, ["src/new.rs"]);
+    }
+
+    /// An issue that names other issues is refused by this rule, and one
+    /// that does not passes it.
+    #[test]
+    fn an_issue_that_links_other_issues_is_refused() {
+        let policy = policy();
+        let plain = json!({"type": "create_issue", "title": "t", "body": "b"});
+        assert!(redirections(plain.as_object().unwrap(), &policy).is_empty());
+        for key in ISSUE_LINKS {
+            let mut item = plain.clone();
+            item[*key] = json!(7);
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy),
+                [format!(
+                    "a create_issue with {key}, which links another issue"
+                )],
+                "{key}"
+            );
+        }
     }
 
     #[test]
