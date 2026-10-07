@@ -126,6 +126,9 @@ jobs:
       - run: node --test crates/agentic-job/tests/corpus/nft.test.mjs
         env:
           AGENTIC_JOB: target/debug/agentic-job
+      # The old tree's handback.mjs and `run`'s hand-back, on the same
+      # checkouts: the same files, but for the commit's message.
+      - run: cargo test --locked --test handback
 
   # The egress proxy's policy, with the tests that came with it.
   egress:
