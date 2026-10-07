@@ -428,7 +428,9 @@ impl Bounds {
         } = *request;
         let mut errors = Vec::new();
 
-        let dotted = |name: &str| name.split('/').any(|part| part == "." || part == "..");
+        // A name of dots alone is no directory to clone into, whatever
+        // their number: `run` refuses one (`run::clone::check`).
+        let dotted = |name: &str| name.split('/').any(|part| part.bytes().all(|b| b == b'.'));
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         if !repo_ok || !glob_matches(&self.repos, repo) {
             errors.push(format!(
@@ -1098,6 +1100,59 @@ files = ["README.md", "AGENTS.md"]
             assert_eq!(back, policy, "{text:?}");
             assert_eq!(keys(&back), keys(&good), "{text:?}");
             assert_eq!(back.max_outputs, good.max_outputs);
+        }
+    }
+
+    /// `run` holds a policy to what it uses its values as before it
+    /// clones (`run::clone::check`), minutes after `policy` wrote it.
+    /// Nothing `policy` admits may fail there: the edges of what the
+    /// patterns here let through are held to that check, and what it
+    /// refuses of a name is refused here first.
+    #[test]
+    fn what_policy_writes_run_can_clone() {
+        let all = Bounds {
+            repos: vec!["*/*".to_owned()],
+            ..bounds()
+        };
+        for name in [".", "..", "...", "....."] {
+            let repo = format!("bootc-dev/{name}");
+            let clone_url = format!("https://github.com/{repo}");
+            let request = Request {
+                repo: &repo,
+                clone_url: &clone_url,
+                ..request()
+            };
+            let errors = all.compile(&request).expect_err(&repo);
+            assert!(errors[0].starts_with("repo "), "{repo}: {errors:?}");
+        }
+        let long_base = format!("bot/{}", "x".repeat(196));
+        let cases = [
+            (REPO, "https://github.com/bootc-dev/bootc", "main"),
+            (REPO, "https://GitHub.com/bootc-dev/bootc.git", "master"),
+            (
+                "cgwalters-bot/a.b_c-d",
+                "https://github.com/cgwalters-bot/a.b_c-d",
+                "bot/a.b_c-d/e",
+            ),
+            (
+                "composefs/_",
+                "https://github.com/composefs/_",
+                long_base.as_str(),
+            ),
+            ("bootc-dev/.x", "https://github.com/bootc-dev/.x", "bot/_/-"),
+        ];
+        for (repo, clone_url, base) in cases {
+            let request = Request {
+                repo,
+                clone_url,
+                base,
+                ..request()
+            };
+            let policy = bounds()
+                .compile(&request)
+                .unwrap_or_else(|errors| panic!("{repo} {base}: {errors:?}"));
+            crate::run::clone::check(&policy)
+                .unwrap_or_else(|err| panic!("{repo} {clone_url} {base}: {err:#}"));
         }
     }
 

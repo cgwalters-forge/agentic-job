@@ -86,7 +86,8 @@ supplies:
 - the run's count of model requests, as a `tokio::sync::watch` channel
   that `run` keeps current from the inference proxy. A request cap
   with no count is refused, and where nothing counts (`token-file`, or
-  no proxy) `run` refuses the configuration rather than drop the cap;
+  no proxy) the configuration is refused rather than the cap dropped
+  ([`config`](#config) and `run` both make that check);
 - `Policy::for_task(home)`, the permission policy of a task run;
 - where the condensed transcript goes, a line per event: `run/log.rs`,
   which redacts each line and keeps it from acting as a command to the
@@ -238,8 +239,19 @@ file. `agentic-job config --from FILE --string TABLE.KEY=VALUE
 of its one key and is never read as TOML, so an input that holds a
 quote or a table header cannot add a key, as it could in a file that a
 shell script pasted together. A setting whose value is empty sets
-nothing, which is how an input the caller left out arrives. The result
-is checked as its readers will read it, before a machine is set up.
+nothing, which is how an input the caller left out arrives.
+
+The result is checked as its readers will read it, before a machine is
+set up. `config/checked.rs` holds that check, and the tables' own
+checks can be called from nowhere outside `config/`: `sandbox setup` and every entry
+into the sandbox take the machine's part of it (`Config::check_host`:
+the sandbox user, the packages, the direct endpoints) and `run` the
+whole (`Config::check`: also that the agent is one `run` can configure,
+that an agent with a model behind it has an inference proxy it can
+reach and a way to register, that the limits bind, that the commit's
+author and trailers are ones git takes). A check of the file alone that
+is added there is made by all three; one added in `run` or `sandbox
+setup` would be found only minutes into a job.
 
 ## Rules that keep steps apart
 

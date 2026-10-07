@@ -63,13 +63,13 @@ pub struct Entry {
 impl Entry {
     /// The sandbox user of `config`, which `sandbox setup` has created.
     pub fn new(config: &Config) -> Result<Self> {
-        config.sandbox.validate()?;
+        let host = config.check_host()?;
         let name = &config.sandbox.user;
         let user = User::lookup(name)?
             .with_context(|| format!("no user {name}: `agentic-job sandbox setup` creates it"))?;
         ensure!(user.uid != 0, "the sandbox user {name} is root by uid");
         let proxy = if config.egress.proxy {
-            network::proxy_environment(&network::direct(&config.egress)?)
+            network::proxy_environment(&host.direct)
         } else {
             BTreeMap::new()
         };

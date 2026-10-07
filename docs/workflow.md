@@ -148,7 +148,9 @@ praxis-credential-broker's run API. A proxy on a tailnet is reached by
 joining it (`tailscale-oauth-client-id`, `tailscale-audience`,
 `tailscale-tags`), and its address goes into `[egress] direct` of the
 configuration file so that the run token never crosses the egress
-proxy.
+proxy. The agent job refuses an address on the tailnet that is not
+listed there before it sets the sandbox up, since the agent could not
+reach it.
 
 What the operator of a praxis-credential-broker has to turn on for a
 run of this workflow to be admitted is written up, with what each

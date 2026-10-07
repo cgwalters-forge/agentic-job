@@ -4,10 +4,11 @@
 //! cannot change.
 //!
 //! Each table's struct belongs to the step of docs/plan.md that uses it
-//! (see docs/layout.md). The fields here are the ones the plan names;
-//! their step may rename or add to them, and checks what the types
-//! cannot say (that `github-oidc` has an audience, for one).
+//! (see docs/layout.md). What the types cannot say (that `github-oidc`
+//! has an audience, for one) is checked in one place, [`checked`], for
+//! the command that writes the file and the two that read it.
 
+pub mod checked;
 pub mod compose;
 
 use std::collections::BTreeMap;
@@ -108,7 +109,7 @@ impl Sandbox {
     /// What the types cannot say. The user's name goes into a sudoers
     /// file and a polkit rule, so it is held to the portable character
     /// set and not to what `useradd` happens to accept.
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         let name_ok = |name: &str| {
             let mut chars = name.chars();
             chars
@@ -367,7 +368,7 @@ impl Setup {
     /// A name is handed to a package manager run as root, so it must not
     /// read as an option; and an agent program without an exact version
     /// is whatever the registry serves that day.
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         let plain = |name: &str| {
             !name.is_empty() && !name.starts_with('-') && !name.contains(char::is_whitespace)
         };
