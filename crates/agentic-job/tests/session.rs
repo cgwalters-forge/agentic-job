@@ -821,11 +821,15 @@ fn processes_of(user: &str) -> String {
 /// A process the agent leaves behind does not outlive the session: one in
 /// the background of a tool call, and one that left its session and
 /// process group, which only killing the sandbox user's processes ends.
+///
+/// The second tool call waits until its process has left: `$!` is known
+/// before the child has called setsid, and a session that ended in
+/// between killed it with the group it was still in.
 #[test]
 fn nothing_survives_the_session() {
     const STRAYS: &str = r#"[
       {"execute": {"title": "Bash", "command": "sleep 600 >/dev/null 2>&1 </dev/null & echo $! > stray"}},
-      {"execute": {"title": "Bash", "command": "setsid sleep 600 >/dev/null 2>&1 </dev/null & echo $! > escaped; id -un > whoami"}},
+      {"execute": {"title": "Bash", "command": "setsid sleep 600 >/dev/null 2>&1 </dev/null & echo $! > escaped; for try in $(seq 200); do [ \"$(ps -o sid= -p $! | tr -d ' ')\" != \"$!\" ] || break; sleep 0.05; done; id -un > whoami"}},
       {"say": "Left two behind."}
     ]"#;
     let sandbox_user = std::env::var(SANDBOX_USER_VAR).ok();
