@@ -52,8 +52,9 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// The command lines of the plan's table, and the name each stub reports.
-    const PLAN: &[(&[&str], &str)] = &[
+    /// The command lines of the plan's table, and the name each stub
+    /// reports; none for a command that is implemented.
+    const PLAN: &[(&[&str], Option<&str>)] = &[
         (
             &[
                 "policy",
@@ -61,6 +62,8 @@ mod tests {
                 "allow.toml",
                 "--repo",
                 "owner/name",
+                "--clone-url",
+                "https://example.org/owner/name",
                 "--base",
                 "main",
                 "--kind",
@@ -70,20 +73,23 @@ mod tests {
                 "--max-outputs",
                 "2",
             ],
-            "policy",
+            None,
         ),
-        (&["sandbox", "setup", "--config", "c.toml"], "sandbox setup"),
-        (&["sandbox", "check"], "sandbox check"),
+        (
+            &["sandbox", "setup", "--config", "c.toml"],
+            Some("sandbox setup"),
+        ),
+        (&["sandbox", "check"], Some("sandbox check")),
         (
             &[
                 "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out",
                 "out",
             ],
-            "run",
+            Some("run"),
         ),
         (
             &["check", "--policy", "p.json", "--outputs", "dir"],
-            "check",
+            Some("check"),
         ),
         (
             &[
@@ -95,7 +101,7 @@ mod tests {
                 "--report",
                 "r.json",
             ],
-            "check",
+            Some("check"),
         ),
     ];
 
@@ -104,6 +110,7 @@ mod tests {
         for (args, name) in PLAN {
             let cli = Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args))
                 .unwrap_or_else(|err| panic!("{args:?}: {err}"));
+            let Some(name) = name else { continue };
             let err = cli.command.run().expect_err("stub succeeded");
             assert_eq!(
                 err.downcast_ref::<NotImplemented>(),
