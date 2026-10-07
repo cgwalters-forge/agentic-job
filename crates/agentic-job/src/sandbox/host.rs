@@ -14,7 +14,17 @@ use anyhow::{Context, Result, bail, ensure};
 pub const PATH_DIRS: &[&str] = &["/usr/local/bin", "/usr/bin", "/bin"];
 
 /// Root's programs, which the list above leaves out on some hosts.
-const SBIN_DIRS: &[&str] = &["/usr/local/sbin", "/usr/sbin", "/sbin"];
+pub const SBIN_DIRS: &[&str] = &["/usr/local/sbin", "/usr/sbin", "/sbin"];
+
+/// The PATH of what root runs: both lists, and nothing of the caller's.
+pub fn root_path() -> String {
+    PATH_DIRS
+        .iter()
+        .chain(SBIN_DIRS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(":")
+}
 
 /// A user, as `getent passwd` describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +55,12 @@ impl User {
     /// Through `getent`, since the released binary is static and its own
     /// libc reads only `/etc/passwd`.
     pub fn lookup(key: &str) -> Result<Option<Self>> {
-        let output = Command::new("getent")
+        // By its path on the fixed list, and root's alone: the helper
+        // runs this as root. Setup calls this before it has made the
+        // program directories root's, so an image whose getent is not
+        // fails setup here, with the reason.
+        let getent = super::helper::trusted_program("getent")?;
+        let output = Command::new(getent)
             .args(["passwd", "--", key])
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
@@ -127,17 +142,6 @@ pub fn command<S: AsRef<OsStr>>(argv: &[S]) -> Result<Command> {
     let (program, args) = argv.split_first().context("an empty command")?;
     let mut command = Command::new(program);
     command.args(args);
-    Ok(command)
-}
-
-/// `argv` as root: as it is when we are root, through `sudo` otherwise.
-/// `-n`, so that a host that would ask for a password fails at once.
-pub fn as_root<S: AsRef<OsStr>>(argv: &[S]) -> Result<Command> {
-    if is_root() {
-        return command(argv);
-    }
-    let mut command = Command::new("sudo");
-    command.arg("-n").arg("--").args(argv);
     Ok(command)
 }
 

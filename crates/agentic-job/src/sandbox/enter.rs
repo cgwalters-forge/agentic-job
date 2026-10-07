@@ -7,6 +7,10 @@
 //! directory, the user's systemd manager and session bus, which rootless
 //! podman relies on. The command runs in that session's scope, under the
 //! user's slice, which is what the supervisor kills when the run ends.
+//!
+//! `run0` is root's to run. How the supervisor, the runner's user, gets
+//! root to run it is [`super::root`]: the helper on a machine setup has
+//! locked, sudo itself elsewhere.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -20,6 +24,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::host::{self, User};
 use super::network;
+use super::root::Root;
 use crate::config::{Config, Sandbox};
 
 /// `run0` came with systemd 256, and its `--pipe` with 257.
@@ -58,6 +63,7 @@ impl Output {
 pub struct Entry {
     user: User,
     env: BTreeMap<String, String>,
+    root: Root,
 }
 
 impl Entry {
@@ -73,12 +79,17 @@ impl Entry {
         } else {
             BTreeMap::new()
         };
-        Ok(Self::for_user(user, &config.sandbox, proxy))
+        Ok(Self::for_user(user, &config.sandbox, proxy, Root::detect()))
     }
 
     /// The fixed variables, then the egress proxy's, then the
     /// configuration's own, each over the one before.
-    fn for_user(user: User, sandbox: &Sandbox, proxy: BTreeMap<String, String>) -> Self {
+    fn for_user(
+        user: User,
+        sandbox: &Sandbox,
+        proxy: BTreeMap<String, String>,
+        root: Root,
+    ) -> Self {
         let fixed = [
             ("LANG".to_owned(), LANG.to_owned()),
             ("PATH".to_owned(), host::PATH_DIRS.join(":")),
@@ -88,29 +99,31 @@ impl Entry {
             .chain(proxy)
             .chain(sandbox.env.clone())
             .collect();
-        Self { user, env }
+        Self { user, env, root }
     }
 
     pub fn user(&self) -> &User {
         &self.user
     }
 
+    /// How root is had for the way in.
+    pub fn root(&self) -> Root {
+        self.root
+    }
+
     pub fn home(&self) -> &Path {
         &self.user.home
     }
 
-    /// The `run0` command line for `argv`, in `cwd`, with `env` over the
-    /// configured variables.
-    fn run0_argv(
-        &self,
-        argv: &[String],
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Vec<String>> {
+    /// The `run0` command line for `argv`, in `cwd`, with the configured
+    /// variables and nothing else. The helper builds it as root from the
+    /// root-owned configuration; where the runner's user has sudo, the
+    /// runner's copy of the configuration is the same file.
+    pub fn run0_argv(&self, argv: &[String], cwd: &Path) -> Result<Vec<String>> {
         ensure!(!argv.is_empty(), "an empty command for the sandbox");
-        let forbidden: Vec<&str> = env
+        let forbidden: Vec<&str> = self
+            .env
             .keys()
-            .chain(self.env.keys())
             .filter(|name| name.starts_with(Sandbox::FORBIDDEN_ENV_PREFIX))
             .map(String::as_str)
             .collect();
@@ -120,7 +133,6 @@ impl Entry {
             forbidden.join(", "),
             self.user.name
         );
-        let vars: BTreeMap<&String, &String> = self.env.iter().chain(env).collect();
         let head = [
             RUN0.to_owned(),
             "--pipe".to_owned(),
@@ -132,7 +144,8 @@ impl Entry {
             "--property=CollectMode=inactive-or-failed".to_owned(),
             format!("--chdir={}", cwd.display()),
         ];
-        let setenv = vars
+        let setenv = self
+            .env
             .iter()
             .map(|(name, value)| format!("--setenv={name}={value}"));
         let unset = SUDO_VARS
@@ -154,14 +167,8 @@ impl Entry {
     /// run0 hands them to PID 1 over D-Bus, which refuses regular files,
     /// and SELinux keeps PID 1 from reading a pipe this process made.
     /// [`Entry::run`] does that for a command that runs to its end.
-    pub fn command(
-        &self,
-        argv: &[String],
-        cwd: Option<&Path>,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Command> {
-        let run0 = self.run0_argv(argv, cwd.unwrap_or(self.home()), env)?;
-        host::as_root(&run0)
+    pub fn command(&self, argv: &[String], cwd: Option<&Path>) -> Result<Command> {
+        self.root.enter(self, argv, cwd.unwrap_or(self.home()))
     }
 
     /// Runs `argv` in the sandbox user's home, gives it `input`, and waits.
@@ -173,7 +180,7 @@ impl Entry {
         // The command object holds the child's ends: it has to be gone
         // before the reads below can see the streams close.
         let mut child = {
-            let mut command = self.command(&argv, None, &BTreeMap::new())?;
+            let mut command = self.command(&argv, None)?;
             command
                 .stdin(Stdio::from(OwnedFd::from(child_stdin)))
                 .stdout(Stdio::from(OwnedFd::from(child_stdout)))
@@ -228,7 +235,7 @@ mod tests {
             gid: 1001,
             home: "/home/agent".into(),
         };
-        Entry::for_user(user, &sandbox, BTreeMap::new())
+        Entry::for_user(user, &sandbox, BTreeMap::new(), Root::Sudo)
     }
 
     fn strings(items: &[&str]) -> Vec<String> {
@@ -237,10 +244,13 @@ mod tests {
 
     #[test]
     fn run0_command_line() {
-        let entry = entry(&[("PATH", "/opt/bin:/usr/bin"), ("HTTPS_PROXY", "http://p")]);
-        let extra = BTreeMap::from([("LANG".to_owned(), "C".to_owned())]);
+        let entry = entry(&[
+            ("PATH", "/opt/bin:/usr/bin"),
+            ("HTTPS_PROXY", "http://p"),
+            ("LANG", "C"),
+        ]);
         let argv = entry
-            .run0_argv(&strings(&["git", "status"]), Path::new("/work"), &extra)
+            .run0_argv(&strings(&["git", "status"]), Path::new("/work"))
             .unwrap();
         assert_eq!(
             argv,
@@ -253,8 +263,7 @@ mod tests {
                 "--property=CollectMode=inactive-or-failed",
                 "--chdir=/work",
                 "--setenv=HTTPS_PROXY=http://p",
-                // The call's own value wins over the fixed one, and the
-                // configuration's over the fixed PATH.
+                // The configuration's values win over the fixed ones.
                 "--setenv=LANG=C",
                 "--setenv=PATH=/opt/bin:/usr/bin",
                 "--",
@@ -276,17 +285,58 @@ mod tests {
         );
     }
 
+    /// A configuration that validation should have refused, carrying one
+    /// of the job's variables, gets no further here.
     #[test]
     fn the_jobs_variables_are_refused() {
         let cwd = Path::new("/");
         let cmd = strings(&["true"]);
-        let leak = BTreeMap::from([("ACTIONS_RUNTIME_TOKEN".to_owned(), "x".to_owned())]);
-        let err = entry(&[]).run0_argv(&cmd, cwd, &leak).unwrap_err();
-        assert!(err.to_string().contains("ACTIONS_RUNTIME_TOKEN"), "{err}");
-        // Also when the configuration, which validation should have
-        // refused, carries one.
-        let configured = entry(&[("ACTIONS_CACHE_URL", "x")]);
-        assert!(configured.run0_argv(&cmd, cwd, &BTreeMap::new()).is_err());
-        assert!(entry(&[]).run0_argv(&[], cwd, &BTreeMap::new()).is_err());
+        let err = entry(&[("ACTIONS_CACHE_URL", "x")])
+            .run0_argv(&cmd, cwd)
+            .unwrap_err();
+        assert!(err.to_string().contains("ACTIONS_CACHE_URL"), "{err}");
+        assert!(entry(&[]).run0_argv(&[], cwd).is_err());
+    }
+
+    /// Where the runner's user has sudo, the way in is sudo and run0;
+    /// where setup locked the machine, the helper.
+    #[test]
+    fn the_way_in_depends_on_how_root_is_had() {
+        let argv = |command: &Command| -> Vec<String> {
+            std::iter::once(command.get_program())
+                .chain(command.get_args())
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let direct = entry(&[]).command(&strings(&["id"]), None).unwrap();
+        if !rustix::process::geteuid().is_root() {
+            assert_eq!(&argv(&direct)[..4], ["sudo", "-n", "--", "run0"]);
+        }
+        let user = User {
+            name: "agent".into(),
+            uid: 1001,
+            gid: 1001,
+            home: "/home/agent".into(),
+        };
+        let locked = Entry::for_user(user, &Sandbox::default(), BTreeMap::new(), Root::Helper);
+        let command = locked
+            .command(&strings(&["id", "-u"]), Some(Path::new("/home/agent/w")))
+            .unwrap();
+        assert_eq!(
+            argv(&command),
+            [
+                "sudo",
+                "-n",
+                "--",
+                "/usr/local/libexec/agentic-job",
+                "helper",
+                "enter",
+                "--chdir",
+                "/home/agent/w",
+                "--",
+                "id",
+                "-u"
+            ]
+        );
     }
 }

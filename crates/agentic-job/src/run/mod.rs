@@ -49,7 +49,6 @@ pub mod upload;
 use std::future::Future;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -206,36 +205,15 @@ enum Stage {
     Broken(anyhow::Error),
 }
 
-/// The configuration: the root-owned copy, which the runner's user may
-/// need root to read.
+/// The configuration: the root-owned copy, which setup leaves readable
+/// by all (it holds no secret).
 fn load_config(path: &Path) -> Result<Config> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            let out = enter::command("sudo")
-                .args(["-n", "cat", "--"])
-                .arg(path)
-                .stdin(Stdio::null())
-                .output()
-                .context("running sudo")?;
-            ensure!(
-                out.status.success(),
-                "reading {} as root failed ({})",
-                path.display(),
-                out.status
-            );
-            String::from_utf8(out.stdout)
-                .with_context(|| format!("{} is not UTF-8", path.display()))?
-        }
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "reading {}: `sandbox setup` puts the configuration there",
-                    path.display()
-                )
-            });
-        }
-    };
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "reading {}: `sandbox setup` puts the configuration there",
+            path.display()
+        )
+    })?;
     Config::parse(&text).with_context(|| format!("in {}", path.display()))
 }
 
@@ -587,7 +565,12 @@ impl Plan {
         }
         // What the agent reached, and what it was refused.
         let access_log = transcript.join(egress::TRANSCRIPT_NAME);
-        if !egress::collect(Path::new(egress::ACCESS_LOG), egress_from, &access_log)? {
+        if !egress::collect(
+            Path::new(egress::ACCESS_LOG),
+            egress_from,
+            &access_log,
+            self.sandbox.root(),
+        )? {
             eprintln!(
                 "No egress log at {}: the transcript has none.",
                 egress::ACCESS_LOG
@@ -775,13 +758,13 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
 async fn supervise(plan: Plan) -> Result<Exit> {
     // Refuses root and this process's own user, before anything of
     // theirs could be killed.
-    let user = SandboxUser::find(&plan.sandbox.user).await?;
+    let user = SandboxUser::find(&plan.sandbox.user, plan.sandbox.root()).await?;
     let mut signals = Signals::new()?;
     let plan = Arc::new(plan);
     let shared = Arc::new(Shared::default());
     // The egress proxy's log from here on is this run's: what is in it
     // already is `sandbox check`'s probes.
-    let egress_from = egress::offset(Path::new(egress::ACCESS_LOG));
+    let egress_from = egress::offset(Path::new(egress::ACCESS_LOG), plan.sandbox.root());
 
     // Its steps block (commands, requests), so it has a thread, which a
     // signal cannot cancel: it ends when its commands are killed, or at

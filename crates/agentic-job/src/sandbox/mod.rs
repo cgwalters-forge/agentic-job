@@ -1,6 +1,8 @@
 //! `agentic-job sandbox`: make the host safe for the agent, and prove it.
-//! Step 5 of docs/plan.md. `setup` runs as root; `check` runs as the
-//! runner's user and enters the sandbox ([`enter`]) for each probe.
+//! Step 5 of docs/plan.md. `setup` runs as root, and ends by taking root
+//! away from the runner's user; `check` runs as the runner's user and
+//! enters the sandbox ([`enter`]) for each probe, through the one
+//! privileged command that user keeps ([`helper`], via [`root`]).
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -10,9 +12,11 @@ use crate::exit::Exit;
 pub mod check;
 pub mod egress;
 pub mod enter;
+pub mod helper;
 pub mod host;
 pub mod local;
 pub mod network;
+pub mod root;
 pub mod setup;
 
 #[derive(Debug, Subcommand)]

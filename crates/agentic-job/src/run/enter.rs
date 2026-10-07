@@ -12,7 +12,6 @@
 //! runner's user, a link the agent planted could make it read the
 //! runner's files into an artifact.
 
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
@@ -23,6 +22,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::Config;
 use crate::sandbox::enter::Entry;
+use crate::sandbox::root::Root;
 use crate::session::process::inherited_settings;
 
 /// Stands for the command in a command line that is asked for only to
@@ -120,12 +120,15 @@ impl Sandbox {
         })
     }
 
+    /// How root is had for what a run needs of it.
+    pub fn root(&self) -> Root {
+        self.entry.root()
+    }
+
     /// The command line that runs what is appended to it as the sandbox
     /// user, in CWD: for the session, which appends the agent's own.
     pub fn wrapper(&self, cwd: &Path) -> Result<Vec<String>> {
-        let command = self
-            .entry
-            .command(&[PLACEHOLDER.to_owned()], Some(cwd), &BTreeMap::new())?;
+        let command = self.entry.command(&[PLACEHOLDER.to_owned()], Some(cwd))?;
         let mut argv = std::iter::once(command.get_program())
             .chain(command.get_args())
             .map(|arg| {
@@ -296,6 +299,8 @@ mod tests {
         };
         let wrapper = sandbox.wrapper(Path::new("/somewhere")).unwrap();
         assert_eq!(wrapper.last().map(String::as_str), Some("--"));
+        // Through sudo and run0 here, where setup has not run; through
+        // the helper on a machine it locked (`sandbox::enter`'s tests).
         assert!(wrapper.contains(&"run0".to_owned()), "{wrapper:?}");
         assert!(
             wrapper.contains(&"--chdir=/somewhere".to_owned()),

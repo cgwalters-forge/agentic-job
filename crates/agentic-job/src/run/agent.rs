@@ -42,9 +42,7 @@
 //! docs/layout.md says what a new one takes.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Component, Path};
-use std::process::Stdio;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, json};
@@ -624,9 +622,11 @@ pub fn generate(
     })
 }
 
-/// Writes CONFIGURATION: the sandbox user's files as that user, with
-/// their content on standard input and never on a command line, and the
-/// managed settings as root.
+/// Writes CONFIGURATION's files of the sandbox user's, as that user,
+/// with their content on standard input and never on a command line.
+/// The managed settings are root's and `sandbox setup` wrote them from
+/// the same configuration ([`managed_settings`]): `run` has no root to
+/// write with, and only checks that they are what this run expects.
 pub fn install(sandbox: &Sandbox, configuration: &Configuration) -> Result<()> {
     for file in &configuration.files {
         let (script, input) = match &file.content {
@@ -642,55 +642,36 @@ pub fn install(sandbox: &Sandbox, configuration: &Configuration) -> Result<()> {
             .with_context(|| format!("writing {}'s {}", sandbox.user, file.path))?;
     }
     if let Some((path, content)) = &configuration.managed {
-        install_as_root(path, content).with_context(|| format!("writing {path}"))?;
+        let found = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {path}, which `sandbox setup` writes"))?;
+        ensure!(
+            found == *content,
+            "{path} is not what this run's configuration calls for: `sandbox setup` writes it"
+        );
     }
     Ok(())
 }
 
-/// Writes CONTENT to PATH as root's file, readable by all.
-fn install_as_root(path: &str, content: &str) -> Result<()> {
-    let sudo: &[&str] = if rustix::process::geteuid().is_root() {
-        &[]
-    } else {
-        &["sudo", "-n"]
-    };
-    let argv = [
-        sudo,
-        &[
-            "install",
-            "-D",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0644",
-            "/dev/stdin",
-            path,
-        ],
-    ]
-    .concat();
-    let (program, args) = argv.split_first().context("the command is empty")?;
-    let mut child = super::enter::command(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(content.as_bytes())
-            .context("writing its content")?;
+/// The managed settings of the agent KIND behind ENDPOINT, if it has
+/// any: a root-owned file, readable by all, with no secret in it. Written
+/// by `sandbox setup`, as root, from the same configuration `run` reads.
+pub fn managed_settings(kind: Kind, endpoint: Option<&Endpoint>) -> Option<(&'static str, String)> {
+    match (kind, endpoint) {
+        (Kind::Claude, Some(endpoint)) => Some((
+            MANAGED_SETTINGS_FILE,
+            pretty(&claude_managed_settings(endpoint)),
+        )),
+        _ => None,
     }
-    let status = child.wait().context("waiting for install")?;
-    ensure!(status.success(), "install failed ({status})");
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+
+    use std::io::Write;
+    use std::process::Stdio;
 
     use super::*;
     use crate::run::inference::Mode;

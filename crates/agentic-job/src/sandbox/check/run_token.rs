@@ -4,7 +4,6 @@
 use anyhow::{Context, Result};
 
 use super::{CONTAINER_UID, Checker, RunToken, Want, contains};
-use crate::sandbox::host;
 
 /// Where the sandbox user can write, and so where a token handed to it
 /// could have been left, besides its home and its runtime directory.
@@ -70,8 +69,10 @@ impl Checker<'_> {
             format!("{user}'s {config_file} holds the run token (control)"),
             holds,
         );
+        // As the sandbox user, whose files they are: the runner's user
+        // cannot see into that home, and has no root to look with.
         let mode = |path: &str| -> Result<String> {
-            let output = host::output(&mut host::as_root(&["stat", "-c", "%U %a", "--", path])?)?;
+            let output = self.sandbox(&["stat", "-c", "%U %a", "--", path], b"")?;
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         };
         let (file_mode, dir_mode) = (mode(&config_file)?, mode(&config_dir)?);
