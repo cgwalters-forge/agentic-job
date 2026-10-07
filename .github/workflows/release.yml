@@ -1,4 +1,4 @@
-# Publishes the static binary with its SHA-256 checksum as a GitHub
+# Publishes the static binaries with their SHA-256 checksums as a GitHub
 # release. Runs for a pushed tag, or by hand with the tag to create at the
 # chosen commit. The tag must be `v` and the workspace's version.
 name: release
@@ -42,9 +42,9 @@ jobs:
         with:
           name: agentic-job
       # Comparing the whole tag also keeps it to the shape of a version.
-      - name: The checksum matches and the version is the tag's
+      - name: The checksums match and the version is the tag's
         run: |
-          sha256sum --check "agentic-job-$TARGET.sha256"
+          sha256sum --check "agentic-job-$TARGET.sha256" "fake-agent-$TARGET.sha256"
           chmod +x "agentic-job-$TARGET"
           test "$("./agentic-job-$TARGET" --version)" = "agentic-job ${TAG#v}"
           test "v${TAG#v}" = "$TAG"
@@ -65,3 +65,4 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY"
           --target "$GITHUB_SHA" --generate-notes
           "agentic-job-$TARGET" "agentic-job-$TARGET.sha256"
+          "fake-agent-$TARGET" "fake-agent-$TARGET.sha256"
