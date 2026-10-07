@@ -9,6 +9,10 @@ on:
         description: Restore the build cache; a release builds without it
         type: boolean
         default: true
+      release:
+        description: The tag the build is published as, for the pin its summary prints
+        type: string
+        default: TAG
 
 permissions:
   contents: read
@@ -42,19 +46,14 @@ jobs:
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
-      # What agentic-job.yml's pin of a release of this commit reads, of
-      # the source that file says the binaries are built from.
+      # secure-host/release.json for a release of this build: what a job
+      # at a commit with this source fetches the binaries by.
       - name: The pin of this build
         shell: bash
+        env:
+          RELEASE: ${{ inputs.release }}
         run: |
-          set -f
-          from=$(yq .env.BUILT_FROM .github/workflows/agentic-job.yml)
-          [ "$(git ls-tree HEAD $from | wc -l)" = "$(wc -w <<< "$from")" ] || { echo "::error::not all of $from is in the source"; exit 1; }
-          { echo '```'
-            echo "RELEASE_SOURCE: $(git ls-tree HEAD $from | sha256sum | cut -d ' ' -f 1)"
-            echo "RELEASE_AGENTIC_JOB_SHA256: $(cut -d ' ' -f 1 "dist/agentic-job-$TARGET.sha256")"
-            echo "RELEASE_FAKE_AGENT_SHA256: $(cut -d ' ' -f 1 "dist/fake-agent-$TARGET.sha256")"
-            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '```json'; node secure-host/binary.mjs pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binary is static and runs
         run: |
