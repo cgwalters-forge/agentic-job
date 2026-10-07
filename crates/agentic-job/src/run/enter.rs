@@ -63,12 +63,48 @@ impl Output {
     }
 }
 
+/// What starts a command to GitHub's runner anywhere in a line of a
+/// job's log, and what it is printed as.
+const LOG_COMMAND: &str = "##[";
+const LOG_COMMAND_SHOWN: &str = "## [";
+
 /// TEXT on one line and without control characters: what a repository or
 /// the agent wrote must not act as a command to the CI system's log.
+/// GitHub's runner takes `::name::` for one only at the start of a line,
+/// where nothing printed here puts such text, and `##[name]` anywhere in
+/// a line, so that is broken up.
 pub fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
+        .collect::<String>()
+        .replace(LOG_COMMAND, LOG_COMMAND_SHOWN)
+}
+
+/// Runs one command at a time and gives back what it wrote: the way
+/// `run` reads the agent's files and its checkout.
+pub trait Runner {
+    /// Runs ARGV with INPUT on its standard input; its standard output
+    /// may be at most MAX_OUTPUT bytes.
+    fn run(&self, argv: &[&str], input: &[u8], max_output: usize) -> Result<Output>;
+}
+
+impl Runner for Sandbox {
+    fn run(&self, argv: &[&str], input: &[u8], max_output: usize) -> Result<Output> {
+        Sandbox::run(self, argv, input, max_output)
+    }
+}
+
+/// Runs commands as this process's own user. For tests of what `run`
+/// does with a checkout: a run itself reads the agent's files only as
+/// the sandbox user.
+#[derive(Debug, Clone, Copy)]
+pub struct Unconfined;
+
+impl Runner for Unconfined {
+    fn run(&self, argv: &[&str], input: &[u8], max_output: usize) -> Result<Output> {
+        let argv: Vec<String> = argv.iter().map(|&arg| arg.to_owned()).collect();
+        over_sockets(&argv, input, max_output)
+    }
 }
 
 impl Sandbox {
@@ -275,5 +311,10 @@ mod tests {
     #[test]
     fn log_lines_stay_one_line() {
         assert_eq!(one_line("a\nb\r::error::c\x1b[0m"), "a b ::error::c [0m");
+        // The form the runner acts on in the middle of a line.
+        assert_eq!(
+            one_line("x ##[error]y ##[group]"),
+            "x ## [error]y ## [group]"
+        );
     }
 }
