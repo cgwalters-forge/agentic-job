@@ -45,6 +45,11 @@ Read this before relying on it.
   and once naming a private repository, which stopped in the policy
   job. homegit's `bot-runs list`, `show`, `log` and `reconcile` read
   the first of those runs.
+- The event path (`event: true`) runs in CI on every pull request and
+  push of this repository (`e2e-event`, [below](#event-triggered-callers)):
+  admitted on a pull request, with the comments on the pull request;
+  refused on a push. The slash-command, label and schedule examples are
+  live here with the scripted agent.
 - **It has not been called from another repository.** CI calls it by
   path, where the workflow's own commit is the run's. That a caller's
   pin by commit selects the source the binary is built from follows
@@ -57,12 +62,14 @@ Read this before relying on it.
 ## A caller
 
 [`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
-complete one, for the scripted agent. Copy it with the two files it
-names, and put your own repository in place of this one in the bounds
-file's `repos` and in the default of the example's `repo` input. Every
-input is described where it is declared, at the top of the workflow
-file; this page says what a caller has to provide for them. The call
-itself:
+complete one, for the scripted agent, started by hand. Copy it with the
+two files it names, and put your own repository in place of this one in
+the bounds file's `repos` and in the default of the example's `repo`
+input. Three more are started by events, [below](#event-triggered-callers):
+a slash command in a comment, a label on a pull request, a schedule.
+Every input is described where it is declared, at the top of the
+workflow file; this page says what a caller has to provide for them.
+The call itself:
 
 ```yaml
 jobs:
@@ -159,6 +166,54 @@ setting gives up, in
 `called_workflows` entry naming this workflow file, the commit the
 caller pins and the calling repository, or `any_workflow` for an owner.
 Both are merged there and off.
+
+### Event-triggered callers
+
+With `event: true` the run is decided from the event that started the
+calling workflow, by `agentic-job event` in the policy job
+([how it decides](events.md)). The caller adds a `[trigger]` table to
+its bounds file (which events, which roles, which bots, whether forks,
+which commands), keys its `concurrency` on the triggering issue or pull
+request, and writes `task` as the standing instruction: the event's text
+follows it in the task file, fenced. Three callers in this repository,
+each a file to copy:
+
+- [`example-command.yml`](../.github/workflows/example-command.yml):
+  `/agent REQUEST` as a comment on an issue or pull request. Every
+  comment starts the workflow; its `if` skips the ones that do not start
+  with the command, and the policy job refuses the rest that may not
+  start a run, in seconds, before the agent's machine is started.
+- [`example-pull-request.yml`](../.github/workflows/example-pull-request.yml):
+  a pull request labeled `agent-review`, on `pull_request_target` so that
+  the bounds and the configuration are read from the base branch. The
+  run starts from the pull request's base and is told its head.
+- [`example-schedule.yml`](../.github/workflows/example-schedule.yml): a
+  weekly run with no item, so `comment-target` names where a comment
+  goes.
+
+What changes with `event: true`. `base` gives way to the pull request's
+base branch where the event names one, and the bounds have to cover it.
+`comment-target` defaults to the triggering item. The `notify` and
+`conclude` jobs put an eyes reaction on what started the run and a
+status comment on the item, edited when the run ends (`notify: reaction`
+for reactions only, `none` for neither); they write with the call's own
+token, so the call grants `issues: write` or `pull-requests: write` for
+them; naming no permissions, they hold the whole of what the call was
+granted, as the apply job does, and the agent's machine never holds a
+token that can comment. A
+refused event ends the run in the policy job: a success with the other
+jobs skipped, the reason in the job summary, and the workflow's outputs
+`trigger` and `trigger-reason` saying what was decided. A pull request
+from a fork is refused unless the bounds say `forks = true`, for a
+comment on one too: the policy job fetches the pull request to apply the
+rule. `workflow_dispatch` with `event: true` admits only a dispatcher
+with a listed role, which the plain `example.yml` does not check.
+
+CI's `e2e-event` job calls the workflow with `event: true` on every pull
+request of this repository, where the event is admitted and the
+scripted agent's comment lands on the pull request under the status
+comment, and on every push to main, where `push` is not among the
+bounds' events and the run ends in the policy job.
 
 ### The apply job and its token
 
@@ -302,8 +357,12 @@ get anything past `check`.
 `pull_request` reads its bounds file, its configuration and its setup
 script from the pull request's merge commit, so whoever opens the pull
 request writes them. Take the task and those files from a trusted ref
-instead (`workflow_dispatch`, or `pull_request_target` with nothing
-checked out from the head), as for any workflow that holds a token.
+instead (`workflow_dispatch`, or `pull_request_target`, which this
+workflow reads like `pull_request` and which checks nothing out from the
+head), as for any workflow that holds a token; `example-pull-request.yml`
+does. With `event: true` the bounds also refuse a pull request from a
+fork unless they say otherwise, and a pull request whose actor (whoever
+opened, pushed to or labeled it) lacks a listed role.
 
 **What the pinned actions bring.** The workflow names every action by
 commit: `actions/checkout`, `actions/upload-artifact`,
@@ -397,4 +456,12 @@ or a pull request, gh-aw's handlers also comment there, in the calling
 repository, to say what they made.
 
 **One run at a time.** The workflow sets no `concurrency`: the caller
-does, as the example does for each `id`.
+does, as `example.yml` does for each `id` and the event-triggered
+examples do for each issue or pull request, on the job that calls the
+workflow rather than on the workflow: a workflow-level group is joined
+before a job's `if` is evaluated, so a comment that is no command would
+cancel a command waiting its turn. GitHub keeps one waiting run per
+group either way. `event.json` carries the
+same key (`issue-N`, `pull-N`, `schedule`, `dispatch`) for whoever
+reads a run, but a group is decided before any job runs, so it is the
+caller's expression that sets it.
