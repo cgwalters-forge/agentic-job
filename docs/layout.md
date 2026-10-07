@@ -29,7 +29,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `sandbox/enter.rs` | 5 | running a command as the sandbox user with `run0`; `run` starts the agent through it |
 | `sandbox/host.rs`, `sandbox/local.rs` | 5 | users and programs of the host; the listeners a user can connect to |
 | `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
-| `run/` | 6a, 6b | `run`: `run/inference.rs` (run token), `run/agent.rs` (agent configuration), `run/clone.rs` in 6a; `run/handback.rs`, `run/summary.rs`, `run/upload.rs` in 6b |
+| `run/` | 6a, 6b | `run` ([below](#run)): `run/inference.rs` (run token), `run/agent.rs` and `run/launch.rs` (agent configuration), `run/clone.rs`, `run/probe.rs`, `run/enter.rs` in 6a; `run/handback.rs`, `run/summary.rs`, `run/upload.rs` in 6b |
 
 A module that outgrows its file becomes a directory of the same name
 (`check.rs` to `check/mod.rs`); its path in `lib.rs` does not change.
@@ -68,22 +68,25 @@ schemas. `RunResult::result.exit()` is the run's exit state. What `run`
 supplies:
 
 - the agent, an entry of the registry in `session/agents.toml`
-  (`session::agents::builtin`); step 6a owns what surrounds each
-  command, and may change the commands with it. The old tree's
-  launchers also cleared the agent's inherited provider settings
-  (`ANTHROPIC_*`, `CLAUDE_*`, `OPENCODE_*`), which nothing here does;
+  (`session::agents::builtin`). `run` replaces the command of Claude
+  Code and of opencode with its launcher (`run/launch.rs`), which
+  clears the agent's inherited provider settings (`ANTHROPIC_*`,
+  `CLAUDE_*`, `OPENCODE_*`) as the old tree's launchers did; the
+  session itself starts nothing with those or with the job's
+  `ACTIONS_*` variables;
 - `Launch::Sandbox`: the sandbox user, every process of which is killed
   when the session ends, and the wrapper that switches to it (the `run0`
   command line, which is step 5's to build). The kill happens when
   `session::run` returns, not if its future is dropped or the process
-  is signalled: `run` has to see to those itself;
+  is signalled: `run` sees to those itself, with
+  `session::process::SandboxUser::reap`;
 - `Limits::from_config` of the `[limits]` table, which refuses a table
   without a timeout, and one that caps neither model requests nor
   spending unless it says `uncapped = true`;
 - the run's count of model requests, as a `tokio::sync::watch` channel
-  that step 6a keeps current from the inference proxy. A request cap
-  with no count is refused, so where nothing counts (`token-file`)
-  `run` clears the cap and says so;
+  that `run` keeps current from the inference proxy. A request cap
+  with no count is refused, and where nothing counts (`token-file`, or
+  no proxy) `run` refuses the configuration rather than drop the cap;
 - `Policy::for_task(home)`, the permission policy of a task run;
 - where the condensed transcript goes, a line per event, which step 6b
   redacts on its way to the job log and `condensed.log`.
@@ -96,11 +99,74 @@ for a task run, to which the agent's notifications are passed on.
 Nothing can attach yet, and `session/clients.rs` lists what step 11
 has to design before something can.
 
+## `run`
+
+`run::run` checks everything it was given before it starts or spends
+anything (an error there is exit state 2), and then, in this order:
+
+1. fetches the agent's configuration repository, if `[agent]` names one,
+   and clones the target from the URL in `policy.json`, both as the
+   sandbox user (`run/clone.rs`);
+2. announces the run to the inference proxy and gets its token
+   (`run/inference.rs`): `github-oidc`, `plain` or `token-file`, as
+   `[inference] register` says, which has no default;
+3. writes the agent's configuration (`run/agent.rs`) with the token in
+   one file of the sandbox user's, and probes that it is nowhere else
+   (`run/probe.rs`);
+4. drives the session, feeding it the proxy's count of the run's model
+   requests;
+5. ends the run at the proxy, and writes how that went to
+   `OUT/work/inference.json`.
+
+A failure in 1 to 3 is exit state 4: the agent never started. The clone
+comes before the registration, unlike the plan's summary of `run`,
+because it needs no token: a run that cannot clone then leaves nothing
+at the proxy. A signal at any point kills the sandbox user's processes
+and ends the run at the proxy before `run` exits.
+
+Exit state 4 means trying again is safe, and on the same machine it
+works: the checkout an earlier try left is removed first. One case
+needs a new attempt of the job and not a second `run` in the same one:
+a run that registered and was then ended (a failed probe, say) cannot
+register again under the same identity, which the proxy answers with
+409.
+
+A cap on model requests is only as good as the proxy's count. `run`
+refuses to start if the proxy registered the run without a count, and
+the job log says so when the count stops arriving during the run; the
+cap then reads the last count, and what still bounds the run is its
+timeout and the proxy's own limits. The requests to the proxy and for
+the identity token ignore `HTTP_PROXY` and its like in the job's
+environment, as the old tree's did: the tokens would pass through it.
+
+Step 6b continues in `run::supervise` after the session: the hand-back,
+redaction, the summary and the gate on uploads. Until then the
+session's files are in `OUT/work/harness/`, unredacted, and nothing
+sorts them into the artifacts. The job log's copy of the condensed
+transcript has the run token and the identity-token request masked by
+value (`run/secrets.rs`); `redact.rs` replaces that.
+
+`run/enter.rs` is `run`'s use of step 5's way into the sandbox
+(`sandbox::enter`): the same `run0` command line, with a limit on what
+a command may write back and as a wrapper for the session.
+`run/probe.rs` holds only the probes of the run token; `run` does not
+yet call `sandbox check`'s probes again.
+
+The agent is not started by its own command but by `agentic-job
+launch-agent NAME`, a hidden command that runs as the sandbox user: it
+reads the one file with the token, sets the agent's environment and
+becomes the agent. So the binary has to be where the sandbox user can
+run it (`/usr/local/bin`), which `run` checks.
+
+`run` has one argument the plan does not: a hidden `--config`, for
+tests, in place of the root-owned copy.
+
 ## Rules that keep steps apart
 
 Each command's module owns its `Args` and its `run(&Args) ->
 anyhow::Result<Exit>`. `cli.rs` only lists the commands, so
-implementing a command does not edit it. The arguments are the table in
+implementing a command does not edit it (but for `launch-agent`, which
+is not in the plan's table). The arguments are the table in
 the plan; a change to them is a change to the plan and belongs in the
 pull request's description.
 
