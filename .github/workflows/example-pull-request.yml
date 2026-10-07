@@ -1,0 +1,57 @@
+# A caller started by a pull request of this repository, when a
+# maintainer puts the label `agent-review` on it. The run starts from
+# the pull request's base branch, which the bounds have to list, and is
+# told the pull request's number and head commit, which it can fetch as
+# refs/pull/N/head; its comment goes to the pull request. For a run on
+# every pull request as it is opened and pushed to, list `opened`,
+# `synchronize`, `reopened` and `ready_for_review` under `types` and drop
+# the `if`; CI's `e2e-event` job does that.
+#
+# `pull_request_target` rather than `pull_request`: this file, the
+# bounds, the configuration and the setup script are then read from the
+# base branch and not from the pull request's merge commit, so that a
+# pull request cannot change what bounds it. The payload is the same and
+# the binary reads it the same way. A pull request from a fork is refused
+# unless the bounds say `forks = true`; this workflow never checks a
+# head out, it names it.
+name: example-pull-request
+run-name: "agent on pull request #${{ github.event.pull_request.number }}"
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  run:
+    # The label is a word of the event, compared here as an expression and
+    # never pasted into a script. The actor is whoever put it on, and the
+    # bounds decide whether they may start a run.
+    if: ${{ github.event.label.name == 'agent-review' }}
+    # One run at a time for each pull request, as a group of this job: a
+    # workflow-level group is joined before `if` is evaluated, and any
+    # other label would cancel a run waiting its turn.
+    concurrency:
+      group: agent-pull-${{ github.event.pull_request.number }}
+    uses: ./.github/workflows/agentic-job.yml
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    with:
+      id: pull-${{ github.event.pull_request.number }}
+      event: true
+      task: >-
+        Review the pull request named below: fetch its head, read the change against its base
+        branch, and answer with one comment that says what you found and what you would change.
+        Do not propose a change yourself.
+      repo: ${{ github.repository }}
+      outputs: add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/event.sh
+      timeout: "10"
+      max-requests: "0"
+      budget: "100"

@@ -1,0 +1,46 @@
+# A caller on a schedule. There is no event text and no item: the task
+# is the whole of what the agent is told, and a comment needs a target
+# of its own (`comment-target`). GitHub starts a scheduled workflow as
+# the user who last changed this file, and the binary checks no role
+# for a schedule: the bounds' `events` admit it or not. A dispatch by
+# hand goes through the same decision, so the dispatcher needs the
+# write role.
+name: example-schedule
+
+on:
+  schedule:
+    # Mondays, 06:17 UTC: an odd minute, since the hour is crowded.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: agent-schedule
+
+jobs:
+  run:
+    uses: ./.github/workflows/agentic-job.yml
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      id: schedule-${{ github.run_id }}
+      event: true
+      task: >-
+        Read docs/ for a statement that is no longer true of the code, and propose one pull
+        request that fixes one, or say in a comment that you found none.
+      repo: ${{ github.repository }}
+      outputs: create_pull_request,add_comment,noop
+      # Where a comment goes, since no event names an item: an issue of
+      # your own in place of this repository's scratch issue.
+      comment-target: "64"
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      timeout: "10"
+      max-requests: "0"
+      budget: "100"
+      refused-pull-request: branch

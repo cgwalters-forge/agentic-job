@@ -1,0 +1,64 @@
+# A caller started by a slash command: `/agent REQUEST` as a comment on
+# an issue or pull request of this repository starts a run, for whoever
+# holds the write role here. The `[trigger]` table of the bounds file
+# says who may and from which events, and docs/events.md how the
+# decision is made. Copy this file with the bounds and configuration
+# files it names, as example.yml says.
+#
+# The request reaches the agent inside the task file, fenced, after the
+# standing `task` below; no text of the comment is in a script. The run's
+# comment goes back to the issue or pull request the command was on, and
+# a status comment there says the run started and how it ended.
+name: example-command
+run-name: "/agent on #${{ github.event.issue.number }} by ${{ github.actor }}"
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  run:
+    # Every comment starts this workflow; the policy job refuses the ones
+    # that are not a command by someone admitted, in seconds, before the
+    # agent's machine is started. This `if` saves those seconds for a
+    # comment that plainly is not a command, and decides nothing: the
+    # binary does, from the bounds.
+    if: ${{ startsWith(github.event.comment.body, '/agent') }}
+    # One run at a time for each issue or pull request, as a group of this
+    # job and not of the workflow: a workflow-level group is joined before
+    # `if` is evaluated, so any comment at all would cancel a command
+    # waiting its turn. A third command still replaces a waiting second
+    # one, since GitHub keeps one pending run per group.
+    concurrency:
+      group: agent-item-${{ github.event.issue.number }}
+    # Another repository names the workflow by the commit it has read:
+    #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    uses: ./.github/workflows/agentic-job.yml
+    permissions:
+      id-token: write
+      # For the job's own token to apply the outputs here and to post the
+      # status comment: the branch of a pull request, the comments.
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      id: item-${{ github.event.issue.number }}
+      event: true
+      task: >-
+        You answer /agent requests on this repository's issues and pull requests. Do what the
+        request below asks, within what the bounds allow, and answer with one comment. Propose a
+        change as a pull request only when the request asks for one.
+      repo: ${{ github.repository }}
+      outputs: add_comment,create_pull_request,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      # The scripted agent, which answers with one comment; for a real one
+      # see the commented lines of example.yml.
+      agent: fake
+      setup: .github/agentic-job/e2e/event.sh
+      timeout: "10"
+      max-requests: "0"
+      budget: "100"
+      refused-pull-request: branch
