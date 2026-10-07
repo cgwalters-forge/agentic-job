@@ -1,5 +1,5 @@
-//! `bot-harness run`: one ACP session, from spawning the agent to its
-//! result, recorded as it goes.
+//! One ACP session, from starting the agent to its result, recorded as it
+//! goes.
 //!
 //! The session is the task's prompt turn, and what the run's budget
 //! (`budget`) adds to it: notices, sent as prompts of their own while the
@@ -8,19 +8,17 @@
 //! a limit, a `session/cancel` of the turn and one more prompt turn in
 //! which the agent hands back; and at the limit a last `session/cancel`.
 //!
-//! The harness is not a sandbox. The only boundary between it and the
-//! agent is the wrapper command (`bot-harness run ... -- WRAPPER`), which
-//! agent.yml sets to run the agent as another user, in a login session of
-//! its own.
-//! Without a wrapper, the agent runs as the harness's user and inherits
-//! its environment, which is only fit for local testing.
-//!
-//! When the session ends, the SDK kills the process group it spawned: the
-//! wrapper's, or the agent's without one. Processes the agent started in
-//! their own group (Claude Code's shell commands), or under a wrapper
-//! that starts it elsewhere (run0), may outlive it: stopping those is the
-//! sandbox's job (agent.yml kills the agent user's sessions, later a
-//! container).
+//! When the session ends, the process group started for the agent is
+//! killed, and then every process of the sandbox user (`process`): the
+//! agent runs in a login session of that user's, where a signal to the
+//! group does not reach.
+
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::ExitStatus;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
@@ -29,42 +27,36 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOptionCategory, SessionId,
     SetSessionConfigOptionRequest, TextContent,
 };
-use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Dispatch, Handled, LineDirection,
-};
-use anyhow::{Context, Result};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Handled, Lines};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use serde_json::{Map, Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
-use crate::agents::AgentSpec;
-use crate::budget::{Budget, LABEL_HAND_BACK, Signal, Stop, Usage};
-use crate::digest::{Digest, Dir};
-use crate::policy::{self, Policy, Request, pick_option};
+use super::agents::AgentSpec;
+use super::budget::{Budget, LABEL_HAND_BACK, Limits, Signal, Stop, Usage};
+use super::clients::Clients;
+use super::digest::{self, Dir};
+use super::permission::{self, Policy, Request, pick_option};
+use super::process::{self, Launch};
+use super::transcript::{Log, Tap, set_stop};
+use crate::exit::Exit;
 
-/// The files `run` writes to its output directory.
-pub const ACP_LOG: &str = "acp.jsonl";
-pub const STDERR_LOG: &str = "agent-stderr.log";
 pub const RESULT_FILE: &str = "harness.json";
+/// The old tree's schema name, which readers of `harness.json` check.
 pub const RESULT_SCHEMA: &str = "bot-harness-result/v1";
 /// How long the agent gets to wind down after `session/cancel`.
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How often the budget is checked.
 const BUDGET_TICK: Duration = Duration::from_millis(250);
-const CLIENT_NAME: &str = "bot-harness";
-
-/// Exit statuses of `bot-harness run`, by result.
-pub const EXIT_FAILURE: i32 = 1;
-pub const EXIT_BUDGET: i32 = 3;
-/// As timeout(1).
-pub const EXIT_TIMEOUT: i32 = 124;
+/// How long an agent whose streams closed gets to exit, so that the
+/// failure can say how it did.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+const CLIENT_NAME: &str = env!("CARGO_PKG_NAME");
+const LOST_STOP_SIGNAL: &str = "the session lost its stop signal";
+const AGENT_EXITED: &str = "the agent exited";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,33 +79,18 @@ impl Outcome {
         }
     }
 
-    pub fn exit_code(self) -> i32 {
+    /// The exit state of a run whose session ended like this.
+    pub fn exit(self) -> Exit {
         match self {
-            Outcome::Success => 0,
-            Outcome::Timeout => EXIT_TIMEOUT,
-            Outcome::Budget => EXIT_BUDGET,
-            Outcome::Failure | Outcome::Cancelled => EXIT_FAILURE,
+            Outcome::Success => Exit::Success,
+            Outcome::Timeout => Exit::Timeout,
+            Outcome::Budget => Exit::Limit,
+            Outcome::Failure | Outcome::Cancelled => Exit::Failure,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Limits {
-    pub timeout_s: u64,
-    /// In AIC (1 AIC = $0.01), from the agent's `usage_update` cost.
-    pub budget_aic: Option<f64>,
-    /// ACP reports tool calls, not model turns, so this is the turn budget.
-    pub max_tool_calls: Option<usize>,
-    /// Model requests, as the caller counts them (`RunOptions::requests_file`):
-    /// ACP doesn't report them, and a subagent's aren't in the session at all.
-    #[serde(default)]
-    pub max_requests: Option<u64>,
-    /// Subagent tasks the agent may start (the digest's `tasks`).
-    #[serde(default)]
-    pub max_tasks: Option<usize>,
-}
-
-/// `harness.json`: what `run` did, for `bot-harness summary`.
+/// `harness.json`: how the session went, for the run's summary.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunResult {
     pub schema: String,
@@ -141,19 +118,6 @@ impl RunResult {
     }
 }
 
-/// One line of `acp.jsonl`: a JSON-RPC message as it crossed the pipe,
-/// parsed (so re-serialized, with its keys in order), or the raw line if
-/// it wasn't JSON.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Record {
-    pub ts: f64,
-    pub dir: Dir,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msg: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line: Option<String>,
-}
-
 /// What the budget asks of the session short of stopping it.
 enum Nudge {
     Notice {
@@ -167,149 +131,38 @@ enum Nudge {
     },
 }
 
-pub struct RunOptions {
+/// One session: which agent, on what, within which limits.
+pub struct Options {
+    /// The agent's name, for the record.
     pub name: String,
     pub agent: AgentSpec,
+    /// The model (default: the agent's own).
     pub model: Option<String>,
+    /// The agent's working directory.
     pub cwd: PathBuf,
+    /// The task.
     pub prompt: String,
+    /// Where `acp.jsonl`, `agent-stderr.log` and `harness.json` go.
     pub out: PathBuf,
-    pub policy: Policy,
+    pub permissions: Policy,
     pub limits: Limits,
-    /// A file the caller keeps the run's count of model requests in, as a
-    /// decimal number (for `Limits::max_requests`).
-    pub requests_file: Option<PathBuf>,
-    pub wrapper: Vec<String>,
-}
-
-fn now() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
-
-/// Sees every line on the agent's stdio: records it, feeds the digest
-/// (which prints the condensed log to stdout) and checks the budget.
-struct Tap {
-    inner: Mutex<TapInner>,
-    limits: Limits,
-    stop: watch::Sender<Option<Stop>>,
-}
-
-struct TapInner {
-    acp: BufWriter<File>,
-    stderr: BufWriter<File>,
-    digest: Digest,
-    /// The first write error; the run fails with it.
-    error: Option<String>,
-}
-
-impl Tap {
-    fn create(out: &Path, limits: Limits, stop: watch::Sender<Option<Stop>>) -> Result<Self> {
-        let open = |name: &str| -> Result<BufWriter<File>> {
-            let path = out.join(name);
-            Ok(BufWriter::new(
-                File::create(&path).with_context(|| format!("creating {}", path.display()))?,
-            ))
-        };
-        Ok(Tap {
-            inner: Mutex::new(TapInner {
-                acp: open(ACP_LOG)?,
-                stderr: open(STDERR_LOG)?,
-                digest: Digest::new(),
-                error: None,
-            }),
-            limits,
-            stop,
-        })
-    }
-
-    fn line(&self, line: &str, direction: LineDirection) {
-        let ts = now();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = match direction {
-            LineDirection::Stderr => {
-                let r = writeln!(inner.stderr, "{line}").and_then(|()| inner.stderr.flush());
-                inner.note(r);
-                return;
-            }
-            LineDirection::Stdin => Dir::Send,
-            LineDirection::Stdout => Dir::Recv,
-        };
-        let msg = serde_json::from_str::<Value>(line).ok();
-        let record = Record {
-            ts,
-            dir,
-            line: msg.is_none().then(|| line.to_owned()),
-            msg,
-        };
-        let r = serde_json::to_writer(&mut inner.acp, &record)
-            .map_err(std::io::Error::from)
-            .and_then(|()| writeln!(inner.acp))
-            .and_then(|()| inner.acp.flush());
-        inner.note(r);
-        if let Some(msg) = &record.msg {
-            let lines = inner.digest.feed(ts, dir, msg);
-            print_lines(&lines);
-            if let Some(stop) = self.over_budget(&inner.digest) {
-                set_stop(&self.stop, stop);
-            }
-        }
-    }
-
-    /// The subagent tasks the agent has started.
-    fn tasks(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .digest
-            .tasks
-    }
-
-    fn over_budget(&self, d: &Digest) -> Option<Stop> {
-        if let Some(max) = self.limits.max_tool_calls
-            && d.calls.len() > max
-        {
-            return Some(Stop::Budget(format!(
-                "over budget: more than {max} tool calls"
-            )));
-        }
-        let aic = d.cost_usd? * 100.0;
-        let budget = self.limits.budget_aic?;
-        (aic > budget).then(|| Stop::Budget(format!("over budget: spent {aic:.1} of {budget} AIC")))
-    }
-}
-
-impl TapInner {
-    fn note(&mut self, r: std::io::Result<()>) {
-        if let Err(e) = r {
-            self.error
-                .get_or_insert_with(|| format!("writing the transcript: {e}"));
-        }
-    }
-}
-
-/// Stops the session for WHY, unless it is being stopped already.
-fn set_stop(stop: &watch::Sender<Option<Stop>>, why: Stop) {
-    stop.send_if_modified(|s| {
-        let first = s.is_none();
-        if first {
-            *s = Some(why);
-        }
-        first
-    });
-}
-
-/// The count in the caller's requests file; None while it has none.
-fn read_count(path: &Path) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    /// The run's count of model requests, kept current by whoever serves
+    /// the inference (ACP doesn't report them, and it has subagents'
+    /// too); `None` in it while nothing is known. `Limits::max_requests`
+    /// needs one: a cap with nothing to count is refused.
+    pub requests: Option<watch::Receiver<Option<u64>>>,
+    pub launch: Launch,
+    /// The clients attached to the session; none for a task run.
+    pub clients: Clients,
+    /// Where the condensed transcript goes, a line per event.
+    pub log: Log,
 }
 
 /// Watches the budget for the whole run, from before the session exists:
 /// the limit stops it through STOP, the rest reaches the session as nudges.
 async fn watch_budget(
     limits: Limits,
-    requests_file: Option<PathBuf>,
+    requests: Option<watch::Receiver<Option<u64>>>,
     tap: Arc<Tap>,
     stop: watch::Sender<Option<Stop>>,
     nudges: mpsc::UnboundedSender<Nudge>,
@@ -321,7 +174,7 @@ async fn watch_budget(
         tick.tick().await;
         let usage = Usage {
             elapsed: started.elapsed(),
-            requests: requests_file.as_deref().and_then(read_count),
+            requests: requests.as_ref().and_then(|count| *count.borrow()),
             tasks: tap.tasks(),
         };
         // The session may be over: nobody is left to nudge.
@@ -336,64 +189,262 @@ async fn watch_budget(
     }
 }
 
-fn print_lines(lines: &[String]) {
-    let mut out = std::io::stdout().lock();
-    for l in lines {
-        // The job log is best effort; the transcript has everything.
-        let _ = writeln!(out, "{l}");
-    }
-    let _ = out.flush();
-}
-
 fn rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// The agent's standard output as the transport's incoming lines, each
+/// recorded as it arrives.
+fn incoming(
+    stdout: UnixStream,
+    tap: Arc<Tap>,
+) -> impl futures::Stream<Item = std::io::Result<String>> + Send + 'static {
+    futures::stream::unfold(
+        (BufReader::new(stdout).lines(), tap),
+        |(mut lines, tap)| async move {
+            let line = lines.next_line().await.transpose()?;
+            if let Ok(line) = &line {
+                tap.message(Dir::Recv, line);
+            }
+            Some((line, (lines, tap)))
+        },
+    )
+}
+
+/// The agent's standard input as the transport's outgoing lines, each
+/// recorded as it is sent.
+fn outgoing(
+    stdin: UnixStream,
+    tap: Arc<Tap>,
+) -> impl futures::Sink<String, Error = std::io::Error> + Send + 'static {
+    futures::sink::unfold((stdin, tap), |(mut stdin, tap), line: String| async move {
+        tap.message(Dir::Send, &line);
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok::<_, std::io::Error>((stdin, tap))
+    })
+}
+
+/// Records the agent's standard error until it closes. It is read as
+/// bytes: a line that isn't UTF-8 must not end the reading, which would
+/// close the stream under an agent that goes on writing to it.
+async fn drain_stderr(stderr: UnixStream, tap: Arc<Tap>) {
+    let mut stderr = BufReader::new(stderr);
+    let mut line = Vec::new();
+    while let Ok(1..) = stderr.read_until(b'\n', &mut line).await {
+        let text = String::from_utf8_lossy(&line);
+        tap.stderr(text.trim_end_matches(['\n', '\r']));
+        line.clear();
+    }
+}
+
 /// Runs the session and writes `harness.json`.
-pub async fn run(opts: RunOptions) -> Result<RunResult> {
-    std::fs::create_dir_all(&opts.out)
-        .with_context(|| format!("creating {}", opts.out.display()))?;
+///
+/// `Err` is for what keeps a session from being run or recorded at all,
+/// and for processes of the sandbox user that could not be stopped. An
+/// agent that fails, or cannot be started, is a result.
+pub async fn run(opts: Options) -> Result<RunResult> {
+    let Options {
+        name,
+        agent: spec,
+        model,
+        cwd,
+        prompt,
+        out,
+        permissions,
+        limits,
+        requests,
+        launch,
+        clients,
+        log,
+    } = opts;
+    // A cap that nothing counts would be no cap, and silently: the
+    // caller drops it, knowing so, or supplies the count.
+    ensure!(
+        limits.max_requests.is_none() || requests.is_some(),
+        "the session has a cap on model requests and nothing that counts them"
+    );
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    // Before anything is started: a user that cannot be stopped again is
+    // no sandbox user.
+    let sandbox = match &launch {
+        Launch::Sandbox { user, .. } => Some(process::SandboxUser::find(user).await?),
+        Launch::Direct => None,
+    };
     let (stop_tx, stop_rx) = watch::channel(None);
     let tap = Arc::new(Tap::create(
-        &opts.out,
-        opts.limits.clone(),
+        &out,
+        log,
+        limits.clone(),
         stop_tx.clone(),
+        clients,
     )?);
-    let (argv, env) = opts.agent.command(&opts.wrapper, opts.model.as_deref());
-    let config = AcpAgentConfig::new(&argv[0]).args(&argv[1..]).envs(env);
-    let t = tap.clone();
-    let agent = AcpAgent::new(config).with_debug(move |line, dir| t.line(line, dir));
-
-    let policy = Arc::new(opts.policy);
-    let cwd = opts.cwd.clone();
-    let permission_stop = stop_rx.clone();
-    // Between a session/cancel and the turn's answer.
-    let cancelling = Arc::new(AtomicBool::new(false));
-    let permission_cancelling = cancelling.clone();
+    let (argv, env) = spec.command(launch.wrapper(), model.as_deref());
+    let task = Task {
+        cwd: &cwd,
+        model: model.as_deref(),
+        model_by_env: spec.model_env.is_some(),
+        prompt: &prompt,
+        notices: spec.notices,
+    };
     let started = chrono::Utc::now();
     let (nudge_tx, nudge_rx) = mpsc::unbounded_channel();
     let watcher = tokio::spawn(watch_budget(
-        opts.limits.clone(),
-        opts.requests_file.clone(),
+        limits.clone(),
+        requests,
         tap.clone(),
-        stop_tx.clone(),
+        stop_tx,
         nudge_tx,
     ));
-    let session = Client
+    // Whatever the agent left running goes before anything reads its
+    // files, and whether or not it ever started.
+    let (ended, reaped) = match process::spawn(&argv, &env) {
+        Ok((mut agent, streams)) => {
+            let process::Streams {
+                stdin,
+                stdout,
+                stderr,
+            } = streams;
+            let stderr = tokio::spawn(drain_stderr(stderr, tap.clone()));
+            let signals = Signals {
+                stop: stop_rx,
+                nudges: nudge_rx,
+                cancelling: Arc::new(AtomicBool::new(false)),
+            };
+            let (ended, exited) = drive(
+                &mut agent,
+                (stdin, stdout),
+                &tap,
+                task,
+                permissions,
+                signals,
+            )
+            .await;
+            // The group started here is the wrapper's, which may be
+            // root's and out of this user's reach: the sandbox user's
+            // processes are killed first, so the wrapper is not waited
+            // for while its agent lives.
+            agent.kill_group();
+            let reaped = reap(sandbox.as_ref()).await;
+            agent.gone().await;
+            // With its writers gone the agent's standard error closes;
+            // what was written until then belongs in the log.
+            let _ = tokio::time::timeout(EXIT_GRACE, stderr).await;
+            let ended = match exited {
+                Some(status) => ended.agent_exited(status, tap.last_stderr()),
+                None => ended,
+            };
+            (ended, reaped)
+        }
+        Err(e) => (
+            Ended::failure(format!("the agent could not be started: {e:#}")),
+            reap(sandbox.as_ref()).await,
+        ),
+    };
+    watcher.abort();
+    let finished = chrono::Utc::now();
+
+    let Ended {
+        mut outcome,
+        mut stop_reason,
+        mut message,
+        handed_back,
+    } = ended;
+    let transcript = tap.finish();
+    if stop_reason.is_none() {
+        stop_reason = transcript.stop_reason;
+    }
+    if let Some(e) = transcript.write_error {
+        outcome = Outcome::Failure;
+        message = Some(e);
+    }
+    // What is left running may still be writing the files a caller is
+    // about to read: no result of such a session stands.
+    if let Err(e) = &reaped {
+        outcome = Outcome::Failure;
+        message = Some(format!("{e:#}"));
+    }
+    // Why it didn't succeed, unless the digest already said.
+    if let (Outcome::Failure, Some(m)) = (outcome, &message)
+        && !transcript.agent_error
+    {
+        tap.log(&[digest::cut(&format!("⚠ {m}"))]);
+    }
+    let result = RunResult {
+        schema: RESULT_SCHEMA.to_owned(),
+        agent: name,
+        command: argv,
+        result: outcome,
+        stop_reason,
+        message: message.map(|m| digest::cut(&m)),
+        started_at: rfc3339(started),
+        finished_at: rfc3339(finished),
+        duration_s: (finished - started).num_seconds().max(0).unsigned_abs(),
+        limits,
+        // A transcript that couldn't be written fails the run all the same.
+        handed_back: handed_back && outcome != Outcome::Failure,
+    };
+    let path = out.join(RESULT_FILE);
+    std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
+    reaped?;
+    Ok(result)
+}
+
+/// Stops everything the sandbox user is running, where there is one.
+async fn reap(sandbox: Option<&process::SandboxUser>) -> Result<()> {
+    match sandbox {
+        Some(user) => user.reap().await,
+        None => Ok(()),
+    }
+}
+
+/// What the session asks of the agent.
+struct Task<'a> {
+    cwd: &'a Path,
+    model: Option<&'a str>,
+    /// The model went into the agent's environment.
+    model_by_env: bool,
+    prompt: &'a str,
+    /// The agent takes a prompt sent during a turn (`AgentSpec::notices`).
+    notices: bool,
+}
+
+/// Speaks ACP with a started agent, over its standard input and output,
+/// until the session ends: how it ended, and the agent's exit status if
+/// it failed by exiting. Returning closes the agent's standard input.
+async fn drive(
+    agent: &mut process::Agent,
+    (stdin, stdout): (UnixStream, UnixStream),
+    tap: &Arc<Tap>,
+    task: Task<'_>,
+    permissions: Policy,
+    signals: Signals,
+) -> (Ended, Option<ExitStatus>) {
+    let transport = Lines::new(
+        Box::pin(outgoing(stdin, tap.clone())),
+        Box::pin(incoming(stdout, tap.clone())),
+    );
+    let policy = Arc::new(permissions);
+    let permission_cwd = task.cwd.to_owned();
+    let permission_stop = signals.stop.clone();
+    let permission_cancelling = signals.cancelling.clone();
+    let connection = Client
         .builder()
         .name(CLIENT_NAME)
         .on_receive_request(
             async move |req: RequestPermissionRequest, responder, _cx| {
                 let stopped = permission_stop.borrow().is_some()
                     || permission_cancelling.load(Ordering::Relaxed);
-                responder.respond(answer_permission(&policy, &cwd, &req, stopped))
+                responder.respond(answer_permission(&policy, &permission_cwd, &req, stopped))
             },
             agent_client_protocol::on_receive_request!(),
         )
         // Everything else the agent sends. The tap has already recorded
         // it; unhandled, the SDK would queue session-scoped messages for
         // a session handler forever (growing without bound, and leaving
-        // fs/* and terminal/* requests, which the harness doesn't
+        // fs/* and terminal/* requests, which the session doesn't
         // advertise, unanswered until the timeout).
         .on_receive_dispatch(
             async move |d: Dispatch, _cx| match d {
@@ -405,7 +456,7 @@ pub async fn run(opts: RunOptions) -> Result<RunResult> {
                     Ok(Handled::Yes)
                 }
                 Dispatch::Notification(_) => Ok(Handled::Yes),
-                // Responses to the harness's own requests.
+                // Responses to the session's own requests.
                 other => Ok(Handled::No {
                     message: other,
                     retry: false,
@@ -413,74 +464,37 @@ pub async fn run(opts: RunOptions) -> Result<RunResult> {
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
-        .connect_with(agent, async |cx: ConnectionTo<Agent>| {
-            Ok(session(
-                cx,
-                &opts.cwd,
-                opts.model.as_deref(),
-                opts.agent.model_env.is_some(),
-                &opts.prompt,
-                opts.agent.notices,
-                Signals {
-                    stop: stop_rx,
-                    nudges: nudge_rx,
-                    cancelling,
-                },
-            )
-            .await)
-        })
-        .await;
-    watcher.abort();
-    let finished = chrono::Utc::now();
-
-    // An error is the transport's: usually the agent exited, and the
-    // error has its stderr tail (as agent-stderr.log does).
-    let Ended {
-        mut outcome,
-        mut stop_reason,
-        mut message,
-        handed_back,
-    } = session.unwrap_or_else(|e| Ended::failure(format!("the agent failed: {e}")));
-    {
-        let mut inner = tap.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let lines = inner.digest.finish();
-        print_lines(&lines);
-        if stop_reason.is_none() {
-            stop_reason = inner.digest.stop_reason.clone();
-        }
-        if let Some(e) = inner.error.take() {
-            outcome = Outcome::Failure;
-            message = Some(e);
-        }
-        // Why it didn't succeed, unless the digest already said.
-        if let (Outcome::Failure, Some(m)) = (outcome, &message)
-            && inner.digest.error.is_none()
-        {
-            print_lines(&[crate::digest::cut(&format!("⚠ {m}"))]);
-        }
-    }
-    let result = RunResult {
-        schema: RESULT_SCHEMA.to_owned(),
-        agent: opts.name,
-        command: argv,
-        result: outcome,
-        stop_reason,
-        message: message.map(|m| crate::digest::cut(&m)),
-        started_at: rfc3339(started),
-        finished_at: rfc3339(finished),
-        duration_s: (finished - started).num_seconds().max(0) as u64,
-        limits: opts.limits,
-        // A transcript that couldn't be written fails the run all the same.
-        handed_back: handed_back && outcome != Outcome::Failure,
+        .connect_with(transport, async |cx: ConnectionTo<Agent>| {
+            Ok(session(cx, tap, &task, signals).await)
+        });
+    let mut connection = std::pin::pin!(connection);
+    // An error is the transport's: usually the agent closed its streams.
+    let transport_failed =
+        |e: agent_client_protocol::Error| Ended::failure(format!("the agent failed: {e}"));
+    // The agent exiting ends the session, whatever it was waiting for.
+    let ended = tokio::select! {
+        r = &mut connection => r.unwrap_or_else(transport_failed),
+        // Its last answer may still be on its way in: an agent that
+        // answers its turn and exits has not failed.
+        _ = agent.wait() => match tokio::time::timeout(EXIT_GRACE, &mut connection).await {
+            Ok(r) => r.unwrap_or_else(transport_failed),
+            Err(_) => Ended::failure(AGENT_EXITED.to_owned()),
+        },
     };
-    let path = opts.out.join(RESULT_FILE);
-    std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(result)
+    // A failure is usually the agent having died, and its exit status and
+    // last words say more than the request that happened to be waiting.
+    let exited = match ended.outcome {
+        Outcome::Failure => tokio::time::timeout(EXIT_GRACE, agent.wait())
+            .await
+            .ok()
+            .and_then(Result::ok),
+        _ => None,
+    };
+    (ended, exited)
 }
 
-/// Answers a permission request from the policy; once the harness has
-/// stopped the session (STOPPED), every request is cancelled, as ACP
+/// Answers a permission request from the policy; once the session has
+/// been stopped (STOPPED), every request is cancelled, as ACP
 /// requires after session/cancel.
 fn answer_permission(
     policy: &Policy,
@@ -503,14 +517,13 @@ fn answer_permission(
         // Stopped, no option for the decision, or a malformed request.
         None => (RequestPermissionOutcome::Cancelled, "cancelled"),
     };
-    let meta = json!({
-        policy::META_KEY: {"decision": decision, "rule": verdict.rule},
-    });
-    let meta = match meta {
-        Value::Object(m) => m,
-        _ => unreachable!("a JSON object literal"),
-    };
+    let meta = meta(json!({"decision": decision, "rule": verdict.rule}));
     RequestPermissionResponse::new(outcome).meta(meta)
+}
+
+/// The `_meta` the session marks its own messages with.
+fn meta(value: Value) -> Map<String, Value> {
+    Map::from_iter([(permission::META_KEY.to_owned(), value)])
 }
 
 /// How a session ended.
@@ -531,7 +544,22 @@ impl Ended {
         }
     }
 
-    /// Stopped by the harness for WHY.
+    /// The failure of an agent that exited on its own with STATUS: that,
+    /// and the last it said on its standard error, ahead of the request
+    /// that failed for it.
+    fn agent_exited(self, status: ExitStatus, last_words: Option<String>) -> Self {
+        let last_words = last_words
+            .map(|line| format!(": {line}"))
+            .unwrap_or_default();
+        let request = self
+            .message
+            .filter(|m| m != AGENT_EXITED)
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default();
+        Ended::failure(format!("{AGENT_EXITED} ({status}){last_words}{request}"))
+    }
+
+    /// Stopped by the session for WHY.
     fn stopped(why: &Stop, handed_back: bool) -> Self {
         let (outcome, msg) = stopped(why);
         let how = if handed_back {
@@ -557,7 +585,7 @@ struct Signals {
     cancelling: Arc<AtomicBool>,
 }
 
-/// Why the harness stopped a session, as its result.
+/// Why the session was stopped, as its result.
 fn stopped(why: &Stop) -> (Outcome, String) {
     match why {
         Stop::Timeout => (Outcome::Timeout, "hit the timeout".to_owned()),
@@ -565,7 +593,7 @@ fn stopped(why: &Stop) -> (Outcome, String) {
     }
 }
 
-/// Waits until the harness decides to stop the session.
+/// Waits until something decides to stop the session.
 async fn wait_stop(stop: &mut watch::Receiver<Option<Stop>>) -> Option<Stop> {
     stop.wait_for(Option::is_some)
         .await
@@ -576,20 +604,13 @@ async fn wait_stop(stop: &mut watch::Receiver<Option<Stop>>) -> Option<Stop> {
 /// A `session/prompt` response still on its way.
 type Turn<'a, F> = Pin<&'a mut F>;
 
-/// The `_meta` that marks a prompt as a budget notice, for the digest.
-fn notice_meta(label: &str) -> serde_json::Map<String, Value> {
-    match json!({policy::META_KEY: {"notice": label}}) {
-        Value::Object(m) => m,
-        _ => unreachable!("a JSON object literal"),
-    }
-}
-
+/// A prompt marked as a budget notice, for the digest.
 fn notice_prompt(sid: &SessionId, label: &str, text: String) -> PromptRequest {
     PromptRequest::new(
         sid.clone(),
         vec![ContentBlock::Text(TextContent::new(text))],
     )
-    .meta(notice_meta(label))
+    .meta(meta(json!({"notice": label})))
 }
 
 /// Asks the agent to stop its turn, and gives it a moment to answer the
@@ -613,38 +634,29 @@ where
 
 /// initialize, session/new, then the task's prompt turn and what the
 /// budget adds to it, all raced against the timeout and the budget.
-async fn session(
-    cx: ConnectionTo<Agent>,
-    cwd: &Path,
-    model: Option<&str>,
-    model_by_env: bool,
-    prompt: &str,
-    notices: bool,
-    signals: Signals,
-) -> Ended {
+async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: Signals) -> Ended {
     let Signals {
         mut stop,
         mut nudges,
         cancelling,
     } = signals;
     let sid = tokio::select! {
-        r = setup(&cx, cwd, model, model_by_env) => match r {
+        r = setup(&cx, task) => match r {
             Ok(sid) => sid,
             Err(ended) => return ended,
         },
         why = wait_stop(&mut stop) => {
             // No session to cancel yet: the process is killed on return.
             let Some(why) = why else {
-                return Ended::failure("the harness lost its stop signal".to_owned());
+                return Ended::failure(LOST_STOP_SIGNAL.to_owned());
             };
-            let ended = Ended::stopped(&why, false);
-            print_lines(&[format!("⚠ {} (starting the session)", stopped(&why).1)]);
-            return ended;
+            tap.log(&[format!("⚠ {} (starting the session)", stopped(&why).1)]);
+            return Ended::stopped(&why, false);
         }
     };
     let request = PromptRequest::new(
         sid.clone(),
-        vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
+        vec![ContentBlock::Text(TextContent::new(task.prompt.to_owned()))],
     );
     let mut response = std::pin::pin!(cx.send_request(request).block_task());
     let (why, text, window) = loop {
@@ -652,15 +664,18 @@ async fn session(
             // In this order: a turn that has ended is not sent a notice,
             // which would start another.
             biased;
+            // A task run ends with its turn. With a client attached
+            // (`clients`) the session would go on to that client's next
+            // prompt, which nothing can send yet.
             r = &mut response => return prompt_result(r),
             why = wait_stop(&mut stop) => {
-                return stop_turn(&cx, &sid, &cancelling, why, response.as_mut()).await;
+                return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut()).await;
             }
             Some(nudge) = nudges.recv() => match nudge {
                 // An agent that would end its turn for a prompt sent
                 // during it goes without: it is still interrupted to hand
                 // back.
-                Nudge::Notice { .. } if !notices => {}
+                Nudge::Notice { .. } if !task.notices => {}
                 // The others take it as a message for the model's next
                 // step; its answer comes with the turn's, and one that
                 // refuses it only goes without (the digest says).
@@ -678,7 +693,7 @@ async fn session(
     // Near a limit: a notice queued now may never be read (a subagent
     // task can outlast the run), so the turn is interrupted, and what is
     // left of the budget is a turn in which the agent hands back.
-    print_lines(&[format!(
+    tap.log(&[format!(
         "⚠ {}: interrupting the agent to hand back",
         stopped(&why).1
     )]);
@@ -708,7 +723,7 @@ async fn session(
     let handed_back = match answer {
         Some(r) => prompt_result(r).outcome == Outcome::Success,
         None => {
-            print_lines(&["⚠ the agent didn't hand back in time".to_owned()]);
+            tap.log(&["⚠ the agent didn't hand back in time".to_owned()]);
             let _ = cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await;
             false
         }
@@ -716,10 +731,11 @@ async fn session(
     Ended::stopped(&why, handed_back)
 }
 
-/// Ends the turn at a limit. The caller then closes the connection, and
-/// the SDK kills the process group it spawned.
+/// Ends the turn at a limit. The caller then closes the connection and
+/// kills the agent.
 async fn stop_turn<F>(
     cx: &ConnectionTo<Agent>,
+    tap: &Tap,
     sid: &SessionId,
     cancelling: &AtomicBool,
     why: Option<Stop>,
@@ -729,21 +745,16 @@ where
     F: Future,
 {
     let Some(why) = why else {
-        return Ended::failure("the harness lost its stop signal".to_owned());
+        return Ended::failure(LOST_STOP_SIGNAL.to_owned());
     };
-    print_lines(&[format!("⚠ {}", stopped(&why).1)]);
+    tap.log(&[format!("⚠ {}", stopped(&why).1)]);
     let _ = cancel_turn(cx, sid, cancelling, turn).await;
     Ended::stopped(&why, false)
 }
 
 /// initialize, session/new and the model: the session's id, or how it
 /// failed.
-async fn setup(
-    cx: &ConnectionTo<Agent>,
-    cwd: &Path,
-    model: Option<&str>,
-    model_by_env: bool,
-) -> Result<SessionId, Ended> {
+async fn setup(cx: &ConnectionTo<Agent>, task: &Task<'_>) -> Result<SessionId, Ended> {
     let fail =
         |what: &str, e: agent_client_protocol::Error| Ended::failure(format!("{what} failed: {e}"));
     // fs and terminal are left unadvertised (the defaults), so agents use
@@ -755,14 +766,14 @@ async fn setup(
         .await
         .map_err(|e| fail("initialize", e))?;
     let new = cx
-        .send_request(NewSessionRequest::new(cwd))
+        .send_request(NewSessionRequest::new(task.cwd))
         .block_task()
         .await
         .map_err(|e| fail("session/new", e))?;
     let sid = new.session_id;
     // Where the agent has no environment variable for it, the model is a
     // session config option.
-    if let (Some(model), false) = (model, model_by_env) {
+    if let (Some(model), false) = (task.model, task.model_by_env) {
         let option = new
             .config_options
             .iter()

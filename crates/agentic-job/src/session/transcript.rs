@@ -1,0 +1,206 @@
+//! The transcript: every line that crosses the agent's standard streams,
+//! written down as it passes.
+//!
+//! The [`Tap`] is the one place all of the agent's traffic goes through.
+//! It records each message in `acp.jsonl`, feeds the digest (which makes
+//! the condensed log and counts what the limits need), stops the session
+//! when the agent reports spending over the budget, and passes the
+//! agent's messages on to whatever clients are attached.
+
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::watch;
+
+use super::budget::{Limits, Stop};
+use super::clients::Clients;
+use super::digest::{Digest, Dir};
+
+/// The files a session writes to its output directory.
+pub const ACP_LOG: &str = "acp.jsonl";
+pub const STDERR_LOG: &str = "agent-stderr.log";
+
+/// One line of `acp.jsonl`: a JSON-RPC message as it crossed the stream,
+/// parsed (so re-serialized, with its keys in order), or the raw line if
+/// it wasn't JSON.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Record {
+    pub ts: f64,
+    pub dir: Dir,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+}
+
+/// Where the condensed log goes: one line per event, for the job's log.
+pub type Log = Box<dyn Write + Send>;
+
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// Sees every line on the agent's standard streams.
+pub(super) struct Tap {
+    inner: Mutex<Inner>,
+    limits: Limits,
+    stop: watch::Sender<Option<Stop>>,
+    clients: Clients,
+}
+
+struct Inner {
+    acp: BufWriter<File>,
+    stderr: BufWriter<File>,
+    log: Log,
+    digest: Digest,
+    /// The last thing the agent said on its standard error.
+    last_stderr: Option<String>,
+    /// The first write error; the run fails with it.
+    error: Option<String>,
+}
+
+impl Inner {
+    fn note(&mut self, r: std::io::Result<()>) {
+        if let Err(e) = r {
+            self.error
+                .get_or_insert_with(|| format!("writing the transcript: {e}"));
+        }
+    }
+
+    fn log(&mut self, lines: &[String]) {
+        // The job log is best effort; the transcript has everything.
+        for line in lines {
+            let _ = writeln!(self.log, "{line}");
+        }
+        let _ = self.log.flush();
+    }
+}
+
+/// Stops the session for WHY, unless it is being stopped already.
+pub(super) fn set_stop(stop: &watch::Sender<Option<Stop>>, why: Stop) {
+    stop.send_if_modified(|s| {
+        let first = s.is_none();
+        if first {
+            *s = Some(why);
+        }
+        first
+    });
+}
+
+impl Tap {
+    pub fn create(
+        out: &Path,
+        log: Log,
+        limits: Limits,
+        stop: watch::Sender<Option<Stop>>,
+        clients: Clients,
+    ) -> Result<Self> {
+        let open = |name: &str| -> Result<BufWriter<File>> {
+            let path = out.join(name);
+            Ok(BufWriter::new(
+                File::create(&path).with_context(|| format!("creating {}", path.display()))?,
+            ))
+        };
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                acp: open(ACP_LOG)?,
+                stderr: open(STDERR_LOG)?,
+                log,
+                digest: Digest::new(),
+                last_stderr: None,
+                error: None,
+            }),
+            limits,
+            stop,
+            clients,
+        })
+    }
+
+    /// A panic while the lock was held loses nothing a later line needs.
+    fn inner(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A protocol line, to the agent (`Dir::Send`) or from it.
+    pub fn message(&self, dir: Dir, line: &str) {
+        let ts = now();
+        let msg = serde_json::from_str::<Value>(line).ok();
+        let record = Record {
+            ts,
+            dir,
+            line: msg.is_none().then(|| line.to_owned()),
+            msg,
+        };
+        let mut inner = self.inner();
+        let r = serde_json::to_writer(&mut inner.acp, &record)
+            .map_err(std::io::Error::from)
+            .and_then(|()| writeln!(inner.acp))
+            .and_then(|()| inner.acp.flush());
+        inner.note(r);
+        let Some(msg) = &record.msg else { return };
+        let lines = inner.digest.feed(ts, dir, msg);
+        inner.log(&lines);
+        if let Some(stop) = inner.digest.cost_usd.and_then(|c| self.limits.overspent(c)) {
+            set_stop(&self.stop, stop);
+        }
+        if dir == Dir::Recv {
+            self.clients.relay(msg);
+        }
+    }
+
+    /// A line of the agent's standard error.
+    pub fn stderr(&self, line: &str) {
+        let mut inner = self.inner();
+        let r = writeln!(inner.stderr, "{line}").and_then(|()| inner.stderr.flush());
+        inner.note(r);
+        if !line.trim().is_empty() {
+            inner.last_stderr = Some(line.to_owned());
+        }
+    }
+
+    /// Lines of the session's own for the condensed log.
+    pub fn log(&self, lines: &[String]) {
+        self.inner().log(lines);
+    }
+
+    /// The subagent tasks the agent has started.
+    pub fn tasks(&self) -> usize {
+        self.inner().digest.tasks
+    }
+
+    /// The last line the agent wrote to its standard error: of an agent
+    /// that died, usually why.
+    pub fn last_stderr(&self) -> Option<String> {
+        self.inner().last_stderr.clone()
+    }
+
+    /// Ends the transcript: the digest's last lines are logged, and what
+    /// it knows of how the session went is returned.
+    pub fn finish(&self) -> Finished {
+        let mut inner = self.inner();
+        let lines = inner.digest.finish();
+        inner.log(&lines);
+        Finished {
+            stop_reason: inner.digest.stop_reason.clone(),
+            agent_error: inner.digest.error.is_some(),
+            write_error: inner.error.take(),
+        }
+    }
+}
+
+/// What the transcript knows at the end of a session.
+pub(super) struct Finished {
+    /// The stop reason of the last turn the agent answered.
+    pub stop_reason: Option<String>,
+    /// The condensed log already says why a request to the agent failed.
+    pub agent_error: bool,
+    /// The transcript could not be written.
+    pub write_error: Option<String>,
+}
