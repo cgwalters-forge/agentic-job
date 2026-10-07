@@ -12,10 +12,14 @@
 
 use std::time::Duration;
 
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+
+use crate::config;
 
 /// One AIC is a hundredth of a dollar.
 const AIC_PER_USD: f64 = 100.0;
+const SECONDS_PER_MINUTE: u64 = 60;
 
 /// What stops a session. `harness.json` records it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -33,6 +37,48 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// The `[limits]` table of the configuration, checked.
+    ///
+    /// There is always a timeout: nothing else ends a session whose agent
+    /// has stopped answering. And a run that nothing stops from spending
+    /// is refused unless the configuration asks for one in so many words
+    /// (`uncapped = true`): a table left out, or a misspelled one, must
+    /// not quietly mean an unlimited run, which is what it meant in the
+    /// old tree.
+    pub fn from_config(limits: &config::Limits) -> Result<Self> {
+        ensure!(
+            limits.timeout_minutes > 0,
+            "limits.timeout-minutes is not set: a run needs a timeout"
+        );
+        let timeout_s = limits
+            .timeout_minutes
+            .checked_mul(SECONDS_PER_MINUTE)
+            .context("limits.timeout-minutes is out of range")?;
+        let cap = |n: u64| (n > 0).then_some(n);
+        let (budget, max_requests) = (cap(limits.budget), cap(limits.max_requests));
+        match (budget.or(max_requests), limits.uncapped) {
+            (None, false) => bail!(
+                "limits sets neither max-requests nor budget, so nothing caps what the run \
+                 spends: set one, or say `uncapped = true`"
+            ),
+            (Some(_), true) => {
+                bail!("limits.uncapped is set together with max-requests or budget: remove one")
+            }
+            _ => {}
+        }
+        let max_tasks = cap(limits.max_tasks)
+            .map(usize::try_from)
+            .transpose()
+            .context("limits.max-tasks is out of range")?;
+        Ok(Self {
+            timeout_s,
+            // Exact below 2^53, far beyond any budget.
+            budget_aic: budget.map(|n| n as f64),
+            max_requests,
+            max_tasks,
+        })
+    }
+
     /// The stop for a session that has spent COST_USD, if that is over
     /// the budget.
     pub fn overspent(&self, cost_usd: f64) -> Option<Stop> {
@@ -266,6 +312,59 @@ mod tests {
             max_requests,
             max_tasks,
             ..Limits::default()
+        }
+    }
+
+    fn configured(text: &str) -> Result<Limits> {
+        Limits::from_config(&config::Config::parse(text)?.limits)
+    }
+
+    #[test]
+    fn from_config() {
+        let capped = |budget_aic, max_requests, max_tasks| Limits {
+            timeout_s: 4500,
+            budget_aic,
+            max_requests,
+            max_tasks,
+        };
+        let cases: &[(&str, Result<Limits, &str>)] = &[
+            (
+                "[limits]\ntimeout-minutes = 75\nmax-requests = 150",
+                Ok(capped(None, Some(150), None)),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nbudget = 500\nmax-tasks = 3",
+                Ok(capped(Some(500.0), None, Some(3))),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nuncapped = true",
+                Ok(capped(None, None, None)),
+            ),
+            // No table at all is not an unlimited run.
+            ("", Err("needs a timeout")),
+            ("[limits]\nmax-requests = 150", Err("needs a timeout")),
+            ("[limits]\ntimeout-minutes = 75", Err("nothing caps")),
+            (
+                "[limits]\ntimeout-minutes = 75\nmax-tasks = 3",
+                Err("nothing caps"),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 75\nbudget = 5\nuncapped = true",
+                Err("remove one"),
+            ),
+            (
+                "[limits]\ntimeout-minutes = 18446744073709551615\nbudget = 5",
+                Err("out of range"),
+            ),
+        ];
+        for (text, want) in cases {
+            match (configured(text), want) {
+                (Ok(got), Ok(want)) => assert_eq!(&got, want, "{text:?}"),
+                (Err(err), Err(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{text:?}: {err:#}")
+                }
+                (got, want) => panic!("{text:?}: got {got:?}, want {want:?}"),
+            }
         }
     }
 

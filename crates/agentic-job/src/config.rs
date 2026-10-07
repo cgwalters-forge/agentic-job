@@ -104,15 +104,21 @@ pub struct Agent {
     pub config_path: Option<PathBuf>,
 }
 
-/// What stops a run. Zero means no cap, as in the old tree. Step 3.
+/// What stops a run. Zero means not set. `session::Limits::from_config`
+/// checks it: a run needs a timeout, and one of `max-requests` and
+/// `budget` unless it says `uncapped`. Step 3.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Limits {
     pub timeout_minutes: u64,
+    /// Model requests, as the inference proxy counts them.
     pub max_requests: u64,
+    /// Subagent tasks the agent may start.
     pub max_tasks: u64,
-    /// In AIC, hundredths of a dollar.
+    /// In AIC, hundredths of a dollar, of the cost the agent reports.
     pub budget: u64,
+    /// Asks for a run with neither `max-requests` nor `budget`.
+    pub uncapped: bool,
 }
 
 /// What the task needs installed. Step 5.
