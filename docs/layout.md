@@ -229,6 +229,70 @@ run it (`/usr/local/bin`), which `run` checks.
 `run` has one argument the plan does not: a hidden `--config`, for
 tests, in place of the root-owned copy.
 
+### Adding an agent
+
+The session drives any agent that speaks ACP on its standard streams,
+and to it an agent is one entry of `session/agents.toml`. `run` is
+narrower: it configures Claude Code, opencode and the scripted agent,
+and a fourth one is a change to this crate. That is deliberate, and
+this is what the change consists of.
+
+What is data, in `session/agents.toml`: the command that starts the
+agent's ACP server (the launcher becomes that command, so it is named
+nowhere else), how the agent is told the model (`model-env`, or ACP's
+`model` session option without it), and `notices`. Set `notices` only
+for an agent that takes a prompt sent during a turn into that turn; one
+that queues it as a turn of its own ends the running turn, and the run
+with it, as claude-agent-acp does. The agent's program itself is
+installed by the caller's configuration (`[setup] npm` or `packages`).
+
+What is code, and why it is not a table a caller fills in:
+
+- **Where inference goes** (`run/agent.rs`): a variant of `Kind`, and a
+  function from the proxy's address and the run token to the agent's
+  files (`Configuration`). It has to say which of the proxy's two
+  routes the agent speaks, since they take the token differently: the
+  Anthropic route in a header of its own beside a placeholder
+  credential (`x-run-token`, where the proxy has the run API), the
+  OpenAI route as the API key. And it has to close every other way the
+  agent would choose a provider: Claude Code's switches to Bedrock,
+  Vertex and Foundry are pinned empty, an opencode configuration must
+  define exactly one provider and enable only it.
+- **What the target repository can override** (`run/agent.rs`,
+  `run/launch.rs`): every agent reads some configuration from the
+  directory it works in, which is the repository a stranger's task
+  names. Claude Code applies a project's `env` over its own
+  environment, so its endpoint is pinned in root's managed settings;
+  opencode's project configuration is turned off by a variable. For a
+  new agent this has to be found out from its documentation and source
+  and then tested: got wrong, the agent's requests go where a file in
+  the repository says, the run token with them, and only the egress
+  proxy's write rules are left to stop that. It is the reason a caller
+  cannot add an agent with a command and two variable names.
+- **The one file that holds the token** (`Kind::token_file`): `run`
+  probes that the token is in that file, private to the sandbox user,
+  and nowhere else that user can read (`run/probe.rs`). An agent that
+  takes its credential only from the environment gets it from the
+  launcher, which reads it from such a file, as Claude Code's does.
+- **What it must not inherit** (`NOT_INHERITED` in
+  `session/process.rs`, and `environment` in `run/launch.rs`): the
+  prefixes of the agent's own variables, so that nothing in the job's
+  environment selects its provider, credential or configuration; and
+  what the launcher sets in their place.
+- **What it does not read by itself** (`Kind::unread_instructions`):
+  the repository's `AGENTS.md` or `CLAUDE.md`, which the task then
+  points it at.
+- **What its reported cost means** (`aic_pricing` in `run/mod.rs`),
+  for the summary: the budget counts what the agent reports.
+- **Its configuration repository**, if a caller may supply one
+  (`fetch_source`, `check`): which files are taken, and that none of
+  them can move the provider.
+
+Each has a table test beside it (`run/agent.rs`, `run/launch.rs`,
+`session/process.rs`) that takes a row for the new agent, and
+`tests/probe.rs` runs the token probes as another user. None of that
+shows the agent works: a run of it against a real proxy does.
+
 ## `config`
 
 Not in the plan's table of commands. A workflow gets a run's settings as
