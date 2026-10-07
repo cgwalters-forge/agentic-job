@@ -1,0 +1,6 @@
+{
+  "run": "https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/37351276724",
+  "artifact": "safe-outputs",
+  "files": ["outputs.jsonl"],
+  "config.json": "safe-outputs.mjs compile --repo cgwalters-forge/tracker --base main --workflow analysis --outputs add_comment,noop,missing_data --max-outputs 3, at cgwalters-devspace-sandbox df1e867; the safe_outputs of the policy it writes"
+}

@@ -1,0 +1,11 @@
+{
+  "add_comment": {
+    "max": 3
+  },
+  "noop": {
+    "max": 1
+  },
+  "missing_data": {
+    "max": 3
+  }
+}
