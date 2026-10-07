@@ -1,14 +1,21 @@
 //! `agentic-job run`: clone the target, get the run token, configure the
-//! agent, start it in the sandbox, drive it within the limits, and end
-//! the run at the inference proxy. Step 6a of docs/plan.md, on top of
-//! [`crate::session`]; step 6b adds the hand-back, redaction and the
-//! summary where [`supervise`] says so.
+//! agent, start it in the sandbox, drive it within the limits, end the
+//! run at the inference proxy, take what the agent hands back, and leave
+//! under `--out` what may be uploaded. Steps 6a and 6b of docs/plan.md,
+//! on top of [`crate::session`].
 //!
 //! `run` is the runner's user. Everything it does in the agent's files
-//! (the clone, the configuration, the probes) it does as the sandbox
-//! user, through [`enter`].
+//! (the clone, the configuration, the probes, the hand-back) it does as
+//! the sandbox user, through [`enter`].
 //!
-//! Three things it must never do, each of which the old tree could:
+//! Under `--out` a run that ended leaves `run/` (`summary.json`,
+//! `summary.md`, `condensed.log`, `outcome.json`), `transcript.tar.zst`
+//! and, if the agent handed anything back, `safe-outputs/`: in the old
+//! tree's names and schemas, redacted, and only if they passed the gate
+//! of [`upload`]. `work/` beside them is `run`'s own and is never
+//! uploaded.
+//!
+//! Four things it must never do, each of which the old tree could:
 //!
 //! - **Run uncapped without being told to.** A run that cannot announce
 //!   itself to the proxy does not start ([`Exit::NotStarted`]), and a cap
@@ -18,8 +25,9 @@
 //!   processes when it returns. `run` does the same when it is told to
 //!   stop (a signal), and when it gives up before the session started.
 //! - **Leave the token live.** Whatever way the run ends, it is ended at
-//!   the proxy, and [`INFERENCE_FILE`] says whether that worked, for the
-//!   gate on uploads.
+//!   the proxy, and [`INFERENCE_FILE`] says whether that worked.
+//! - **Publish what quotes a live token.** A run that was not ended at
+//!   the proxy leaves nothing to upload.
 //!
 //! The target is cloned before the run is registered, not after as the
 //! plan's summary has it: a clone needs no token, and a run that fails to
@@ -33,9 +41,10 @@ pub mod enter;
 pub mod handback;
 pub mod inference;
 pub mod launch;
+pub mod log;
 pub mod probe;
 pub mod summary;
-mod secrets;
+pub mod upload;
 
 use std::future::Future;
 use std::os::unix::fs::DirBuilderExt;
@@ -53,15 +62,17 @@ use self::agent::Kind;
 use self::clone::Checkout;
 use self::enter::Sandbox;
 use self::inference::{Ended, Endpoint, Identity, OidcRequest, Retry, Run};
+use self::upload::{Gate, Staging};
 use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::policy;
+use crate::redact::Redactor;
 use crate::session::process::SandboxUser;
 use crate::session::{self, Clients, Launch, Limits, Options, Policy, RunResult};
 
-/// Under `--out`: what `run` keeps for itself until step 6b sorts it into
-/// the artifacts. Nothing here is redacted yet, and nothing here is
-/// uploaded.
+/// Under `--out`: what `run` keeps for itself. Nothing here is redacted,
+/// and nothing here is uploaded: what is, is put together under it and
+/// moved out once it may be ([`upload`]).
 pub const WORK_DIR: &str = "work";
 /// Under [`WORK_DIR`]: the session's `acp.jsonl`, `agent-stderr.log` and
 /// `harness.json`.
@@ -77,6 +88,18 @@ const META_RUN_ATTEMPT: &str = "run_attempt";
 const STOP_GRACE: Duration = Duration::from_secs(60);
 const MAX_PROBE_OUTPUT: usize = 4096;
 const PRIVATE_DIR_MODE: u32 = 0o700;
+/// The largest task taken. The old tree's was what one dispatch of a
+/// workflow can carry, a quarter of this.
+const MAX_TASK_BYTES: u64 = 256 << 10;
+/// The run's identifier names the branch and the patch of its pull
+/// request: what a file name and a branch name can hold, and no more
+/// than gh-aw's names for either allow.
+const MAX_RUN_ID_CHARS: usize = 64;
+/// A variable of this process named like this holds a credential, whose
+/// value is replaced wherever the run would log or publish it.
+const TOKEN_VAR_SUFFIX: &str = "_TOKEN";
+/// The file of the run's results that holds the condensed transcript.
+pub const CONDENSED_FILE: &str = "condensed.log";
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -114,6 +137,15 @@ struct Plan {
     /// This binary, which the sandbox user runs as the agent's launcher.
     exe: String,
     work: PathBuf,
+    out: PathBuf,
+    /// Where what will be uploaded is put together.
+    staging: Staging,
+    /// The author and trailers of the hand-back's commit.
+    commit: config::Commit,
+    /// `--meta`, for the summary.
+    meta: Value,
+    /// The run's identifier in it.
+    run_id: String,
 }
 
 /// What the preparation leaves for the session.
@@ -122,6 +154,17 @@ struct Prepared {
     /// The model the session asks the agent for.
     model: Option<String>,
     prompt: String,
+}
+
+/// A session that ended, and what is needed to take its results.
+struct Session {
+    result: Box<RunResult>,
+    checkout: Checkout,
+    model: Option<String>,
+    /// What replaced the secrets in the session's log, and its count.
+    redactor: log::Shared,
+    started: chrono::DateTime<chrono::Utc>,
+    finished: chrono::DateTime<chrono::Utc>,
 }
 
 /// What the preparation, on its own thread, shares with whoever may
@@ -155,7 +198,9 @@ enum Stage {
     NotStarted(anyhow::Error),
     /// A signal stopped it.
     Interrupted(&'static str),
-    Ended(Box<RunResult>),
+    Ended(Session),
+    /// Its results were taken, or refused: the exit state of its session.
+    Finished(Exit),
     /// An internal error.
     Broken(anyhow::Error),
 }
@@ -193,18 +238,62 @@ fn load_config(path: &Path) -> Result<Config> {
     Config::parse(&text).with_context(|| format!("in {}", path.display()))
 }
 
-/// The name a run registered without proof asks for: the identifier and
-/// attempt `--meta` gives it, which the CI system made unique.
-fn run_name(meta: &Value) -> Option<String> {
-    let field = |key: &str| match meta.get(key) {
+/// A field of `--meta` that is a name or a number.
+fn meta_field(meta: &Value, key: &str) -> Option<String> {
+    match meta.get(key) {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Value::Number(n)) => Some(n.to_string()),
         _ => None,
-    };
-    let id = field(META_RUN_ID)?;
-    Some(match field(META_RUN_ATTEMPT) {
+    }
+}
+
+/// The name a run registered without proof asks for: the identifier and
+/// attempt `--meta` gives it, which the CI system made unique.
+fn run_name(meta: &Value) -> Option<String> {
+    let id = meta_field(meta, META_RUN_ID)?;
+    Some(match meta_field(meta, META_RUN_ATTEMPT) {
         Some(attempt) => format!("{id}-{attempt}"),
         None => id,
+    })
+}
+
+/// The run's identifier, which `--meta` must give: it names the branch
+/// and the patch of what the run hands back.
+fn run_id(meta: &Value) -> Result<String> {
+    let id = meta_field(meta, META_RUN_ID)
+        .with_context(|| format!("--meta has no {META_RUN_ID}, which names the run's patch"))?;
+    ensure!(
+        id.len() <= MAX_RUN_ID_CHARS
+            && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && id.ends_with(|c: char| c.is_ascii_alphanumeric())
+            && !id.contains("..")
+            && !id.ends_with(".lock")
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+        "--meta: {META_RUN_ID} {id:?} is not at most {MAX_RUN_ID_CHARS} letters, digits and . _ -"
+    );
+    Ok(id)
+}
+
+/// The price list a run's cost is in, for the summary: the fake agent
+/// makes its cost up, a subscription has none per token, and Claude Code
+/// reports what its tokens would cost at API rates.
+const fn aic_pricing(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Fake => "mock",
+        Kind::Opencode => "subscription",
+        Kind::Claude => "api-equivalent",
+    }
+}
+
+/// The values of the credentials this process was started with.
+fn own_tokens() -> impl Iterator<Item = String> {
+    std::env::vars_os().filter_map(|(name, value)| {
+        name.to_str()?
+            .ends_with(TOKEN_VAR_SUFFIX)
+            .then(|| value.into_string().ok())
+            .flatten()
     })
 }
 
@@ -251,6 +340,14 @@ impl Plan {
         let read = |path: &Path| {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
         };
+        let task_bytes = std::fs::metadata(&args.task)
+            .with_context(|| format!("reading {}", args.task.display()))?
+            .len();
+        ensure!(
+            task_bytes <= MAX_TASK_BYTES,
+            "the task {} is {task_bytes} bytes, over {MAX_TASK_BYTES}",
+            args.task.display()
+        );
         let task = read(&args.task)?;
         ensure!(
             !task.trim().is_empty(),
@@ -264,8 +361,12 @@ impl Plan {
             "{} must hold a JSON object",
             args.meta.display()
         );
+        let run_id = run_id(&meta)?;
         let policy = policy::Policy::load(&args.policy)?;
         clone::check(&policy)?;
+        handback::author(&config.commit)?;
+        handback::check_trailers(&config.commit.trailers)?;
+        upload::refuse_earlier_results(&args.out)?;
         // Asked for only where it is used: nothing else holds what lets
         // a process get the job's identity token.
         let oidc = matches!(
@@ -283,6 +384,7 @@ impl Plan {
             .mode(PRIVATE_DIR_MODE)
             .create(work.join(HARNESS_DIR))
             .with_context(|| format!("creating {}", work.display()))?;
+        let staging = Staging::create(&work)?;
         Ok(Self {
             kind,
             limits,
@@ -296,12 +398,18 @@ impl Plan {
             sandbox: Sandbox::new(&config)?,
             exe: clone::utf8(&exe)?.to_owned(),
             work,
+            out: args.out.clone(),
+            staging,
+            commit: config.commit,
+            meta,
+            run_id,
             agent: config.agent,
         })
     }
 
-    /// The task, after a pointer to the repository's instructions for
-    /// agents that this agent does not read by itself.
+    /// The task, after the text on what the run hands back and how, and
+    /// a pointer to the repository's instructions for agents that this
+    /// agent does not read by itself.
     fn prompt(&self, checkout: &Checkout) -> Result<String> {
         let mut found = Vec::new();
         for name in self.kind.unread_instructions() {
@@ -314,11 +422,13 @@ impl Plan {
                 found.push(*name);
             }
         }
+        let hand_back = brief::hand_back(&self.policy, &self.sandbox.home, &checkout.dir);
         Ok(if found.is_empty() {
-            self.task.clone()
+            format!("{hand_back}{}", self.task)
         } else {
             format!(
-                "Before starting, read the repository's instructions for agents: {}.\n\n{}",
+                "{hand_back}Before starting, read the repository's instructions for agents: \
+                 {}.\n\n{}",
                 found.join(" and "),
                 self.task
             )
@@ -397,12 +507,13 @@ impl Plan {
         })
     }
 
-    /// What the session needs to drive the agent on PREPARED.
+    /// What the session needs to drive the agent on PREPARED, and what
+    /// redacts its log.
     fn session(
         &self,
         prepared: Prepared,
         run: Option<&Arc<Run>>,
-    ) -> Result<(Options, Option<inference::Counter>)> {
+    ) -> Result<(Options, Option<inference::Counter>, log::Shared)> {
         let mut spec = session::agents::builtin(self.kind.as_str())?;
         if self.kind != Kind::Fake {
             spec.command = launch::command(&self.exe, self.kind);
@@ -410,11 +521,19 @@ impl Plan {
         let (requests, counter) = run
             .and_then(|run| run.count(inference::COUNT_INTERVAL))
             .unzip();
-        // The agent can read its token, and its words are in these lines.
+        // The agent can read its token, and its words are in these lines
+        // and in every file of the session.
         let secrets = run
             .map(|run| run.token().expose().to_owned())
             .into_iter()
-            .chain(self.identity.oidc.iter().map(|oidc| oidc.bearer.clone()));
+            .chain(self.identity.oidc.iter().map(|oidc| oidc.bearer.clone()))
+            .chain(own_tokens());
+        let redactor = log::Shared::new(
+            Redactor::new(secrets).context("building the redaction of the run's secrets")?,
+        );
+        let condensed = self.staging.run().join(CONDENSED_FILE);
+        let condensed = std::fs::File::create(&condensed)
+            .with_context(|| format!("creating {}", condensed.display()))?;
         let options = Options {
             name: self.kind.as_str().to_owned(),
             agent: spec,
@@ -432,10 +551,178 @@ impl Plan {
                 wrapper: self.sandbox.wrapper(&self.sandbox.home)?,
             },
             clients: Clients::none(),
-            log: Box::new(secrets::Masked::new(std::io::stdout(), secrets)),
+            log: Box::new(log::Condensed::new(
+                std::io::stdout(),
+                condensed,
+                redactor.clone(),
+            )),
         };
-        Ok((options, counter))
+        Ok((options, counter, redactor))
     }
+
+    /// Takes the results of SESSION: the agent's hand-back, the
+    /// transcript and the summary, redacted, and moved to where they are
+    /// uploaded from if they pass the gate. An error is a run of which
+    /// nothing may be uploaded, and nothing is then there to upload.
+    ///
+    /// The agent's files are read by commands of the sandbox user, which
+    /// the caller stops afterwards: they run programs of the agent's
+    /// choosing (a filter of its checkout's git configuration, for one).
+    /// Once STOPPED is set no further command is started and nothing is
+    /// published.
+    fn finish(
+        &self,
+        session: &Session,
+        egress_from: u64,
+        settled: &Settled,
+        stopped: &AtomicBool,
+    ) -> Result<()> {
+        let staging = &self.staging;
+        let harness_dir = self.work.join(HARNESS_DIR);
+        let change = handback::collect(&handback::Request {
+            runner: &Stoppable {
+                sandbox: &self.sandbox,
+                stopped,
+            },
+            home: &self.sandbox.home,
+            checkout: &session.checkout,
+            policy: &self.policy,
+            commit: &self.commit,
+            run_id: &self.run_id,
+            harness: Some(session.result.as_ref()),
+            run_dir: &staging.run(),
+            safe_outputs: &staging.safe_outputs(),
+        })?;
+        if let Some(why) = &change.dropped {
+            eprintln!("warning: no change handed back: {}", enter::one_line(why));
+        }
+
+        let transcript = staging.transcript();
+        for name in [session::ACP_LOG, session::STDERR_LOG, session::RESULT_FILE] {
+            let from = harness_dir.join(name);
+            match std::fs::copy(&from, transcript.join(name)) {
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| format!("copying {}", from.display()));
+                }
+            }
+        }
+        // What the agent reached, and what it was refused.
+        let access_log = transcript.join(egress::TRANSCRIPT_NAME);
+        if !egress::collect(Path::new(egress::ACCESS_LOG), egress_from, &access_log)? {
+            eprintln!(
+                "No egress log at {}: the transcript has none.",
+                egress::ACCESS_LOG
+            );
+        }
+        staging.redact(&session.redactor)?;
+
+        // From the redacted copies, so that the summary quotes nothing
+        // of the session that the transcript does not have.
+        let records: Vec<session::Record> =
+            summary::read_jsonl(&transcript.join(session::ACP_LOG)).unwrap_or_default();
+        let result = RunResult::load(&transcript).ok();
+        let outcome = std::fs::read_to_string(staging.run().join(handback::OUTCOME_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or_else(|| json!({}));
+        let measured = summary::Measured {
+            meta: self.meta.clone(),
+            repo: self.policy.repo.clone(),
+            base: self.policy.base.clone(),
+            workflow: match self.policy.kind {
+                policy::Kind::Branch => "branch",
+                policy::Kind::Analysis => "analysis",
+            },
+            agent: self.kind.as_str().to_owned(),
+            model: session.model.clone(),
+            started_at: rfc3339(session.started),
+            finished_at: rfc3339(session.finished),
+            duration_s: u64::try_from((session.finished - session.started).num_seconds())
+                .unwrap_or(0),
+            aic_budget: self.limits.budget_aic,
+            aic_pricing: aic_pricing(self.kind),
+            // The agent named them.
+            files: change
+                .files
+                .iter()
+                .map(|file| {
+                    session
+                        .redactor
+                        .with(|redactor| redactor.redact(file).into_owned())
+                })
+                .collect(),
+            patch: change.patch,
+            egress_denied: egress::denied_in(&access_log),
+            redactions: session.redactor.count(),
+        };
+        let summary = summary::summarize(&summary::Inputs {
+            records: &records,
+            result: result.as_ref(),
+            measured: &measured,
+            outcome: &outcome,
+            usage: settled.usage.as_ref(),
+        });
+        let write = |name: &str, content: String| {
+            let path = staging.run().join(name);
+            std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))
+        };
+        write(summary::SUMMARY_FILE, format!("{summary}\n"))?;
+        write(summary::MARKDOWN_FILE, summary::markdown(&summary))?;
+
+        staging.check(
+            Gate {
+                ended: settled.dead,
+                fake_agent: self.kind == Kind::Fake,
+            },
+            &session.redactor,
+        )?;
+        staging.publish(&self.out, stopped)?;
+        eprintln!(
+            "The agent {} ended: {}. Redacted {} string(s).",
+            self.kind.as_str(),
+            summary["result"].as_str().unwrap_or_default(),
+            measured.redactions
+        );
+        Ok(())
+    }
+}
+
+/// The sandbox, for as long as the run was not told to stop: whoever
+/// takes the run's results on a thread a signal cannot interrupt starts
+/// no command of the sandbox user's after the one it is in.
+struct Stoppable<'a> {
+    sandbox: &'a Sandbox,
+    stopped: &'a AtomicBool,
+}
+
+impl enter::Runner for Stoppable<'_> {
+    fn run(&self, argv: &[&str], input: &[u8], max_output: usize) -> Result<enter::Output> {
+        ensure!(!self.stopped.load(Ordering::SeqCst), "the run was stopped");
+        self.sandbox.run(argv, input, max_output)
+    }
+}
+
+fn rfc3339(time: chrono::DateTime<chrono::Utc>) -> String {
+    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// How a run stands at the proxy once it was told to end.
+#[derive(Debug, Clone)]
+struct Settled {
+    /// Whether the token is known dead, or was never this run's to end.
+    dead: bool,
+    /// The proxy's record of what the run used.
+    usage: Option<Value>,
+}
+
+impl Settled {
+    /// A run that never had a token.
+    const NO_RUN: Self = Self {
+        dead: true,
+        usage: None,
+    };
 }
 
 /// The signals that ask a job to stop.
@@ -475,9 +762,8 @@ impl Signals {
 }
 
 /// Ends RUN at the proxy and records how it stands, for the summary and
-/// for the gate on uploads. Returns whether the token is known dead, or
-/// was never this run's to end.
-async fn end_run(run: Arc<Run>, work: &Path) -> Result<bool> {
+/// for the gate on uploads.
+async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
     let ending = Arc::clone(&run);
     let ended = tokio::task::spawn_blocking(move || ending.end(Retry::default()))
         .await
@@ -490,17 +776,21 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<bool> {
             (false, None)
         }
     };
+    let usage = usage.as_ref().map(inference::Record::as_json).cloned();
     let state = json!({
         "schema": INFERENCE_SCHEMA,
         "register": run.register_mode().as_str(),
         "run_api": run.has_run_api(),
         "ended": ended,
-        "usage": usage.as_ref().map(inference::Record::as_json),
+        "usage": usage,
     });
     let path = work.join(INFERENCE_FILE);
     std::fs::write(&path, format!("{state}\n"))
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok(ended || !run.has_run_api())
+    Ok(Settled {
+        dead: ended || !run.has_run_api(),
+        usage,
+    })
 }
 
 /// Runs PLAN, and leaves nothing of it behind: no process of the sandbox
@@ -512,6 +802,9 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     let mut signals = Signals::new()?;
     let plan = Arc::new(plan);
     let shared = Arc::new(Shared::default());
+    // The egress proxy's log from here on is this run's: what is in it
+    // already is `sandbox check`'s probes.
+    let egress_from = egress::offset(Path::new(egress::ACCESS_LOG));
 
     // Its steps block (commands, requests), so it has a thread, which a
     // signal cannot cancel: it ends when its commands are killed, or at
@@ -527,16 +820,29 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Err(name) => Stage::Interrupted(name),
         Ok(Err(panic)) => Stage::Broken(anyhow::Error::from(panic).context("preparing the run")),
         Ok(Ok(Err(err))) => Stage::NotStarted(err),
-        Ok(Ok(Ok(prepared))) => match plan.session(prepared, shared.run().as_ref()) {
-            Err(err) => Stage::Broken(err),
-            // Dropped on a signal, the session kills the wrapper it
-            // started; the agent itself is the sandbox user's, below.
-            Ok((options, _counter)) => match signals.or(session::run(options)).await {
-                Err(name) => Stage::Interrupted(name),
-                Ok(Err(err)) => Stage::Broken(err),
-                Ok(Ok(result)) => Stage::Ended(Box::new(result)),
-            },
-        },
+        Ok(Ok(Ok(prepared))) => {
+            let (checkout, model) = (prepared.checkout.clone(), prepared.model.clone());
+            match plan.session(prepared, shared.run().as_ref()) {
+                Err(err) => Stage::Broken(err),
+                // Dropped on a signal, the session kills the wrapper it
+                // started; the agent itself is the sandbox user's, below.
+                Ok((options, _counter, redactor)) => {
+                    let started = chrono::Utc::now();
+                    match signals.or(session::run(options)).await {
+                        Err(name) => Stage::Interrupted(name),
+                        Ok(Err(err)) => Stage::Broken(err),
+                        Ok(Ok(result)) => Stage::Ended(Session {
+                            result: Box::new(result),
+                            checkout,
+                            model,
+                            redactor,
+                            started,
+                            finished: chrono::Utc::now(),
+                        }),
+                    }
+                }
+            }
+        }
     };
 
     // The session stopped the sandbox user if it returned a result. In
@@ -564,6 +870,54 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         }
     }
 
+    // The results of a session that ended are taken now: the agent is
+    // gone and the run's usage is final. Git runs in the agent's
+    // checkout for it, as the sandbox user, whose processes are stopped
+    // once more afterwards.
+    let (stage, published) = match stage {
+        Stage::Ended(session) => {
+            let standing = match &settled {
+                None => Settled::NO_RUN,
+                Some(Ok(settled)) => settled.clone(),
+                Some(Err(_)) => Settled {
+                    dead: false,
+                    usage: None,
+                },
+            };
+            let exit = session.result.result.exit();
+            // On a thread, which a signal cannot cancel: as with the
+            // preparation, it is told to stop, what it was running is
+            // killed, and it is waited for.
+            let stopped = Arc::new(AtomicBool::new(false));
+            let mut finishing = tokio::task::spawn_blocking({
+                let (plan, stopped) = (Arc::clone(&plan), Arc::clone(&stopped));
+                move || plan.finish(&session, egress_from, &standing, &stopped)
+            });
+            let finished = signals.or(&mut finishing).await;
+            if finished.is_err() {
+                stopped.store(true, Ordering::SeqCst);
+            }
+            reaped = reaped.and(user.reap().await);
+            if finished.is_err() {
+                let _ = tokio::time::timeout(STOP_GRACE, &mut finishing).await;
+                reaped = reaped.and(user.reap().await);
+                // It may have been moving the results out as it was
+                // told: a run that was stopped publishes none.
+                Staging::withdraw(&plan.out);
+            }
+            match finished {
+                Err(name) => (Stage::Interrupted(name), None),
+                Ok(done) => {
+                    let done = done.unwrap_or_else(|panic| {
+                        Err(anyhow::Error::from(panic).context("taking the run's results"))
+                    });
+                    (Stage::Finished(exit), Some(done))
+                }
+            }
+        }
+        other => (other, None),
+    };
+
     // However the run ended, what the cleaning up left is said.
     let mut unclean = false;
     for err in [
@@ -576,7 +930,7 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         eprintln!("error: {err:#}");
         unclean = true;
     }
-    if matches!(settled, Some(Ok(false))) {
+    if matches!(&settled, Some(Ok(settled)) if !settled.dead) {
         eprintln!(
             "error: the run was not ended at the inference proxy: its token may still be live, \
              and nothing of this run may be uploaded"
@@ -591,13 +945,22 @@ async fn supervise(plan: Plan) -> Result<Exit> {
             eprintln!("error: stopped by {name}");
             Exit::Failure
         }
-        Stage::Ended(result) => result.result.exit(),
+        Stage::Finished(exit) => exit,
+        // Taken above: a session that ended is finished or interrupted.
+        Stage::Ended(_) => bail!("the session's results were not taken"),
         Stage::Broken(err) => return Err(err),
     };
     ensure!(
         !unclean,
         "the run could not be cleaned up after: see the errors above"
     );
+    if let Some(Err(err)) = published {
+        return Err(err.context(format!(
+            "nothing of this run may be uploaded, and nothing was left to upload (the agent's \
+             session itself ended with exit state {})",
+            exit.code()
+        )));
+    }
     Ok(exit)
 }
 
@@ -672,6 +1035,23 @@ mod tests {
                 }
                 (got, want) => panic!("{text}: got {got:?}, wanted {want:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn run_ids() {
+        for (id, ok) in [
+            (json!(37558571698u64), true),
+            (json!("a.b_c-1"), true),
+            (json!("a..b"), false),
+            (json!("a."), false),
+            (json!("a.lock"), false),
+            (json!("-a"), false),
+            (json!("a/b"), false),
+            (json!("x".repeat(MAX_RUN_ID_CHARS + 1)), false),
+            (json!(null), false),
+        ] {
+            assert_eq!(run_id(&json!({"run_id": id})).is_ok(), ok, "{id}");
         }
     }
 
