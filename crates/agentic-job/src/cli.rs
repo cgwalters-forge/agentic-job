@@ -27,6 +27,9 @@ pub enum Command {
     Run(run::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
+    /// Become the agent, as the sandbox user: what `run` has the session start
+    #[command(name = run::launch::COMMAND, hide = true)]
+    LaunchAgent(run::launch::Args),
 }
 
 impl Command {
@@ -36,6 +39,7 @@ impl Command {
             Self::Sandbox(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::Check(args) => check::run(args),
+            Self::LaunchAgent(args) => run::launch::run(args),
         }
     }
 }
@@ -148,6 +152,7 @@ mod tests {
             &["run", "--policy", "p.json"],
             &["check", "--outputs", "dir"],
             &["check", "--policy", "p.json", "--outputs", "dir"],
+            &["launch-agent"],
         ];
         for args in cases {
             let parsed = Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args));

@@ -2,9 +2,11 @@
 //! the sandbox, drive it within the limits, and take the hand-back.
 //! Steps 6a and 6b of docs/plan.md, on top of [`crate::session`].
 
+pub mod agent;
 pub mod clone;
 pub mod enter;
 pub mod inference;
+pub mod launch;
 
 use std::path::PathBuf;
 
