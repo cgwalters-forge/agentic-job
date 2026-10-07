@@ -53,85 +53,63 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
-    use crate::exit::NotImplemented;
 
     #[test]
     fn definition_is_consistent() {
         Cli::command().debug_assert();
     }
 
-    /// The command lines of the plan's table, and the name each stub
-    /// reports; none for a command that is implemented.
-    const PLAN: &[(&[&str], Option<&str>)] = &[
-        (
-            &[
-                "policy",
-                "--allow",
-                "allow.toml",
-                "--repo",
-                "owner/name",
-                "--clone-url",
-                "https://example.org/owner/name",
-                "--base",
-                "main",
-                "--kind",
-                "branch",
-                "--outputs",
-                "create_pull_request,noop",
-                "--max-outputs",
-                "2",
-            ],
-            None,
-        ),
-        (&["sandbox", "setup", "--config", "c.toml"], None),
-        (&["sandbox", "check"], None),
-        (
-            &[
-                "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out",
-                "out",
-            ],
-            None,
-        ),
-        (
-            &[
-                "check",
-                "--policy",
-                "p.json",
-                "--outputs",
-                "dir",
-                "--collected",
-                "agent_output.json",
-            ],
-            None,
-        ),
-        (
-            &[
-                "check",
-                "--policy",
-                "p.json",
-                "--outputs",
-                "dir",
-                "--collected",
-                "agent_output.json",
-                "--report",
-                "r.json",
-            ],
-            None,
-        ),
+    /// The command lines of the plan's table.
+    const PLAN: &[&[&str]] = &[
+        &[
+            "policy",
+            "--allow",
+            "allow.toml",
+            "--repo",
+            "owner/name",
+            "--clone-url",
+            "https://example.org/owner/name",
+            "--base",
+            "main",
+            "--kind",
+            "branch",
+            "--outputs",
+            "create_pull_request,noop",
+            "--max-outputs",
+            "2",
+        ],
+        &["sandbox", "setup", "--config", "c.toml"],
+        &["sandbox", "check"],
+        &[
+            "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out", "out",
+        ],
+        &[
+            "check",
+            "--policy",
+            "p.json",
+            "--outputs",
+            "dir",
+            "--collected",
+            "agent_output.json",
+        ],
+        &[
+            "check",
+            "--policy",
+            "p.json",
+            "--outputs",
+            "dir",
+            "--collected",
+            "agent_output.json",
+            "--report",
+            "r.json",
+        ],
     ];
 
     #[test]
-    fn plan_commands_parse_and_are_stubs() {
-        for (args, name) in PLAN {
-            let cli = Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args))
+    fn plan_commands_parse() {
+        for args in PLAN {
+            Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args))
                 .unwrap_or_else(|err| panic!("{args:?}: {err}"));
-            let Some(name) = name else { continue };
-            let err = cli.command.run().expect_err("stub succeeded");
-            assert_eq!(
-                err.downcast_ref::<NotImplemented>(),
-                Some(&NotImplemented(name)),
-                "{args:?}"
-            );
         }
     }
 
