@@ -184,11 +184,21 @@ jobs:
   # `sandbox check`, and then each probe again with its protection
   # removed, which must make that probe and no other fail.
   # ubuntu-26.04 has run0 (systemd 256 or later); ubuntu-24.04 does not.
+  #
+  # Every removal runs every probe, most of a minute each time, and one
+  # machine took 27 minutes over them all. So the removals are shared out
+  # over several machines, each of which sets the sandbox up for itself:
+  # what one removes must not be there for another's probes to find.
   sandbox:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
+      SHARDS: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -216,6 +226,7 @@ jobs:
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: https://oidc.invalid/stand-in
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stand-in-request-token-0123456789abcdef
+          AGENTIC_JOB_TEST_SHARD: ${{ matrix.shard }}/${{ env.SHARDS }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
   ci:

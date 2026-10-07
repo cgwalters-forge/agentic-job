@@ -8,6 +8,12 @@
 //! cargo test --test sandbox_host -- --ignored --nocapture
 //! ```
 //!
+//! Every case runs every probe, which takes most of a minute, so CI
+//! shares the cases out over several machines: with
+//! `AGENTIC_JOB_TEST_SHARD=I/N` this runs every Nth case, starting at
+//! the Ith (counted from 0). Each machine still checks that all probes
+//! pass before anything is removed and after everything is put back.
+//!
 //! The run-token probes want the job's identity-token request variables
 //! in the environment (any values: the probes only look for them where
 //! they must not be).
@@ -64,6 +70,23 @@ const READABLE_TOKEN: &str = "/etc/agentic-job-test-token";
 
 /// The variable whose value the job must keep from the sandbox user.
 const REQUEST_TOKEN_VAR: &str = "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
+
+/// Which of the cases this machine runs: `I/N`, see the top of the file.
+const SHARD_VAR: &str = "AGENTIC_JOB_TEST_SHARD";
+
+/// The shard `AGENTIC_JOB_TEST_SHARD` names, as (index, count); every
+/// case when it is not set. A value that is not `I/N` with I below N is
+/// a mistake in the job, and running nothing for it would pass.
+fn shard() -> (usize, usize) {
+    let Ok(text) = std::env::var(SHARD_VAR) else {
+        return (0, 1);
+    };
+    let parsed = text
+        .split_once('/')
+        .and_then(|(index, count)| Some((index.parse().ok()?, count.parse().ok()?)))
+        .filter(|(index, count)| index < count);
+    parsed.unwrap_or_else(|| panic!("{SHARD_VAR}={text:?} is not I/N with I below N"))
+}
 
 /// The working directory changed to one outside the runner's home; put
 /// back when dropped.
@@ -742,8 +765,13 @@ fn each_probe_fails_when_its_protection_is_removed() {
     assert!(stderr.contains("ran on this machine before"), "{stderr}");
 
     let fixture = TokenFixture::create(&runner, &entry);
+    let (index, count) = shard();
+    let mine = cases(&config, &runner, &entry, &fixture)
+        .into_iter()
+        .skip(index)
+        .step_by(count);
     let mut wrong = Vec::new();
-    for case in cases(&config, &runner, &entry, &fixture) {
+    for case in mine {
         println!("\n=== removed: {} ===", case.name);
         let token = match &case.token {
             Token::None => None,
