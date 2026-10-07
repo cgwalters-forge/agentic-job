@@ -309,8 +309,31 @@ what is in the pinned commit. The Tailscale action downloads the
 Tailscale release its pinned commit names as the default version, from
 Tailscale's package server, and checks it against a checksum it fetches
 from the same place. The build fetches crates as `Cargo.lock` pins them,
-and `sandbox setup` installs the egress proxy from `egress/requirements.txt`
-and the caller's packages with the image's package manager.
+and `sandbox setup` installs the caller's packages with the image's
+package manager.
+
+**The egress proxy's pins.** `sandbox setup` runs as root and takes two
+things from the network before the rules load, each pinned in this
+repository. mitmproxy and all it depends on are installed with `pip
+--require-hashes --only-binary :all:` from `egress/requirements.txt`,
+which names each at one version with the hashes of its files: pip
+installs no file that is not one of those, and builds nothing. That
+file is generated from `egress/requirements.in`, whose first lines give
+the command. The threat feed is fetched at one commit of its repository
+and must have the SHA-256 written beside it (`DENYLIST_COMMIT` and
+`DENYLIST_SHA256` in `crates/agentic-job/src/sandbox/egress.rs`): a
+file that is not that one stops the setup, and a fetch that fails
+leaves the proxy without a feed, with a warning, as before. To move the
+feed, take the newest commit of the file and the checksum of the file
+there, and put the two in a pull request:
+
+```sh
+commit=$(gh api 'repos/hagezi/dns-blocklists/commits?path=wildcard/tif.medium-onlydomains.txt&per_page=1' --jq '.[0].sha')
+curl -fsSL "https://raw.githubusercontent.com/hagezi/dns-blocklists/$commit/wildcard/tif.medium-onlydomains.txt" | sha256sum
+```
+
+The feed changes several times a day upstream, so a run blocks what was
+known when the pin was last moved, and nothing moves it by itself yet.
 
 **Steps that run after the agent.** In the agent job, as the runner's
 user: the second check that the repositories are public, the uploads,
