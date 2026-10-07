@@ -132,6 +132,12 @@ const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version
 /// Azure's WireServer, which serves the VM's configuration.
 const WIRESERVER_URL: &str = "http://168.63.129.16/?comp=versions";
 
+/// It is the VM's own host and answers at once where it answers at all.
+/// Where it does not (a hosted runner drops the packets), waiting out
+/// the whole of a request's time for the control added half a minute to
+/// every run.
+const WIRESERVER_CONNECT_SECONDS: &str = "5";
+
 /// With the egress proxy: a write it must refuse, on a host that would
 /// take it; a push; and a repository to fetch from.
 const WRITE_URL: &str = "https://example.com/";
@@ -1372,7 +1378,11 @@ impl Checker<'_> {
             format!("{user} can't reach a public DNS server ({PUBLIC_DNS}:{DNS_PORT})"),
             got,
         );
-        let wireserver = direct(&[WIRESERVER_URL]);
+        let wireserver = direct(&[
+            "--connect-timeout",
+            WIRESERVER_CONNECT_SECONDS,
+            WIRESERVER_URL,
+        ]);
         self.control_or_note("egress-wireserver-control", "the WireServer", &wireserver);
         let got = self.sandbox_succeeds(&wireserver)?;
         self.report.expect(
