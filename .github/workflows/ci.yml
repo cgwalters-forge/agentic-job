@@ -61,10 +61,24 @@ jobs:
     env:
       AGENTIC_JOB_TEST_SANDBOX_USER: agentic-job-test
       AGENTIC_JOB_TEST_FAKE_AGENT: /usr/local/bin/fake-agent
+      # gh-aw's collector, which the test of `run` puts between a run's
+      # hand-back and `check`, as a workflow does.
+      GH_AW_JS: ${{ github.workspace }}/gh-aw/actions/setup/js
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The commit safe-outputs-probe.yml takes gh-aw's setup action at.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          path: gh-aw
+          sparse-checkout: actions/setup/js
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked --bin fake-agent
       # The runner's home is closed to other users: the agent's program
@@ -77,8 +91,9 @@ jobs:
       # passes.
       - run: cargo test --locked --test session
       # `run` itself, with the fake agent as that user: the clone, the
-      # run's registration at a mock proxy, the session, and the end of
-      # the run.
+      # run's registration at a mock proxy, the session, the end of the
+      # run, the hand-back, and what is left to upload; and from there
+      # through gh-aw's collector into `check`.
       - run: cargo test --locked --test run
       # The probes of where the run token is, each failing when what it
       # names is broken.
