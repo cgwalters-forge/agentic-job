@@ -12,6 +12,7 @@ use crate::exit::Exit;
 pub mod check;
 pub mod egress;
 pub mod enter;
+pub mod exec;
 pub mod helper;
 pub mod host;
 pub mod local;
@@ -25,6 +26,8 @@ pub enum Command {
     Setup(setup::Args),
     /// Probe the sandbox as the sandbox user, each probe with a positive control
     Check(check::Args),
+    /// Run one command as the sandbox user, with none of this environment
+    Exec(exec::Args),
     /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
     #[command(hide = true)]
     ProbeLocal,
@@ -51,6 +54,7 @@ impl Command {
         match self {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
+            Self::Exec(args) => exec::run(args),
             Self::ProbeLocal => local::run(),
             Self::NftRules(args) => {
                 let direct = args

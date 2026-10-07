@@ -21,6 +21,9 @@ pub enum Exit {
     NotStarted,
     /// `run`: the timeout stopped the agent.
     Timeout,
+    /// `sandbox exec`: the exit status of the command it ran, which is
+    /// that command's to choose.
+    Command(u8),
 }
 
 impl Exit {
@@ -31,6 +34,7 @@ impl Exit {
             Self::Limit => 3,
             Self::NotStarted => 4,
             Self::Timeout => 124,
+            Self::Command(code) => code,
         }
     }
 }
