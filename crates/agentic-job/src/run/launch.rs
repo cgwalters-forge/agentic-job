@@ -17,11 +17,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::agent::{CLAUDE_ENV_FILE, CLAUDE_QUIET, Kind, OPENCODE_PROFILE_FILE};
 use crate::exit::Exit;
+use crate::session::agents;
 use crate::session::process::is_inherited_setting;
 
 /// The subcommand, as the session's command line names it.
@@ -52,9 +53,6 @@ const OPENCODE_SWITCHES: &[(&str, &str)] = &[
 ];
 /// Selects an opencode configuration merged over the global one.
 const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG";
-/// The agents' own programs, found on the sandbox user's PATH.
-const CLAUDE_PROGRAM: &[&str] = &["claude-agent-acp"];
-const OPENCODE_PROGRAM: &[&str] = &["opencode", "acp"];
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -85,13 +83,15 @@ fn claude_env(text: &str) -> Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
-/// The command line to become, of the agent's program and ARGS.
-fn program(kind: Kind) -> Result<&'static [&'static str]> {
-    match kind {
-        Kind::Claude => Ok(CLAUDE_PROGRAM),
-        Kind::Opencode => Ok(OPENCODE_PROGRAM),
-        Kind::Fake => bail!("the fake agent is started as it is, without a launcher"),
-    }
+/// The agent's own program and its first arguments, found on the sandbox
+/// user's PATH: the command of its entry in the session's registry,
+/// which is the one place that names it.
+fn program(kind: Kind) -> Result<Vec<String>> {
+    ensure!(
+        kind != Kind::Fake,
+        "the fake agent is started as it is, without a launcher"
+    );
+    Ok(agents::builtin(kind.as_str())?.command)
 }
 
 /// The agent's environment: INHERITED without anything that selects an
