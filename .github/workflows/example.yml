@@ -1,0 +1,81 @@
+# A caller of the reusable workflow, as another repository would write
+# one: copy this file, the bounds file and the configuration file it
+# names, and change what the comments point at. Each input is described
+# where the workflow declares it, and docs/workflow.md says what a caller
+# has to provide.
+#
+# It runs the scripted agent, which needs no inference and no secret: the
+# target is cloned for it, and it tries what it must not be able to do,
+# changes one file and reports. The change comes back as the branch
+# `agent-run-RUNID` here, and as a draft pull request where the
+# repository lets Actions open one.
+name: example
+run-name: agent ${{ inputs.item }} ${{ inputs.repo }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      item:
+        description: Your name for this run (an issue, a board item)
+        type: string
+        default: example
+      repo:
+        description: The repository the agent works on, OWNER/NAME; public, one the bounds file allows, and without `output-repo` this repository itself
+        type: string
+        default: cgwalters-forge/agentic-job
+      task:
+        description: The task (public, like everything about a run)
+        type: string
+        required: true
+
+permissions: {}
+
+# One run at a time for each name.
+concurrency:
+  group: agent-${{ inputs.item }}
+
+jobs:
+  run:
+    # Another repository names the workflow by the commit it has read:
+    #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    # The binary is built from that same commit.
+    uses: ./.github/workflows/agentic-job.yml
+    permissions:
+      # The agent job asks for it: to announce the run to the inference
+      # proxy, and to join a tailnet.
+      id-token: write
+      # For the job's own token to apply the outputs here. With
+      # `apply-environment` these are `contents: read` and nothing more:
+      # the environment's token does the writing.
+      contents: write
+      issues: write
+      pull-requests: write
+    with:
+      id: ${{ inputs.item }}
+      task: ${{ inputs.task }}
+      repo: ${{ inputs.repo }}
+      outputs: create_pull_request,noop
+      # What a run started from this repository may ask for at all.
+      allow: .github/agentic-job/allow.toml
+      # What the runner image needs stopped and allowed, and who the
+      # commit is by. This one is for GitHub's ubuntu-26.04.
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      timeout: "10"
+      budget: "100"
+      # Nothing counts model requests without an inference proxy, and a
+      # cap that nothing counts is refused.
+      max-requests: "0"
+      # For claude or opencode, the proxy and how the run proves itself:
+      #   agent: claude
+      #   agent-runner: '["self-hosted", "my-label"]'
+      #   inference-url: ${{ vars.INFERENCE_URL }}
+      #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      #   max-requests: "150"
+      # To apply with a token of your own, from an environment of this
+      # repository that holds the secret AGENTIC_JOB_APPLY_TOKEN:
+      #   output-repo: OWNER/FORK
+      #   apply-environment: agent-apply
+      # Without one: this organization keeps Actions from opening pull
+      # requests, so the pushed branch is the result.
+      refused-pull-request: branch
