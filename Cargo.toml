@@ -22,8 +22,12 @@ rustix = { version = "1", features = ["fs", "net", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1"
+# The run API of the inference proxy, and the CI system's identity token,
+# which is fetched over TLS. Blocking, and far smaller than a client on
+# hyper; rustls with ring builds for musl with a C compiler alone.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
