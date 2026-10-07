@@ -184,11 +184,14 @@ user cannot obtain. `plain` sends the run's name and no proof, and
 both have to be chosen by name. The proxy speaks
 praxis-credential-broker's run API. A proxy on a tailnet is reached by
 joining it (`tailscale-oauth-client-id`, `tailscale-audience`,
-`tailscale-tags`), and its address goes into `[egress] direct` of the
-configuration file so that the run token never crosses the egress
-proxy. The agent job refuses an address on the tailnet that is not
-listed there before it sets the sandbox up, since the agent could not
-reach it.
+`tailscale-tags`). When the inference URL is an HTTP(S) IPv4 literal in
+100.64.0.0/10, `agentic-job config` defaults `[egress] direct` to that URL
+so that the run token never crosses the egress proxy. An explicit `direct`
+list in the configuration file (even an empty one), or supplied with
+`--list egress.direct=...`, takes precedence; other addresses are not
+added automatically. The agent job refuses an address on the tailnet
+that is not listed there before it sets the sandbox up, since the agent
+could not reach it.
 
 What the operator of a praxis-credential-broker has to turn on for a
 run of this workflow to be admitted is written up, with what each

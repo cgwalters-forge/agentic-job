@@ -24,6 +24,7 @@ use toml::{Table, Value};
 
 use super::Config;
 use crate::exit::Exit;
+use crate::sandbox::network::Direct;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -167,6 +168,28 @@ fn compose(args: &Args) -> Result<String> {
             }
         }
     }
+    // Default only an absent key: an explicit list (even an empty one)
+    // is the caller's network policy, not ours to expand.
+    let direct_is_set = table
+        .get("egress")
+        .and_then(Value::as_table)
+        .is_some_and(|egress| egress.contains_key("direct"));
+    if !direct_is_set {
+        let url = table
+            .get("inference")
+            .and_then(Value::as_table)
+            .and_then(|inference| inference.get("url"))
+            .and_then(Value::as_str)
+            .filter(|url| Direct::parse(url).is_ok())
+            .map(str::to_owned);
+        if let Some(url) = url {
+            set(
+                &mut table,
+                &["egress".into(), "direct".into()],
+                Value::Array(vec![Value::String(url)]),
+            )?;
+        }
+    }
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
     let config = Config::parse(&text)?;
@@ -251,6 +274,83 @@ mod tests {
         assert_eq!(config.limits.timeout_minutes, 75);
         assert_eq!(config.limits.budget, 500);
         assert_eq!(config.setup.packages, ["just", "gcc-c++", "jq"]);
+    }
+
+    /// Only an address `egress.direct` takes is implied: the edges of
+    /// the tailnet's range, and nothing outside it or by name.
+    #[test]
+    fn tailnet_inference_defaults_to_direct() {
+        for (url, direct) in [
+            ("http://100.64.0.0:18080/v1", true),
+            ("https://100.127.255.255", true),
+            ("https://proxy.example", false),
+            ("http://100.63.255.255:18080", false),
+            ("http://100.128.0.0:18080", false),
+            ("http://127.0.0.1:18080", false),
+            ("http://[fd7a:115c:a1e0::1]:18080", false),
+        ] {
+            let setting = format!("inference.url={url}");
+            let config = composed(&args(
+                None,
+                &[RUN[0], &setting, "inference.register=plain"],
+                LIMITS,
+                &[],
+            ));
+            let expected: &[&str] = if direct { &[url] } else { &[] };
+            assert_eq!(config.egress.direct, expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn explicit_direct_policy_is_preserved() {
+        for policy in ["[]", "[\"http://100.64.0.2:18080\"]"] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            write!(
+                file,
+                "[egress]\ndirect = {policy}\n[inference]\nurl = \"http://100.64.0.1:18080\"\nregister = \"plain\"\n"
+            )
+            .unwrap();
+            let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
+            assert!(!config.egress.direct.contains(&config.inference.url));
+            let config = composed(&args(
+                file.path().to_str(),
+                RUN,
+                LIMITS,
+                &["egress.direct=http://100.64.0.3:18080"],
+            ));
+            assert_eq!(config.egress.direct, ["http://100.64.0.3:18080"]);
+        }
+    }
+
+    #[test]
+    fn file_inference_defaults_to_direct() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "[inference]\nurl = \"http://100.64.0.1:18080\"\nregister = \"plain\"\n"
+        )
+        .unwrap();
+        let config = composed(&args(file.path().to_str(), RUN, LIMITS, &[]));
+        assert_eq!(config.egress.direct, ["http://100.64.0.1:18080"]);
+    }
+
+    #[test]
+    fn real_agent_can_reach_default_but_not_override_explicit_policy() {
+        let strings = [
+            "agent.name=claude",
+            "inference.url=http://100.64.0.1:18080",
+            "inference.register=plain",
+        ];
+        let config = composed(&args(None, &strings, LIMITS, &[]));
+        assert_eq!(config.egress.direct, ["http://100.64.0.1:18080"]);
+        let err = compose(&args(
+            None,
+            &strings,
+            LIMITS,
+            &["egress.direct=http://100.64.0.2:18080"],
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("add \"http://100.64.0.1:18080\""));
     }
 
     /// A setting replaces the file's key and leaves the rest; an empty
