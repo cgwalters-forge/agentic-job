@@ -390,11 +390,16 @@ impl Setup {
     }
 }
 
-/// The hand-back commit. Step 6b.
+/// The commit a run's change is handed back as. Step 6b;
+/// `run::handback` checks it.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Commit {
+    /// Who the commit is by, as `Name <address>`. Without it,
+    /// `agent <agent@localhost>`, as in the old tree.
     pub author: Option<String>,
+    /// Lines put at the end of the commit's message, each `Key: value`:
+    /// `Generated-by: AI`, for one.
     pub trailers: Vec<String>,
 }
 
