@@ -1,0 +1,207 @@
+# Proves that gh-aw's own collector and handlers can be driven from a
+# workflow gh-aw did not generate, on the safe-outputs artifact of a real
+# run (safe-outputs/fixtures/, since artifacts expire). It is the shape the
+# check and apply jobs of the reusable workflow take.
+#
+# What it makes is scratch: it deletes every branch under probe/ and closes
+# the pull request and the issue it opened. Where Actions may not open pull
+# requests, the run shows that refusal and still passes: the branch is the
+# pull request's, pushed with the hand-back's author. gh-aw then leaves an
+# issue saying so, which stays, closed, and a label for it.
+name: safe-outputs probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: "Which run's safe outputs to apply"
+        type: choice
+        options: [create-pull-request, add-comment]
+        default: create-pull-request
+
+permissions: {}
+
+# The scratch branch has a fixed name, so two runs would collide.
+concurrency:
+  group: ${{ github.workflow }}
+
+env:
+  FIXTURE: safe-outputs/fixtures/${{ inputs.fixture }}
+  # Where gh-aw's scripts read and write a run's files; fixed in its
+  # constants.cjs.
+  GH_AW_TMP: /tmp/gh-aw
+  SCRATCH_PREFIX: probe/
+  # The author a hand-back's change has, which the pushed commit must keep.
+  HANDBACK_AUTHOR: agent <agent@localhost>
+
+jobs:
+  # What the check job does before `agentic-job check`: gh-aw's ingestion,
+  # which validates each output against its type's rules, enforces the
+  # counts of config.json and sanitizes the text.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The destination is the action's default, written out because the
+      # steps below name it. The action empties and recreates /tmp/gh-aw,
+      # so it comes before anything is put there. ci.yml checks
+      # validation.json against this same commit.
+      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - name: Ingest the outputs with gh-aw's collector
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_SAFE_OUTPUTS: ${{ github.workspace }}/${{ env.FIXTURE }}/outputs.jsonl
+          GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ github.workspace }}/${{ env.FIXTURE }}/config.json
+          GH_AW_VALIDATION_CONFIG_PATH: ${{ github.workspace }}/safe-outputs/validation.json
+        with:
+          script: |
+            const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+            require(`${dir}/setup_globals.cjs`).setupGlobals(core, github, context, exec, io, getOctokit);
+            await require(`${dir}/collect_ndjson_output.cjs`).main();
+      # The collector reports what it refused in its result and succeeds.
+      - name: The collector refused nothing
+        run: jq -e '.errors == [] and (.items | length) > 0' "$GH_AW_TMP/agent_output.json"
+      # The handlers look for a pull request's patch beside the ingested
+      # outputs, under the name gh-aw derives from the branch.
+      - name: Put the patch and the configuration beside the ingested outputs
+        run: find "$FIXTURE" \( -name 'aw-*.patch' -o -name config.json \) -exec cp -t "$GH_AW_TMP" {} +
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checked-outputs
+          path: |
+            ${{ env.GH_AW_TMP }}/agent_output.json
+            ${{ env.GH_AW_TMP }}/config.json
+            ${{ env.GH_AW_TMP }}/aw-*.patch
+          if-no-files-found: error
+
+  # The only job with a credential that can write. It runs gh-aw's pinned
+  # handlers on the checked outputs and nothing from the repository's
+  # branch but this file.
+  apply:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the pull request's branch
+      issues: write # add_comment, and the scratch issue it is made on
+      pull-requests: write # create_pull_request
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # The repository the outputs go to, at the branch a pull request is
+      # for. The handlers push with this checkout's credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: true
+      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.check.outputs.artifact-id }}
+          path: ${{ env.GH_AW_TMP }}
+      # `git am` keeps the patch's author and needs a committer.
+      - name: Set the committer
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Open a scratch issue for the comment
+        id: issue
+        if: ${{ inputs.fixture == 'add-comment' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh issue create --title "Scratch issue of safe-outputs probe run $GITHUB_RUN_ID" --body 'Closed by the run that opened it.')
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+      # The handlers take the same configuration as the collector, with how
+      # to apply added: an unsigned push keeps the author (a signed one is
+      # made through the API, as the token's owner), a pull request that
+      # cannot be opened is not to become an issue, and the comment goes to
+      # the scratch issue, not to the issue the old run named.
+      - name: Write the handlers' configuration
+        id: config
+        env:
+          ISSUE: ${{ steps.issue.outputs.number }}
+          BASE: ${{ github.event.repository.default_branch }}
+          PULL_REQUEST: >-
+            {"signed_commits": false, "fallback_as_issue": false,
+             "preserve_branch_name": true}
+        run: |
+          json=$(jq -c --arg issue "$ISSUE" --arg base "$BASE" --arg prefix "$SCRATCH_PREFIX" --argjson pr "$PULL_REQUEST" '
+            (select(has("create_pull_request")).create_pull_request) += $pr + {base_branch: $base, branch_prefix: $prefix}
+            | (select(has("add_comment")).add_comment.target) = $issue
+          ' "$GH_AW_TMP/config.json")
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+      - name: Apply the outputs with gh-aw's handlers
+        id: apply
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/agent_output.json
+          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: ${{ steps.config.outputs.json }}
+          GH_AW_WORKFLOW_ID: safe-outputs-probe
+          GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
+        with:
+          script: |
+            const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+            require(`${dir}/setup_globals.cjs`).setupGlobals(core, github, context, exec, io, getOctokit);
+            await require(`${dir}/safe_output_handler_manager.cjs`).main();
+      # One line for each thing the handlers made.
+      - name: Show what the handlers made
+        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        run: cat "$GH_AW_TMP/safe-output-items.jsonl"
+      - name: The pushed commit keeps the hand-back's author
+        if: ${{ inputs.fixture == 'create-pull-request' }}
+        env:
+          BASE: origin/${{ github.event.repository.default_branch }}
+          FORMAT: "%H%n author %an <%ae>%n committer %cn <%ce>"
+        run: |
+          git fetch origin "+refs/heads/$SCRATCH_PREFIX*:refs/remotes/scratch/*"
+          git log --format="$FORMAT" --remotes=scratch --not "$BASE" | tee "$GITHUB_STEP_SUMMARY"
+          test "$(git log --format='%an <%ae>' --remotes=scratch --not "$BASE")" = "$HANDBACK_AUTHOR"
+      # When Actions may not open pull requests, the handlers say so in an
+      # issue and report success, whatever fallback_as_issue is; so a
+      # caller has to look at what was made, as this does.
+      - name: A draft pull request, or the refusal of the setting that keeps Actions from opening one
+        if: ${{ inputs.fixture == 'create-pull-request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.apply.outputs.created_pr_number }}
+          REFUSAL: GitHub Actions is not permitted to create or approve pull requests
+        run: |
+          if [ -n "$PR" ]; then
+            gh pr view "$PR" --json isDraft,headRefName,url | tee "$GITHUB_STEP_SUMMARY" | jq -e .isDraft
+          else
+            gh issue view "$(jq -r .number "$GH_AW_TMP/safe-output-items.jsonl")" --json body --jq .body | grep -F "$REFUSAL"
+            echo "::notice::create_pull_request pushed its branch and stopped at: $REFUSAL"
+          fi
+      - name: The comment is on the scratch issue
+        if: ${{ inputs.fixture == 'add-comment' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+        run: |
+          first_line=$(jq -r '.items[0].body' "$GH_AW_TMP/agent_output.json" | head -n 1)
+          gh issue view "$ISSUE" --json comments --jq '.comments[] | .url, .body' | tee "$GITHUB_STEP_SUMMARY" | grep -xF "$first_line"
+      # Closes pull requests too: to the API they are issues. The branch
+      # goes last, so that failing to delete it leaves nothing open.
+      - name: Close what was opened and remove the scratch branch
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+          MADE: ${{ env.GH_AW_TMP }}/safe-output-items.jsonl
+        run: |
+          { echo "$ISSUE"; [ ! -e "$MADE" ] || jq -r 'select(.type == "create_pull_request").number' "$MADE"; } |
+            xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url
+          git ls-remote origin "refs/heads/$SCRATCH_PREFIX*" | cut -f2 | xargs -r git push origin --delete
