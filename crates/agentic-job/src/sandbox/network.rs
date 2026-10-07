@@ -49,7 +49,7 @@ const TAILNET_FIRST_OCTET: u8 = 100;
 
 const TAILNET_SECOND_OCTET: std::ops::RangeInclusive<u8> = 64..=127;
 
-const DNS_PORT: u16 = 53;
+pub const DNS_PORT: u16 = 53;
 
 /// Azure's WireServer, which serves the VM's configuration.
 const WIRESERVER: &str = "168.63.129.16";
