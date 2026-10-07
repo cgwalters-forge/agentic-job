@@ -86,7 +86,7 @@ mod tests {
                 "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out",
                 "out",
             ],
-            Some("run"),
+            None,
         ),
         (
             &[
