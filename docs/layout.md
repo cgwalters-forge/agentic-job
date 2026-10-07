@@ -25,7 +25,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `redact.rs` | 4 | secret-shaped strings; used by `check` and by `run` |
 | `files.rs` | 4 | reading a file someone else wrote: no link followed, a size cap; used by `check`, `redact` and `run` |
 | `sandbox/setup.rs` | 5 | `sandbox setup` |
-| `sandbox/check/` | 5 | `sandbox check`; its probes are a function `run` calls again ([what they prove](sandbox-check.md)) |
+| `sandbox/check/` | 5 | `sandbox check`; its probes are a function `run` calls again ([what they prove](sandbox-check.md)); `setup` and `check` together are [the step any job can run first](secure-host.md) |
 | `sandbox/enter.rs` | 5 | running a command as the sandbox user with `run0`; `run` starts the agent through it |
 | `sandbox/helper.rs`, `sandbox/root.rs` | 5 | `helper`, the privileged operations the runner's user keeps after setup, as root through its one sudo rule; and how the runner's user asks for each (the helper, or sudo itself where setup never ran) |
 | `sandbox/host.rs`, `sandbox/local.rs` | 5 | users and programs of the host; the listeners a user can connect to |

@@ -250,22 +250,42 @@ jobs:
       - run: cargo build --locked --tests
       # What the probes try must be there to be refused.
       - run: sudo apt-get update -q
-      - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo
+      - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo socat
       - name: Setup refuses a machine that is not fresh
         run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
-      # For whoever has to say why a local-sockets probe failed.
-      - name: What listens on this runner
+      # For whoever has to say why a local-sockets probe failed, and what
+      # the runner's user is before setup takes its root away.
+      - name: What listens on this runner, and what its user is
         run: |
           systemctl list-sockets --no-pager --full
           sudo ss -xlnpH
           sudo ss -tlnpH
+          id; sudo -n -l; sudo ls -la /etc/sudoers.d; cat /proc/self/cgroup; cat /sys/kernel/security/lsm; echo
+          ps -eo pid,user,comm,cgroup --no-headers | grep -F "$(cut -d: -f3 /proc/self/cgroup)" || true
+      # Setup takes root away from the runner's user, which the test below
+      # runs as, and the test puts each protection back as root: a shell
+      # behind a socket only this user's group may connect to, started as
+      # a service of its own before setup. It is this test's and nothing
+      # a job should have (docs/sandbox-check.md says what it stands for).
+      - name: Start the root service the test puts protections back through
+        run: |
+          sudo systemd-run --unit=agentic-job-test-root --quiet \
+            socat "UNIX-LISTEN:/run/agentic-job-test-root.sock,fork,unlink-early,mode=0660,user=root,group=$(id -gn)" EXEC:/bin/sh,stderr
+          for i in 1 2 3 4 5; do test -S /run/agentic-job-test-root.sock && break; sleep 1; done
+          test "$(printf 'id -u; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = 0
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
       # here the feed has to load.
       - shell: bash
         run: sudo target/debug/agentic-job sandbox setup --config "$CONFIG" | tee /dev/stderr | grep -F 'Threat feed:'
+      # From here on this job's user has no sudo: root is the test's
+      # service, or the helper.
+      - name: The runner's user has no root after setup
+        run: |
+          if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
+          sudo -n -l
       - name: The setup script ran as the sandbox user
-        run: test "$(sudo cat /home/runner-sandbox/toolchain-installed-by)" = runner-sandbox
+        run: test "$(printf 'cat /home/runner-sandbox/toolchain-installed-by; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = runner-sandbox
       - run: target/debug/agentic-job sandbox check
       # Stand-ins for the variables of a job that may ask for an identity
       # token: the probes look for their values where they must not be.

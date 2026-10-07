@@ -8,7 +8,9 @@ probe which fails because a program is missing does not read as a
 protection that holds. A probe or a control that comes out wrong fails
 the check: exit state 1, and for `run`, 4.
 
-The host probes come first below, then the network's: the rules
+The host probes come first below, then those of the runner's own user,
+which setup has taken root from ([After setup, nothing has
+root](#after-setup-nothing-has-root)), then the network's: the rules
 `sandbox setup` loads and the egress proxy it starts.
 
 ## The probes
@@ -37,6 +39,118 @@ matches on them.
 | `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration must be its own, mode 600, in a directory of mode 700) | the configuration holds the token | `run` writes it so |
 | `token-files`, `token-processes` | find the token in any other file it can write, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
 | `token-container-subuid` | read the configuration from a rootless container as a subordinate uid | the container's root reads it | the modes above |
+
+## After setup, nothing has root
+
+Every step of the job after `sandbox setup` is secured, not only the
+agent: the supervisor (`sandbox check`, `run`), the uploads, the
+actions' own cleanup steps and the runner's. On the runners this is
+built for, the runner's user has passwordless sudo, so a flaw in any of
+those (a supervisor that reads the agent's files wrongly, an action
+that follows a link the agent planted) would hand root to the agent.
+Setup is the last thing that has root. It ends by taking it away from
+the runner's user, and proves that it did. [secure-host.md](secure-host.md)
+says how a job that runs no agent uses this step on its own.
+
+**What the lock closes.** sudo: a rule read last denies the runner's
+user everything, and one rule after it grants `/usr/local/libexec/agentic-job
+helper *` as root without a password. `sudo -l` still lists the image's
+own grant before them (it lists every rule that matches); what counts
+is the last, so the probe requires the listing to end with those two
+and `sudo -l /usr/bin/true` to refuse. Setup refuses a machine with a
+sudoers.d file that sudo would read after its own, and notes one whose
+nsswitch takes sudo rules from a directory service as well. polkit:
+the first rule read answers `NO` for the runner's user as for the
+sandbox user, which covers `pkexec`, `run0` and `systemctl start`.
+`su`: root's account is locked if it had no
+password; one it has is noted, since nothing here knows it. Groups: a
+process keeps the groups it started with, whatever the user database
+says later, so for each group of the runner's user that is root by
+another name the lock closes what the group leads to and the probe
+tries it: `docker`, `podman`, `lxd`, `incus`, `libvirt` (their daemons
+are stopped, sockets included), `disk` (the block devices lose group
+and other access), `shadow` (the password files are closed). `adm` and
+`systemd-journal` read the host's logs, which is not root; they are
+noted. Setuid: the walk that strips world write also lists the
+setuid-root programs, and one that no package owns loses the bit, as
+someone's own way to root; the distribution's (`sudo`, `su`, `pkexec`,
+`mount`) stay, each closed by its own policy or needing a password root
+does not have; file capabilities (`cap_setuid` on a program) are not
+looked for. On the hosted image the walk also finds, and strips, the
+setuid programs inside the container daemon's image layers under
+`/var/lib/containerd`, which are files of the host like any other. Root
+processes in the job's cgroup besides setup's own are listed, never
+killed: on the hosted runner the job shares its cgroup with the
+platform's own `provjobd`, which runs as root and is what runs the job.
+
+**The helper.** What a run still needs root for is small: enter the
+sandbox (`run0` as the sandbox user), stop that user's every process,
+read the egress proxy's log, and the controls of a few probes
+(`pkexec` as root, tailscaled's status as root, undoing a probe's
+linger or crontab). Three ways were weighed. A sudoers rule for fixed
+subcommands of a root-owned binary: the simplest, with sudo's own
+checks that the file is root's, and the binary's own validation as the
+boundary. A root service behind a socket with a peer-credential check:
+sounder in theory (the kernel says who is calling, no sudo involved),
+but a daemon for the job's length, a protocol, and passing the agent's
+standard streams across a socket. polkit rules for `run0`: polkit sees
+the unit and the verb, not the command, so a rule could not say "as the
+sandbox user only". The first was chosen. `agentic-job helper` is a
+hidden command of the binary; the sudo rule names the copy setup
+installed at `/usr/local/libexec/agentic-job`, and setup makes that
+path, the configuration's and the fixed PATH's directories root's alone
+(no group write but root's, no other write) or refuses. The interface is
+closed:
+no operation takes a path, a user or a command that root then acts on.
+The sandbox user comes from the root-owned configuration; `enter` runs
+the caller's command as that user, in a directory that must be under
+its home; the log read is of one fixed file from a byte offset; every
+program root runs is looked up once, on a fixed PATH whose directories
+must be root's alone, and runs with none of the caller's environment;
+the configuration must be root's alone too, and the proxy's log is
+opened without following a link and must be the proxy user's plain
+file. The `enter` command line is built
+from the configuration as before (`sandbox::enter`), and the helper
+becomes `run0` with the caller's sockets as its standard streams, so
+the session's wrapper is `sudo helper enter ... --` where it was `sudo
+run0 ... --`. On a host where setup never ran (the tests), the same
+operations go through sudo directly (`sandbox::root`).
+
+**The steps after setup.** In the reusable workflow every step of the
+agent job after setup is this repository's: `sandbox check`, the
+task's files, `run`, the public-repository check, three uploads and the
+result. None needs root; the uploads read only what `run` moved out
+(docs/run.md). Of the actions' post steps, `actions/checkout`'s cleans
+its own credentials as the runner's user, the artifact actions have
+none, and `tailscale/github-action`'s runs `sudo tailscale logout`,
+which now fails: the action logs a warning and goes on ("your ephemeral
+node will eventually be cleaned up by Tailscale"), which is what
+happens, since the node is ephemeral. The hosted runner's own
+completion needs no root. A self-hosted runner that is not ephemeral
+would keep a locked machine: `agent-runner` must be thrown away after
+the job, as docs/workflow.md requires. A caller who does not want this
+sets `sandbox.lock-runner = false`, and the docs say what that gives up.
+
+**Not covered.** A caller who writes their own job around the binary
+gets what setup did and no more: their steps after it run as the
+runner's user, now without root, but a step before setup runs with it,
+and nothing holds the caller to the order. That is what a compiler
+would add (docs/compiler.md): a fixed shape of job in which only the
+setup step has root. Protections that are per agent unit (a mount
+namespace, an AppArmor profile on the agent alone) do not satisfy
+this principle and are not used; the world-writable walk is host-wide,
+and a replacement must be too ([agentic-job#108](https://github.com/cgwalters-forge/agentic-job/issues/108)).
+
+### The runner's probes
+
+| Probe | The runner's user tries to | Control | What stops it |
+| --- | --- | --- | --- |
+| `runner-sudo`, `runner-sudo-list` | run `sudo -n true`; ask `sudo -l /usr/bin/true` whether it may | `sudo-control`: root runs the helper's `ping` for it | the deny rule |
+| `runner-sudo-rules` | (none: the rules `sudo -n -l` lists must end with the deny rule and the helper's) | the same | the two rules, read last |
+| `runner-pkexec`, `runner-run0` | run a command through `pkexec` from a shell; run `run0 true` | `polkit-control`: root runs pkexec through the helper | the polkit rule |
+| `runner-su` | become root with `su` | `su` runs at all | root's locked password, and no terminal to ask at |
+| `runner-group:GROUP` | for each group it is in that is root by another name: connect to the daemon's sockets (`docker`, `podman`, `lxd`, `incus`, `libvirt`), write a block device (`disk`), read `/etc/shadow` (`shadow`) | it connects to a socket opened for it | the daemon is stopped; the devices and files are closed |
+| `setuid-unowned` | (the sandbox user's search) find a setuid-root program no package owns | it finds `sudo` or `su` | setup took the bit off such programs |
 
 ## The network probes
 
@@ -143,7 +257,20 @@ at deny lists; makes a file in `/etc` world-writable; resets ptrace;
 starts a stopped unit; opens two listeners; and, for the run token,
 loosens the configuration's modes, leaves a copy in `/tmp`, puts the
 token on a command line, and puts the runner's copy where anyone reads
-it.
+it. For the runner's user it adds a sudoers rule that sorts after the
+deny rule, a polkit rule that grants it with the deny rule moved away,
+starts the daemon of a group it is in (`docker`, on the hosted image),
+and installs a setuid-root program no package owns.
+
+The test runs as the runner's user, which after setup has no root to
+put anything back with. So CI starts, before setup, a root shell behind
+a Unix socket that only that user's group may connect to
+(`systemd-run ... socat`), and the test sends its restorations there;
+where that socket is not there it uses sudo. The service stands for
+what the lock cannot close: a root process the image already runs that
+does as a local user says. The sandbox user cannot connect to it, which
+the `local-sockets` probe confirms by not reporting it, and nothing in
+a job should start one.
 
 `tests/sandbox_fresh.rs` runs before setup in the same job: setup
 refuses a user that exists, an image's user in a forbidden group, a

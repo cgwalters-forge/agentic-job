@@ -7,14 +7,16 @@
 //! runner images leave open to every local user, which starts to matter
 //! once something runs as a user other than the runner's.
 //!
-//! The runner user's own sudo is left as it is: the supervisor
-//! (`sandbox check`, `run`) runs as that user and needs it to enter the
-//! sandbox. Taking it away once the sandbox is up is a follow-up in
-//! docs/plan.md.
+//! Setup is the last thing that runs as root with the runner's user's own
+//! sudo. It ends by taking that away ([`lock_runner`]): every step after
+//! it, the supervisor (`sandbox check`, `run`) and the job's own, runs as
+//! an unprivileged user that has root do only what the helper allows
+//! ([`super::helper`]). docs/sandbox-check.md says what that closes and
+//! how the probes prove it.
 
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -24,7 +26,7 @@ use rustix::fs::Mode;
 
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
-use super::{egress, network};
+use super::{egress, helper, network};
 use crate::config::{self, Config, Sandbox};
 use crate::exit::Exit;
 use crate::run::agent::{self, Kind};
@@ -92,12 +94,123 @@ const SCHEDULERS: &[Scheduler] = &[
 /// Sticky world-writable directories, meant to stay that way.
 const SHARED_TMP: &[&str] = &["/tmp", "/var/tmp"];
 
+/// Where the walk over the filesystem leaves the setuid-root programs it
+/// passes: root's, in the configuration directory.
+const SETUID_LIST: &str = "/etc/agentic-job/setuid-root";
+
+/// Setuid-root programs every host this runs on has: the control of the
+/// probe that looks for ones no package owns.
+pub const SETUID_CONTROLS: &[&str] = &["/usr/bin/sudo", "/usr/bin/su", "/bin/su"];
+
+/// A group that is root by another name, through a daemon that does as
+/// its members ask or a device they may write. A process keeps the groups
+/// it started with whatever the user database says later, so what the
+/// group leads to is closed instead, and `sandbox check` tries it.
+#[derive(Debug)]
+pub struct RootGroup {
+    pub name: &'static str,
+    /// What membership opens, for the probe's words.
+    pub grants: &'static str,
+    /// The units stopped when the runner's user is in the group.
+    pub units: &'static [&'static str],
+    /// The sockets the daemon takes orders on, which the probe tries.
+    pub sockets: &'static [&'static str],
+}
+
+pub const DISK_GROUP: &str = "disk";
+
+pub const SHADOW_GROUP: &str = "shadow";
+
+pub const ROOT_GROUPS: &[RootGroup] = &[
+    RootGroup {
+        name: "docker",
+        grants: "the container daemon, which starts root containers",
+        units: &["docker.socket", "docker.service", "containerd.service"],
+        sockets: &["/var/run/docker.sock", "/run/containerd/containerd.sock"],
+    },
+    RootGroup {
+        name: "podman",
+        grants: "root's podman service",
+        units: &["podman.socket", "podman.service"],
+        sockets: &["/run/podman/podman.sock"],
+    },
+    RootGroup {
+        name: "lxd",
+        grants: "the LXD daemon, which starts privileged containers",
+        units: &[
+            "snap.lxd.daemon.unix.socket",
+            "snap.lxd.daemon.service",
+            "lxd.socket",
+            "lxd.service",
+        ],
+        sockets: &[
+            "/var/snap/lxd/common/lxd/unix.socket",
+            "/var/lib/lxd/unix.socket",
+        ],
+    },
+    RootGroup {
+        name: "incus",
+        grants: "the Incus daemon",
+        units: &["incus.socket", "incus.service"],
+        sockets: &["/var/lib/incus/unix.socket"],
+    },
+    RootGroup {
+        name: "incus-admin",
+        grants: "the Incus daemon",
+        units: &["incus.socket", "incus.service"],
+        sockets: &["/var/lib/incus/unix.socket"],
+    },
+    RootGroup {
+        name: "libvirt",
+        grants: "libvirt's system instance, which runs VMs as root",
+        units: &[
+            "libvirtd.socket",
+            "libvirtd.service",
+            "virtqemud.socket",
+            "virtqemud.service",
+        ],
+        sockets: &[
+            "/var/run/libvirt/libvirt-sock",
+            "/run/libvirt/virtqemud-sock",
+        ],
+    },
+    RootGroup {
+        name: DISK_GROUP,
+        grants: "the block devices, root's filesystem among them",
+        units: &[],
+        sockets: &[],
+    },
+    RootGroup {
+        name: SHADOW_GROUP,
+        grants: "the password hashes",
+        units: &[],
+        sockets: &[],
+    },
+];
+
+/// Groups that read the host's logs: a way to secrets others wrote
+/// there, not to root. Noted, not closed.
+pub const READ_ONLY_GROUPS: &[&str] = &["adm", "systemd-journal"];
+
+/// Where the block devices are, for the `disk` group's closure.
+const DEV: &str = "/dev";
+
+const SHADOW_FILES: &[&str] = &["/etc/shadow", "/etc/gshadow"];
+
+const NSSWITCH: &str = "/etc/nsswitch.conf";
+
+/// What `passwd -S` prints for an account with no password at all, on
+/// which `su` would ask nothing.
+const NO_PASSWORD: &str = "NP";
+
 /// Some images leave this group-writable, and ssh refuses to run with a
 /// group-writable included configuration: plain ssh and git over ssh then
 /// fail for every user but the one the image was built for.
 const SSH_CRYPTO_POLICY: &str = "/etc/crypto-policies/back-ends/openssh.config";
 
 const GROUP_WRITE: u32 = 0o020;
+
+const OTHER_WRITE: u32 = 0o002;
 
 /// The permission bits of a mode, without the file type.
 const MODE_BITS: u32 = 0o7777;
@@ -149,6 +262,12 @@ pub fn run(args: &Args) -> Result<Exit> {
     );
     // Root's umask is the caller's, and some images build with 000.
     rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
+    // Before anything else is decided: a machine that was set up before
+    // is refused whoever asks, and however.
+    ensure!(
+        !Path::new(CONFIG_DIR).exists(),
+        "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
+    );
     let runner = runner_user(&config)?;
     // Every refusal comes before the first change.
     let existing = preflight(&config, &runner)?;
@@ -178,11 +297,27 @@ pub fn run(args: &Args) -> Result<Exit> {
     close_private_dirs(&config, &runner)?;
     stop_services(&config.sandbox.stop_services)?;
     install_self()?;
+    // The helper's copy, the configuration it reads and the programs it
+    // runs are what the runner's one sudo rule gives root to: their
+    // directories are made root's alone first, or setup refuses.
+    for path in std::iter::once(SELF_COPY)
+        .chain(std::iter::once(CONFIG_DIR))
+        .chain(host::PATH_DIRS.iter().copied())
+        .chain(host::SBIN_DIRS.iter().copied())
+        .filter(|path| Path::new(path).exists())
+    {
+        make_roots_alone(Path::new(path))?;
+    }
     install_packages(&config.setup.packages)?;
     install_npm(&config.setup.npm)?;
     // After the packages: one of them may be what a rule is for (polkit,
-    // at), and a rule is written only for what is there.
-    deny_privileges(&sandbox.name)?;
+    // at), and a rule is written only for what is there. The runner's
+    // rules take effect now too, which nothing running needs: the job's
+    // step is waiting on this process, root already.
+    deny_privileges(
+        &sandbox.name,
+        config.sandbox.lock_runner.then_some(runner.name.as_str()),
+    )?;
     // The proxy first, since the rules name its uid; and both after the
     // installs, which root does on the open network.
     let proxy_uid = config
@@ -207,6 +342,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     }
     // After the installs, which are the last things to write as root.
     strip_world_write()?;
+    strip_unowned_setuid()?;
     fix_ssh_crypto_policy()?;
     restrict_ptrace()?;
     println!(
@@ -221,14 +357,23 @@ pub fn run(args: &Args) -> Result<Exit> {
         run_setup_script(&config, script)?;
     }
     write_managed_settings(&config)?;
-    // Last, so a setup that failed leaves nothing `sandbox check` and
-    // `run` would take for a finished one.
+    // Late, so a setup that failed leaves nothing `sandbox check` and
+    // `run` would take for a finished one; before the lock, whose proof
+    // runs the helper, which reads it.
     install_file(
         Path::new(config::ROOT_COPY),
         text.as_bytes(),
         MODE_FILE,
         None,
     )?;
+    if config.sandbox.lock_runner {
+        lock_runner(&runner)?;
+    } else {
+        println!(
+            "sandbox.lock-runner = false: {} keeps its sudo, and every step after this one has root",
+            runner.name
+        );
+    }
     Ok(Exit::Success)
 }
 
@@ -309,10 +454,6 @@ fn has_processes(uid: u32) -> Result<bool> {
 /// Returns the sandbox user if the image ships it and the configuration
 /// says so.
 fn preflight(config: &Config, runner: &User) -> Result<Option<User>> {
-    ensure!(
-        !Path::new(CONFIG_DIR).exists(),
-        "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
-    );
     let name = &config.sandbox.user;
     let Some(user) = User::lookup(name)? else {
         let home = home_base()?.join(name);
@@ -409,13 +550,39 @@ pub fn subuid_ranges(user: &User, subuid: &str) -> Result<Vec<String>> {
     Ok(ranges)
 }
 
-fn sudoers_deny(user: &str) -> String {
-    format!("{user} ALL=(ALL:ALL) !ALL\n")
+/// The sudoers rules: the sandbox user has nothing; the runner's user,
+/// when the machine is locked, nothing but the helper. The last matching
+/// rule wins, so the grant follows the denial.
+fn sudoers_rules(sandbox: &str, locked_runner: Option<&str>) -> String {
+    let mut rules = format!("{sandbox} ALL=(ALL:ALL) !ALL\n");
+    if let Some(runner) = locked_runner {
+        rules.push_str(&format!(
+            "{runner} ALL=(ALL:ALL) !ALL\n{runner} ALL=(root) NOPASSWD: {}\n",
+            helper::sudoers_command()
+        ));
+    }
+    rules
 }
 
-fn polkit_deny(user: &str) -> String {
+/// What `sudo -l` lists for the locked runner's user, and nothing else:
+/// the probe compares.
+pub fn runner_sudo_rules() -> Vec<String> {
+    vec![
+        "(ALL : ALL) !ALL".to_owned(),
+        format!("(root) NOPASSWD: {}", helper::sudoers_command()),
+    ]
+}
+
+/// One rule for every user named: polkit takes the first rule that
+/// answers.
+fn polkit_deny(users: &[&str]) -> String {
+    let test = users
+        .iter()
+        .map(|user| format!("subject.user == \"{user}\""))
+        .collect::<Vec<_>>()
+        .join(" || ");
     format!(
-        "polkit.addRule(function(action, subject) {{\n  if (subject.user == \"{user}\") return polkit.Result.NO;\n}});\n"
+        "polkit.addRule(function(action, subject) {{\n  if ({test}) return polkit.Result.NO;\n}});\n"
     )
 }
 
@@ -435,18 +602,20 @@ fn denial(text: &str, user: &str) -> Option<String> {
 
 /// Takes away the sandbox user's sudo, its polkit actions, and every way
 /// to leave a process behind for later: cron, at, and a lingering user
-/// manager.
-fn deny_privileges(user: &str) -> Result<()> {
+/// manager. With LOCKED_RUNNER, the runner's user's sudo (but for the
+/// helper) and polkit actions go too.
+fn deny_privileges(user: &str, locked_runner: Option<&str>) -> Result<()> {
     install_file(
         Path::new(SUDOERS_DENY),
-        sudoers_deny(user).as_bytes(),
+        sudoers_rules(user, locked_runner).as_bytes(),
         MODE_SUDOERS,
         Some(VISUDO_CHECK),
     )?;
     if Path::new(POLKIT_RULES_DIR).is_dir() {
+        let users: Vec<&str> = std::iter::once(user).chain(locked_runner).collect();
         install_file(
             Path::new(POLKIT_DENY),
-            polkit_deny(user).as_bytes(),
+            polkit_deny(&users).as_bytes(),
             MODE_FILE,
             None,
         )?;
@@ -577,14 +746,37 @@ pub fn world_writable_find(root: &str) -> Vec<String> {
         .collect()
 }
 
+/// `find` arguments that match the setuid-root programs under `root`, on
+/// that one filesystem.
+pub fn setuid_root_find(root: &str) -> Vec<String> {
+    [
+        root, "-xdev", "-type", "f", "-perm", "-4000", "-user", "root", "-print",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
 /// World-writable system files include ones root loads code from (a
 /// polkit rule, a unit): any user could make itself root through them.
-/// Some runner images are built with umask 000.
+/// Some runner images are built with umask 000. The same walk, the
+/// slowest thing setup does, writes down the setuid-root programs it
+/// passes for [`strip_unowned_setuid`].
 fn strip_world_write() -> Result<()> {
     let fixed = host::run(
         Command::new("find")
             .args(world_writable_find("/"))
-            .args(["-print", "-exec", "chmod", "o-w", "{}", "+"]),
+            .args(["-print", "-exec", "chmod", "o-w", "{}", "+"])
+            .args([
+                ",",
+                "-type",
+                "f",
+                "-perm",
+                "-4000",
+                "-user",
+                "root",
+                "-fprint",
+                SETUID_LIST,
+            ]),
     )?;
     let paths: Vec<&str> = fixed.lines().collect();
     if !paths.is_empty() {
@@ -596,6 +788,277 @@ fn strip_world_write() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether the host's package manager accounts for the file at PATH.
+pub fn package_owned(path: &str) -> bool {
+    let (query, path): (&[&str], String) = if host::has_program("dpkg-query") {
+        // dpkg-query takes a pattern: a path with a glob character in it
+        // is asked about as itself.
+        let escaped = path
+            .chars()
+            .flat_map(|c| {
+                if "*?[\\".contains(c) {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        (&["dpkg-query", "-S", "--"], escaped)
+    } else if host::has_program("rpm") {
+        (&["rpm", "-qf", "--"], path.to_owned())
+    } else {
+        // No way to tell: nothing is called unowned on such a host.
+        return true;
+    };
+    host::command(query).is_ok_and(|mut command| host::succeeds(command.arg(path)))
+}
+
+/// A setuid-root program that no package owns is someone's own way to
+/// root, kept for whoever knows of it: it loses the bit. The distribution's
+/// (sudo, su, pkexec, mount...) stay, each closed by its own policy or
+/// needing a password root does not have.
+fn strip_unowned_setuid() -> Result<()> {
+    let mut listed = match fs::read_to_string(SETUID_LIST) {
+        Ok(text) => text,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("reading {SETUID_LIST}")),
+    };
+    // The walk left the shared temporary directories out, as sticky ones
+    // meant to be world-writable; a setuid-root file there is as good a
+    // way in as anywhere.
+    for dir in SHARED_TMP.iter().filter(|dir| Path::new(dir).is_dir()) {
+        // Busy directories: a file that goes while the walk is on is no
+        // reason to fail it.
+        let mut args = setuid_root_find(dir);
+        args.insert(1, "-ignore_readdir_race".to_owned());
+        let mut find = Command::new("find");
+        find.args(args);
+        listed.push_str(&host::run(&mut find)?);
+        listed.push('\n');
+    }
+    let programs: Vec<&str> = listed.lines().filter(|line| !line.is_empty()).collect();
+    let unowned: Vec<&str> = programs
+        .iter()
+        .copied()
+        .filter(|path| !package_owned(path))
+        .collect();
+    if !unowned.is_empty() {
+        host::run(Command::new("chmod").args(["u-s", "--"]).args(&unowned))?;
+    }
+    println!(
+        "{} setuid-root programs, {} of them no package's: {}",
+        programs.len(),
+        unowned.len(),
+        if unowned.is_empty() {
+            "nothing to take the bit from".to_owned()
+        } else {
+            format!("took the bit from {}", unowned.join(", "))
+        }
+    );
+    Ok(())
+}
+
+/// The groups of USER, from the user database: the ones its running
+/// processes carry too.
+fn groups_of(user: &str) -> Result<Vec<String>> {
+    let listing = host::run(Command::new("id").args(["-Gn", "--", user]))?;
+    Ok(listing.split_whitespace().map(str::to_owned).collect())
+}
+
+/// `passwd -S` for USER: the account's status field, such as `NP`.
+fn password_status(user: &str) -> Result<String> {
+    let line = host::run(Command::new("passwd").args(["-S", "--", user]))?;
+    line.split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .with_context(|| format!("passwd -S printed {line:?} for {user}"))
+}
+
+/// Takes root away from the runner's user, whose sudo was all that let
+/// setup itself run: its sudoers deny rule and the helper's grant are in
+/// place already ([`deny_privileges`]); this closes what its groups lead
+/// to, makes sure `su` asks for a password nobody has, and proves it,
+/// as that user.
+fn lock_runner(runner: &User) -> Result<()> {
+    let groups = groups_of(&runner.name)?;
+    for group in ROOT_GROUPS
+        .iter()
+        .filter(|group| groups.iter().any(|name| name == group.name))
+    {
+        let units: Vec<String> = group.units.iter().map(|&unit| unit.to_owned()).collect();
+        if !units.is_empty() {
+            println!(
+                "{} is in {}, which leads to {}: stopping its daemon",
+                runner.name, group.name, group.grants
+            );
+            stop_services(&units)?;
+        }
+        if group.name == DISK_GROUP {
+            host::run(Command::new("find").args([
+                DEV, "-xdev", "-type", "b", "-exec", "chmod", "go-rw", "{}", "+",
+            ]))?;
+            println!(
+                "{} is in {DISK_GROUP}: block devices are root's alone now",
+                runner.name
+            );
+        }
+        if group.name == SHADOW_GROUP {
+            for file in SHADOW_FILES.iter().filter(|file| Path::new(file).exists()) {
+                fs::set_permissions(file, fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("closing {file}"))?;
+            }
+            println!(
+                "{} is in {SHADOW_GROUP}: the password files are root's alone now",
+                runner.name
+            );
+        }
+    }
+    helper::roots_alone(Path::new(SELF_COPY))?;
+    if let Some(sources) = sudoers_sources_besides_files()? {
+        println!(
+            "note: {NSSWITCH} takes sudo rules from {sources} after the files; a rule there for {} would win over the deny rule. The proof below is of this machine as it is",
+            runner.name
+        );
+    }
+    let after: Vec<String> = sudoers_after_ours()?;
+    ensure!(
+        after.is_empty(),
+        "{} sorts after {SUDOERS_DENY} in {}, and sudo would read it later: a rule there for {} would win. Remove it, or set sandbox.lock-runner = false",
+        after.join(", "),
+        Path::new(SUDOERS_DENY)
+            .parent()
+            .map(Path::display)
+            .map_or_else(String::new, |p| p.to_string()),
+        runner.name
+    );
+    match password_status("root")?.as_str() {
+        NO_PASSWORD => {
+            host::run(Command::new("passwd").args(["-l", "root"]))?;
+            println!("root had no password, on which su would have asked nothing: locked");
+        }
+        status if status.starts_with('P') => println!(
+            "note: root has a password ({status}); whoever knows it can become root with su"
+        ),
+        _ => {}
+    }
+    for root_process in root_processes_in_our_cgroup()? {
+        println!("note: a root process in this job's cgroup besides setup's own: {root_process}");
+    }
+    // The proof, as the runner's user: no sudo, then the helper.
+    let as_runner = |argv: &[&str]| -> Result<bool> {
+        Ok(host::succeeds(
+            Command::new("runuser")
+                .args(["-u", &runner.name, "--"])
+                .args(argv),
+        ))
+    };
+    ensure!(
+        !as_runner(&["sudo", "-n", "true"])?,
+        "{} still has sudo after the lock",
+        runner.name
+    );
+    ensure!(
+        as_runner(&["sudo", "-n", "--", SELF_COPY, helper::COMMAND, "ping"])?,
+        "{} cannot run the helper through sudo after the lock",
+        runner.name
+    );
+    let listing = host::run(Command::new("sudo").args(["-l", "-U", &runner.name]))?;
+    println!(
+        "{} has no root now but the helper ({SELF_COPY} {}); sudo lists:\n{listing}",
+        runner.name,
+        helper::COMMAND
+    );
+    Ok(())
+}
+
+/// Where sudo takes its rules from besides the files, as nsswitch.conf
+/// says (`sss` on hosts joined to a domain): `None` for nowhere.
+fn sudoers_sources_besides_files() -> Result<Option<String>> {
+    let text = match fs::read_to_string(NSSWITCH) {
+        Ok(text) => text,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("reading {NSSWITCH}")),
+    };
+    let others: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("sudoers:"))
+        .flat_map(str::split_whitespace)
+        .filter(|source| *source != "files" && !source.starts_with('['))
+        .collect();
+    Ok((!others.is_empty()).then(|| others.join(", ")))
+}
+
+/// The files of sudoers.d that sudo reads after ours (lexically later,
+/// and not skipped for a dot or a trailing tilde).
+fn sudoers_after_ours() -> Result<Vec<String>> {
+    let ours = Path::new(SUDOERS_DENY);
+    let (dir, name) = (
+        ours.parent().context("the sudoers rule has no directory")?,
+        ours.file_name().context("the sudoers rule has no name")?,
+    );
+    let mut after = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+        let entry = entry?;
+        let other = entry.file_name();
+        let text = other.to_string_lossy();
+        if other.as_os_str() > name && !text.contains('.') && !text.ends_with('~') {
+            after.push(entry.path().display().to_string());
+        }
+    }
+    after.sort();
+    Ok(after)
+}
+
+/// The processes running as root in the cgroup this one is in, but for
+/// this process and its ancestors (sudo): a root process the job started
+/// and left, which the runner's user may still be able to talk to.
+/// Listed, since what such a process does cannot be known from here.
+fn root_processes_in_our_cgroup() -> Result<Vec<String>> {
+    let cgroup = fs::read_to_string("/proc/self/cgroup").context("reading /proc/self/cgroup")?;
+    // cgroup v2: one line, `0::/path`.
+    let Some(path) = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(str::trim)
+    else {
+        return Ok(Vec::new());
+    };
+    let procs = fs::read_to_string(format!("/sys/fs/cgroup{path}/cgroup.procs"))
+        .with_context(|| format!("listing the processes of the cgroup {path}"))?;
+    let mut ancestors = std::collections::BTreeSet::new();
+    let mut pid = std::process::id();
+    while pid > 1 {
+        ancestors.insert(pid);
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        pid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .and_then(|ppid| ppid.trim().parse().ok())
+            .unwrap_or(0);
+    }
+    let mut found = Vec::new();
+    for pid in procs
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+    {
+        if ancestors.contains(&pid) {
+            continue;
+        }
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let uid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|uids| uids.split_whitespace().next())
+            .and_then(|uid| uid.parse::<u32>().ok());
+        if uid == Some(0) {
+            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            found.push(format!("{pid} {}", cmdline.trim()));
+        }
+    }
+    Ok(found)
 }
 
 fn fix_ssh_crypto_policy() -> Result<()> {
@@ -637,6 +1100,42 @@ fn stop_services(units: &[String]) -> Result<()> {
         println!("Stopped {}", names.join(", "));
     }
     Ok(())
+}
+
+/// Makes PATH and every directory above it root's alone, as the helper
+/// requires of what root runs or reads ([`helper::roots_alone`]): group
+/// write by a group other than root's goes (Debian's `staff` on
+/// `/usr/local`), as does other write; something not owned by root
+/// cannot be made right from here and refuses setup.
+fn make_roots_alone(path: &Path) -> Result<()> {
+    for prefix in path.ancestors() {
+        let meta = fs::symlink_metadata(prefix)
+            .with_context(|| format!("reading {}", prefix.display()))?;
+        ensure!(
+            meta.uid() == 0,
+            "{} is owned by uid {}, and the helper's {} must be root's alone: this image cannot be locked",
+            prefix.display(),
+            meta.uid(),
+            path.display()
+        );
+        if meta.is_symlink() {
+            continue;
+        }
+        let mode = meta.permissions().mode() & MODE_BITS;
+        let mut wanted = mode & !OTHER_WRITE;
+        if meta.gid() != 0 {
+            wanted &= !GROUP_WRITE;
+        }
+        if wanted != mode {
+            fs::set_permissions(prefix, fs::Permissions::from_mode(wanted))
+                .with_context(|| format!("setting the mode of {}", prefix.display()))?;
+            println!(
+                "Made {} root's alone (mode {mode:o} to {wanted:o})",
+                prefix.display()
+            );
+        }
+    }
+    helper::roots_alone(path)
 }
 
 fn install_self() -> Result<()> {
@@ -867,10 +1366,18 @@ mod tests {
 
     #[test]
     fn deny_files() {
-        assert_eq!(sudoers_deny("agent"), "agent ALL=(ALL:ALL) !ALL\n");
+        assert_eq!(sudoers_rules("agent", None), "agent ALL=(ALL:ALL) !ALL\n");
         assert_eq!(
-            polkit_deny("agent"),
+            sudoers_rules("agent", Some("runner")),
+            "agent ALL=(ALL:ALL) !ALL\nrunner ALL=(ALL:ALL) !ALL\nrunner ALL=(root) NOPASSWD: /usr/local/libexec/agentic-job helper *\n"
+        );
+        assert_eq!(
+            polkit_deny(&["agent"]),
             "polkit.addRule(function(action, subject) {\n  if (subject.user == \"agent\") return polkit.Result.NO;\n});\n"
+        );
+        assert_eq!(
+            polkit_deny(&["agent", "runner"]),
+            "polkit.addRule(function(action, subject) {\n  if (subject.user == \"agent\" || subject.user == \"runner\") return polkit.Result.NO;\n});\n"
         );
         let cases = [
             ("", Some("agent\n")),
@@ -923,6 +1430,21 @@ mod tests {
         assert_eq!(
             world_writable_find("/").join(" "),
             "/ -xdev ( -path /tmp -o -path /var/tmp -o -false ) -prune -o ( -type f -o -type d ) -perm -0002 ! -perm -1000"
+        );
+        assert_eq!(
+            setuid_root_find("/").join(" "),
+            "/ -xdev -type f -perm -4000 -user root -print"
+        );
+    }
+
+    #[test]
+    fn the_runner_keeps_exactly_the_helper() {
+        assert_eq!(
+            runner_sudo_rules(),
+            [
+                "(ALL : ALL) !ALL",
+                "(root) NOPASSWD: /usr/local/libexec/agentic-job helper *"
+            ]
         );
     }
 
