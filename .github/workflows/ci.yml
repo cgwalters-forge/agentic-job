@@ -55,9 +55,28 @@ jobs:
   static:
     uses: ./.github/workflows/build.yml
 
+  # validation.json is generated from gh-aw's compiled workflows, so a
+  # change of the pin has to regenerate it. The commit is the one
+  # safe-outputs-probe.yml takes gh-aw's setup action at.
+  safe-outputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          path: gh-aw
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - run: node safe-outputs/validation.mjs gh-aw --check
+
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, static]
+    needs: [docs, rust, static, safe-outputs]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

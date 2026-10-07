@@ -45,6 +45,15 @@ The egress proxy is not Rust. Step 5 puts mitmproxy's addon, policy and
 tests in `egress/` at the top of the repository, as they are in the old
 tree's `agent/egress/`.
 
+gh-aw's half of the safe-outputs check, and its handlers, are not Rust
+either and are not copied here: the workflows take its scripts from its
+setup action, pinned by commit. Step 2a puts what those scripts need in
+`safe-outputs/` at the top of the repository. `validation.json` is
+generated from the pinned gh-aw (`node safe-outputs/validation.mjs
+GH_AW_CHECKOUT`) and regenerated when the pin moves. `fixtures/` holds
+the safe-outputs artifacts of two real runs of the old tree, each with
+the configuration it ran under and a `source.json` naming the run.
+
 ## Rules that keep steps apart
 
 Each command's module owns its `Args` and its `run(&Args) ->

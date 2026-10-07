@@ -1,0 +1,6 @@
+{
+  "run": "https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/37396445799",
+  "artifact": "safe-outputs",
+  "files": ["outputs.jsonl", "base.json", "aw-agent-run-37396445799.patch"],
+  "config.json": "safe-outputs.mjs compile --repo cgwalters-bot/homegit --base main --workflow branch --outputs create_pull_request,noop,missing_tool --max-outputs 3, at cgwalters-devspace-sandbox df1e867; the safe_outputs of the policy it writes"
+}
