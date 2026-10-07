@@ -42,6 +42,17 @@ jobs:
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
+      # What agentic-job.yml's pin of a release of this commit reads, of
+      # the source that file says the binaries are built from.
+      - name: The pin of this build
+        shell: bash
+        run: |
+          set -f
+          { echo '```'
+            echo "RELEASE_SOURCE: $(git ls-tree HEAD $(yq .env.BUILT_FROM .github/workflows/agentic-job.yml) | sha256sum | cut -d ' ' -f 1)"
+            echo "RELEASE_AGENTIC_JOB_SHA256: $(cut -d ' ' -f 1 "dist/agentic-job-$TARGET.sha256")"
+            echo "RELEASE_FAKE_AGENT_SHA256: $(cut -d ' ' -f 1 "dist/fake-agent-$TARGET.sha256")"
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binary is static and runs
         run: |

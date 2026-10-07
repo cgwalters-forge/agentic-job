@@ -166,6 +166,39 @@ jobs:
           if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
           grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
 
+  # The release agentic-job.yml pins, if it pins one: its tag is of the
+  # source the pin names, and the binaries it published have the pinned
+  # checksums. A run then uses it exactly when its own source is that one.
+  release-pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      # The pin's digest is of Cargo.lock, Cargo.toml, crates and egress:
+      # a file the build includes from anywhere else would not be in it.
+      - name: Nothing is built in from outside what the pin's digest covers
+        run: |
+          grep -rnE 'include_(str|bytes)!\("(\.\./)+' crates | tee /dev/stderr | grep -vE '!\("(\.\./)+egress/[a-z_.]+"\)' > "$RUNNER_TEMP/outside" || true
+          test ! -s "$RUNNER_TEMP/outside"
+      - name: The pinned release is of the source the pin names, and its binaries have the pinned checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -f
+          pin() { yq ".env.$1" .github/workflows/agentic-job.yml; }
+          [ -n "$(pin RELEASE)" ] || { echo "::notice::no release is pinned: every run builds its binary"; exit 0; }
+          digest() { git ls-tree "$1" $(pin BUILT_FROM) | sha256sum | cut -d ' ' -f 1; }
+          test "$(digest "refs/tags/$(pin RELEASE)")" = "$(pin RELEASE_SOURCE)"
+          [ "$(digest HEAD)" = "$(pin RELEASE_SOURCE)" ] || echo "::notice::the source changed since $(pin RELEASE): runs at this commit build their binary"
+          gh release download "$(pin RELEASE)" --dir "$RUNNER_TEMP/release" --pattern "*-$(pin TARGET)"
+          cd "$RUNNER_TEMP/release"
+          sha256sum --check --strict <<< "$(pin RELEASE_AGENTIC_JOB_SHA256)  agentic-job-$(pin TARGET)"$'\n'"$(pin RELEASE_FAKE_AGENT_SHA256)  fake-agent-$(pin TARGET)"
+
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
@@ -313,6 +346,8 @@ jobs:
       apply-partial: true
       branch-prefix: e2e/limit/
       artifact-prefix: limit-
+      # So that both ways to the binary run here once a release is pinned.
+      build-binary: true
       refused-pull-request: branch
 
   e2e-verify:
@@ -443,7 +478,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-verify]
+    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
