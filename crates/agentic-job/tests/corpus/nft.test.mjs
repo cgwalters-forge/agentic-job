@@ -6,6 +6,9 @@
 // loads), so its constants and its two functions are cut out of its
 // source and loaded as a module of their own. And egress/ here must be
 // agent/egress/ there, byte for byte: the proxy was moved, not changed.
+// Its pin is the exception: the old tree's requirements.txt, which names
+// mitmproxy alone, is requirements.in here, and requirements.txt is
+// generated from it with every dependency and the hashes of its files.
 //
 //   OLD_TREE=... AGENTIC_JOB=.../agentic-job node --test nft.test.mjs
 import assert from "node:assert/strict";
@@ -23,6 +26,8 @@ const env = (name) => {
 const OLD_TREE = env("OLD_TREE");
 const AGENTIC_JOB = env("AGENTIC_JOB");
 const EGRESS = join(dirname(fileURLToPath(import.meta.url)), "../../../../egress");
+const PINS = "requirements.txt";
+const PINS_SOURCE = "requirements.in";
 
 // From the first constant to the end of sandboxRules.
 const source = readFileSync(join(OLD_TREE, "scripts/setup-runner-sandbox.mjs"), "utf8");
@@ -67,8 +72,10 @@ test("both refuse what is not a tailnet endpoint", () => {
 test("egress/ is the old tree's agent/egress/, unchanged", () => {
   const theirs = join(OLD_TREE, "agent/egress");
   const names = readdirSync(theirs).sort();
-  assert.deepEqual(readdirSync(EGRESS).sort(), names);
-  for (const name of names) {
+  assert.deepEqual(readdirSync(EGRESS).filter((name) => name !== PINS_SOURCE).sort(), names);
+  for (const name of names.filter((name) => name !== PINS)) {
     assert.ok(readFileSync(join(EGRESS, name)).equals(readFileSync(join(theirs, name))), `${name} differs`);
   }
+  const pinned = (file) => readFileSync(file, "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
+  assert.deepEqual(pinned(join(EGRESS, PINS_SOURCE)), pinned(join(theirs, PINS)));
 });

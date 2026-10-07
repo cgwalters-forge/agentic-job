@@ -11,7 +11,9 @@
 //! policy; and the network rules keep that user off everything private.
 //!
 //! Setup therefore needs Python, a package index and the threat feed's
-//! host on the network.
+//! host on the network. What it takes from them is pinned here: every
+//! package by the hashes of `egress/requirements.txt`, and the feed by a
+//! commit and a checksum. docs/workflow.md says how each pin is moved.
 
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -32,7 +34,8 @@ const POLICY_PY: &str = include_str!("../../../../egress/policy.py");
 
 const POLICY_TOML: &str = include_str!("../../../../egress/policy.toml");
 
-/// The pin of mitmproxy.
+/// mitmproxy and everything it depends on, each at one version and with
+/// the hashes of its files: generated from `egress/requirements.in`.
 const REQUIREMENTS: &str = include_str!("../../../../egress/requirements.txt");
 
 pub const EGRESS_USER: &str = "egress-proxy";
@@ -82,10 +85,20 @@ const CERTIFICATE_MARKER: &str = "-----BEGIN CERTIFICATE-----";
 /// platforms, so it complements the write rules and does not replace
 /// them. A fetch that fails leaves the feed empty, with a warning: it is
 /// hardening, not the boundary.
-const DENYLIST_URL: &str = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt";
+const DENYLIST_REPOSITORY: &str = "https://raw.githubusercontent.com/hagezi/dns-blocklists";
 
-/// A feed shorter than this is not the feed.
-const DENYLIST_MIN_ENTRIES: usize = 1000;
+const DENYLIST_FILE: &str = "wildcard/tif.medium-onlydomains.txt";
+
+/// The feed as it was at one commit of its repository, and the SHA-256
+/// of the file there: what root fetches before the network rules load is
+/// what a pull request here named, not whatever the branch holds that
+/// day. A file that is not that one stops the setup.
+const DENYLIST_COMMIT: &str = "c4cea861852d108931445dd9867f09a324fe2a40";
+
+const DENYLIST_SHA256: &str = "f24fd0b07a8ba5bc83a2842be5e08501a14ae1d2272089fdf17c8f6e306e29f6";
+
+/// Where the feed is fetched to, beside where it goes once it is checked.
+const DENYLIST_FETCHED: &str = "/opt/egress-proxy/denylist.txt.fetched";
 
 const FETCH_SECONDS: &str = "60";
 
@@ -189,14 +202,21 @@ fn install(policy: Option<&Path>) -> Result<()> {
     )?;
     let requirements = format!("{INSTALL_DIR}/requirements.txt");
     write(&requirements, REQUIREMENTS)?;
+    // Root runs this on the open network. With hashes required, pip
+    // installs no file but the ones the requirements name; and a wheel is
+    // unpacked, where a source archive would run its build as root, with
+    // build tools that no hash covers.
     host::run(Command::new(format!("{INSTALL_DIR}/bin/pip")).args([
         "install",
         "--quiet",
         "--disable-pip-version-check",
+        "--require-hashes",
+        "--only-binary",
+        ":all:",
         "-r",
         &requirements,
     ]))
-    .context("installing mitmproxy")?;
+    .context("installing mitmproxy by the hashes of egress/requirements.txt")?;
     make_dir(POLICY_DIR)?;
     let rules = match policy {
         Some(path) => fs::read_to_string(path)
@@ -220,8 +240,26 @@ fn feed_entries(text: &str) -> usize {
         .count()
 }
 
-/// Fetches the threat feed; whether there is one.
-fn fetch_denylist() -> bool {
+fn denylist_url() -> String {
+    format!("{DENYLIST_REPOSITORY}/{DENYLIST_COMMIT}/{DENYLIST_FILE}")
+}
+
+/// Fails unless the file at `path` has the SHA-256 `pinned`.
+fn check_sha256(path: &Path, pinned: &str) -> Result<()> {
+    let sum = host::run(Command::new("sha256sum").arg("--").arg(path))?;
+    let found = sum.split_whitespace().next().unwrap_or_default();
+    ensure!(
+        found == pinned,
+        "{} has the SHA-256 {found}, and the pinned one is {pinned}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Fetches the threat feed; whether there is one. A fetch that fails
+/// leaves none, and a file that is not the pinned one is an error.
+fn fetch_denylist() -> Result<bool> {
+    let url = denylist_url();
     let fetched = host::run(Command::new("curl").args([
         "--fail",
         "--silent",
@@ -229,26 +267,24 @@ fn fetch_denylist() -> bool {
         "--location",
         "--max-time",
         FETCH_SECONDS,
-        DENYLIST_URL,
-    ]))
-    .and_then(|text| {
-        let entries = feed_entries(&text);
-        ensure!(entries >= DENYLIST_MIN_ENTRIES, "only {entries} entries");
-        write(DENYLIST, &text)?;
-        Ok(entries)
-    });
-    match fetched {
-        Ok(entries) => {
-            println!("Threat feed: {entries} domains from {DENYLIST_URL}");
-            true
-        }
-        Err(err) => {
-            eprintln!(
-                "warning: the egress proxy runs without a threat feed: fetching {DENYLIST_URL} failed ({err:#})"
-            );
-            false
-        }
+        "--output",
+        DENYLIST_FETCHED,
+        &url,
+    ]));
+    if let Err(err) = fetched {
+        eprintln!(
+            "warning: the egress proxy runs without a threat feed: fetching {url} failed ({err:#})"
+        );
+        return Ok(false);
     }
+    check_sha256(Path::new(DENYLIST_FETCHED), DENYLIST_SHA256)
+        .with_context(|| format!("the threat feed fetched from {url} is not the pinned one"))?;
+    let text = fs::read_to_string(DENYLIST_FETCHED)
+        .with_context(|| format!("reading {DENYLIST_FETCHED}"))?;
+    fs::remove_file(DENYLIST_FETCHED).with_context(|| format!("removing {DENYLIST_FETCHED}"))?;
+    write(DENYLIST, &text)?;
+    println!("Threat feed: {} domains from {url}", feed_entries(&text));
+    Ok(true)
 }
 
 fn listening() -> bool {
@@ -297,7 +333,7 @@ fn publish_ca() -> Result<()> {
 /// rules name.
 pub fn start(egress: &Egress) -> Result<u32> {
     install(egress.policy.as_deref())?;
-    let denylist = fetch_denylist();
+    let denylist = fetch_denylist()?;
     let mut run = Command::new("systemd-run");
     run.arg(format!("--unit={UNIT}"))
         .args(["--service-type=exec", "--collect"])
@@ -358,13 +394,68 @@ mod tests {
         assert_eq!(feed_entries(""), 0);
     }
 
+    /// The checksum is of the file's bytes, and anything else is refused.
     #[test]
-    fn the_pin_and_the_files_come_with_the_binary() {
-        assert!(
-            REQUIREMENTS
-                .lines()
-                .any(|line| line.starts_with("mitmproxy=="))
+    fn a_feed_that_is_not_the_pinned_one_is_refused() {
+        const FEED: &str = "evil.example\nbad.test\n";
+        const FEED_SHA256: &str =
+            "8f5c06d1ad3e9913c292e76ab4f4a799a68c85e1ec32dfda4cc87d7890032c9b";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feed.txt");
+        for (content, pinned, accepted) in [
+            (FEED, FEED_SHA256, true),
+            ("evil.example\n", FEED_SHA256, false),
+            ("evil.example\nbad.test\ngood.example\n", FEED_SHA256, false),
+            ("", FEED_SHA256, false),
+            (FEED, DENYLIST_SHA256, false),
+        ] {
+            fs::write(&path, content).unwrap();
+            let checked = check_sha256(&path, pinned);
+            assert_eq!(checked.is_ok(), accepted, "{content:?}: {checked:?}");
+        }
+        assert!(check_sha256(&dir.path().join("absent"), FEED_SHA256).is_err());
+    }
+
+    #[test]
+    fn the_feed_is_fetched_at_its_pinned_commit() {
+        assert_eq!(DENYLIST_COMMIT.len(), 40);
+        assert_eq!(DENYLIST_SHA256.len(), 64);
+        for pin in [DENYLIST_COMMIT, DENYLIST_SHA256] {
+            assert!(pin.bytes().all(|byte| b"0123456789abcdef".contains(&byte)));
+        }
+        assert_eq!(
+            denylist_url(),
+            format!(
+                "https://raw.githubusercontent.com/hagezi/dns-blocklists/{DENYLIST_COMMIT}/wildcard/tif.medium-onlydomains.txt"
+            )
         );
+    }
+
+    /// Every requirement is one version with hashes, as `pip
+    /// --require-hashes` wants, and mitmproxy is the one requirements.in
+    /// names.
+    #[test]
+    fn every_requirement_is_pinned_with_hashes() {
+        const DIRECT: &str = include_str!("../../../../egress/requirements.in");
+        let is_entry = |line: &&str| !line.starts_with(['#', ' ']) && !line.is_empty();
+        let lines: Vec<&str> = REQUIREMENTS.lines().collect();
+        let entries: Vec<&str> = lines.iter().copied().filter(is_entry).collect();
+        assert!(entries.len() > 1, "{entries:?}");
+        for pair in lines.windows(2).filter(|pair| is_entry(&pair[0])) {
+            let (entry, next) = (pair[0], pair[1]);
+            assert!(entry.contains("==") && entry.ends_with(" \\"), "{entry}");
+            assert!(next.trim_start().starts_with("--hash=sha256:"), "{entry}");
+        }
+        let direct: Vec<&str> = DIRECT
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .collect();
+        assert_eq!(direct.len(), 1, "{direct:?}");
+        assert!(entries.contains(&format!("{} \\", direct[0]).as_str()));
+    }
+
+    #[test]
+    fn the_files_come_with_the_binary() {
         assert!(ADDON.contains("X-Egress-Denied"));
         assert!(POLICY_PY.contains("class Policy"));
         assert!(POLICY_TOML.contains("git-upload-pack"));

@@ -1,0 +1,11 @@
+# The egress proxy, which `sandbox setup` installs into a virtual
+# environment of its own with `pip --require-hashes`. requirements.txt is
+# generated from this file, and names every dependency with the hashes of
+# its files for any platform and any Python from 3.12:
+#
+#   cd egress && uv pip compile --universal --python-version 3.12 \
+#     --generate-hashes --no-annotate requirements.in -o requirements.txt
+#
+# Run again after a change here; with `--upgrade` it also moves the
+# dependencies, which otherwise stay where requirements.txt has them.
+mitmproxy==12.2.3
