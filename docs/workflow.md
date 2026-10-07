@@ -8,7 +8,7 @@ four jobs on four machines. What the workflow decides itself is in the
 apply job, and [listed below](#what-the-apply-job-does-before-it-writes).
 
 1. **policy**, on a small hosted machine. It checks that the target
-   repository is public, builds the binary, and checks the run's request
+   repository is public, fetches or builds the binary, and checks the run's request
    against the caller's bounds file (`agentic-job policy`). A request
    outside the bounds stops here, before a machine is spent on the agent.
 2. **agent**, on the caller's runner. `agentic-job sandbox setup` creates
@@ -117,8 +117,9 @@ which takes each as the value of one key and never reads it as TOML.
 away after the job, with passwordless sudo for the runner's user,
 systemd 257 or later (for `run0`), and `apt-get` or `dnf`. `sandbox
 setup` refuses a machine it has set up before. `runner` is for the other
-three jobs and defaults to `ubuntu-24.04`; the policy job builds the
-binary there with rustup, and apt for the musl compiler. Labels resolve
+three jobs and defaults to `ubuntu-24.04`; where no release fits the
+workflow's commit, the policy job builds the binary there with rustup,
+and apt for the musl compiler. Labels resolve
 in the calling repository.
 
 **Permissions.** The call needs `contents: read` and `id-token: write`
@@ -347,12 +348,39 @@ settings of a checkout that kept none) and of the Tailscale action (it
 logs the machine out). None of them reads the sandbox user's files; the
 uploads take only what `run` put under its own directory after the gate.
 
-**No build cache.** The policy job builds the binary on every run,
-which takes about two minutes on a hosted runner. The plan had it
-cached under the workflow's exact commit. That is not enough: a job
-that can write caches, as the agent's runner user can, could leave an
-entry for a commit no run has built yet, and the first run at that
-commit would take it for its binary, the `check` of that run included.
+**Where the binary comes from.** `agentic-job.yml` names a release of
+this repository (`RELEASE`), the SHA-256 of the binaries it published,
+and what that release was built from (`RELEASE_SOURCE`, the SHA-256 of
+`git ls-tree` over `Cargo.lock`, `Cargo.toml`, `crates` and `egress` at
+its commit). The policy job computes the same for the workflow's own
+commit. When the two agree it fetches the release's binaries and checks
+them against the checksums, which takes a few seconds; a file that does
+not match stops the run. When they do not agree, which is any commit
+that changed the source since the release, it builds the binary from
+that source, which takes about two minutes on a hosted runner. Either
+way a caller that pins the workflow's commit pins the binary: the
+checksums are in the file at that commit. What ties a release's bytes
+to its source is this repository's `release` workflow and nothing a
+caller can check for itself, so a caller that would sooner build than
+trust that passes `build-binary: true`.
+
+A build cache was not used, though the plan had one. The reason this
+page gave before was wrong: the agent is the sandbox user and has no
+token to write a cache with. The reason that holds is that a cache is
+the calling repository's, where any workflow on the default branch or
+on the run's own ref can leave an entry under the key of a commit
+nobody has built yet, and the
+first run at that commit would take it for its binary, the `check` of
+that run included. A cache is also one per calling repository, where a
+release is fetched by every caller.
+
+To pin a release: with the source merged and the workspace's version
+raised, run the `release` workflow on main with the tag of that
+version. Its build job's summary prints the three values; put them and
+the tag in `agentic-job.yml` in a pull request, which changes nothing
+the binaries are built from. CI's `release-pin` job checks that the tag
+is of the source the pin names and that the published binaries have the
+pinned checksums.
 
 **Inputs a caller forwards.** The bounds file holds `repo`, `base`,
 `kind`, `outputs` and `max-outputs`, and nothing holds any other input.

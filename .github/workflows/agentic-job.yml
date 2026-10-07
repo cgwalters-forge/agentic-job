@@ -8,10 +8,13 @@
 #   check   what the agent handed back, on a machine it never touched
 #   apply   the only job with a credential that can write
 #
-# The binary every job runs is built by the policy job from this file's
-# own repository at this file's own commit, so a caller that pins the
-# workflow pins the binary. Artifacts pass between the jobs by the id their upload returned:
-# a name can be uploaded again by a later job, an id cannot.
+# The binary every job runs comes from this file's own repository at this
+# file's own commit, so a caller that pins the workflow pins the binary:
+# the policy job takes a release's by the checksum written below when
+# that release was built from the source at this commit, and builds it
+# from that source otherwise, or when the caller says so. Artifacts pass between the jobs by the id
+# their upload returned: a name can be uploaded again by a later job, an
+# id cannot.
 #
 # Every input reaches a step through its environment and is never pasted
 # into a script, and the agent's configuration is written by `agentic-job
@@ -88,6 +91,12 @@ on:
         description: The runner the agent runs on, as JSON. It is thrown away after the job, and needs sudo and systemd 257
         type: string
         default: '"ubuntu-26.04"'
+      build-binary:
+        description: >-
+          Build the binary from this workflow's source on every run, also where a release fits its
+          commit and would be fetched by its checksum
+        type: boolean
+        default: false
       inference-url:
         description: The inference proxy, as http://ADDRESS:PORT; empty for an agent that needs none
         type: string
@@ -217,6 +226,21 @@ env:
   JOB_DIR: ${{ github.workspace }}/.agentic-job
   # This repository at this file's commit, where a job needs its source.
   SOURCE_DIR: ${{ github.workspace }}/.agentic-job-source
+  # What the binaries are built from: `git ls-tree` of these names their
+  # content at a commit. Whatever the build comes to read from elsewhere
+  # (an `include_str!` of a file outside them, a toolchain file) has to
+  # be added, or a run would take a release for its own source when it
+  # is not; CI's `release-pin` looks for the first of those.
+  BUILT_FROM: Cargo.lock Cargo.toml crates egress
+  # A release of this repository, the SHA-256 of `git ls-tree` of the
+  # above at its commit, and the SHA-256 of each binary it published.
+  # A run at a commit whose source is that one fetches those binaries and
+  # checks them against these; at any other it builds its own. Empty
+  # until a release is pinned; docs/workflow.md says how one is.
+  RELEASE: ""
+  RELEASE_SOURCE: ""
+  RELEASE_AGENTIC_JOB_SHA256: ""
+  RELEASE_FAKE_AGENT_SHA256: ""
 
 jobs:
   policy:
@@ -261,13 +285,43 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .agentic-job-source
           persist-credentials: false
-      # Built here every time, and not kept in a cache: a job that can
-      # write caches (the agent's runner user can) could leave an entry
-      # for a commit nobody has built yet, and the first run at that
-      # commit would take it for its binary.
-      # One static binary, so that it runs on whatever the agent's runner
-      # is. musl-gcc is for the C that dependencies bring with them.
+      # git lists nothing for a name that is not there, and says nothing.
+      - name: Whether the pinned release was built from this source
+        id: source
+        working-directory: .agentic-job-source
+        env:
+          BUILD: ${{ inputs.build-binary }}
+        run: |
+          set -f
+          [ "$(git ls-tree HEAD $BUILT_FROM | wc -l)" = "$(wc -w <<< "$BUILT_FROM")" ] || { echo "::error::not all of $BUILT_FROM is in the source"; exit 1; }
+          source=$(git ls-tree HEAD $BUILT_FROM | sha256sum | cut -d ' ' -f 1)
+          echo "source $source, release ${RELEASE:-none} is of ${RELEASE_SOURCE:-none}, and the caller asks for a build: $BUILD"
+          [ "$BUILD" = true ] || [ -z "$RELEASE" ] || [ "$source" != "$RELEASE_SOURCE" ] || echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+      # What decides that a file is the release's is the checksum in this
+      # file, at the commit the caller pinned, and not where it came from:
+      # one that does not match stops the run, and nothing is built in its
+      # place.
+      - name: Fetch the release's binaries by their checksums
+        if: ${{ steps.source.outputs.release != '' }}
+        env:
+          FROM: ${{ github.server_url }}/${{ job.workflow_repository }}/releases/download/${{ steps.source.outputs.release }}
+        run: |
+          mkdir -p "$JOB_DIR/bin"
+          cd "$JOB_DIR/bin"
+          for name in agentic-job fake-agent; do
+            curl --fail --silent --show-error --location --retry 3 --max-time 120 --output "$name" "$FROM/$name-$TARGET"
+          done
+          sha256sum --check --strict <<< "$RELEASE_AGENTIC_JOB_SHA256  agentic-job"$'\n'"$RELEASE_FAKE_AGENT_SHA256  fake-agent"
+          chmod +x agentic-job fake-agent
+      # For a commit no release was built from, or a caller that wants its
+      # own build. It is not kept in a cache: a cache is the calling
+      # repository's, where any workflow on its default branch or on the
+      # run's own ref can leave an entry for a commit nobody has built
+      # yet, and the first run at that commit would take it for its
+      # binary. One static binary, so that it runs on whatever the agent's
+      # runner is. musl-gcc is for the C that dependencies bring with them.
       - name: Build the binary
+        if: ${{ steps.source.outputs.release == '' }}
         working-directory: .agentic-job-source
         run: |
           sudo apt-get install -y --no-install-recommends musl-tools
