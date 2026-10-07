@@ -129,8 +129,10 @@ not seen by this probe.
 
 `crates/agentic-job/tests/sandbox_host.rs` removes one protection at a
 time, as root, and requires that exactly the probes guarding it fail.
-CI's `sandbox` job runs it on a hosted `ubuntu-26.04` runner, after
-`sandbox setup` and a clean `sandbox check` there. It grants the
+CI's `sandbox` job runs it on hosted `ubuntu-26.04` runners, after
+`sandbox setup` and a clean `sandbox check` on each: four of them, with
+the removals shared out between them, since every removal runs every
+probe. It grants the
 sandbox user a sudoers rule (and one that sorts before the deny rule,
 which must change nothing); adds it to a group; moves the polkit rule
 away, alone and with a rule that grants; opens the runner's home, and
