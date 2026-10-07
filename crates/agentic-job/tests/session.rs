@@ -859,10 +859,6 @@ fn nothing_survives_the_session() {
         text.trim().parse().unwrap()
     };
     let whoami = std::fs::read_to_string(r.path("work/whoami")).unwrap();
-    assert!(
-        !session::process::is_running(pid("stray")),
-        "the background process survived"
-    );
     match &sandbox_user {
         Some(user) => {
             assert_eq!(whoami.trim(), user, "the agent did not run as {user}");
@@ -885,5 +881,18 @@ fn nothing_survives_the_session() {
                 .args(["-KILL", &escaped.to_string()])
                 .status();
         }
+    }
+    // Direct launch waits for the agent, not its orphaned descendants.
+    // SIGKILL has been sent to the group, but those processes may not have
+    // handled it yet. Zombies count as stopped; do not wait for their reaper.
+    // Check after cleaning up the escaped process so a failure cannot leak it.
+    let stray = pid("stray");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session::process::is_running(stray) {
+        assert!(
+            Instant::now() < deadline,
+            "the background process {stray} survived"
+        );
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
