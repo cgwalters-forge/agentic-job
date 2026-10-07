@@ -299,17 +299,22 @@ mod tests {
         };
         let wrapper = sandbox.wrapper(Path::new("/somewhere")).unwrap();
         assert_eq!(wrapper.last().map(String::as_str), Some("--"));
-        // Through sudo and run0 here, where setup has not run; through
-        // the helper on a machine it locked (`sandbox::enter`'s tests).
-        assert!(wrapper.contains(&"run0".to_owned()), "{wrapper:?}");
-        assert!(
-            wrapper.contains(&"--chdir=/somewhere".to_owned()),
-            "{wrapper:?}"
-        );
-        assert!(
-            wrapper.contains(&format!("--user={}", own.trim())),
-            "{wrapper:?}"
-        );
+        // Through sudo and run0 where setup has not run, and through the
+        // helper on a machine it locked, which a job's own tests may
+        // well run on: the helper takes the user from root's file.
+        let has = |args: &[&str]| wrapper.windows(args.len()).any(|window| window == args);
+        match sandbox.root() {
+            Root::Sudo => {
+                assert!(has(&["run0"]), "{wrapper:?}");
+                assert!(has(&["--chdir=/somewhere"]), "{wrapper:?}");
+                let user = format!("--user={}", own.trim());
+                assert!(has(&[user.as_str()]), "{wrapper:?}");
+            }
+            Root::Helper => assert!(
+                has(&["helper", "enter", "--chdir", "/somewhere"]),
+                "{wrapper:?}"
+            ),
+        }
         assert!(!wrapper.iter().any(|arg| arg == PLACEHOLDER), "{wrapper:?}");
     }
 
