@@ -1,0 +1,51 @@
+# Builds the static binary and its checksum, as the artifact `agentic-job`.
+# Called by ci (to keep the build working) and by release (to publish it).
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      cache:
+        description: Restore the build cache; a release builds without it
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # musl-gcc, for the C that dependencies bring with them.
+      - run: sudo apt-get install -y --no-install-recommends musl-tools
+      - run: rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ inputs.cache }}
+        with:
+          key: ${{ env.TARGET }}
+      - run: cargo build --release --locked --target "$TARGET" -p agentic-job
+      - name: Stage the binary and its checksum
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/agentic-job" "dist/agentic-job-$TARGET"
+          cd dist
+          sha256sum "agentic-job-$TARGET" > "agentic-job-$TARGET.sha256"
+      # A runner the binary is fetched onto may have another libc, or none.
+      - name: The binary is static and runs
+        run: |
+          file "dist/agentic-job-$TARGET" | tee /dev/stderr | grep -q 'static'
+          "dist/agentic-job-$TARGET" --version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agentic-job
+          path: dist/
+          if-no-files-found: error

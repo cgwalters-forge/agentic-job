@@ -1,4 +1,6 @@
-# The one job named ci is what the main branch ruleset requires.
+# The one job named ci is what the main branch ruleset requires. It only
+# gathers the others, so a new kind of check is a new job listed in its
+# `needs`, with no change to the ruleset.
 name: ci
 
 on:
@@ -11,11 +13,15 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,4 +33,35 @@ jobs:
       - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: --offline --include-fragments --no-progress "**/*.md"
+          failIfEmpty: false
           fail: true
+
+  # The runner image's stable toolchain: nothing to download, and the
+  # workspace's rust-version says what the code needs.
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  # What a release would publish, so a dependency that breaks the static
+  # build is found on its pull request and not at the next tag.
+  static:
+    uses: ./.github/workflows/build.yml
+
+  ci:
+    if: ${{ always() }}
+    needs: [docs, rust, static]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: jq -e 'all(.[]; .result == "success")' <<<"$NEEDS"
