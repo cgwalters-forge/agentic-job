@@ -48,8 +48,10 @@ jobs:
         shell: bash
         run: |
           set -f
+          from=$(yq .env.BUILT_FROM .github/workflows/agentic-job.yml)
+          [ "$(git ls-tree HEAD $from | wc -l)" = "$(wc -w <<< "$from")" ] || { echo "::error::not all of $from is in the source"; exit 1; }
           { echo '```'
-            echo "RELEASE_SOURCE: $(git ls-tree HEAD $(yq .env.BUILT_FROM .github/workflows/agentic-job.yml) | sha256sum | cut -d ' ' -f 1)"
+            echo "RELEASE_SOURCE: $(git ls-tree HEAD $from | sha256sum | cut -d ' ' -f 1)"
             echo "RELEASE_AGENTIC_JOB_SHA256: $(cut -d ' ' -f 1 "dist/agentic-job-$TARGET.sha256")"
             echo "RELEASE_FAKE_AGENT_SHA256: $(cut -d ' ' -f 1 "dist/fake-agent-$TARGET.sha256")"
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
