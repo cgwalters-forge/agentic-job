@@ -59,7 +59,9 @@ Read this before relying on it.
 - Not tried at all: `apply-environment`, an `output-repo` other than the
   calling repository, bringing a fork's base branch up to date, the
   tailnet login, a runner that is not GitHub's `ubuntu-26.04`,
-  `agent-config-repo`, and `kind: analysis`.
+  `agent-config-repo`, `kind: analysis`, and applying a `create_issue`:
+  that type is checked through gh-aw's collector and `check` in CI
+  (the `corpus` job), and its handler has not run from this workflow.
 
 ## A caller
 
@@ -141,8 +143,8 @@ in the calling repository.
 tailnet, whether or not the run uses either). The policy, agent and check
 jobs take no more than that. The apply job names no permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
-nothing more, and without it add `contents: write`, `issues: write` and
-`pull-requests: write` for the job's own token.
+nothing more, and without it add `contents: write`, `issues: write`
+(comments and issues) and `pull-requests: write` for the job's own token.
 
 **Limits that fit the agent.** The workflow's defaults are for a real
 agent behind a proxy. A cap on model requests that nothing counts is
@@ -460,6 +462,16 @@ person the choice: of the bounds file itself (`allow`), of the limits,
 of the machine that holds the apply token (`runner`), of the repository
 that token is aimed at (`output-repo`). Forward the task, the target
 and the request, and write the rest in the caller's file.
+
+**Issues a run opens.** Where the bounds list `create_issue`, the issue's
+labels and assignees are the agent's, sanitized by gh-aw's collector, as
+gh-aw allows by default; a bounds rule for them is not written yet
+([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)). A
+request that names other issues (`parent`, `blocked_by`) is refused by
+`check`, since nothing bounds which; gh-aw's handler still makes the new
+issue a sub-issue of the issue an event-triggered run was started from,
+when it was. The apply job lets no handler open more issues than that
+count, none for a run without the type.
 
 **Comments gh-aw adds.** When the caller's run was started by an issue
 or a pull request, gh-aw's handlers also comment there, in the calling

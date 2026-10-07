@@ -352,6 +352,31 @@ test("check: every type, at its ceiling and over it", async () => {
   await same("a pull request from an analysis run", withPatch(GOOD), /Unexpected output type 'create_pull_request'/, { workflow: "analysis", outputs: "all" });
 });
 
+// A type the old tree never had, so there is nothing of it to compare
+// with: the new policy, gh-aw's collector and the new check alone.
+test("check: create_issue, through the collector and the check", () => {
+  const bounds = join(scratch(), "allow.toml");
+  writeFileSync(bounds, readFileSync(BOUNDS, "utf8").replace("[outputs]\n", "[outputs]\ncreate_issue = { max = 1 }\n"));
+  const r = agenticJob("policy", "--allow", bounds, "--repo", REPO, "--clone-url", `https://github.com/${REPO}`,
+    "--base", BASE, "--kind", "analysis", "--outputs", "create_issue,noop", "--max-outputs", "2");
+  assert.equal(r.status, 0, r.stderr);
+  const policy = JSON.parse(r.stdout);
+  assert.deepEqual(policy.safe_outputs.create_issue, { max: 1 });
+  const issue = { type: "create_issue", title: "A flaky test in nightly", body: "The nightly run fails once a week on the same test." };
+  for (const [name, lines, want] of [
+    ["one issue and a noop", [issue, NOOP], null],
+    ["two issues", [issue, issue], /Too many items of type 'create_issue'/],
+    ["an issue without a title", [{ type: "create_issue", body: issue.body }], /title/],
+    ["an issue whose body is too short", [{ ...issue, body: "x" }], /body/],
+    ["an issue that names a parent", [{ ...issue, parent: 7 }], /links another issue/],
+  ]) {
+    const verdict = newCheck(handback({ lines, base: null }), policy);
+    assert.equal(verdict.ok, want === null, `${name}: ${JSON.stringify(verdict.errors)}`);
+    if (want) assert.match(verdict.errors.join("\n"), want, name);
+    else assert.equal(verdict.items.length, lines.length, name);
+  }
+});
+
 test("check: the hand-backs of two real runs of the old tree", async () => {
   for (const [name, change] of [
     ["create-pull-request", { repo: OWN_REPO, outputs: "create_pull_request,noop,missing_tool" }],
