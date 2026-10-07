@@ -10,26 +10,81 @@ use std::path::Path;
 use super::handback::{
     AGENT_OUTCOME, AGENT_OUTPUTS, MAX_LINES, MAX_OUTCOME_BYTES, MAX_OUTPUTS_BYTES,
 };
-use crate::policy::{CREATE_PULL_REQUEST, Kind, Policy};
+use crate::policy::{CREATE_PULL_REQUEST, Kind, Policy, PullRequest};
 
 const KIB: usize = 1 << 10;
+
+/// What `check` refuses by path whatever the policy says
+/// (`check::patch`), in words: an agent is not shown the pattern.
+const ALWAYS_PROTECTED: &str = "any file or directory whose name starts with `.git`, in any \
+                                directory (`.gitignore`, `.gitattributes`, `.gitkeep`), \
+                                `CODEOWNERS`, and the configuration of hooks, shells, editors \
+                                and CI systems (`.husky/`, `lefthook.yml`, `.envrc`, \
+                                `.vscode/`, `.pre-commit-config.yaml`, `.travis.yml`)";
+
+/// What `check` refuses of a change's files whatever their names.
+const REFUSED_KINDS: &str = "adds an executable, adds, changes or deletes a symbolic link, a \
+                             submodule or a binary file, changes a file's mode, or has a path \
+                             with a character other than ASCII letters, digits and `_.+@=,-` in \
+                             it (no spaces, brackets or parentheses) or a part that starts with \
+                             `-`";
+
+/// What a change may not touch and how many files it may, for an agent
+/// that would otherwise learn it only from `check` refusing all it did:
+/// the first real run lost its whole change to one line added to a
+/// README.
+fn patch_rules(rules: &PullRequest) -> String {
+    let mut text = String::from(
+        " A change is refused whole, with everything else in it, if it touches one of these: ",
+    );
+    if !rules.protected_files.is_empty() {
+        let names: Vec<String> = rules
+            .protected_files
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect();
+        let _ = write!(
+            text,
+            "a file of one of these names, in any directory: {}; ",
+            names.join(", ")
+        );
+    }
+    if rules.protect_top_level_dot_folders {
+        text.push_str(
+            "anything under a top-level directory whose name starts with a dot (`.github/`); ",
+        );
+    }
+    let _ = write!(
+        text,
+        "{ALWAYS_PROTECTED}. So is a change to more than {} files, and one that \
+         {REFUSED_KINDS}. Where the task asks for a change that would be refused, leave that \
+         part out and say so in your report.",
+        rules.max_patch_files
+    );
+    text
+}
 
 /// The text for a run of POLICY whose agent has the home HOME and works
 /// in CHECKOUT. It ends with an empty line.
 pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
     let outputs = &policy.safe_outputs;
-    let pull_request = policy.kind == Kind::Branch && outputs.create_pull_request.is_some();
+    let rules = outputs
+        .create_pull_request
+        .as_ref()
+        .filter(|_| policy.kind == Kind::Branch);
     let mut text = String::from(
         "How this run hands back its results. Nothing else leaves this machine, and all of it \
          is published.\n\n",
     );
-    let tree = if pull_request {
+    let pull_request = rules.is_some();
+    let tree = if let Some(rules) = rules {
         format!(
             "everything you change, add or delete in it (ignored files excepted) is collected \
              when you finish, as one patch of at most {} KiB against the commit you started \
              from, and proposed as a pull request. Leave your changes uncommitted, and do not \
-             push.",
-            policy.max_patch_bytes / (KIB as u64)
+             push.{}",
+            policy.max_patch_bytes / (KIB as u64),
+            patch_rules(rules)
         )
     } else {
         "this run proposes no change to the repository, so nothing you change in it is handed \
@@ -71,7 +126,9 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
         text.push_str(
             "  To word the pull request yourself, write `{\"type\": \"create_pull_request\", \
              \"title\": \"...\", \"body\": \"...\"}`: the title and the body are also the \
-             message of the commit. Without one, a pull request is made from the `summary` \
+             message of the commit. Put no line in either that credits a tool or a model \
+             (\"Generated with ...\", `Co-Authored-By:`): the run's own configuration adds the \
+             commit's trailers. Without one, a pull request is made from the `summary` \
              below.\n",
         );
     }
@@ -144,6 +201,7 @@ mod tests {
             assert!(branch.contains(want), "{want}\n{branch}");
         }
         assert!(branch.ends_with(".\n\n"), "{branch:?}");
+        assert!(branch.contains("credits a tool or a model"), "{branch}");
 
         // An analysis run is offered no pull request, whatever the policy
         // file says; a run with no outputs is told to write none.
@@ -164,5 +222,73 @@ mod tests {
             "{nothing}"
         );
         assert!(nothing.contains("outcome.json"), "{nothing}");
+    }
+
+    #[test]
+    fn a_pull_request_run_is_told_what_a_change_may_not_touch() {
+        const NAMES: &str =
+            "a file of one of these names, in any directory: `README.md`, `go.mod`; ";
+        const DOT_FOLDERS: &str = "a top-level directory whose name starts with a dot";
+        struct Case {
+            files: &'static [&'static str],
+            dot_folders: bool,
+            has: &'static [&'static str],
+            has_not: &'static [&'static str],
+        }
+        let rules = |files: &[&str], dot_folders: bool| {
+            json!({"create_pull_request": {
+                "max": 1, "protected_files": files, "protect_top_level_dot_folders": dot_folders,
+                "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024,
+                "max_patch_files": 20,
+            }})
+        };
+        let cases = [
+            Case {
+                files: &["README.md", "go.mod"],
+                dot_folders: true,
+                has: &[NAMES, DOT_FOLDERS],
+                has_not: &[],
+            },
+            Case {
+                files: &[],
+                dot_folders: true,
+                has: &[DOT_FOLDERS],
+                has_not: &["of one of these names"],
+            },
+            Case {
+                files: &["README.md", "go.mod"],
+                dot_folders: false,
+                has: &[NAMES],
+                has_not: &[DOT_FOLDERS],
+            },
+        ];
+        for case in cases {
+            let Case {
+                files,
+                dot_folders,
+                has,
+                has_not,
+            } = case;
+            let brief = text(&policy(Kind::Branch, rules(files, dot_folders)));
+            let always = [
+                "A change is refused whole",
+                "name starts with `.git`",
+                "`.envrc`",
+                "adds an executable, adds, changes or deletes a symbolic link",
+                "digits and `_.+@=,-`",
+                "`CODEOWNERS`",
+                "more than 20 files",
+                "leave that part out and say so in your",
+            ];
+            for want in has.iter().chain(&always) {
+                assert!(brief.contains(want), "{want}\n{brief}");
+            }
+            for unwanted in has_not {
+                assert!(!brief.contains(unwanted), "{unwanted}\n{brief}");
+            }
+        }
+        // A run that proposes no change has no such rules to be told.
+        let analysis = text(&policy(Kind::Analysis, rules(&["README.md"], true)));
+        assert!(!analysis.contains("refused whole"), "{analysis}");
     }
 }
