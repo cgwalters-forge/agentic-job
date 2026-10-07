@@ -17,7 +17,7 @@ use crate::config::Sandbox;
 use crate::sandbox::enter::OIDC_REQUEST_VARS;
 use crate::sandbox::local::{ABSTRACT_PREFIX, Reached};
 use crate::sandbox::setup::{self, SELF_COPY};
-use crate::sandbox::{egress, host};
+use crate::sandbox::{egress, host, network};
 
 /// A variable of a process of the runner's, standing in for the tokens in
 /// the environments of real job steps.
@@ -659,7 +659,11 @@ impl Checker<'_> {
                     let port = addr.port();
                     // The egress proxy is where it is meant to connect.
                     let proxy = self.config.egress.proxy && port == egress::PROXY_PORT;
-                    !proxy && !check.allow_tcp_ports.contains(&port)
+                    // Without one its network is open, and a resolver
+                    // on loopback is how it resolves names: the rules
+                    // close that port only behind the proxy.
+                    let resolver = !self.config.egress.proxy && port == network::DNS_PORT;
+                    !proxy && !resolver && !check.allow_tcp_ports.contains(&port)
                 }
             })
             .partition(|reached| !matches!(reached, Reached::Tcp(_)));
