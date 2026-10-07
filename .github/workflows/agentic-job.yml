@@ -13,7 +13,8 @@
 # the policy job takes a release's by the checksum in
 # secure-host/release.json when that release was built from the source at
 # this commit, and builds it from that source otherwise, or when the
-# caller says so.
+# caller says so. The agent's machine is secured by the action of that
+# directory, the same step any job can run first (docs/secure-host.md).
 # Artifacts pass between the jobs by the id their upload returned: a name
 # can be uploaded again by a later job, an id cannot.
 #
@@ -302,7 +303,7 @@ jobs:
         env:
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
+        run: &own |
           echo "$WORKFLOW_REPOSITORY at $WORKFLOW_SHA"
           [[ "$WORKFLOW_REPOSITORY" == */* && "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -435,6 +436,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The action that secures this machine, from this file's own
+      # repository and commit: without them the checkout would quietly
+      # take the caller's, and the step below whatever is there.
+      - name: This workflow's own repository and commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: *own
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agentic-job-source
+          sparse-checkout: secure-host
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }},${{ needs.policy.outputs.policy-artifact-id }}
@@ -493,10 +509,15 @@ jobs:
             --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"
-      - name: Set up the sandbox
-        run: sudo agentic-job sandbox setup --config "$JOB_DIR/config.toml"
-      - name: Check the sandbox
-        run: agentic-job sandbox check
+      # The step any job can run first, with the binary the policy job
+      # made and the configuration written above: `sandbox setup`, which
+      # ends by taking root from this job, and `sandbox check`. Every
+      # step after it is this file's, and none of them has root.
+      - name: Secure the host
+        uses: ./.agentic-job-source/secure-host
+        with:
+          binary: /usr/local/bin/agentic-job
+          config: ${{ env.JOB_DIR }}/config.toml
       # For an event-triggered run the task is the one the policy job
       # wrote, downloaded with the policy: the caller's task and then the
       # event's text, fenced.

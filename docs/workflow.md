@@ -11,10 +11,12 @@ apply job, and [listed below](#what-the-apply-job-does-before-it-writes).
    repository is public, fetches or builds the binary, and checks the run's request
    against the caller's bounds file (`agentic-job policy`). A request
    outside the bounds stops here, before a machine is spent on the agent.
-2. **agent**, on the caller's runner. `agentic-job sandbox setup` creates
-   the unprivileged user, the network rules and the egress proxy;
-   `sandbox check` probes them; `run` clones the target, drives the agent
-   and leaves what may be uploaded.
+2. **agent**, on the caller's runner. [The step that secures a host for
+   any job](secure-host.md), the action in `secure-host/`, creates the
+   unprivileged user, the network rules and the egress proxy, takes root
+   from the job and probes all of it (`agentic-job sandbox setup` and
+   `sandbox check`); `run` clones the target, drives the agent and
+   leaves what may be uploaded.
 3. **check**, on a machine the agent never touched. gh-aw's collector
    validates and sanitizes the agent's requests, then `agentic-job check`
    holds them and the patch to the policy.
