@@ -76,6 +76,13 @@ jobs:
       # All of them, not the one by name: a filter that matches nothing
       # passes.
       - run: cargo test --locked --test session
+      # `run` itself, with the fake agent as that user: the clone, the
+      # run's registration at a mock proxy, the session, and the end of
+      # the run.
+      - run: cargo test --locked --test run
+      # The probes of where the run token is, each failing when what it
+      # names is broken.
+      - run: cargo test --locked --test probe
 
   # The old tree's check and the new one, on the same requests and
   # hand-backs: crates/agentic-job/tests/corpus. The old tree is fetched at
