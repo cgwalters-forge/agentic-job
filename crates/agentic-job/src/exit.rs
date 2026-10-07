@@ -1,7 +1,6 @@
 //! Exit states, as docs/plan.md defines them. Callers (the workflow,
 //! `bot-runs`) branch on these numbers, so they are part of the interface.
 
-use std::fmt;
 use std::process::ExitCode;
 
 /// Bad arguments or an internal error. Also what clap exits with.
@@ -41,18 +40,6 @@ impl From<Exit> for ExitCode {
         Self::from(exit.code())
     }
 }
-
-/// The error of a command whose step of the plan has not landed yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotImplemented(pub &'static str);
-
-impl fmt::Display for NotImplemented {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "`agentic-job {}` is not implemented yet", self.0)
-    }
-}
-
-impl std::error::Error for NotImplemented {}
 
 #[cfg(test)]
 mod tests {
