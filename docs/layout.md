@@ -9,11 +9,10 @@ yours, so that steps written at the same time do not collide.
 One: `crates/agentic-job`, the released binary and its library, with a
 module per command. Add a crate only for code with a second user.
 
-The scripted ACP agent the tests drive arrives with step 3 as a second
-binary of the same crate, `src/bin/fake-agent.rs`. Cargo gives a
-package's tests the paths of its own binaries only
-(`CARGO_BIN_EXE_fake-agent`), and steps 3, 6a and 6b all need it. The
-release publishes `agentic-job` alone.
+The scripted ACP agent the tests drive is a second binary of the same
+crate, `src/bin/fake-agent.rs`. Cargo gives a package's tests the paths
+of its own binaries only (`CARGO_BIN_EXE_fake-agent`), and steps 3, 6a
+and 6b all need it. The release publishes `agentic-job` alone.
 
 ## Modules of `crates/agentic-job`
 
@@ -26,7 +25,7 @@ release publishes `agentic-job` alone.
 | `redact.rs` | 4 | secret-shaped strings; used by `check` and by `run` |
 | `sandbox/setup.rs` | 5 | `sandbox setup` |
 | `sandbox/check.rs` | 5 | `sandbox check`; its probes are a function `run` calls again |
-| `session/` | 3 | the ACP session, its limits and transcript: a library, no command |
+| `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
 | `run/` | 6a, 6b | `run`: `run/inference.rs` (run token), `run/agent.rs` (agent configuration), `run/clone.rs` in 6a; `run/handback.rs`, `run/summary.rs`, `run/upload.rs` in 6b |
 
 A module that outgrows its file becomes a directory of the same name
@@ -54,6 +53,44 @@ GH_AW_CHECKOUT`) and regenerated when the pin moves. `fixtures/` holds
 the safe-outputs artifacts of two real runs of the old tree, each with
 the configuration it ran under and a `source.json` naming the run;
 `.github/workflows/safe-outputs-probe.yml` applies them.
+
+## The session
+
+`session::run(Options)` is the whole interface, and `run` its caller. It
+starts the agent, drives one task over ACP within the limits, kills
+what the agent left running, and writes `acp.jsonl`, `agent-stderr.log`
+and `harness.json` to the directory it is given, in the old tree's
+schemas. `RunResult::result.exit()` is the run's exit state. What `run`
+supplies:
+
+- the agent, an entry of the registry in `session/agents.toml`
+  (`session::agents::builtin`); step 6a owns what surrounds each
+  command, and may change the commands with it. The old tree's
+  launchers also cleared the agent's inherited provider settings
+  (`ANTHROPIC_*`, `CLAUDE_*`, `OPENCODE_*`), which nothing here does;
+- `Launch::Sandbox`: the sandbox user, every process of which is killed
+  when the session ends, and the wrapper that switches to it (the `run0`
+  command line, which is step 5's to build). The kill happens when
+  `session::run` returns, not if its future is dropped or the process
+  is signalled: `run` has to see to those itself;
+- `Limits::from_config` of the `[limits]` table, which refuses a table
+  without a timeout, and one that caps neither model requests nor
+  spending unless it says `uncapped = true`;
+- the run's count of model requests, as a `tokio::sync::watch` channel
+  that step 6a keeps current from the inference proxy. A request cap
+  with no count is refused, so where nothing counts (`token-file`)
+  `run` clears the cap and says so;
+- `Policy::for_task(home)`, the permission policy of a task run;
+- where the condensed transcript goes, a line per event, which step 6b
+  redacts on its way to the job log and `condensed.log`.
+
+`session::digest::Digest` follows a recorded `acp.jsonl` as it follows
+a live session; the summary (step 6b) is built on it.
+
+A session keeps a list of attached clients, `session::Clients`, empty
+for a task run, to which the agent's notifications are passed on.
+Nothing can attach yet, and `session/clients.rs` lists what step 11
+has to design before something can.
 
 ## Rules that keep steps apart
 
@@ -92,7 +129,9 @@ do not copy it here.
 `.github/workflows/ci.yml` has one job per kind of check and a last job,
 `ci`, that the ruleset requires and that only gathers the others. A step
 that needs another runner or another setup (the sandbox probes need
-`run0`) adds a job and names it in `ci`'s `needs`. Two steps doing so
+`run0`) adds a job and names it in `ci`'s `needs`. `session-sandbox` is
+one: it runs the session's agent as a second user through `run0`, on
+ubuntu-26.04, since `run0 --pipe` needs systemd 257. Two steps doing so
 both edit that one line; keep both names.
 
 Every dependency has to build for `x86_64-unknown-linux-musl`, since the
