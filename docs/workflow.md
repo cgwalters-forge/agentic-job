@@ -447,13 +447,21 @@ first run at that commit would take it for its binary, the `check` of
 that run included. A cache is also one per calling repository, where a
 release is fetched by every caller.
 
-To pin a release: with the source merged and the workspace's version
-raised, run the `release` workflow on main with the tag of that
-version. Its build job's summary prints the new `release.json`; put it
-in `secure-host/` in a pull request, which changes nothing the binaries
-are built from. CI's `release-pin` job checks that the tag is of the
-source the pin names and that the published binaries have the pinned
-checksums.
+The pin refreshes itself, but for one click. When a push to main
+changes what the binaries are built from, the `pin` workflow builds
+them, publishes them as a release named for the source and the run
+(`build-DIGEST-RUN`), and pushes a branch `pin/...` whose one commit
+puts that release in `secure-host/release.json`. Someone opens that
+branch's pull request, since this organization does not let Actions
+open one and CI would not start for it if it did; the workflow's
+summary has the link. CI's `release-pin` job checks that the tag is of
+the source the pin names and that the published binaries have the
+pinned checksums, which is all a pin by hand was ever held to. Until
+it merges, jobs build their binary.
+
+A release with a version is still made by hand: raise the workspace's
+version, merge, and run the `release` workflow on main with that tag.
+Its build job's summary prints the `release.json` to pin it with.
 
 **Inputs a caller forwards.** The bounds file holds `repo`, `base`,
 `kind`, `outputs` and `max-outputs`, and nothing holds any other input.
