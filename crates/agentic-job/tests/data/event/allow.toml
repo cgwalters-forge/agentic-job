@@ -1,0 +1,19 @@
+# A bounds file with a [trigger] table, for the event tests.
+hosts = ["github.com"]
+repos = ["octo/repo"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 1 }
+noop = { max = 1 }
+
+[trigger]
+events = ["issues", "issue_comment", "pull_request", "pull_request_review_comment", "schedule", "workflow_dispatch"]
+roles = ["admin", "maintain", "write"]
+bots = ["dependabot[bot]"]
+forks = false
+commands = ["/agent"]

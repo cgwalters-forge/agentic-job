@@ -1,0 +1,812 @@
+//! `agentic-job event`: decide whether the event that started a workflow
+//! may start an agent run, and if so turn it into the run's task context.
+//!
+//! A caller's workflow may be triggered by anything (`on:` is the
+//! caller's), and the event's payload is a stranger's text: the title of
+//! an issue, the body of a comment, the name of a branch. This command is
+//! the one place that reads it. It decides from the caller's bounds file
+//! (the `[trigger]` table) who may start a run and from which events,
+//! fail closed, and writes the untrusted text into the task file behind a
+//! fence it cannot close, so the agent reads it as data. The decision and
+//! the targets (the triggering issue or pull request, the pull request's
+//! base and head) go to `event.json` for the workflow, which has the token
+//! to fetch the actor's permission and to react; the binary holds none.
+//!
+//! This is gh-aw's `pre_activation` and `activation` jobs in one command:
+//! its role check (`roles:` as an exact allowlist, bots refused unless
+//! listed, a comment's actor must be its author), its fork rule (a pull
+//! request from another repository is refused by default), its slash
+//! commands (the body must start with the command) and its sanitized
+//! context, with one difference: the text is fenced.
+
+mod context;
+
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use anyhow::{Context, Result, bail};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::exit::Exit;
+use crate::files;
+use crate::policy;
+
+pub use context::write_task;
+
+/// `event.json`'s schema.
+pub const SCHEMA: &str = "agentic-job-event/v1";
+
+/// What the command writes under `--out`.
+pub const DECISION_FILE: &str = "event.json";
+pub const TASK_FILE: &str = "task.md";
+
+/// The events this command knows how to read. A bounds file lists a
+/// subset of these; anything else is refused.
+pub const EVENTS: &[&str] = &[
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review_comment",
+    "schedule",
+    "workflow_dispatch",
+];
+
+/// gh-aw's default `roles:`: an exact allowlist, so `maintain` is not
+/// `write` and `admin` is not either.
+pub const DEFAULT_ROLES: &[&str] = &["admin", "maintain", "write"];
+
+/// The most an event payload, a permission response and a caller's task
+/// may be, in bytes.
+const MAX_EVENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PERMISSION_BYTES: u64 = 64 * 1024;
+const MAX_TASK_BYTES: u64 = 64 * 1024;
+
+/// The actor that is every workflow's own: a run it starts is a loop.
+const GITHUB_ACTIONS: &str = "github-actions[bot]";
+
+/// The actions of an event that may start a run. An edit is not one: the
+/// editor may not be the author, and the text that was checked is gone.
+const ISSUE_ACTIONS: &[&str] = &["opened", "reopened", "labeled"];
+const COMMENT_ACTIONS: &[&str] = &["created"];
+const PULL_REQUEST_ACTIONS: &[&str] = &["opened", "reopened", "synchronize", "ready_for_review"];
+
+/// A command at the very start of the body, as gh-aw matches it: no
+/// leading whitespace, then a word boundary.
+static COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^/([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]|\r?\n|$)").expect("a valid pattern")
+});
+
+static LOGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$").expect("a valid pattern")
+});
+
+/// The event's values may start with a dash: they are a stranger's text.
+#[derive(Debug, clap::Args)]
+pub struct Args {
+    /// The caller's bounds file, for its [trigger] table
+    #[arg(long, value_name = "FILE")]
+    pub allow: PathBuf,
+    /// The event's name (GITHUB_EVENT_NAME)
+    #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
+    pub event_name: String,
+    /// The event's payload (GITHUB_EVENT_PATH)
+    #[arg(long, value_name = "FILE")]
+    pub event: PathBuf,
+    /// Who started the workflow (github.actor)
+    #[arg(long, value_name = "LOGIN", allow_hyphen_values = true)]
+    pub actor: String,
+    /// The repository the workflow runs in, OWNER/NAME (github.repository)
+    #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
+    pub repository: String,
+    /// The actor's permission on that repository: the response of
+    /// GET /repos/OWNER/NAME/collaborators/LOGIN/permission, fetched by the
+    /// workflow. Without it, only a schedule or a listed bot may start a run
+    #[arg(long, value_name = "FILE")]
+    pub actor_permission: Option<PathBuf>,
+    /// The caller's own task text, put before the event's
+    #[arg(long, value_name = "FILE")]
+    pub task: Option<PathBuf>,
+    /// Where event.json and task.md are written
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+}
+
+/// The `[trigger]` table of the bounds file. Absent, no event starts a run.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trigger {
+    /// The events that may start a run, from [`EVENTS`].
+    pub events: Vec<String>,
+    /// The roles an actor may have, exactly; [`DEFAULT_ROLES`] by default.
+    #[serde(default = "default_roles")]
+    pub roles: Vec<String>,
+    /// Bot logins admitted without a role (`dependabot[bot]`).
+    #[serde(default)]
+    pub bots: Vec<String>,
+    /// Whether a pull request whose head is in another repository may
+    /// start a run.
+    #[serde(default)]
+    pub forks: bool,
+    /// The commands a comment must start with (`/agent`), one of which
+    /// every comment event needs.
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+fn default_roles() -> Vec<String> {
+    DEFAULT_ROLES.iter().map(|role| role.to_string()).collect()
+}
+
+impl Trigger {
+    /// Refuse a table that cannot mean what it says.
+    pub fn validate(&self) -> Result<()> {
+        for event in &self.events {
+            if !EVENTS.contains(&event.as_str()) {
+                bail!("[trigger] events: {event:?} is not one of {EVENTS:?}");
+            }
+        }
+        for command in &self.commands {
+            let Some(name) = command.strip_prefix('/') else {
+                bail!("[trigger] commands: {command:?} must start with a slash");
+            };
+            if !COMMAND_RE.is_match(command) || name.contains(char::is_whitespace) {
+                bail!("[trigger] commands: {command:?} is not a command name");
+            }
+        }
+        for bot in &self.bots {
+            if bot == GITHUB_ACTIONS {
+                bail!("[trigger] bots: {GITHUB_ACTIONS} would let a run start the next");
+            }
+            if !LOGIN_RE.is_match(bot) {
+                bail!("[trigger] bots: {bot:?} is not a login");
+            }
+        }
+        let comment_events = ["issue_comment", "pull_request_review_comment"];
+        if self.commands.is_empty()
+            && self
+                .events
+                .iter()
+                .any(|e| comment_events.contains(&e.as_str()))
+        {
+            bail!("[trigger] commands is empty, and a comment event needs one");
+        }
+        if self.roles.is_empty() && self.bots.is_empty() {
+            bail!("[trigger] roles and bots are both empty: nobody may start a run");
+        }
+        Ok(())
+    }
+}
+
+/// The response of the collaborator-permission API, the two fields read.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Permission {
+    /// The coarse level (`admin`, `write`, `read`, `none`).
+    pub permission: String,
+    /// The role (`admin`, `maintain`, `write`, `triage`, `read`), when the
+    /// API gives it.
+    #[serde(default)]
+    pub role_name: Option<String>,
+    /// Whose permission it is: it must be the actor's.
+    pub user: PermissionUser,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionUser {
+    pub login: String,
+}
+
+impl Permission {
+    fn role(&self) -> &str {
+        self.role_name.as_deref().unwrap_or(&self.permission)
+    }
+}
+
+/// What kind of thing the event is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    Issue,
+    PullRequest,
+}
+
+/// The issue or pull request the event is about: the default target of
+/// the run's outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub number: u64,
+    /// Its page, when the payload's is under the repository's.
+    pub url: Option<String>,
+}
+
+/// A pull request's head, when it is in the repository itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Head {
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub sha: String,
+}
+
+/// What the workflow may react to, so the human sees the run started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReactTo {
+    Issue { number: u64 },
+    Comment { id: u64 },
+    ReviewComment { id: u64 },
+}
+
+/// `event.json`: the decision, and what the workflow needs of the event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decision {
+    pub schema: String,
+    pub admitted: bool,
+    /// Why it was refused, or what admitted it.
+    pub reason: String,
+    pub event: String,
+    pub action: Option<String>,
+    pub actor: String,
+    /// The actor's role, when one was checked.
+    pub role: Option<String>,
+    pub item: Option<Item>,
+    /// The command that started the run, without its slash.
+    pub command: Option<String>,
+    /// For a pull request, its base branch; the run should start there.
+    pub base: Option<String>,
+    /// For a pull request in the repository, its head.
+    pub head: Option<Head>,
+    /// A key for the caller's `concurrency.group`, one run per item.
+    pub concurrency: String,
+    pub react_to: Option<ReactTo>,
+}
+
+/// The untrusted text of the event, each piece named for the agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Text {
+    /// Who wrote the comment or opened the item.
+    pub author: String,
+    /// What the comment said, after the command.
+    pub request: Option<String>,
+    /// The item's title and body.
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// A review comment's place in the diff.
+    pub diff: Option<String>,
+}
+
+/// What a read of the event yields: the decision and the text to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub decision: Decision,
+    pub text: Text,
+}
+
+/// The inputs of a decision, with the payload already parsed.
+pub struct Input<'a> {
+    pub trigger: &'a Trigger,
+    pub event_name: &'a str,
+    pub payload: &'a Value,
+    pub actor: &'a str,
+    pub repository: &'a str,
+    pub permission: Option<&'a Permission>,
+}
+
+pub fn run(args: &Args) -> Result<Exit> {
+    let bounds = policy::Bounds::load(&args.allow)?;
+    let Some(trigger) = bounds.trigger.as_ref() else {
+        bail!(
+            "{}: no [trigger] table, so no event may start a run",
+            args.allow.display()
+        );
+    };
+    trigger
+        .validate()
+        .with_context(|| args.allow.display().to_string())?;
+    let payload = files::read_regular(&args.event, MAX_EVENT_BYTES)
+        .with_context(|| format!("reading the event {}", args.event.display()))?;
+    let payload: Value = serde_json::from_slice(&payload)
+        .with_context(|| format!("{}: not JSON", args.event.display()))?;
+    let permission = args
+        .actor_permission
+        .as_deref()
+        .map(load_permission)
+        .transpose()?;
+    let task = args
+        .task
+        .as_deref()
+        .map(|path| {
+            let bytes = files::read_regular(path, MAX_TASK_BYTES)
+                .with_context(|| format!("reading the task {}", path.display()))?;
+            String::from_utf8(bytes).with_context(|| format!("{}: not UTF-8", path.display()))
+        })
+        .transpose()?;
+    let outcome = decide(&Input {
+        trigger,
+        event_name: &args.event_name,
+        payload: &payload,
+        actor: &args.actor,
+        repository: &args.repository,
+        permission: permission.as_ref(),
+    });
+    std::fs::create_dir_all(&args.out)
+        .with_context(|| format!("creating {}", args.out.display()))?;
+    // The task first and the decision last, so that a decision that says
+    // "admitted" is never on disk without the task it admits; and no task
+    // of an earlier decision survives a refusal.
+    let task_path = args.out.join(TASK_FILE);
+    match std::fs::remove_file(&task_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("removing {}", task_path.display())),
+    }
+    if outcome.decision.admitted {
+        write_task(&task_path, task.as_deref(), &outcome)?;
+    }
+    let decision_path = args.out.join(DECISION_FILE);
+    let json = serde_json::to_vec_pretty(&outcome.decision)?;
+    std::fs::write(&decision_path, json)
+        .with_context(|| format!("writing {}", decision_path.display()))?;
+    if outcome.decision.admitted {
+        eprintln!("admitted: {}", outcome.decision.reason);
+        Ok(Exit::Success)
+    } else {
+        eprintln!("refused: {}", outcome.decision.reason);
+        Ok(Exit::Failure)
+    }
+}
+
+fn load_permission(path: &Path) -> Result<Permission> {
+    let bytes = files::read_regular(path, MAX_PERMISSION_BYTES)
+        .with_context(|| format!("reading the permission {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("{}: not a permission response", path.display()))
+}
+
+/// The decision, pure: every refusal names its reason, and a refusal
+/// still carries what was read so the workflow can say what happened.
+pub fn decide(input: &Input<'_>) -> Outcome {
+    let mut outcome = Outcome {
+        decision: Decision {
+            schema: SCHEMA.to_string(),
+            admitted: false,
+            reason: String::new(),
+            event: input.event_name.to_string(),
+            action: str_at(input.payload, &["action"]).map(str::to_string),
+            actor: input.actor.to_string(),
+            role: None,
+            item: None,
+            command: None,
+            base: None,
+            head: None,
+            concurrency: input.event_name.to_string(),
+            react_to: None,
+        },
+        text: Text::default(),
+    };
+    match read(input, &mut outcome) {
+        Ok(reason) => {
+            outcome.decision.admitted = true;
+            outcome.decision.reason = reason;
+        }
+        Err(reason) => {
+            outcome.decision.admitted = false;
+            outcome.decision.reason = reason;
+            outcome.text = Text::default();
+        }
+    }
+    outcome
+}
+
+/// The checks, in the order a refusal should be reported: the event, the
+/// actor, then what the event says.
+fn read(input: &Input<'_>, outcome: &mut Outcome) -> std::result::Result<String, String> {
+    let event = input.event_name;
+    if !input.trigger.events.iter().any(|allowed| allowed == event) {
+        return Err(format!("the bounds do not let a {event} event start a run"));
+    }
+    if !LOGIN_RE.is_match(input.actor) {
+        return Err("the actor is not a login".to_string());
+    }
+    let payload_repo = str_at(input.payload, &["repository", "full_name"]);
+    if event != "schedule"
+        && payload_repo.is_none_or(|repo| !repo.eq_ignore_ascii_case(input.repository))
+    {
+        return Err(format!(
+            "the event's repository {} is not {}",
+            payload_repo.unwrap_or("(none)"),
+            input.repository
+        ));
+    }
+    if event == "schedule" {
+        outcome.decision.concurrency = "schedule".to_string();
+        return Ok("a schedule".to_string());
+    }
+    // A schedule has no sender; every other event has, and it is the actor.
+    let sender = str_at(input.payload, &["sender", "login"]).ok_or("the event has no sender")?;
+    if sender != input.actor {
+        return Err(format!(
+            "the actor {} is not the event's sender {sender}",
+            input.actor
+        ));
+    }
+    outcome.decision.role = check_actor(input)?;
+    if event == "workflow_dispatch" {
+        outcome.decision.concurrency = "dispatch".to_string();
+        return Ok(format!("dispatched by {}", input.actor));
+    }
+    let action = outcome.decision.action.clone().unwrap_or_default();
+    let action = action.as_str();
+    match event {
+        "issues" => read_issue(input, action, outcome),
+        "issue_comment" => read_comment(input, action, outcome),
+        "pull_request" => read_pull_request(input, action, outcome),
+        "pull_request_review_comment" => read_review_comment(input, action, outcome),
+        other => Err(format!("{other} events are not supported")),
+    }
+}
+
+/// Who the actor is: a bot on the list, or a collaborator with a listed
+/// role. The bot check comes first so that a bot is never admitted by a
+/// role it happens to hold.
+fn check_actor(input: &Input<'_>) -> std::result::Result<Option<String>, String> {
+    let actor = input.actor;
+    let is_bot = actor.ends_with("[bot]")
+        || str_at(input.payload, &["sender", "type"]).is_some_and(|kind| kind == "Bot");
+    if actor == GITHUB_ACTIONS {
+        return Err("github-actions[bot] may not start a run: that is a loop".to_string());
+    }
+    if is_bot {
+        return if input.trigger.bots.iter().any(|bot| bot == actor) {
+            Ok(None)
+        } else {
+            Err(format!("{actor} is a bot the bounds do not list"))
+        };
+    }
+    let Some(permission) = input.permission else {
+        return Err(format!(
+            "no permission of {actor} was given, and one is needed"
+        ));
+    };
+    if permission.user.login != actor {
+        return Err(format!(
+            "the permission given is {}'s, not {actor}'s",
+            permission.user.login
+        ));
+    }
+    let role = permission.role();
+    if input.trigger.roles.iter().any(|allowed| allowed == role) {
+        Ok(Some(role.to_string()))
+    } else {
+        Err(format!(
+            "{actor} has the role {role:?}, and the bounds admit {:?}",
+            input.trigger.roles
+        ))
+    }
+}
+
+fn read_issue(
+    input: &Input<'_>,
+    action: &str,
+    outcome: &mut Outcome,
+) -> std::result::Result<String, String> {
+    allowed_action(ISSUE_ACTIONS, action)?;
+    let issue = input.payload.get("issue").ok_or("no issue in the event")?;
+    if issue.get("pull_request").is_some() {
+        return Err("an issues event about a pull request".to_string());
+    }
+    let item = item_of(input, issue, ItemKind::Issue)?;
+    outcome.text = Text {
+        author: str_at(issue, &["user", "login"])
+            .unwrap_or_default()
+            .to_string(),
+        request: None,
+        title: str_at(issue, &["title"]).map(str::to_string),
+        body: str_at(issue, &["body"]).map(str::to_string),
+        diff: None,
+    };
+    let decision = &mut outcome.decision;
+    decision.concurrency = format!("issue-{}", item.number);
+    decision.react_to = Some(ReactTo::Issue {
+        number: item.number,
+    });
+    let reason = format!("issue #{} {action} by {}", item.number, input.actor);
+    decision.item = Some(item);
+    Ok(reason)
+}
+
+fn read_comment(
+    input: &Input<'_>,
+    action: &str,
+    outcome: &mut Outcome,
+) -> std::result::Result<String, String> {
+    allowed_action(COMMENT_ACTIONS, action)?;
+    let comment = input
+        .payload
+        .get("comment")
+        .ok_or("no comment in the event")?;
+    let issue = input.payload.get("issue").ok_or("no issue in the event")?;
+    check_author(input, comment)?;
+    // The payload of a comment on a pull request says nothing about where
+    // its head is, so the fork rule cannot be applied here; until the
+    // workflow fetches the pull request, such a comment is admitted only
+    // where forks are.
+    let kind = if issue.get("pull_request").is_some() {
+        if !input.trigger.forks {
+            return Err(
+                "a comment on a pull request is admitted only with forks = true, since \
+                        its payload does not say where the head is"
+                    .to_string(),
+            );
+        }
+        ItemKind::PullRequest
+    } else {
+        ItemKind::Issue
+    };
+    let item = item_of(input, issue, kind)?;
+    let body = str_at(comment, &["body"]).unwrap_or_default();
+    let (command, request) = match_command(input.trigger, body)?;
+    let id = u64_at(comment, &["id"]).ok_or("the comment has no id")?;
+    outcome.text = Text {
+        author: str_at(comment, &["user", "login"])
+            .unwrap_or_default()
+            .to_string(),
+        request: Some(request),
+        title: str_at(issue, &["title"]).map(str::to_string),
+        body: str_at(issue, &["body"]).map(str::to_string),
+        diff: None,
+    };
+    let decision = &mut outcome.decision;
+    decision.concurrency = format!("issue-{}", item.number);
+    decision.react_to = Some(ReactTo::Comment { id });
+    decision.command = Some(command.clone());
+    let reason = format!("/{command} on #{} by {}", item.number, input.actor);
+    decision.item = Some(item);
+    Ok(reason)
+}
+
+fn read_pull_request(
+    input: &Input<'_>,
+    action: &str,
+    outcome: &mut Outcome,
+) -> std::result::Result<String, String> {
+    allowed_action(PULL_REQUEST_ACTIONS, action)?;
+    let pull = input
+        .payload
+        .get("pull_request")
+        .ok_or("no pull request in the event")?;
+    let item = item_of(input, pull, ItemKind::PullRequest)?;
+    let head = check_head(input, pull)?;
+    outcome.text = Text {
+        author: str_at(pull, &["user", "login"])
+            .unwrap_or_default()
+            .to_string(),
+        request: None,
+        title: str_at(pull, &["title"]).map(str::to_string),
+        body: str_at(pull, &["body"]).map(str::to_string),
+        diff: None,
+    };
+    let decision = &mut outcome.decision;
+    decision.concurrency = format!("pull-{}", item.number);
+    decision.react_to = Some(ReactTo::Issue {
+        number: item.number,
+    });
+    decision.base = str_at(pull, &["base", "ref"]).map(str::to_string);
+    decision.head = head;
+    let reason = format!("pull request #{} {action} by {}", item.number, input.actor);
+    decision.item = Some(item);
+    Ok(reason)
+}
+
+fn read_review_comment(
+    input: &Input<'_>,
+    action: &str,
+    outcome: &mut Outcome,
+) -> std::result::Result<String, String> {
+    allowed_action(COMMENT_ACTIONS, action)?;
+    let comment = input
+        .payload
+        .get("comment")
+        .ok_or("no comment in the event")?;
+    let pull = input
+        .payload
+        .get("pull_request")
+        .ok_or("no pull request in the event")?;
+    check_author(input, comment)?;
+    let item = item_of(input, pull, ItemKind::PullRequest)?;
+    let head = check_head(input, pull)?;
+    let body = str_at(comment, &["body"]).unwrap_or_default();
+    let (command, request) = match_command(input.trigger, body)?;
+    let id = u64_at(comment, &["id"]).ok_or("the comment has no id")?;
+    let place = format!(
+        "{} line {}",
+        str_at(comment, &["path"]).unwrap_or("?"),
+        u64_at(comment, &["line"]).unwrap_or(0)
+    );
+    let diff = str_at(comment, &["diff_hunk"]).map(|hunk| format!("{place}\n{hunk}"));
+    outcome.text = Text {
+        author: str_at(comment, &["user", "login"])
+            .unwrap_or_default()
+            .to_string(),
+        request: Some(request),
+        title: str_at(pull, &["title"]).map(str::to_string),
+        body: str_at(pull, &["body"]).map(str::to_string),
+        diff,
+    };
+    let decision = &mut outcome.decision;
+    decision.concurrency = format!("pull-{}", item.number);
+    decision.react_to = Some(ReactTo::ReviewComment { id });
+    decision.command = Some(command.clone());
+    decision.base = str_at(pull, &["base", "ref"]).map(str::to_string);
+    decision.head = head;
+    let reason = format!(
+        "/{command} on pull request #{} by {}",
+        item.number, input.actor
+    );
+    decision.item = Some(item);
+    Ok(reason)
+}
+
+fn allowed_action(allowed: &[&str], action: &str) -> std::result::Result<(), String> {
+    if allowed.contains(&action) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the action {action:?} does not start a run (only {allowed:?})"
+        ))
+    }
+}
+
+/// A comment's actor must be its author: an edit, a reaction or a
+/// re-delivery by someone else is not that person asking.
+fn check_author(input: &Input<'_>, comment: &Value) -> std::result::Result<(), String> {
+    let author = str_at(comment, &["user", "login"]).ok_or("the comment has no author")?;
+    if author == input.actor {
+        Ok(())
+    } else {
+        Err(format!(
+            "the actor {} is not the comment's author {author}",
+            input.actor
+        ))
+    }
+}
+
+/// A pull request's head is in the repository, or the bounds allow forks.
+/// The head is reported only when it is the repository's own: a fork's
+/// branch is never something a run starts from by name.
+fn check_head(input: &Input<'_>, pull: &Value) -> std::result::Result<Option<Head>, String> {
+    let repo_id = u64_at(input.payload, &["repository", "id"]).ok_or("the repository has no id")?;
+    let head_id = u64_at(pull, &["head", "repo", "id"]);
+    if head_id == Some(repo_id) {
+        let git_ref = str_at(pull, &["head", "ref"]).ok_or("the head has no ref")?;
+        let sha = str_at(pull, &["head", "sha"]).ok_or("the head has no sha")?;
+        return Ok(Some(Head {
+            git_ref: git_ref.to_string(),
+            sha: sha.to_string(),
+        }));
+    }
+    if input.trigger.forks {
+        return Ok(None);
+    }
+    Err(format!(
+        "the pull request's head is in {}, not in {}, and the bounds do not allow forks",
+        str_at(pull, &["head", "repo", "full_name"]).unwrap_or("another repository"),
+        input.repository
+    ))
+}
+
+/// The body must start with one of the bounds' commands. What follows,
+/// on that line and below it, is the request.
+fn match_command(trigger: &Trigger, body: &str) -> std::result::Result<(String, String), String> {
+    if trigger.commands.is_empty() {
+        return Err("the bounds list no command, and a comment needs one".to_string());
+    }
+    let Some(found) = COMMAND_RE.captures(body) else {
+        return Err("the comment does not start with a command".to_string());
+    };
+    let name = &found[1];
+    if !trigger
+        .commands
+        .iter()
+        .any(|command| command.strip_prefix('/') == Some(name))
+    {
+        return Err(format!(
+            "/{name} is not one of the bounds' commands {:?}",
+            trigger.commands
+        ));
+    }
+    // Everything after the command is the request: the rest of its line
+    // and the lines below it.
+    let request = body[found.get(0).map_or(0, |m| m.end())..]
+        .trim()
+        .to_string();
+    Ok((name.to_string(), request))
+}
+
+/// The item's number and, when it is the repository's own page, its URL.
+/// No text of the event: `event.json` is read by the workflow unfenced.
+fn item_of(input: &Input<'_>, value: &Value, kind: ItemKind) -> std::result::Result<Item, String> {
+    let prefix = format!("https://github.com/{}/", input.repository);
+    let url = str_at(value, &["html_url"])
+        .filter(|url| url.starts_with(&prefix) && url.chars().all(|c| c.is_ascii_graphic()))
+        .map(str::to_string);
+    Ok(Item {
+        kind,
+        number: u64_at(value, &["number"]).ok_or("no number")?,
+        url,
+    })
+}
+
+fn at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(value, |value, key| value.get(key))
+}
+
+fn str_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    at(value, path).and_then(Value::as_str)
+}
+
+fn u64_at(value: &Value, path: &[&str]) -> Option<u64> {
+    at(value, path).and_then(Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trigger(commands: &[&str]) -> Trigger {
+        Trigger {
+            events: EVENTS.iter().map(|e| e.to_string()).collect(),
+            roles: default_roles(),
+            bots: vec![],
+            forks: false,
+            commands: commands.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn commands_match_at_the_start_only() {
+        let t = trigger(&["/agent", "/review"]);
+        let cases: &[(&str, Option<(&str, &str)>)] = &[
+            ("/agent fix it", Some(("agent", "fix it"))),
+            ("/agent", Some(("agent", ""))),
+            ("/agent\nmore", Some(("agent", "more"))),
+            ("/agent   fix it  \nmore", Some(("agent", "fix it  \nmore"))),
+            ("/review", Some(("review", ""))),
+            (" /agent", None),
+            ("please /agent", None),
+            ("/agentx", None),
+            ("/other", None),
+            ("", None),
+        ];
+        for (body, expected) in cases {
+            let got = match_command(&t, body).ok();
+            let expected = expected.map(|(c, r)| (c.to_string(), r.to_string()));
+            assert_eq!(got, expected, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_trigger_table_is_validated() {
+        let mut t = trigger(&["/agent"]);
+        t.validate().unwrap();
+        t.commands = vec!["agent".into()];
+        assert!(t.validate().is_err());
+        t.commands = vec!["/a b".into()];
+        assert!(t.validate().is_err());
+        t.commands = vec![];
+        t.bots = vec![GITHUB_ACTIONS.into()];
+        assert!(t.validate().is_err());
+        t.bots = vec![];
+        t.events = vec!["push".into()];
+        assert!(t.validate().is_err());
+        t.events = vec![];
+        t.roles = vec![];
+        assert!(t.validate().is_err());
+        // A comment event with no command would refuse every comment.
+        let mut t = trigger(&[]);
+        assert!(t.validate().is_err());
+        t.events = vec!["issues".into()];
+        t.validate().unwrap();
+    }
+}

@@ -1,0 +1,17 @@
+{
+  "permission": "admin",
+  "role_name": "admin",
+  "user": {
+    "login": "alice",
+    "id": 1,
+    "node_id": "U_1",
+    "type": "User",
+    "permissions": {
+      "admin": true,
+      "maintain": true,
+      "push": true,
+      "triage": true,
+      "pull": true
+    }
+  }
+}

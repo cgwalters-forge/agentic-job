@@ -1,0 +1,16 @@
+# The same bounds, allowing fork pull requests and a wider role list.
+hosts = ["github.com"]
+repos = ["octo/repo"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+create_pull_request = { max = 1 }
+
+[trigger]
+events = ["pull_request", "issue_comment"]
+roles = ["admin", "maintain", "write", "triage"]
+forks = true
+commands = ["/agent", "/review"]

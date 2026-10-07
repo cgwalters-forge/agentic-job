@@ -1,0 +1,17 @@
+{
+  "permission": "write",
+  "role_name": "write",
+  "user": {
+    "login": "bob",
+    "id": 1,
+    "node_id": "U_1",
+    "type": "User",
+    "permissions": {
+      "admin": false,
+      "maintain": false,
+      "push": true,
+      "triage": true,
+      "pull": true
+    }
+  }
+}

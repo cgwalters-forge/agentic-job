@@ -1,0 +1,17 @@
+{
+  "permission": "read",
+  "role_name": "triage",
+  "user": {
+    "login": "alice",
+    "id": 1,
+    "node_id": "U_1",
+    "type": "User",
+    "permissions": {
+      "admin": false,
+      "maintain": false,
+      "push": false,
+      "triage": true,
+      "pull": true
+    }
+  }
+}

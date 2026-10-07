@@ -1,0 +1,9 @@
+hosts = ["github.com"]
+repos = ["octo/repo"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+noop = { max = 1 }

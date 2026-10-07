@@ -156,6 +156,10 @@ pub struct Bounds {
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
+    /// Which events may start a run, and who may start one
+    /// (`agentic-job event`). Absent, none may.
+    #[serde(default)]
+    pub trigger: Option<crate::event::Trigger>,
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the

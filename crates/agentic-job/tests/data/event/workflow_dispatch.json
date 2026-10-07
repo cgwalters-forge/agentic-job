@@ -1,0 +1,26 @@
+{
+  "inputs": {
+    "task": "Update the changelog for 1.2",
+    "repo": "octo/repo"
+  },
+  "ref": "refs/heads/main",
+  "workflow": ".github/workflows/agent.yml",
+  "repository": {
+    "id": 100,
+    "node_id": "R_100",
+    "name": "repo",
+    "full_name": "octo/repo",
+    "private": false,
+    "default_branch": "main",
+    "owner": {
+      "login": "octo",
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "alice",
+    "id": 1,
+    "node_id": "U_1",
+    "type": "User"
+  }
+}

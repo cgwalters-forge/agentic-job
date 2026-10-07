@@ -9,6 +9,7 @@
 pub mod check;
 pub mod cli;
 pub mod config;
+pub mod event;
 pub mod exit;
 pub mod files;
 pub mod policy;
