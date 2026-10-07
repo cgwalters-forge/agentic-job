@@ -1,23 +1,24 @@
-//! fake-acp-agent: a scripted agent speaking the Agent Client Protocol on
-//! stdio, with no model behind it. It plays a fixed session, so agent.yml
-//! can run end to end (the harness, the sandbox, the permission policy and
-//! the redaction pass) without inference or credentials, and bot-harness's
-//! tests can drive it through what real agents don't readily do. It writes
-//! the JSON-RPC by hand rather than through the SDK, so it can misbehave.
+//! fake-agent: a scripted agent speaking the Agent Client Protocol on its
+//! standard streams, with no model behind it. It plays a fixed session, so
+//! a run can go end to end (the session, the sandbox, the permission
+//! policy and the redaction pass) without inference or credentials, and
+//! the session's tests can drive it through what real agents don't
+//! readily do. It writes the JSON-RPC by hand rather than through the
+//! SDK, so it can misbehave.
 //!
 //! ```text
-//! fake-acp-agent demo          play the built-in session (fake-agent-demo.json)
-//! fake-acp-agent script FILE [LATER]
-//!                              play the session in FILE, and for every
-//!                              prompt turn after the first the one in
-//!                              LATER (default: one line of text)
-//! fake-acp-agent fs            send fs/* and terminal/* requests the client
-//!                              doesn't advertise, expecting each answered
-//! fake-acp-agent flood N       send N agent_message_chunk notifications
-//! fake-acp-agent grace         make three tool calls, then ask permission
-//!                              after the client must have cancelled the
-//!                              session (run with --max-tool-calls 2)
-//! fake-acp-agent slow-init     never answer initialize
+//! fake-agent demo          play the built-in session (fake-agent-demo.json)
+//! fake-agent script FILE [LATER]
+//!                          play the session in FILE, and for every prompt
+//!                          turn after the first the one in LATER (default:
+//!                          one line of text)
+//! fake-agent fs            send fs/* and terminal/* requests the client
+//!                          doesn't advertise, expecting each answered
+//! fake-agent flood N       send N agent_message_chunk notifications
+//! fake-agent grace         report a cost, then ask permission after the
+//!                          client must have cancelled the session for it
+//!                          (run with a budget below a dollar)
+//! fake-agent slow-init     never answer initialize
 //! ```
 //!
 //! A session is a JSON list of steps, run in order in `session/prompt`,
@@ -30,28 +31,36 @@
 //!  {"write": {"title": "Write", "path": "{cwd}/x", "content": "..."}},
 //!  {"cost": {"usd": 0.01}},
 //!  {"task": "Review the change"},
-//!  {"sleep": 1.5}]
+//!  {"sleep": 1.5},
+//!  {"stop": "refusal"},
+//!  {"exit": 7},
+//!  {"finish": 0}]
 //! ```
 //!
 //! A `task` is a subagent's tool call as opencode reports one, done at
-//! once. A `sleep` (seconds) ends early when the client cancels the turn. As
-//! real agents do, it takes a `session/prompt` that arrives during a turn
-//! without starting another one, and answers it when the turn ends.
+//! once. A `sleep` (seconds) ends early when the client cancels the turn.
+//! A `stop` ends the turn there with that stop reason, and an `exit` the
+//! process with that status, as an agent that crashed. A `finish` ends
+//! the turn as done and then the process with that status, as an agent
+//! that doesn't wait for its client to hang up. As real agents do,
+//! it takes a `session/prompt` that arrives during a turn without
+//! starting another one, and answers it when the turn ends.
 //!
 //! `{cwd}` is the session's working directory and `{home}` is `$HOME`.
 //! Commands run with `sh -c` in the session's working directory.
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
-use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-const DEMO: &str = include_str!("../../fake-agent-demo.json");
-const NAME: &str = "fake-acp-agent";
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+const DEMO: &str = include_str!("fake-agent-demo.json");
+const NAME: &str = "fake-agent";
 const SESSION: &str = "fake-session";
 const MODEL_OPTION: &str = "model";
 const DEFAULT_MODEL: &str = "fake";
@@ -61,6 +70,10 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const FS_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long `grace` mode waits before its late permission request.
 const GRACE_DELAY: Duration = Duration::from_secs(1);
+/// What `grace` mode says it has spent.
+const GRACE_COST_USD: f64 = 1.0;
+const END_TURN: &str = "end_turn";
+const CANCELLED: &str = "cancelled";
 /// How often a `sleep` step looks for a cancel.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 /// What a later prompt turn says without a script of its own.
@@ -91,6 +104,9 @@ enum Step {
     },
     Task(String),
     Sleep(f64),
+    Stop(String),
+    Exit(i32),
+    Finish(i32),
 }
 
 enum Mode {
@@ -143,6 +159,8 @@ struct Conn {
     in_turn: bool,
     /// The ids of the prompts that arrived during it.
     queued: Vec<Value>,
+    /// The status to exit with once the turn is answered (`finish`).
+    finish: Option<i32>,
 }
 
 impl Conn {
@@ -167,6 +185,7 @@ impl Conn {
             cancelled: false,
             in_turn: false,
             queued: Vec::new(),
+            finish: None,
         }
     }
 
@@ -284,6 +303,9 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                     conn.respond(&queued, json!({"stopReason": stop}));
                 }
                 conn.respond(&id, json!({"stopReason": stop}));
+                if let Some(status) = conn.finish {
+                    std::process::exit(status);
+                }
             }
             // Notifications (a cancel before the prompt) need no answer.
             _ if id.is_null() => {}
@@ -295,7 +317,7 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
 }
 
 /// Runs prompt turn number TURN (from 0); returns its stop reason.
-fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<&'static str> {
+fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<String> {
     match mode {
         Mode::Script(first, later) => {
             let steps = if turn == 0 { first } else { later };
@@ -307,9 +329,20 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<&'sta
             for (i, step) in steps.iter().enumerate() {
                 conn.poll();
                 if conn.cancelled {
-                    return Ok("cancelled");
+                    return Ok(CANCELLED.to_owned());
                 }
-                play(conn, &format!("call-{i}"), step, cwd, &fill)?;
+                match step {
+                    Step::Stop(reason) => return Ok(reason.clone()),
+                    Step::Finish(status) => {
+                        conn.finish = Some(*status);
+                        return Ok(END_TURN.to_owned());
+                    }
+                    Step::Exit(status) => {
+                        eprintln!("{NAME}: exiting with status {status}, as scripted");
+                        std::process::exit(*status);
+                    }
+                    _ => play(conn, &format!("call-{i}"), step, cwd, &fill)?,
+                }
             }
         }
         Mode::Fs => {
@@ -335,25 +368,21 @@ fn prompt(conn: &mut Conn, mode: &Mode, turn: usize, cwd: &Path) -> Result<&'sta
             }
         }
         Mode::Grace => {
-            for i in 0..3 {
-                conn.update(
-                    json!({"sessionUpdate": "tool_call", "toolCallId": format!("t{i}"),
-                    "title": "Bash", "kind": "execute", "status": "pending",
-                    "rawInput": {"command": "true"}}),
-                );
-            }
+            conn.update(cost_update(GRACE_COST_USD));
             std::thread::sleep(GRACE_DELAY);
             let call =
-                json!({"toolCallId": "t2", "kind": "execute", "rawInput": {"command": "true"}});
+                json!({"toolCallId": "t0", "kind": "execute", "rawInput": {"command": "true"}});
             ask_permission(conn, call)?;
         }
         Mode::SlowInit => unreachable!("never gets a session"),
     }
-    Ok(if conn.cancelled {
-        "cancelled"
-    } else {
-        "end_turn"
-    })
+    let stop = if conn.cancelled { CANCELLED } else { END_TURN };
+    Ok(stop.to_owned())
+}
+
+fn cost_update(usd: f64) -> Value {
+    json!({"sessionUpdate": "usage_update", "used": 0, "size": 0,
+        "cost": {"amount": usd, "currency": "USD"}})
 }
 
 /// Asks the client's permission for a tool call: whether it was granted.
@@ -389,10 +418,7 @@ fn play(
             return Ok(());
         }
         Step::Cost { usd } => {
-            conn.update(
-                json!({"sessionUpdate": "usage_update", "used": 0, "size": 0,
-                "cost": {"amount": usd, "currency": "USD"}}),
-            );
+            conn.update(cost_update(*usd));
             return Ok(());
         }
         Step::Task(description) => {
@@ -416,6 +442,8 @@ fn play(
             }
             return Ok(());
         }
+        // Ends the turn or the process: `prompt` takes these itself.
+        Step::Stop(_) | Step::Exit(_) | Step::Finish(_) => return Ok(()),
         Step::Execute { title, command } => (title, "execute", json!({"command": fill(command)})),
         Step::Read { title, path, lines } => {
             (title, "read", json!({"path": fill(path), "lines": lines}))
@@ -492,7 +520,13 @@ fn play(
                 Err(e) => (false, format!("writing {path}: {e}"), Value::Null),
             }
         }
-        Step::Say(_) | Step::Cost { .. } | Step::Task(_) | Step::Sleep(_) => {
+        Step::Say(_)
+        | Step::Cost { .. }
+        | Step::Task(_)
+        | Step::Sleep(_)
+        | Step::Stop(_)
+        | Step::Exit(_)
+        | Step::Finish(_) => {
             unreachable!("handled above")
         }
     };
@@ -543,8 +577,14 @@ mod tests {
         let bad = r#"[{"say": "x"}, {"execute": {"command": "true"}}]"#;
         assert!(parse_script(bad).is_err());
         assert_eq!(
-            parse_script(r#"[{"sleep": 0.5}]"#).unwrap(),
-            [Step::Sleep(0.5)]
+            parse_script(r#"[{"sleep": 0.5}, {"stop": "refusal"}, {"exit": 7}, {"finish": 0}]"#)
+                .unwrap(),
+            [
+                Step::Sleep(0.5),
+                Step::Stop("refusal".to_owned()),
+                Step::Exit(7),
+                Step::Finish(0)
+            ]
         );
     }
 }
