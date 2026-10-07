@@ -102,10 +102,14 @@ const MAX_SOURCE_BYTES: usize = 1 << 20;
 /// What a failing command may say.
 const MAX_COMMAND_OUTPUT: usize = 4096;
 /// Prints the file `$1` of the checkout `$2`, and fails with [`ABSENT`]
-/// if there is none. It must be a regular file and no link, and, links
-/// in the directories above it resolved, still inside the checkout: a
-/// repository cannot name a file outside itself.
-const READ_SCRIPT: &str = r#"[ -e "$1" ] || [ -L "$1" ] || exit 44; [ -f "$1" ] && [ ! -L "$1" ] && r=$(realpath -e -- "$1") && c=$(realpath -e -- "$2") && case "$r" in "$c"/*) exec cat -- "$r" ;; *) exit 1 ;; esac"#;
+/// if there is none. With every link resolved, its own included, it
+/// must be a regular file still inside the checkout: a repository
+/// cannot name a file outside itself, and may link to one of its own,
+/// as the old tree allowed (the configuration it runs with every day
+/// has its `AGENTS.md` as a link to the one a directory up).
+/// The resolved name is itself no link: `$(...)` drops a newline at a
+/// name's end, and what is left could be another entry, a link out.
+const READ_SCRIPT: &str = r#"[ -e "$1" ] || [ -L "$1" ] || exit 44; r=$(realpath -e -- "$1") && c=$(realpath -e -- "$2") && [ -f "$r" ] && [ ! -L "$r" ] && case "$r" in "$c"/*) exec cat -- "$r" ;; *) exit 1 ;; esac"#;
 const ABSENT: i32 = 44;
 /// Writes standard input to `$1` under the home, replacing what was
 /// there without writing through a link left in its place. The file is
@@ -1079,9 +1083,11 @@ mod tests {
         );
     }
 
-    /// Only a regular file of the repository is read: not a link, nor a
-    /// file reached through a linked directory that leaves it; and a
-    /// file that is not there is told from one that is odd.
+    /// Only a regular file of the repository is read, reached by its
+    /// name or through links that stay inside it: not a link that leaves
+    /// it or leads nowhere, nor a file reached through a linked directory
+    /// that leaves it; and a file that is not there is told from one
+    /// that is odd.
     #[test]
     fn source_files_are_regular_files_of_the_checkout() {
         let root = tempfile::tempdir().unwrap();
@@ -1096,6 +1102,15 @@ mod tests {
         std::os::unix::fs::symlink("nowhere", path("dangling")).unwrap();
         std::os::unix::fs::symlink("../outside", path("way-out")).unwrap();
         std::os::unix::fs::symlink("dir/sub", path("way-in")).unwrap();
+        std::os::unix::fs::symlink("../real", path("dir/own")).unwrap();
+        std::os::unix::fs::symlink("own", path("dir/own-twice")).unwrap();
+        std::os::unix::fs::symlink("../../outside/file", path("dir/others")).unwrap();
+        std::os::unix::fs::symlink("sub", path("dir/to-dir")).unwrap();
+        // A name that ends in a newline, which the shell drops, beside a
+        // link out under the name that is left.
+        std::fs::write(path("x\n"), "decoy").unwrap();
+        std::os::unix::fs::symlink("../outside/file", path("x")).unwrap();
+        std::os::unix::fs::symlink("x\n", path("newline")).unwrap();
         let read = |name: &str| {
             let args = [path(name), checkout.clone()].map(|p| p.to_str().unwrap().to_owned());
             let out = sh(READ_SCRIPT, root.path(), &[&args[0], &args[1]], b"");
@@ -1105,9 +1120,20 @@ mod tests {
         assert_eq!(read("dir/sub/deep"), (Some(0), "deep".into()));
         // A link between directories of the checkout is the checkout's.
         assert_eq!(read("way-in/deep"), (Some(0), "deep".into()));
+        // So is a link to a file of the checkout, however many links on.
+        assert_eq!(read("dir/own"), (Some(0), "content".into()));
+        assert_eq!(read("dir/own-twice"), (Some(0), "content".into()));
         assert_eq!(read("missing"), (Some(ABSENT), String::new()));
         assert_eq!(read("no-dir/missing"), (Some(ABSENT), String::new()));
-        for odd in ["link", "dangling", "dir", "way-out/file"] {
+        for odd in [
+            "link",
+            "dangling",
+            "dir",
+            "way-out/file",
+            "dir/others",
+            "dir/to-dir",
+            "newline",
+        ] {
             let (code, text) = read(odd);
             assert!(
                 code != Some(0) && code != Some(ABSENT) && text.is_empty(),
