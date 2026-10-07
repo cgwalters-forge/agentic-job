@@ -1,0 +1,27 @@
+# A caller's bounds: what a run started from its repository may ask for.
+# `agentic-job policy --allow` checks one run's request against this.
+
+# The hosts a clone URL may name, exactly.
+hosts = ["github.com"]
+# Globs, ignoring case: `*` is anything but a slash, `**` anything.
+repos = ["bootc-dev/*", "cgwalters-bot/*"]
+bases = ["main", "bot/**"]
+
+# The most outputs a run may hand back in all.
+max_outputs = 5
+max_patch_bytes = 8388608
+max_patch_files = 100
+
+# The output types a run may ask for, and the most of each.
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 3 }
+noop = { max = 1 }
+missing_tool = { max = 3 }
+missing_data = { max = 3 }
+
+# Files a patch may touch although they are protected by default, in the
+# repositories named here exactly.
+[unprotected_files]
+repos = ["cgwalters-bot/homegit"]
+files = ["README.md", "AGENTS.md"]

@@ -1,0 +1,146 @@
+//! `agentic-job policy` as a caller runs it: the exit states, and what
+//! reaches standard output.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
+
+const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
+
+/// A request within the bounds of `data/policy/allow.toml`, as pairs of a
+/// flag and its value.
+const REQUEST: &[(&str, &str)] = &[
+    ("--repo", "bootc-dev/bootc"),
+    ("--clone-url", "https://github.com/bootc-dev/bootc"),
+    ("--base", "main"),
+    ("--kind", "branch"),
+    ("--outputs", "create_pull_request,noop"),
+    ("--max-outputs", "2"),
+];
+
+fn data(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/policy")
+        .join(name)
+}
+
+/// Runs `policy` on `REQUEST` with the flags of `change` replaced.
+fn policy(allow: &Path, change: &[(&str, &str)]) -> Output {
+    let value = |flag: &str, default: &str| {
+        change
+            .iter()
+            .find(|(changed, _)| *changed == flag)
+            .map_or(default, |(_, value)| *value)
+            .to_owned()
+    };
+    Command::new(BIN)
+        .arg("policy")
+        .arg("--allow")
+        .arg(allow)
+        .args(
+            REQUEST
+                .iter()
+                .flat_map(|(flag, default)| [(*flag).to_owned(), value(flag, default)]),
+        )
+        .output()
+        .expect("running agentic-job")
+}
+
+#[test]
+fn a_request_within_the_bounds_prints_its_policy() {
+    let output = policy(&data("allow.toml"), &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["repo"], "bootc-dev/bootc");
+    assert_eq!(policy["clone_url"], "https://github.com/bootc-dev/bootc");
+    assert_eq!(policy["base"], "main");
+    assert_eq!(policy["kind"], "branch");
+    assert_eq!(policy["max_outputs"], 2);
+    assert_eq!(policy["max_patch_bytes"], 8_388_608);
+    let outputs = policy["safe_outputs"].as_object().unwrap();
+    assert_eq!(
+        outputs.keys().collect::<Vec<_>>(),
+        ["create_pull_request", "noop"]
+    );
+    assert_eq!(outputs["noop"], serde_json::json!({"max": 1}));
+    let pr = &outputs["create_pull_request"];
+    assert_eq!(pr["draft"], true);
+    assert_eq!(pr["protected_files_policy"], "blocked");
+    assert!(
+        pr["protected_files"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("README.md"))
+    );
+}
+
+#[test]
+fn a_request_outside_the_bounds_prints_no_policy() {
+    // The change to the request, and a part of the reason.
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (
+            &[
+                ("--repo", "evil/bootc"),
+                ("--clone-url", "https://github.com/evil/bootc"),
+            ],
+            "repo \"evil/bootc\"",
+        ),
+        (&[("--base", "release")], "base \"release\""),
+        (&[("--base", "-main")], "base \"-main\""),
+        (
+            &[("--clone-url", "https://evil.example/bootc-dev/bootc")],
+            "host",
+        ),
+        (&[("--outputs", "delete_repo")], "delete_repo"),
+        (&[("--max-outputs", "9")], "max_outputs"),
+        (&[("--kind", "analysis")], "analysis"),
+        // The concern of tracker#281: text that would be structure if a
+        // policy were put together as text.
+        (
+            &[("--repo", "bootc-dev/bootc\",\"max_outputs\":99,\"x\":\"")],
+            "repo ",
+        ),
+        (&[("--base", "main\n\"max_outputs\": 99")], "base "),
+        (&[("--base", "main\n::error::owned")], "base "),
+        (
+            &[("--outputs", "noop\",\"create_issue\":{\"max\":9},\"x\":\"")],
+            "output type",
+        ),
+    ];
+    for (change, want) in cases {
+        let output = policy(&data("allow.toml"), change);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{change:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{change:?}");
+        assert!(stderr.contains(want), "{change:?}: {stderr}");
+        // Whatever the request held, every line of the log is ours.
+        assert!(
+            stderr.lines().all(|line| line.starts_with("error: ")),
+            "{change:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_bad_bounds_file_is_an_error_and_not_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let unknown_key = dir.path().join("unknown.toml");
+    let text = std::fs::read_to_string(data("allow.toml")).unwrap();
+    std::fs::write(&unknown_key, format!("allow_everything = true\n{text}")).unwrap();
+    for (allow, want) in [
+        (dir.path().join("missing.toml"), "reading the bounds file"),
+        (unknown_key, "unknown field `allow_everything`"),
+    ] {
+        let output = policy(&allow, &[]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains(want), "{stderr}");
+    }
+}
