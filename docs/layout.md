@@ -29,7 +29,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `sandbox/enter.rs` | 5 | running a command as the sandbox user with `run0`; `run` starts the agent through it |
 | `sandbox/host.rs`, `sandbox/local.rs` | 5 | users and programs of the host; the listeners a user can connect to |
 | `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
-| `run/` | 6a, 6b | `run` ([below](#run)): `run/inference.rs` (run token), `run/agent.rs` and `run/launch.rs` (agent configuration), `run/clone.rs`, `run/probe.rs`, `run/enter.rs` in 6a; `run/handback.rs`, `run/summary.rs`, `run/upload.rs` in 6b |
+| `run/` | 6a, 6b | `run` ([below](#run)): `run/inference.rs` (run token), `run/agent.rs` and `run/launch.rs` (agent configuration), `run/clone.rs`, `run/probe.rs`, `run/enter.rs` in 6a; `run/brief.rs` (what the agent is told about handing back), `run/handback.rs`, `run/log.rs` (the job log), `run/egress.rs` (the egress proxy's log), `run/summary.rs`, `run/upload.rs` (the gate on uploads) in 6b |
 
 A module that outgrows its file becomes a directory of the same name
 (`check.rs` to `check/mod.rs`); its path in `lib.rs` does not change.
@@ -88,11 +88,12 @@ supplies:
   with no count is refused, and where nothing counts (`token-file`, or
   no proxy) `run` refuses the configuration rather than drop the cap;
 - `Policy::for_task(home)`, the permission policy of a task run;
-- where the condensed transcript goes, a line per event, which step 6b
-  redacts on its way to the job log and `condensed.log`.
+- where the condensed transcript goes, a line per event: `run/log.rs`,
+  which redacts each line and keeps it from acting as a command to the
+  CI system on its way to the job log and `condensed.log`.
 
 `session::digest::Digest` follows a recorded `acp.jsonl` as it follows
-a live session; the summary (step 6b) is built on it.
+a live session; the summary (`run/summary.rs`) is built on it.
 
 A session keeps a list of attached clients, `session::Clients`, empty
 for a task run, to which the agent's notifications are passed on.
@@ -114,9 +115,21 @@ anything (an error there is exit state 2), and then, in this order:
    one file of the sandbox user's, and probes that it is nowhere else
    (`run/probe.rs`);
 4. drives the session, feeding it the proxy's count of the run's model
-   requests;
+   requests. The task is given after a short text that names the two
+   files the agent hands back in, their formats and their caps
+   (`run/brief.rs`);
 5. ends the run at the proxy, and writes how that went to
-   `OUT/work/inference.json`.
+   `OUT/work/inference.json`;
+6. takes what the agent hands back (`run/handback.rs`): its
+   `out/outcome.json`, its requests in `out/safe-outputs.jsonl`, and its
+   working tree as one patch against the commit it started from, all
+   read as the sandbox user;
+7. copies the session's files and the egress proxy's log since the run
+   began into the transcript, and redacts it and the results;
+8. writes `summary.json` and `summary.md` from the redacted copies
+   (`run/summary.rs`);
+9. checks all of it at the gate (`run/upload.rs`) and only then moves it
+   to where it is uploaded from.
 
 A failure in 1 to 3 is exit state 4: the agent never started. The clone
 comes before the registration, unlike the plan's summary of `run`,
@@ -139,16 +152,71 @@ timeout and the proxy's own limits. The requests to the proxy and for
 the identity token ignore `HTTP_PROXY` and its like in the job's
 environment, as the old tree's did: the tokens would pass through it.
 
-Step 6b continues in `run::supervise` after the session: the hand-back,
-redaction, the summary and the gate on uploads. Until then the
-session's files are in `OUT/work/harness/`, unredacted, and nothing
-sorts them into the artifacts. The job log's copy of the condensed
-transcript has the run token and the identity-token request masked by
-value (`run/secrets.rs`); `redact.rs` replaces that.
+What a run that ended leaves under `--out`, in the old tree's names and
+schemas:
+
+- `run/`: `summary.json` (`agent-run-summary/v1`), `summary.md`,
+  `condensed.log`, `outcome.json`;
+- `transcript.tar.zst`: `acp.jsonl`, `harness.json`, `agent-stderr.log`
+  and, where the egress proxy runs, `access.log`. The old tree's
+  `harness-stderr.log` has no counterpart: the harness is this process,
+  and what it says is the job's log;
+- `safe-outputs/`, only if something was handed back: `outputs.jsonl`,
+  `base.json` and `aw-agent-run-ID.patch`, where ID is `run_id` of
+  `--meta`, which a run therefore has to be given;
+- `work/`, private to the runner's user and never uploaded: the
+  session's own files, unredacted, and where the rest is put together.
+
+Those first three exist only for a run that passed the gate: it was
+ended at the inference proxy (or has no run there to end), none of the
+secrets the run holds and nothing shaped like one is left in any of it,
+and, for the fake agent,
+whose session prints such a string on purpose, the redaction replaced
+something. Otherwise `run` exits with 2 and says why, and there is
+nothing to upload: a workflow uploads what is there and needs no check
+of its own, but for whether the target is public, which needs the forge.
+A run that never started leaves none of them, and neither does one that
+a signal stopped, also while its results were being taken: it starts no
+further command, and takes back what it had moved out.
+
+The patch is one commit by `[commit] author`. Its message is the title
+and body of the pull request the agent asked for, or of the one made up
+from its outcome when it changed files and asked for none, followed by
+`[commit] trailers`; the old tree used the title alone. A line of that
+text is indented if git, applying the patch as a mail, would read it as
+the end of the message, the start of a patch, a header that names
+another author, date or subject, or somebody's sign-off. A change is
+dropped, with a warning and the reason in `summary.json`, when the
+policy allows no pull request or the patch is over the policy's size.
+An analysis run's change is not handed back at all, and nothing says
+so, as in the old tree.
+
+The checkout's git configuration is the agent's, and git runs there as
+the agent. `run` takes from it the hooks, the file monitor and signing,
+sets who the commit is by through git's environment, and has
+`format-patch` add nothing a configuration asks for: headers of the
+agent's own, a sign-off, another sender. `check`, on another machine,
+does not hold the patch's author to anything
+([#22](https://github.com/cgwalters-forge/agentic-job/issues/22)).
+
+The value of every variable of the job's environment whose name ends in
+`_TOKEN` counts as a secret of the run's. One that holds an ordinary
+word of eight characters or more would be redacted wherever it occurs,
+and would fail the gate for a patch that has the word in it.
+
+Standard output is the condensed transcript and nothing else; the rest
+of what `run` says is on standard error. `run` prints no command to the
+CI system (`::group::`, a step summary): the workflow wraps the step in
+the `agent (condensed)` group and appends `summary.md` to the job's
+summary itself. Whatever the agent chose that reaches either stream is
+kept to one line, `##[` in it is broken up, and no line starts with
+`::`, so GitHub's runner takes none of it for a command.
 
 `run/enter.rs` is `run`'s use of step 5's way into the sandbox
 (`sandbox::enter`): the same `run0` command line, with a limit on what
-a command may write back and as a wrapper for the session.
+a command may write back and as a wrapper for the session. Its `Runner`
+is what the hand-back reads the agent's files through, so that the
+tests can read a checkout of their own without a second user.
 `run/probe.rs` holds only the probes of the run token; `run` does not
 yet call `sandbox check`'s probes again.
 
