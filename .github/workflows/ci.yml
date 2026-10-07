@@ -350,9 +350,39 @@ jobs:
       build-binary: true
       refused-pull-request: branch
 
+  # The event-triggered path, through the workflow itself and on the
+  # event that started this run. On a pull request the policy job admits
+  # it (its author holds the write role and its head is this
+  # repository's), the run starts from the pull request's base, the
+  # agent's comment goes to the pull request, and a status comment there
+  # says the run started and how it ended. On a push to main the bounds
+  # list no `push` event: the run ends in the policy job, a success with
+  # the other jobs skipped. e2e-verify checks both.
+  e2e-event:
+    permissions: *e2e-permissions
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-event-${{ github.run_id }}
+      event: true
+      # A base the bounds would refuse, so that e2e-verify's check of the
+      # run's base proves the event's pull request chose it. On a push the
+      # event is refused before the bounds see a base.
+      base: ${{ github.event_name == 'pull_request' && 'not-a-branch' || 'main' }}
+      task: Comment on the pull request this run was started by.
+      repo: ${{ github.repository }}
+      outputs: add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/event.sh
+      timeout: "5"
+      max-requests: "0"
+      budget: "100"
+      artifact-prefix: event-
+
   e2e-verify:
     if: ${{ always() }}
-    needs: [e2e-full, e2e-limit]
+    needs: [e2e-full, e2e-limit, e2e-event]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -389,6 +419,37 @@ jobs:
           RESULTS: ${{ needs.e2e-full.result }} ${{ needs.e2e-limit.result }}
           EXITS: ${{ needs.e2e-full.outputs.exit }} ${{ needs.e2e-limit.outputs.exit }}
         run: test "$RESULTS / $EXITS" = "success success / 0 3"
+      # On a pull request the event is admitted, the run starts from the
+      # pull request's base branch and goes to the end; on a push the
+      # bounds list no such event, and the run ends in the policy job with
+      # its reason, a success with the rest skipped.
+      - name: The event-triggered run was admitted on a pull request, and refused on a push
+        env:
+          EVENT: ${{ github.event_name }}
+          RESULT: ${{ needs.e2e-event.result }}
+          TRIGGER: ${{ needs.e2e-event.outputs.trigger }}
+          REASON: ${{ needs.e2e-event.outputs.trigger-reason }}
+          EXIT: ${{ needs.e2e-event.outputs.exit }}
+          BASE: ${{ needs.e2e-event.outputs.base }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "$EVENT: $RESULT, $TRIGGER ($REASON), exit state ${EXIT:-none}, base ${BASE:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "$EVENT" in
+            pull_request) test "$RESULT/$TRIGGER/$EXIT/$BASE" = "success/admitted/0/$BASE_REF" ;;
+            *) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ && grep -F "do not let a $EVENT event" <<< "$REASON" ;;
+          esac
+      # The agent's comment went to the pull request this run is for,
+      # under the status comment the notify job posted and the conclude
+      # job edited, and the eyes reaction is on the pull request.
+      - name: The event-triggered run commented on the pull request, and said how it ended
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" --jq ".[] | select(.body | contains(\"$RUN\")).body" | tee "$RUNNER_TEMP/pr-comments"
+          grep -F 'A comment from the scripted agent of an event-triggered run.' "$RUNNER_TEMP/pr-comments"
+          grep -F '✅ [ci](' "$RUNNER_TEMP/pr-comments" | grep -F 'ended well'
+          gh api "repos/$GH_REPO/issues/$PR/reactions" --jq '[.[] | select(.content == "eyes" and .user.login == "github-actions[bot]")] | length' | grep -vqx 0
       # The quoted prefix is one string of the handlers' configuration,
       # and the configuration has the keys the apply job gives it and no
       # others.
@@ -475,10 +536,20 @@ jobs:
             gh api --paginate "repos/$GH_REPO/issues/$issue/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$RUN\"))).id" |
               xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
           done
+      # The eyes reaction notify put on the pull request, so that the next
+      # run's check finds its own and not this one's.
+      - name: Remove the reaction
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -o pipefail
+          gh api "repos/$GH_REPO/issues/$PR/reactions" --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]").id' |
+            xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/$PR/reactions/{}"
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-verify]
+    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-event, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
