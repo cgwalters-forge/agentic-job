@@ -241,7 +241,11 @@ async fn survivors(uid: &str) -> Result<Option<String>> {
 }
 
 /// The user the agent runs as, known to exist and to be safe to stop.
-pub(super) struct SandboxUser {
+///
+/// The session stops it when [`super::run`] returns. A caller that drops
+/// that future, or is told to stop while it runs, stops the user itself
+/// with [`SandboxUser::reap`].
+pub struct SandboxUser {
     name: String,
     uid: u32,
 }
