@@ -190,7 +190,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -f
-          pin() { yq ".env.$1" .github/workflows/agentic-job.yml; }
+          pin() { yq ".env.$1" "$GITHUB_WORKSPACE/.github/workflows/agentic-job.yml"; }
           [ -n "$(pin RELEASE)" ] || { echo "::notice::no release is pinned: every run builds its binary"; exit 0; }
           digest() { git ls-tree "$1" $(pin BUILT_FROM) | sha256sum | cut -d ' ' -f 1; }
           test "$(digest "refs/tags/$(pin RELEASE)")" = "$(pin RELEASE_SOURCE)"
