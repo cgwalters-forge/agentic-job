@@ -141,6 +141,32 @@ mod tests {
         cli.unwrap();
     }
 
+    /// Not in the plan's table: a host's configuration, and a step of a
+    /// job as the sandbox user, the script as a step's shell is given it.
+    #[test]
+    fn a_job_without_an_agent_parses() {
+        let lines: &[&[&str]] = &[
+            &["config", "--host", "--boolean", "sandbox.lock-runner=true"],
+            &["sandbox", "exec", "--", "make", "--help"],
+            &[
+                "sandbox",
+                "exec",
+                "--chdir",
+                "/home/s/w",
+                "--stdin",
+                "/tmp/s.sh",
+                "--",
+                "bash",
+                "-s",
+            ],
+        ];
+        for args in lines {
+            Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args))
+                .unwrap_or_else(|err| panic!("{args:?}: {err}"));
+        }
+        assert!(Cli::try_parse_from(["agentic-job", "sandbox", "exec"]).is_err());
+    }
+
     /// Not in the plan's table: `sandbox check` runs it as the sandbox user.
     #[test]
     fn the_hidden_prober_parses() {

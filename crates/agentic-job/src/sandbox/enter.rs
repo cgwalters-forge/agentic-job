@@ -211,6 +211,46 @@ impl Entry {
         })
     }
 
+    /// Runs `argv` as the sandbox user with `input` as its standard input
+    /// and this process's standard output and error as its own, each as
+    /// it is written, and waits. Through sockets, like [`Entry::run`]:
+    /// the caller's own streams are a job step's pipes or files.
+    pub fn stream(
+        &self,
+        argv: &[String],
+        cwd: Option<&Path>,
+        mut input: impl Read + Send + 'static,
+    ) -> Result<ExitStatus> {
+        let (mut stdin, child_stdin) = UnixStream::pair().context("socketpair")?;
+        let (mut stdout, child_stdout) = UnixStream::pair().context("socketpair")?;
+        let (mut stderr, child_stderr) = UnixStream::pair().context("socketpair")?;
+        let mut child = {
+            let mut command = self.command(argv, cwd)?;
+            command
+                .stdin(Stdio::from(OwnedFd::from(child_stdin)))
+                .stdout(Stdio::from(OwnedFd::from(child_stdout)))
+                .stderr(Stdio::from(OwnedFd::from(child_stderr)))
+                .spawn()
+                .with_context(|| format!("starting {RUN0} for {}", argv.join(" ")))?
+        };
+        // Never joined: a command that ends before its input does leaves
+        // this reading an input nobody is waiting for, and the process
+        // ends with the command.
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut input, &mut stdin);
+            let _ = stdin.shutdown(Shutdown::Write);
+        });
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = std::io::copy(&mut stderr, &mut std::io::stderr().lock());
+            });
+            let mut out = std::io::stdout().lock();
+            let _ = std::io::copy(&mut stdout, &mut out);
+            let _ = out.flush();
+        });
+        child.wait().context("waiting for run0")
+    }
+
     /// Whether `argv` ran and succeeded as the sandbox user.
     pub fn succeeds(&self, argv: &[&str]) -> Result<bool> {
         Ok(self.run(argv, b"")?.success())
