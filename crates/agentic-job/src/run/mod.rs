@@ -7,6 +7,7 @@ pub mod clone;
 pub mod enter;
 pub mod inference;
 pub mod launch;
+pub mod probe;
 
 use std::path::PathBuf;
 
