@@ -154,6 +154,17 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s egress -v
+      # As `sandbox setup` installs it: every file by a hash of
+      # egress/requirements.txt, and wheels only. Then with the hashes
+      # changed, which pip must refuse for that reason and no other.
+      - name: The pinned proxy is fetched by hash, and a changed hash is refused
+        env:
+          PIP: "pip download --quiet --disable-pip-version-check --require-hashes --only-binary :all:"
+        run: |
+          $PIP --dest "$RUNNER_TEMP/wheels" -r egress/requirements.txt
+          sed 's/--hash=sha256:..../--hash=sha256:0000/' egress/requirements.txt > "$RUNNER_TEMP/changed.txt"
+          if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
+          grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
 
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
@@ -215,7 +226,11 @@ jobs:
           systemctl list-sockets --no-pager --full
           sudo ss -xlnpH
           sudo ss -tlnpH
-      - run: sudo target/debug/agentic-job sandbox setup --config "$CONFIG"
+      # Setup only warns when the threat feed cannot be fetched, and a pin
+      # that names a commit no longer served would have every run warn:
+      # here the feed has to load.
+      - shell: bash
+        run: sudo target/debug/agentic-job sandbox setup --config "$CONFIG" | tee /dev/stderr | grep -F 'Threat feed:'
       - name: The setup script ran as the sandbox user
         run: test "$(sudo cat /home/runner-sandbox/toolchain-installed-by)" = runner-sandbox
       - run: target/debug/agentic-job sandbox check
