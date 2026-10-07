@@ -108,7 +108,7 @@ what let it in. An abstract socket has no permissions and is reported
 without a try.
 
 What may be there without failing the check is a short list in
-`sandbox/check.rs`: the system bus, the journal's and the user
+`sandbox/check/on_host.rs`: the system bus, the journal's and the user
 database's sockets, PID 1's notification socket and the Varlink
 services directly under `/run/systemd/`, the randomly named datagram
 sockets systemd's daemons take notifications on, polkit's password
