@@ -1,0 +1,103 @@
+# The world-write spike (docs/world-write.md): on a hosted ubuntu-26.04
+# runner, close world-writable paths with the BPF program instead of the
+# walk, and prove what a non-root user can and cannot write afterwards.
+# One machine per mode, so the two setups can be timed against each
+# other on the same kind of machine.
+name: spike-world-write
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/spike-world-write.yml
+      - crates/agentic-job/bpf/**
+      - crates/agentic-job/src/sandbox/world_write.rs
+      - crates/agentic-job/tests/world_write_host.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  world-write:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [walk, lsm]
+        include:
+          - mode: walk
+            object-arg: ""
+          - mode: lsm
+            object-arg: --bpf-object crates/agentic-job/bpf/world_write.bpf.o
+    env:
+      CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
+      OBJECT: crates/agentic-job/bpf/world_write.bpf.o
+      AGENTIC_JOB_WORLD_WRITE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked --tests
+      - run: sudo apt-get update -q
+      # clang, libbpf's headers and bpftool for the program; the rest is
+      # what setup and the probes use, as in ci.yml's sandbox job.
+      - run: sudo apt-get install -y --no-install-recommends clang libbpf-dev bpftool at cron pkexec podman uidmap python3-venv nftables socat
+      - name: What this kernel offers
+        run: |
+          uname -r; cat /sys/kernel/security/lsm; echo
+          grep -E '^CONFIG_(BPF_LSM|LSM|DEBUG_INFO_BTF|SECURITY_PATH|BPF_JIT|BPF_UNPRIV_DEFAULT_OFF|SECURITY_LOCKDOWN_LSM|LOCK_DOWN_KERNEL)' "/boot/config-$(uname -r)"
+          cat /sys/kernel/security/lockdown; sysctl kernel.unprivileged_bpf_disabled
+          sudo grep -c -w security_inode_permission /sys/kernel/tracing/available_filter_functions
+          ls -la /sys/fs/bpf /sys/kernel/btf/vmlinux /dev/kvm || true
+          getfacl -R -s -p /etc /opt /usr/local /var/lib 2>/dev/null | grep -c '^# file:' || true
+      - name: Build the program
+        run: |
+          clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -Wall -Werror -c crates/agentic-job/bpf/world_write.bpf.c -o "$OBJECT"
+          ls -l "$OBJECT" && bpftool btf dump file "$OBJECT" | grep -c -E "lsm_inode_permission|fmod_ret_inode_permission"
+      # For the RHEL 10 test by hand, where there is no clang.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: matrix.mode == 'lsm'
+        with:
+          name: world_write.bpf.o
+          path: crates/agentic-job/bpf/world_write.bpf.o
+      - name: Root's side of the test, started before setup
+        run: |
+          sudo systemd-run --unit=agentic-job-test-root --quiet \
+            socat "UNIX-LISTEN:/run/agentic-job-test-root.sock,fork,unlink-early,mode=0660,user=root,group=$(id -gn)" EXEC:/bin/sh,stderr
+          for _ in 1 2 3 4 5; do test -S /run/agentic-job-test-root.sock && break; sleep 1; done
+          test "$(printf 'id -u; exit\n' | socat -t 5 - UNIX-CONNECT:/run/agentic-job-test-root.sock)" = 0
+      - name: A world-writable file of root's, made before setup
+        run: sudo sh -c 'echo x > /var/lib/agentic-job-world-write-before-setup && chmod 666 /var/lib/agentic-job-world-write-before-setup'
+# The trap this guards against: on a kernel whose LSM list lacks bpf, an
+      # LSM program attaches and never runs. The loader picks the hook from
+      # the list (Auto -> fmod_ret here, lsm on RHEL), and its deny-proof
+      # fails setup closed if the chosen hook does not actually deny.
+      - name: bpf is not in this kernel's LSM list, so the loader must use fmod_ret
+        if: matrix.mode == 'lsm'
+        run: |
+          if grep -qw bpf /sys/kernel/security/lsm; then
+            echo "::error::bpf is unexpectedly in the LSM list on this runner"; exit 1
+          fi
+      - name: sandbox setup, timed
+        shell: bash
+        run: |
+          start=$(date +%s)
+          sudo target/debug/agentic-job sandbox setup --config "$CONFIG" --world-write "$AGENTIC_JOB_WORLD_WRITE" ${{ matrix.object-arg }}
+          echo "sandbox setup (${AGENTIC_JOB_WORLD_WRITE}) took $(( $(date +%s) - start )) s on $(uname -r)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The runner's user has no root after setup
+        run: |
+          if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
+          sudo -n -l
+      - name: The cost of the hook on a metadata-heavy command, warm
+        run: |
+          find /usr -xdev -newer /etc/hostname > /dev/null || true
+          time find /usr -xdev -newer /etc/hostname > /dev/null
+          time find /usr -xdev -newer /etc/hostname > /dev/null
+      - run: target/debug/agentic-job sandbox check
+      - name: What a non-root user can and cannot write
+        run: cargo test --locked --test world_write_host -- --ignored --nocapture
+      - name: The denials the program recorded, through the helper
+        if: matrix.mode == 'lsm'
+        run: sudo -n /usr/local/libexec/agentic-job helper world-write-denials
