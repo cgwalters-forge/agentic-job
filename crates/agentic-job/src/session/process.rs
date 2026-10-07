@@ -8,6 +8,7 @@
 //! only fit for tests.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::os::fd::OwnedFd;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -32,6 +33,13 @@ const ROOT_UID: u32 = 0;
 const ZOMBIE: &str = "Z";
 /// Becomes root for a reaper command without ever asking for a password.
 const SUDO: &[&str] = &["sudo", "-n"];
+/// Variables of this process that nothing it starts may inherit: what
+/// lets a process ask for the job's identity token and use the CI
+/// system's own services (`ACTIONS_*`), and what selects an agent's
+/// provider, credential and configuration, which come from the run's
+/// configuration and nowhere else. The old tree's launchers cleared the
+/// second kind.
+const NOT_INHERITED: &[&str] = &["ACTIONS_", "ANTHROPIC_", "CLAUDE_", "OPENCODE_"];
 
 /// Where the agent runs.
 #[derive(Debug, Clone, Default)]
@@ -59,6 +67,22 @@ impl Launch {
             Self::Sandbox { wrapper, .. } => wrapper,
         }
     }
+}
+
+/// Whether the variable NAME is one of [`NOT_INHERITED`].
+pub fn is_inherited_setting(name: &OsStr) -> bool {
+    NOT_INHERITED
+        .iter()
+        .any(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
+}
+
+/// The variables of this process that a command it starts must not get.
+/// A wrapper such as `run0` passes none of them on anyway; this holds
+/// for the wrapper itself, and for an agent started without one.
+pub fn inherited_settings() -> impl Iterator<Item = OsString> {
+    std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| is_inherited_setting(name))
 }
 
 /// The session's ends of the agent's standard streams.
@@ -98,7 +122,13 @@ pub(super) fn spawn(argv: &[String], env: &BTreeMap<String, String>) -> Result<(
     // The command owns the child's ends until it is dropped, at the end
     // of this statement: kept longer, the session would never see the
     // agent close its streams.
-    let child = Command::new(program)
+    let mut command = Command::new(program);
+    for name in inherited_settings() {
+        command.env_remove(name);
+    }
+    // ENV after the removals: what the registry sets for the agent (its
+    // model, for one) is the run's own and stays.
+    let child = command
         .args(args)
         .envs(env)
         .stdin(Stdio::from(child_stdin))
@@ -321,6 +351,24 @@ mod tests {
         streams.stderr.read_to_string(&mut err).await.unwrap();
         assert_eq!((out.as_str(), err.as_str()), ("hello agent\n", "oops\n"));
         assert!(agent.wait().await.unwrap().success());
+    }
+
+    #[test]
+    fn settings_that_are_not_inherited() {
+        let cases = [
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", true),
+            ("ACTIONS_RUNTIME_TOKEN", true),
+            ("ANTHROPIC_API_KEY", true),
+            ("ANTHROPIC_MODEL", true),
+            ("CLAUDE_CODE_USE_BEDROCK", true),
+            ("OPENCODE_CONFIG", true),
+            ("PATH", false),
+            ("GITHUB_ACTIONS_", false),
+            ("anthropic_api_key", false),
+        ];
+        for (name, want) in cases {
+            assert_eq!(is_inherited_setting(OsStr::new(name)), want, "{name}");
+        }
     }
 
     /// A process the agent leaves in its group goes with it.
