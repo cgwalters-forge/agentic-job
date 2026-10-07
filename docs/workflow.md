@@ -40,6 +40,11 @@ Read this before relying on it.
   let Actions open pull requests, and the token that could
   ([below](#the-apply-job-and-its-token)) is not stored yet. CI requires
   exactly the refusal that follows, with the branch pushed.
+- The example caller has been dispatched on this repository's main
+  branch: once to the end, with the scripted agent's built-in session,
+  and once naming a private repository, which stopped in the policy
+  job. homegit's `bot-runs list`, `show`, `log` and `reconcile` read
+  the first of those runs.
 - **It has not been called from another repository.** CI calls it by
   path, where the workflow's own commit is the run's. That a caller's
   pin by commit selects the source the binary is built from follows
@@ -206,7 +211,8 @@ The agent job passes with a warning, and `summary.json` still says
 `stopped_early`. Those words are the workflow's own, chosen by the exit
 state, not text from the agent's machine. The exit state does not say
 which of the request, task and spending limits it was, so the marking
-does not either; `summary.json` and the commit's message do. A stopped run that handed
+does not either. `summary.json` does, and so does the commit's message
+where the agent gave no reason of its own for stopping. A stopped run that handed
 back neither a pull request nor a comment has nothing to carry them,
 and the apply job fails rather than apply it unmarked.
 
