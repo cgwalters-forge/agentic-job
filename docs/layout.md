@@ -289,3 +289,11 @@ both edit that one line; keep both names.
 Every dependency has to build for `x86_64-unknown-linux-musl`, since the
 release is one static binary; the `static` job builds it on every pull
 request.
+
+`e2e-full` and `e2e-limit` call the reusable workflow
+(`.github/workflows/agentic-job.yml`, [described here](workflow.md)) as
+another repository would, with the scripted agent, and `e2e-verify`
+looks at what they made and removes it. Their bounds file and
+configuration are the example caller's, in `.github/agentic-job/`, and
+the sessions the scripted agent plays are in `.github/agentic-job/e2e/`.
+A change to what the apply job makes is a change to `e2e-verify`.
