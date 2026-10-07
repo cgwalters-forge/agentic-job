@@ -403,7 +403,8 @@ jobs:
             fi
           done
       # Whatever happened before: it asks the forge what this run left,
-      # and needs neither the checkout nor the artifacts. Pull requests
+      # and needs neither the checkout nor the artifacts. The branches go
+      # first, since removing them depends on nothing that can fail. Pull requests
       # are closed as issues, which to the API they are; the issue gh-aw
       # leaves for a refused pull request names the run's branch.
       - name: Close what was opened and remove the scratch branches
@@ -411,14 +412,14 @@ jobs:
         env:
           MINE: agent-run-${{ github.run_id }}
         run: |
-          { echo "$ISSUE"
-            gh issue list --state open --label agentic-workflows --limit 100 --json number,body --jq ".[] | select(.body | contains(\"$MINE\")).number"
-            gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number"
-          } > "$RUNNER_TEMP/opened"
+          set -o pipefail
           for branch in "$FULL" "$LIMIT"; do
             gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
           done
-          xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url < "$RUNNER_TEMP/opened"
+          { echo "$ISSUE"
+            gh issue list --state open --label agentic-workflows --limit 100 --json number,body --jq ".[] | select(.body | contains(\"$MINE\")).number"
+            gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number"
+          } | xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url
       # gh-aw's handlers also comment where the run was started from, to
       # say what they made: on a pull request, two comments for each run.
       - name: Remove the handlers' comments from the pull request
@@ -427,6 +428,7 @@ jobs:
           COMMENTS: repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments
           MINE: actions/runs/${{ github.run_id }}
         run: |
+          set -o pipefail
           gh api --paginate "$COMMENTS" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$MINE\"))).id" |
             xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
 
