@@ -1,10 +1,10 @@
 {
   "repository": "cgwalters-forge/agentic-job",
-  "release": "v0.0.3",
+  "release": "build-41369d5bd800-37633654988",
   "target": "x86_64-unknown-linux-musl",
-  "source": "60a9dbb9973023c73ad7b64bb6274b61c0e44ac131606af8618512a5a40dfed4",
+  "source": "41369d5bd8008d3851d1a450872e3a6ca34bac7a96220a2fee64fd293c20b7f7",
   "sha256": {
-    "agentic-job": "24b60b7f1eb6fe7c77f98d2780ad0b6c8c8a063f00196fde3744bc0f61551e2d",
+    "agentic-job": "162b532ac08ee95ef42ef61b2d54398dbe7d8592680194581c248cdb04227584",
     "fake-agent": "df2baaadd450429b31f6cb04795dca5d42a526c2d301095b5ff20bf23fe5e58b"
   }
 }
