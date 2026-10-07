@@ -12,7 +12,9 @@
 //! ([`super::checked`]): a key that does not exist, a value of the wrong
 //! type, a run with no timeout or cap, an agent with no inference proxy,
 //! `github-oidc` with no audience. Each stops the job here, before a
-//! machine is set up for it.
+//! machine is set up for it. With `--host` it is held only to what
+//! `sandbox setup` checks: the file of a job that secures its host and
+//! runs no agent names none, and no limits.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -37,6 +39,12 @@ pub struct Args {
     /// Set a list of strings likewise, from words with spaces or newlines between them
     #[arg(long, value_name = "KEY=VALUE", value_parser = Setting::parse, allow_hyphen_values = true)]
     pub list: Vec<Setting>,
+    /// Set `true` or `false` likewise
+    #[arg(long, value_name = "KEY=VALUE", value_parser = Setting::parse, allow_hyphen_values = true)]
+    pub boolean: Vec<Setting>,
+    /// Check only what `sandbox setup` reads: for a job that runs no agent
+    #[arg(long)]
+    pub host: bool,
 }
 
 /// One `KEY=VALUE` of the command line: the tables down to the key, and
@@ -83,6 +91,7 @@ enum Kind {
     String,
     Integer,
     List,
+    Boolean,
 }
 
 impl Kind {
@@ -105,6 +114,13 @@ impl Kind {
                     .map(|word| Value::String(word.to_owned()))
                     .collect(),
             )),
+            // The two words a workflow's boolean input arrives as, and
+            // nothing a reader would have to guess at.
+            Self::Boolean => Some(Value::Boolean(match text.trim() {
+                "true" => true,
+                "false" => false,
+                _ => bail!("{}: {text:?} is neither true nor false", setting.key()),
+            })),
         })
     }
 }
@@ -141,6 +157,7 @@ fn compose(args: &Args) -> Result<String> {
         (Kind::String, &args.string),
         (Kind::Integer, &args.integer),
         (Kind::List, &args.list),
+        (Kind::Boolean, &args.boolean),
     ];
     for (kind, list) in settings {
         for setting in list {
@@ -152,7 +169,12 @@ fn compose(args: &Args) -> Result<String> {
     }
     let text = toml::to_string(&table).context("writing the configuration")?;
     // As its readers will see it: parsed from the text that is printed.
-    Config::parse(&text)?.check()?;
+    let config = Config::parse(&text)?;
+    if args.host {
+        config.check_host()?;
+    } else {
+        config.check()?;
+    }
     Ok(text)
 }
 
@@ -181,6 +203,17 @@ mod tests {
             string: settings(string),
             integer: settings(integer),
             list: settings(list),
+            boolean: Vec::new(),
+            host: false,
+        }
+    }
+
+    /// The file of a job that secures its host and runs no agent.
+    fn host_args(boolean: &[&str], list: &[&str]) -> Args {
+        Args {
+            boolean: settings(boolean),
+            host: true,
+            ..args(None, &[], &[], list)
         }
     }
 
@@ -248,6 +281,52 @@ mod tests {
             (5, 100)
         );
         assert_eq!(config.setup.packages, ["jq"]);
+    }
+
+    /// A host's file needs no agent and no limits, which a run's does;
+    /// what `sandbox setup` would refuse is refused for it all the same.
+    #[test]
+    fn a_host_is_configured_without_an_agent() {
+        let config = composed(&host_args(
+            &[
+                "sandbox.lock-runner= false ",
+                "egress.proxy=false",
+                "sandbox.allow-existing-user=",
+            ],
+            &["sandbox.stop-services=docker.socket docker.service"],
+        ));
+        assert!(!config.sandbox.lock_runner);
+        assert!(!config.egress.proxy);
+        assert!(!config.sandbox.allow_existing_user);
+        assert_eq!(
+            config.sandbox.stop_services,
+            ["docker.socket", "docker.service"]
+        );
+        assert_eq!(config.agent.name, "");
+        // The same file, as a run's: `run` could not use it.
+        let run = Args {
+            host: false,
+            ..host_args(&["egress.proxy=false"], &[])
+        };
+        assert!(compose(&run).is_err());
+        let cases = [
+            (
+                vec!["sandbox.lock-runner=yes"],
+                vec![],
+                "sandbox.lock-runner: \"yes\" is neither true nor false",
+            ),
+            (vec!["sandbox.user=true"], vec![], "invalid type: boolean"),
+            (
+                vec![],
+                vec!["sandbox.stop-services=docker"],
+                "sandbox.stop-services: \"docker\" is not a unit name",
+            ),
+        ];
+        for (boolean, list, names) in cases {
+            let args = host_args(&boolean, &list);
+            let err = compose(&args).expect_err("a bad setting was taken");
+            assert!(format!("{err:#}").contains(names), "{args:?}: {err:#}");
+        }
     }
 
     /// Text that would add keys if it were pasted into a file is the
