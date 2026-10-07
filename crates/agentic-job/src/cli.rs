@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{check, policy, run, sandbox};
+use crate::{check, event, policy, run, sandbox};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -28,6 +28,8 @@ pub enum Command {
     Run(run::Args),
     /// Check handed-back outputs and patch against the policy
     Check(check::Args),
+    /// Decide whether the event that started the workflow may start a run, and write its task
+    Event(event::Args),
     /// Write a run's configuration from a file and settings given one at a time
     Config(compose::Args),
     /// Become the agent, as the sandbox user: what `run` has the session start
@@ -42,6 +44,7 @@ impl Command {
             Self::Sandbox(command) => command.run(),
             Self::Run(args) => run::run(args),
             Self::Check(args) => check::run(args),
+            Self::Event(args) => event::run(args),
             Self::Config(args) => compose::run(args),
             Self::LaunchAgent(args) => run::launch::run(args),
         }

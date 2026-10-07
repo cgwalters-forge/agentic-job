@@ -1,0 +1,47 @@
+{
+  "action": "labeled",
+  "issue": {
+    "number": 14,
+    "node_id": "I_14",
+    "title": "Flaky test in nightly",
+    "body": "tests::clock fails about one run in five on the nightly job.",
+    "user": {
+      "login": "bob",
+      "id": 2,
+      "node_id": "U_2",
+      "type": "User"
+    },
+    "state": "open",
+    "labels": [
+      {
+        "id": 55,
+        "name": "agent",
+        "color": "0e8a16"
+      }
+    ],
+    "created_at": "2026-01-10T09:00:00Z",
+    "html_url": "https://github.com/octo/repo/issues/14"
+  },
+  "label": {
+    "name": "agent",
+    "id": 55
+  },
+  "repository": {
+    "id": 100,
+    "node_id": "R_100",
+    "name": "repo",
+    "full_name": "octo/repo",
+    "private": false,
+    "default_branch": "main",
+    "owner": {
+      "login": "octo",
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "alice",
+    "id": 1,
+    "node_id": "U_1",
+    "type": "User"
+  }
+}

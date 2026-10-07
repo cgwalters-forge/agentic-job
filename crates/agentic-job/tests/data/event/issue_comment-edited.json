@@ -1,0 +1,50 @@
+{
+  "action": "edited",
+  "issue": {
+    "number": 12,
+    "node_id": "I_12",
+    "title": "Typo in README",
+    "body": "The word 'recieve' is misspelled.",
+    "user": {
+      "login": "bob",
+      "id": 2,
+      "node_id": "U_2",
+      "type": "User"
+    },
+    "state": "open",
+    "labels": [],
+    "created_at": "2026-01-10T09:00:00Z",
+    "html_url": "https://github.com/octo/repo/issues/12"
+  },
+  "comment": {
+    "id": 9007,
+    "node_id": "IC_9007",
+    "body": "/agent fix the typo in the README and nothing else",
+    "user": {
+      "login": "alice",
+      "id": 1,
+      "node_id": "U_1",
+      "type": "User"
+    },
+    "created_at": "2026-01-10T10:00:00Z",
+    "html_url": "https://github.com/octo/repo/issues/12#issuecomment-9007"
+  },
+  "repository": {
+    "id": 100,
+    "node_id": "R_100",
+    "name": "repo",
+    "full_name": "octo/repo",
+    "private": false,
+    "default_branch": "main",
+    "owner": {
+      "login": "octo",
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "carol",
+    "id": 3,
+    "node_id": "U_3",
+    "type": "User"
+  }
+}
