@@ -52,7 +52,8 @@ setup action, pinned by commit. Step 2a puts what those scripts need in
 generated from the pinned gh-aw (`node safe-outputs/validation.mjs
 GH_AW_CHECKOUT`) and regenerated when the pin moves. `fixtures/` holds
 the safe-outputs artifacts of two real runs of the old tree, each with
-the configuration it ran under and a `source.json` naming the run.
+the configuration it ran under and a `source.json` naming the run;
+`.github/workflows/safe-outputs-probe.yml` applies them.
 
 ## Rules that keep steps apart
 
