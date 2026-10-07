@@ -121,6 +121,21 @@ jobs:
         env:
           AGENTIC_JOB: target/debug/agentic-job
           GH_AW_JS: ${{ env.GH_AW }}/actions/setup/js
+      # The network rules, and the egress proxy's files, against the old
+      # tree's.
+      - run: node --test crates/agentic-job/tests/corpus/nft.test.mjs
+        env:
+          AGENTIC_JOB: target/debug/agentic-job
+
+  # The egress proxy's policy, with the tests that came with it.
+  egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s egress -v
 
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
@@ -147,12 +162,13 @@ jobs:
       - run: node safe-outputs/validation.mjs gh-aw --check
 
   # The sandbox for real, on a machine that is thrown away: `sandbox
-  # setup`, every probe of `sandbox check`, and then each probe again with
-  # its protection removed, which must make that probe and no other fail.
+  # setup` with the egress proxy and the network rules, every probe of
+  # `sandbox check`, and then each probe again with its protection
+  # removed, which must make that probe and no other fail.
   # ubuntu-26.04 has run0 (systemd 256 or later); ubuntu-24.04 does not.
   sandbox:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
     steps:
@@ -163,7 +179,7 @@ jobs:
       - run: cargo build --locked --tests
       # What the probes try must be there to be refused.
       - run: sudo apt-get update -q
-      - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap
+      - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo
       - name: Setup refuses a machine that is not fresh
         run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
       # For whoever has to say why a local-sockets probe failed.
@@ -186,7 +202,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, session-sandbox, static, safe-outputs, sandbox]
+    needs: [docs, rust, corpus, egress, session-sandbox, static, safe-outputs, sandbox]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

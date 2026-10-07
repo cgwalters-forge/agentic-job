@@ -30,6 +30,7 @@ use agentic_job::config::{self, Config};
 use agentic_job::sandbox::check::{self, RunToken};
 use agentic_job::sandbox::enter::Entry;
 use agentic_job::sandbox::host::User;
+use agentic_job::sandbox::{egress, network, setup};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
@@ -125,21 +126,73 @@ fn root(argv: &[&str]) {
     assert!(root_ok(&strings(argv)), "sudo {argv:?} failed");
 }
 
-/// Writes `content` to `path` as root, with `mode`.
-fn root_write(path: &str, content: &str, mode: &str) {
-    let mut tee = Command::new("sudo")
-        .args(["-n", "--", "tee", "--", path])
+/// Runs `argv` as root with `input` on its standard input.
+fn root_input(argv: &[&str], input: &str) {
+    let mut child = Command::new("sudo")
+        .arg("-n")
+        .arg("--")
+        .args(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
-    tee.stdin
+    child
+        .stdin
         .take()
         .unwrap()
-        .write_all(content.as_bytes())
+        .write_all(input.as_bytes())
         .unwrap();
-    assert!(tee.wait().unwrap().success(), "writing {path}");
+    assert!(child.wait().unwrap().success(), "sudo {argv:?} failed");
+}
+
+/// Writes `content` to `path` as root, with `mode`.
+fn root_write(path: &str, content: &str, mode: &str) {
+    root_input(&["tee", "--", path], content);
     root(&["chmod", mode, path]);
+}
+
+/// What must fail with no network rules at all, on CI's hosted runner:
+/// Azure, whose metadata service the runner reaches, with a local
+/// resolver on loopback. Its WireServer does not answer HTTP there even
+/// for the runner, so those two probes have nothing to lose.
+const NO_RULES: &[&str] = &[
+    "metadata",
+    "container-metadata",
+    "egress-direct",
+    "egress-tcp",
+    "egress-resolve",
+    "egress-dns",
+    "egress-proxy-metadata",
+    "egress-container-direct",
+    "egress-container-own-network",
+    "local-tcp",
+];
+
+const NO_EGRESS_RULES: &[&str] = &[
+    "egress-direct",
+    "egress-tcp",
+    "egress-resolve",
+    "egress-dns",
+    "egress-proxy-metadata",
+    "egress-container-direct",
+    "egress-container-own-network",
+    "local-tcp",
+];
+
+const PROXY_UNRESTRICTED: &[&str] = &["egress-proxy-metadata"];
+
+/// The expected failures of a network case: `default`, or the
+/// comma-separated list in `AGENTIC_JOB_TEST_<NAME>` for a host whose
+/// network differs (no local resolver, a tailnet with direct endpoints).
+fn network_case(name: &str, default: &'static [&'static str]) -> Vec<&'static str> {
+    match std::env::var(format!("AGENTIC_JOB_TEST_{name}")) {
+        // Leaked: a handful of names, for the life of one test run.
+        Ok(list) => list
+            .split(',')
+            .map(|id| &*Box::leak(id.to_owned().into_boxed_str()))
+            .collect(),
+        Err(_) => default.to_vec(),
+    }
 }
 
 /// A protection that has been removed. Dropping it puts the host back.
@@ -503,6 +556,13 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
                 "local-sockets",
                 "tailscale-status",
                 "tailscale-localapi",
+                // Dialing through tailscaled is only tried for a host
+                // with direct endpoints.
+                if config.egress.direct.is_empty() {
+                    "tailscale-status"
+                } else {
+                    "tailnet-nc"
+                },
             ],
             || {
                 Removed::by(
@@ -511,6 +571,59 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
                 )
             },
         ));
+    }
+
+    // The network rules. Each case loads other rules in their place and
+    // puts back the ones setup left.
+    let rules_back: &[&[&str]] = &[&["nft", "-f", network::RULES_FILE]];
+    let uids: Vec<String> = std::iter::once(uid.to_string())
+        .chain(
+            setup::subuid_ranges(
+                entry.user(),
+                &std::fs::read_to_string("/etc/subuid").unwrap(),
+            )
+            .unwrap(),
+        )
+        .collect();
+    if config.egress.proxy {
+        let direct = network::direct(&config.egress).unwrap();
+        let proxy_uid = User::lookup(egress::EGRESS_USER).unwrap().unwrap().uid;
+        cases.push(Case::new(
+            "the network rules",
+            &network_case("NO_RULES", NO_RULES),
+            move || {
+                Removed::by(
+                    &[&["nft", "delete", "table", "inet", network::TABLE]],
+                    rules_back,
+                )
+            },
+        ));
+        {
+            // The rules of a host without the proxy: the metadata service
+            // stays closed and every way around the proxy opens.
+            let (uids, direct) = (uids.clone(), direct.clone());
+            cases.push(Case::new(
+                "the rules that send everything through the proxy",
+                &network_case("NO_EGRESS_RULES", NO_EGRESS_RULES),
+                move || {
+                    root_input(&["nft", "-f", "-"], &network::rules(&uids, &direct, None));
+                    Removed::by(&[], rules_back)
+                },
+            ));
+        }
+        {
+            // Rules that name another uid as the proxy's: the proxy
+            // itself is then free to go where the sandbox may not.
+            cases.push(Case::new(
+                "the rules on the proxy's own user",
+                &network_case("PROXY_UNRESTRICTED", PROXY_UNRESTRICTED),
+                move || {
+                    let other = Some(proxy_uid + 1);
+                    root_input(&["nft", "-f", "-"], &network::rules(&uids, &direct, other));
+                    Removed::by(&[], rules_back)
+                },
+            ));
+        }
     }
 
     // The run token.

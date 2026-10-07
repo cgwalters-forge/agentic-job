@@ -23,17 +23,18 @@ stop-services = [
 
 [sandbox.check]
 allow-sockets = [
-    # systemd-resolved, which the whole runner resolves names with. The
-    # sandbox user must lose it with the network rules.
+    # systemd-resolved, which the whole runner resolves names with, the
+    # egress proxy included. It resolves for any user, so on this image
+    # the sandbox user still has a way to send names out through it
+    # (docs/sandbox-check.md). The runners agents run on do not have it.
     "/run/systemd/resolve/",
     # systemd-networkd, which the runner's network depends on: it
     # describes the links to any user and changes them only for root.
     "/run/systemd/netif/",
     "/run/systemd/resolve.hook/",
 ]
-# systemd-resolved's stub. The sandbox user loses it with the network
-# rules, which send its lookups through the egress proxy.
-allow-tcp-ports = [53]
+
+# The egress proxy and the network rules are on by default: no [egress].
 
 [setup]
 packages = ["jq"]
