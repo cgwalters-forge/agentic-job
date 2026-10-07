@@ -12,11 +12,6 @@ fn exit_states() {
     let cases: &[(&[&str], i32, &str)] = &[
         (&["--version"], 0, ""),
         (&["sandbox", "check"], ERROR, "not implemented"),
-        (
-            &["check", "--policy", "p", "--outputs", "d"],
-            ERROR,
-            "not implemented",
-        ),
         (&["no-such-command"], ERROR, "unrecognized subcommand"),
         (&["run"], ERROR, "required arguments"),
     ];

@@ -88,8 +88,16 @@ mod tests {
             Some("run"),
         ),
         (
-            &["check", "--policy", "p.json", "--outputs", "dir"],
-            Some("check"),
+            &[
+                "check",
+                "--policy",
+                "p.json",
+                "--outputs",
+                "dir",
+                "--collected",
+                "agent_output.json",
+            ],
+            None,
         ),
         (
             &[
@@ -98,10 +106,12 @@ mod tests {
                 "p.json",
                 "--outputs",
                 "dir",
+                "--collected",
+                "agent_output.json",
                 "--report",
                 "r.json",
             ],
-            Some("check"),
+            None,
         ),
     ];
 
@@ -133,6 +143,7 @@ mod tests {
             &["sandbox", "setup"],
             &["run", "--policy", "p.json"],
             &["check", "--outputs", "dir"],
+            &["check", "--policy", "p.json", "--outputs", "dir"],
         ];
         for args in cases {
             let parsed = Cli::try_parse_from(std::iter::once(&"agentic-job").chain(*args));
