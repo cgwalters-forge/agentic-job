@@ -662,7 +662,9 @@ impl Checker<'_> {
                     // Without one its network is open, and a resolver
                     // on loopback is how it resolves names: the rules
                     // close that port only behind the proxy.
-                    let resolver = !self.config.egress.proxy && port == network::DNS_PORT;
+                    let resolver = !self.config.egress.proxy
+                        && addr.ip().is_loopback()
+                        && port == network::DNS_PORT;
                     !proxy && !resolver && !check.allow_tcp_ports.contains(&port)
                 }
             })
