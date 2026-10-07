@@ -1,0 +1,40 @@
+# What CI's `sandbox` job sets up on a hosted runner (ubuntu-26.04).
+
+[sandbox]
+# Daemons of the runner image that listen for every local user, and that
+# nothing in this job uses: `sandbox check` fails on each one left.
+stop-services = [
+    # The runner's user is in docker's group.
+    "docker.socket",
+    "docker.service",
+    "containerd.service",
+    "ssh.socket",
+    "ssh.service",
+    "sshd-unix-local.socket",
+    "snapd.socket",
+    "snapd.service",
+    "multipathd.socket",
+    "multipathd.service",
+    "uuidd.socket",
+    "uuidd.service",
+    "iscsid.socket",
+    "iscsid.service",
+]
+
+[sandbox.check]
+allow-sockets = [
+    # systemd-resolved, which the whole runner resolves names with. The
+    # sandbox user must lose it with the network rules.
+    "/run/systemd/resolve/",
+    # systemd-networkd, which the runner's network depends on: it
+    # describes the links to any user and changes them only for root.
+    "/run/systemd/netif/",
+    "/run/systemd/resolve.hook/",
+]
+# systemd-resolved's stub. The sandbox user loses it with the network
+# rules, which send its lookups through the egress proxy.
+allow-tcp-ports = [53]
+
+[setup]
+packages = ["jq"]
+script = "crates/agentic-job/tests/data/sandbox/toolchain.sh"

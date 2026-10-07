@@ -139,9 +139,47 @@ jobs:
           persist-credentials: false
       - run: node safe-outputs/validation.mjs gh-aw --check
 
+  # The sandbox for real, on a machine that is thrown away: `sandbox
+  # setup`, every probe of `sandbox check`, and then each probe again with
+  # its protection removed, which must make that probe and no other fail.
+  # ubuntu-26.04 has run0 (systemd 256 or later); ubuntu-24.04 does not.
+  sandbox:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked --tests
+      # What the probes try must be there to be refused.
+      - run: sudo apt-get update -q
+      - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap
+      - name: Setup refuses a machine that is not fresh
+        run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
+      # For whoever has to say why a local-sockets probe failed.
+      - name: What listens on this runner
+        run: |
+          systemctl list-sockets --no-pager --full
+          sudo ss -xlnpH
+          sudo ss -tlnpH
+      - run: sudo target/debug/agentic-job sandbox setup --config "$CONFIG"
+      - name: The setup script ran as the sandbox user
+        run: test "$(sudo cat /home/runner-sandbox/toolchain-installed-by)" = runner-sandbox
+      - run: target/debug/agentic-job sandbox check
+      # Stand-ins for the variables of a job that may ask for an identity
+      # token: the probes look for their values where they must not be.
+      - name: Each probe fails when its protection is removed
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: https://oidc.invalid/stand-in
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: stand-in-request-token-0123456789abcdef
+        run: cargo test --locked --test sandbox_host -- --ignored --nocapture
+
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, session-sandbox, static, safe-outputs]
+    needs: [docs, rust, corpus, session-sandbox, static, safe-outputs, sandbox]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
