@@ -7,6 +7,8 @@ use clap::Subcommand;
 use crate::exit::Exit;
 
 pub mod check;
+pub mod enter;
+pub mod host;
 pub mod setup;
 
 #[derive(Debug, Subcommand)]
