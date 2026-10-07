@@ -229,9 +229,209 @@ jobs:
           AGENTIC_JOB_TEST_SHARD: ${{ matrix.shard }}/${{ env.SHARDS }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
+  # The reusable workflow, called as another repository would call it,
+  # with the scripted agent: all four jobs, on four machines. The agent
+  # clones this repository's main branch, changes a file and asks for a
+  # pull request and a comment, and the apply job applies both here with
+  # the job's own token. `e2e-verify` then looks at what was made.
+  #
+  # This organization does not let Actions open pull requests, and no
+  # other token is stored yet, so the pull request ends at that refusal
+  # with its branch pushed: `refused-pull-request: branch` takes that for
+  # an answer, and `e2e-verify` requires either the draft or exactly that
+  # refusal.
+  #
+  # A pull request from a fork cannot run these: its token cannot write.
+  e2e-prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    outputs:
+      issue: ${{ steps.issue.outputs.number }}
+    steps:
+      - name: Open a scratch issue for the run's comment
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          url=$(gh issue create --title "Scratch issue of end-to-end run $GITHUB_RUN_ID" --body 'Closed by the run that opened it.')
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+
+  e2e-full:
+    needs: e2e-prepare
+    permissions: &e2e-permissions
+      contents: write # push the pull request's branch
+      issues: write # add_comment
+      pull-requests: write # create_pull_request
+      id-token: write # the agent job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-full-${{ github.run_id }}
+      task: Add a scratch file under docs/, ask for a pull request, and comment on the issue.
+      repo: ${{ github.repository }}
+      outputs: create_pull_request,add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/full.sh
+      timeout: "5"
+      max-requests: "0"
+      budget: "100"
+      comment-target: ${{ needs.e2e-prepare.outputs.issue }}
+      # A quote of each kind: it must reach the handlers as it is.
+      title-prefix: 'e2e "full" it''s:'
+      branch-prefix: e2e/full/
+      artifact-prefix: full-
+      refused-pull-request: branch
+
+  # The same, with an agent that starts more subagent tasks than it may:
+  # the session has it hand back and stops it, `run` ends with the exit
+  # state of a limit, and what it had done is applied as a draft that
+  # says it is partial.
+  e2e-limit:
+    needs: e2e-prepare
+    permissions: *e2e-permissions
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-limit-${{ github.run_id }}
+      task: Start a change and then too many subagent tasks.
+      repo: ${{ github.repository }}
+      outputs: create_pull_request,add_comment,noop
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/limit.sh
+      comment-target: ${{ needs.e2e-prepare.outputs.issue }}
+      timeout: "10"
+      max-requests: "0"
+      max-tasks: "2"
+      budget: "100"
+      apply-partial: true
+      branch-prefix: e2e/limit/
+      artifact-prefix: limit-
+      refused-pull-request: branch
+
+  e2e-verify:
+    if: ${{ always() }}
+    needs: [e2e-prepare, e2e-full, e2e-limit]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # delete the scratch branches
+      issues: write # close the scratch issues
+      pull-requests: write # close the drafts
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE: ${{ needs.e2e-prepare.outputs.issue }}
+      FULL: e2e/full/agent-run-${{ github.run_id }}
+      LIMIT: e2e/limit/agent-run-${{ github.run_id }}
+      TITLE_PREFIX: 'e2e "full" it''s:'
+      # What hosted.toml says the commit of a hand-back is by.
+      AUTHOR: agentic-job <agentic-job@users.noreply.github.com>
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.e2e-full.outputs.applied-artifact-id }}
+          path: ${{ runner.temp }}/full
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.e2e-limit.outputs.applied-artifact-id }}
+          path: ${{ runner.temp }}/limit
+      - name: Both runs ended well, the second at a limit
+        env:
+          RESULTS: ${{ needs.e2e-full.result }} ${{ needs.e2e-limit.result }}
+          EXITS: ${{ needs.e2e-full.outputs.exit }} ${{ needs.e2e-limit.outputs.exit }}
+        run: test "$RESULTS / $EXITS" = "success success / 0 3"
+      # The quoted prefix is one string of the handlers' configuration,
+      # and the configuration has the keys the apply job gives it and no
+      # others.
+      - name: An input with quotes reached the handlers as it is and added no key
+        env:
+          ADDED: >-
+            ["base_branch", "branch_prefix", "fallback_as_issue", "preserve_branch_name",
+             "signed_commits", "target-repo", "title_prefix"]
+          POLICY: '["draft", "max", "max_patch_files", "max_patch_size", "protect_top_level_dot_folders", "protected_files", "protected_files_policy"]'
+        run: |
+          jq -e --arg prefix "$TITLE_PREFIX" --argjson added "$ADDED" --argjson policy "$POLICY" '
+            .partial == false and .handlers.create_pull_request.title_prefix == $prefix
+            and (.handlers.create_pull_request | keys) == ($added + $policy | sort)
+            and (.handlers | keys) == ["add_comment", "create_pull_request", "noop"]
+            and (.handlers.add_comment | keys) == ["max", "target", "target-repo"]
+          ' "$RUNNER_TEMP/full/applied.json"
+      - name: Each branch is one commit on main, by the hand-back's author, changing the one file
+        run: |
+          git fetch --no-tags origin "+refs/heads/e2e/*:refs/remotes/origin/e2e/*"
+          while read -r branch file; do
+            git merge-base --is-ancestor "origin/$branch~1" origin/main
+            test "$(git log -1 --format='%an <%ae>' "origin/$branch") $(git diff --name-only "origin/$branch~1" "origin/$branch")" = "$AUTHOR $file"
+            git log -1 --format='%H %an <%ae>%n%B' "origin/$branch" | tee -a "$GITHUB_STEP_SUMMARY"
+          done <<< "$FULL docs/e2e-scratch.md"$'\n'"$LIMIT docs/e2e-partial.md"
+      - name: The comment is on the scratch issue
+        run: gh issue view "$ISSUE" --json comments --jq '.comments[].body' | grep -F 'A comment from the scripted agent of an end-to-end run.'
+      # On what was made, not only in the configuration: the pull request,
+      # or the issue gh-aw leaves in its place with the same title and body.
+      - name: The titles are the prefixed ones, and the run stopped at a limit is marked partial
+        env:
+          FULL_TITLE: 'e2e "full" it''s:docs: Scratch change of an end-to-end run'
+          LIMIT_TITLE: "[partial: stopped at a limit] Wrote the first half of a scratch file."
+          NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"
+        run: |
+          jq -e '.partial and (.handlers.create_pull_request.title_prefix == "[partial: stopped at a limit] ")' "$RUNNER_TEMP/limit/applied.json"
+          made() { gh issue view "$(jq -r '.pull_request.number // first(.made[] | select(.type == "create_pull_request").number)' "$RUNNER_TEMP/$1/applied.json")" --json title,body --jq "$2"; }
+          test "$(made full .title)" = "$FULL_TITLE"
+          test "$(made limit .title)" = "$LIMIT_TITLE"
+          made limit .body | tee -a "$GITHUB_STEP_SUMMARY" | grep -F "$NOTE"
+          gh issue view "$ISSUE" --json comments --jq '.comments[].body | select(contains("of a run that is stopped"))' | grep -F "$NOTE"
+      # Either is right, and nothing else: a draft, or the branch with the
+      # forge's refusal to let Actions open the pull request.
+      - name: A draft pull request each, or the refusal of the setting that keeps Actions from opening one
+        run: |
+          for applied in "$RUNNER_TEMP"/{full,limit}/applied.json; do
+            pr=$(jq -r '.pull_request.number // empty' "$applied")
+            if [ -n "$pr" ]; then gh pr view "$pr" --json isDraft,title,url | tee -a "$GITHUB_STEP_SUMMARY" | jq -e .isDraft
+            else jq -e '.refused and .pull_request == null' "$applied"
+              echo "::notice::the branch was pushed and the pull request refused: this organization does not let Actions open pull requests, and the apply job has no other token (the environment agent-apply with AGENTIC_JOB_APPLY_TOKEN)"
+            fi
+          done
+      # Whatever happened before: it asks the forge what this run left,
+      # and needs neither the checkout nor the artifacts. Pull requests
+      # are closed as issues, which to the API they are; the issue gh-aw
+      # leaves for a refused pull request names the run's branch.
+      - name: Close what was opened and remove the scratch branches
+        if: ${{ always() }}
+        env:
+          MINE: agent-run-${{ github.run_id }}
+        run: |
+          { echo "$ISSUE"
+            gh issue list --state open --label agentic-workflows --limit 100 --json number,body --jq ".[] | select(.body | contains(\"$MINE\")).number"
+            gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number"
+          } > "$RUNNER_TEMP/opened"
+          for branch in "$FULL" "$LIMIT"; do
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
+          done
+          xargs -r -I{} gh api -X PATCH "repos/$GH_REPO/issues/{}" -f state=closed --jq .html_url < "$RUNNER_TEMP/opened"
+      # gh-aw's handlers also comment where the run was started from, to
+      # say what they made: on a pull request, two comments for each run.
+      - name: Remove the handlers' comments from the pull request
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          COMMENTS: repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments
+          MINE: actions/runs/${{ github.run_id }}
+        run: |
+          gh api --paginate "$COMMENTS" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$MINE\"))).id" |
+            xargs -r -I{} gh api -X DELETE "repos/$GH_REPO/issues/comments/{}"
+
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, session-sandbox, static, safe-outputs, sandbox]
+    needs: [docs, rust, corpus, egress, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
