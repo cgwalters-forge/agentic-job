@@ -50,6 +50,33 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  # The session with its agent as another user, entered with run0 as a
+  # real run enters the sandbox: that nothing of that user's is left
+  # running takes a second user and root, which the tests of the rust job
+  # do without. run0 with --pipe needs systemd 257, newer than
+  # ubuntu-24.04's.
+  session-sandbox:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      AGENTIC_JOB_TEST_SANDBOX_USER: agentic-job-test
+      AGENTIC_JOB_TEST_FAKE_AGENT: /usr/local/bin/fake-agent
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked --bin fake-agent
+      # The runner's home is closed to other users: the agent's program
+      # goes where the sandbox user can run it.
+      - name: Add the sandbox user and install the fake agent for it
+        run: |
+          sudo useradd --create-home "$AGENTIC_JOB_TEST_SANDBOX_USER"
+          sudo install -m 0755 target/debug/fake-agent "$AGENTIC_JOB_TEST_FAKE_AGENT"
+      # All of them, not the one by name: a filter that matches nothing
+      # passes.
+      - run: cargo test --locked --test session
+
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
@@ -76,7 +103,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, static, safe-outputs]
+    needs: [docs, rust, session-sandbox, static, safe-outputs]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
