@@ -305,6 +305,61 @@ jobs:
           AGENTIC_JOB_TEST_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
+  # The step that secures a host, in a job that runs no agent: the
+  # example a caller copies, which builds and tests after the lock, as
+  # the runner's user and as the sandbox user, and proves both.
+  secure-host:
+    uses: ./.github/workflows/example-secure-host.yml
+
+  # The same step with its switches the other way: root kept, no egress
+  # proxy, another name for the sandbox user. What the lock takes is
+  # still there, and the sandbox user is closed in all the same.
+  secure-host-options:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: host
+        uses: ./secure-host
+        with:
+          lock: false
+          egress: false
+          sandbox-user: builder
+      - name: The switches did what they say
+        env:
+          SANDBOX_USER: ${{ steps.host.outputs.sandbox-user }}
+          SANDBOX_HOME: ${{ steps.host.outputs.sandbox-home }}
+        run: |
+          sudo -n true
+          test "$SANDBOX_USER" = builder
+          test "$(agentic-job sandbox exec -- pwd)" = "$SANDBOX_HOME"
+          test "$(agentic-job sandbox exec -- sh -c 'echo "${HTTPS_PROXY:-none}"')" = none
+          if systemctl is-active --quiet docker.service; then echo "::error::docker was not stopped"; exit 1; fi
+
+  # The action as another repository names it, which a pull request
+  # cannot do for its own commit: after a push to main, from main. The
+  # runner fetches it as an archive without git, and the binary it gets
+  # is a release's when one is pinned for this source.
+  secure-host-published:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: host
+        uses: cgwalters-forge/agentic-job/secure-host@main
+      - name: A pinned release of this source was fetched, and nothing was built
+        env:
+          FETCHED: ${{ steps.host.outputs.fetched }}
+        run: |
+          echo "fetched: $FETCHED"
+          [ "$(node secure-host/binary.mjs digest)" != "$(jq -r .source secure-host/release.json)" ] || test "$FETCHED" = true
+          if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
+
   # The reusable workflow, called as another repository would call it,
   # with the scripted agent: all four jobs, on four machines. The agent
   # clones this repository's main branch, changes a file and asks for a
@@ -576,7 +631,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, e2e-full, e2e-limit, e2e-event, e2e-verify]
+    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, e2e-full, e2e-limit, e2e-event, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
