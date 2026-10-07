@@ -18,3 +18,7 @@ a pull request (`--pull-request`): #13 with its head in the repository and
 with its head in `mallory/repo`, and #15, another pull request than the one
 `issue_comment-pr-command.json` is on. `pull_request-labeled.json` is
 `pull_request-same-repo.json` with the action `labeled`.
+
+`recorded/` holds payloads and API responses recorded from real runs of the
+trial repository `cgwalters-bot/agentic-job-trial` (and two derived from
+them), with `allow-trial.toml` as its bounds; see its README.

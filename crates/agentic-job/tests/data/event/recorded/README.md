@@ -1,0 +1,49 @@
+# Recorded payloads
+
+What GitHub delivered, as opposed to the hand-written files one directory
+up. All were recorded on 2026-10-07 from `cgwalters-bot/agentic-job-trial`
+(repository id 1408419733) and are kept byte for byte as recorded.
+
+Event payloads (the file at `$GITHUB_EVENT_PATH`), each from a run of the
+trial repository's workflow:
+
+- `issue_comment-command-issue.json`: `/agent ...` by cgwalters-bot on issue
+  #3. [Run 37617460093](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37617460093),
+  admitted.
+- `issue_comment-command-pull.json`: `/agent ...` on pull request #4.
+  [Run 37617487014](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37617487014),
+  admitted.
+- `issue_comment-no-command.json`: a plain comment on issue #3.
+  [Run 37618470196](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37618470196),
+  refused: it does not start with a command.
+- `issue_comment-command-fork-pull.json`: `/agent ...` on pull request #5,
+  whose head is in the fork `cgwalters-forge/agentic-job-trial`.
+  [Run 37618557298](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37618557298),
+  refused: the head is in another repository.
+
+REST responses:
+
+- `permission-cgwalters-bot.json` and `permission-octocat.json`:
+  `GET /repos/cgwalters-bot/agentic-job-trial/collaborators/LOGIN/permission`
+  (admin, and read).
+- `pull-4.json` and `pull-5.json`: `GET /repos/cgwalters-bot/agentic-job-trial/pulls/N`
+  (#5's head is in the fork).
+
+Derived, not recorded: a comment by an outsider, or by `github-actions[bot]`,
+does not start a workflow when posted with the job's token, so no live run
+can produce these. They are `issue_comment-command-issue.json` with the
+user changed, by `jq`:
+
+- `issue_comment-command-issue-by-octocat.json`: `.sender` and
+  `.comment.user` replaced by the `.user` of `permission-octocat.json`.
+- `issue_comment-command-issue-by-github-actions.json`: `.sender` and
+  `.comment.user` replaced by the original user object with `login`
+  `github-actions[bot]`, `id` 41898282, `node_id` `MDM6Qm90NDE4OTgyODI=`,
+  `type` `Bot` and `html_url` `https://github.com/apps/github-actions`; its
+  other keys are as they were.
+
+In both only `.sender` and `.comment.user` were replaced, so
+`comment.author_association` and the user objects' avatar and URL fields
+still read as cgwalters-bot's; the binary reads none of them.
+
+`../allow-trial.toml` is the trial repository's own bounds table.
