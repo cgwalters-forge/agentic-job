@@ -28,11 +28,13 @@
 pub mod agent;
 pub mod brief;
 pub mod clone;
+pub mod egress;
 pub mod enter;
 pub mod handback;
 pub mod inference;
 pub mod launch;
 pub mod probe;
+pub mod summary;
 mod secrets;
 
 use std::future::Future;
