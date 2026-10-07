@@ -1,0 +1,24 @@
+# This repository's bounds: what a run started from here may ask for.
+# The policy job checks each run's request against it before anything
+# else happens (`agentic-job policy --allow`). A caller keeps a file like
+# this in its own repository and names it in the `allow` input.
+
+# The hosts a clone URL may name, exactly. The workflow clones from
+# github.com.
+hosts = ["github.com"]
+# Globs, ignoring case: `*` is anything but a slash, `**` anything.
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+
+# The most outputs a run may hand back in all, and how large a change.
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+# The output types a run may ask for, and the most of each.
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 1 }
+noop = { max = 1 }
+missing_tool = { max = 3 }
+missing_data = { max = 3 }

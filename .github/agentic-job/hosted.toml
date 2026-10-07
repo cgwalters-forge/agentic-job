@@ -1,0 +1,51 @@
+# What the inputs of the workflow do not cover, for an agent that runs on
+# GitHub's hosted `ubuntu-26.04`: the `config` input names this file. The
+# workflow adds the agent, the inference proxy, the limits and the
+# packages from its inputs. Another runner image listens on other
+# sockets: `agentic-job sandbox check` fails on each one that is left and
+# names it.
+
+[sandbox]
+# Daemons of the image that listen for every local user and that an agent
+# run does not use.
+stop-services = [
+    # The runner's user is in docker's group.
+    "docker.socket",
+    "docker.service",
+    "containerd.service",
+    "ssh.socket",
+    "ssh.service",
+    "sshd-unix-local.socket",
+    "snapd.socket",
+    "snapd.service",
+    "multipathd.socket",
+    "multipathd.service",
+    "uuidd.socket",
+    "uuidd.service",
+    "iscsid.socket",
+    "iscsid.service",
+]
+
+[sandbox.check]
+allow-sockets = [
+    # systemd-resolved, which the whole runner resolves names with, the
+    # egress proxy included. It resolves for any user, so on this image
+    # the sandbox user can still send names out through it
+    # (docs/sandbox-check.md).
+    "/run/systemd/resolve/",
+    # systemd-networkd, which the runner's network depends on: it
+    # describes the links to any user and changes them only for root.
+    "/run/systemd/netif/",
+    "/run/systemd/resolve.hook/",
+]
+
+# The egress proxy and the network rules are on by default: no [egress].
+
+[setup]
+# The egress proxy runs in a Python environment of its own, behind
+# nftables rules; podman is what an agent builds containers with.
+packages = ["python3-venv", "nftables", "podman", "uidmap"]
+
+[commit]
+author = "agentic-job <agentic-job@users.noreply.github.com>"
+trailers = ["Generated-by: AI"]
