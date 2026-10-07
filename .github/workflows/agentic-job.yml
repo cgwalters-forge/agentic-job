@@ -237,10 +237,10 @@ env:
   # A run at a commit whose source is that one fetches those binaries and
   # checks them against these; at any other it builds its own.
   # docs/workflow.md says how a release is pinned.
-  RELEASE: v0.0.2
-  RELEASE_SOURCE: 3d2051170b875cf3a444fbfe1b0e4c60392e8a9a46510b4a969deecedd91e69b
-  RELEASE_AGENTIC_JOB_SHA256: 087b8f1e066884c36f4d398ef641978d3f908b85c31a8581fa0813d1465c7ced
-  RELEASE_FAKE_AGENT_SHA256: f21d71bfa7442ba37001c7afa3d13c1dd670cd498079677219ee18bbd56f30f2
+  RELEASE: v0.0.3
+  RELEASE_SOURCE: 1313d1c2595ea3f4705f937254b06f356c0a8b1f3abb7dea115223e173da4819
+  RELEASE_AGENTIC_JOB_SHA256: 24b60b7f1eb6fe7c77f98d2780ad0b6c8c8a063f00196fde3744bc0f61551e2d
+  RELEASE_FAKE_AGENT_SHA256: df2baaadd450429b31f6cb04795dca5d42a526c2d301095b5ff20bf23fe5e58b
 
 jobs:
   policy:
