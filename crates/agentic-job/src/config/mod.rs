@@ -8,6 +8,8 @@
 //! their step may rename or add to them, and checks what the types
 //! cannot say (that `github-oidc` has an audience, for one).
 
+pub mod compose;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

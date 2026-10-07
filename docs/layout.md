@@ -19,7 +19,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | Path under `src/` | Step | Holds |
 | --- | --- | --- |
 | `main.rs`, `cli.rs`, `exit.rs` | 1 | parsing, dispatch, the exit states |
-| `config.rs` | 1, then each table's step | the `--config` TOML, one struct per table |
+| `config/` | 1, then each table's step | the `--config` TOML, one struct per table; `config/compose.rs` (step 7) is `config`, which writes that file from a caller's file and from settings given one at a time |
 | `policy.rs` | 4 | `policy`: the caller's bounds, the request, and the `Policy` type that `policy.json` holds |
 | `check/` | 4 | `check`: the handed-back outputs against the policy, and in `check/patch.rs` the rules for a patch |
 | `redact.rs` | 4 | secret-shaped strings; used by `check` and by `run` |
@@ -34,7 +34,7 @@ and 6b all need it. The release publishes `agentic-job` alone.
 A module that outgrows its file becomes a directory of the same name
 (`check.rs` to `check/mod.rs`); its path in `lib.rs` does not change.
 
-Three types are shared. `config.rs` is read by `sandbox setup` (step 5)
+Three types are shared. `config/mod.rs` is read by `sandbox setup` (step 5)
 and by `run` (step 6a): the file exists now with a struct per table,
 and a step changes only the structs of its own tables (`[sandbox]`,
 `[egress]` and `[setup]` are step 5's, `[limits]` step 3's,
@@ -228,6 +228,18 @@ run it (`/usr/local/bin`), which `run` checks.
 
 `run` has one argument the plan does not: a hidden `--config`, for
 tests, in place of the root-owned copy.
+
+## `config`
+
+Not in the plan's table of commands. A workflow gets a run's settings as
+strings from whoever called it, and `sandbox setup` wants one TOML
+file. `agentic-job config --from FILE --string TABLE.KEY=VALUE
+--integer ... --list ...` writes that file: each setting is the value
+of its one key and is never read as TOML, so an input that holds a
+quote or a table header cannot add a key, as it could in a file that a
+shell script pasted together. A setting whose value is empty sets
+nothing, which is how an input the caller left out arrives. The result
+is checked as its readers will read it, before a machine is set up.
 
 ## Rules that keep steps apart
 
