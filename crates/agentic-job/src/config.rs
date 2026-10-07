@@ -242,10 +242,34 @@ impl Default for SandboxCheck {
     }
 }
 
-/// The egress rules. Step 5 defines the fields.
-#[derive(Debug, Default, Deserialize, PartialEq)]
+/// The sandbox user's way out to the network. Step 5.
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Egress {}
+pub struct Egress {
+    /// Whether the sandbox user reaches the network only through the
+    /// egress proxy. Off, its network is open but for the cloud metadata
+    /// service and the tailnet.
+    pub proxy: bool,
+    /// URLs the sandbox user reaches directly and not through the egress
+    /// proxy: the inference proxy, so that the run token never crosses
+    /// the egress proxy. Each is an IPv4 address on the tailnet, with a
+    /// port; with any, the rest of the tailnet is closed to the sandbox
+    /// user.
+    pub direct: Vec<String>,
+    /// The write rules, in place of the ones that come with the binary
+    /// (`egress/policy.toml`).
+    pub policy: Option<PathBuf>,
+}
+
+impl Default for Egress {
+    fn default() -> Self {
+        Self {
+            proxy: true,
+            direct: Vec::new(),
+            policy: None,
+        }
+    }
+}
 
 /// The inference proxy and how a run announces itself to it. Step 6a.
 /// `run::inference::Endpoint::from_config` checks it.
