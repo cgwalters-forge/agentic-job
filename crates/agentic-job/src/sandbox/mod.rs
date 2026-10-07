@@ -8,9 +8,11 @@ use clap::Subcommand;
 use crate::exit::Exit;
 
 pub mod check;
+pub mod egress;
 pub mod enter;
 pub mod host;
 pub mod local;
+pub mod network;
 pub mod setup;
 
 #[derive(Debug, Subcommand)]
@@ -22,6 +24,22 @@ pub enum Command {
     /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
     #[command(hide = true)]
     ProbeLocal,
+    /// Print the network rules setup would load; CI compares them with the old tree's
+    #[command(hide = true)]
+    NftRules(NftRulesArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct NftRulesArgs {
+    /// The sandbox user's uid, and each range of its subordinate uids as START-END
+    #[arg(long = "uid", value_name = "UID", required = true)]
+    pub uids: Vec<String>,
+    /// A URL reached directly, as `[egress] direct` has them
+    #[arg(long, value_name = "URL")]
+    pub direct: Vec<String>,
+    /// The egress proxy's uid; without it, the rules of a host that has no proxy
+    #[arg(long, value_name = "UID")]
+    pub proxy_uid: Option<u32>,
 }
 
 impl Command {
@@ -30,6 +48,15 @@ impl Command {
             Self::Setup(args) => setup::run(args),
             Self::Check(args) => check::run(args),
             Self::ProbeLocal => local::run(),
+            Self::NftRules(args) => {
+                let direct = args
+                    .direct
+                    .iter()
+                    .map(|url| network::Direct::parse(url))
+                    .collect::<Result<Vec<_>>>()?;
+                print!("{}", network::rules(&args.uids, &direct, args.proxy_uid));
+                Ok(Exit::Success)
+            }
         }
     }
 }

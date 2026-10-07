@@ -19,9 +19,10 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, ensure};
 
 use super::host::{self, User};
+use super::network;
 use crate::config::{Config, Sandbox};
 
-/// `run0` came with systemd 256.
+/// `run0` came with systemd 256, and its `--pipe` with 257.
 pub const RUN0: &str = "run0";
 
 /// `run0` sets these as sudo would, and tools that see them may act as if
@@ -67,15 +68,26 @@ impl Entry {
         let user = User::lookup(name)?
             .with_context(|| format!("no user {name}: `agentic-job sandbox setup` creates it"))?;
         ensure!(user.uid != 0, "the sandbox user {name} is root by uid");
-        Ok(Self::for_user(user, &config.sandbox))
+        let proxy = if config.egress.proxy {
+            network::proxy_environment(&network::direct(&config.egress)?)
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Self::for_user(user, &config.sandbox, proxy))
     }
 
-    fn for_user(user: User, sandbox: &Sandbox) -> Self {
+    /// The fixed variables, then the egress proxy's, then the
+    /// configuration's own, each over the one before.
+    fn for_user(user: User, sandbox: &Sandbox, proxy: BTreeMap<String, String>) -> Self {
         let fixed = [
             ("LANG".to_owned(), LANG.to_owned()),
             ("PATH".to_owned(), host::PATH_DIRS.join(":")),
         ];
-        let env = fixed.into_iter().chain(sandbox.env.clone()).collect();
+        let env = fixed
+            .into_iter()
+            .chain(proxy)
+            .chain(sandbox.env.clone())
+            .collect();
         Self { user, env }
     }
 
@@ -216,7 +228,7 @@ mod tests {
             gid: 1001,
             home: "/home/agent".into(),
         };
-        Entry::for_user(user, &sandbox)
+        Entry::for_user(user, &sandbox, BTreeMap::new())
     }
 
     fn strings(items: &[&str]) -> Vec<String> {
