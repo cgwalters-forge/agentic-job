@@ -21,8 +21,9 @@ and 6b all need it. The release publishes `agentic-job` alone.
 | `main.rs`, `cli.rs`, `exit.rs` | 1 | parsing, dispatch, the exit states |
 | `config.rs` | 1, then each table's step | the `--config` TOML, one struct per table |
 | `policy.rs` | 4 | `policy`: the caller's bounds, the request, and the `Policy` type that `policy.json` holds |
-| `check.rs` | 4 | `check`: the handed-back outputs and patch against the policy |
+| `check/` | 4 | `check`: the handed-back outputs against the policy, and in `check/patch.rs` the rules for a patch |
 | `redact.rs` | 4 | secret-shaped strings; used by `check` and by `run` |
+| `files.rs` | 4 | reading a file someone else wrote: no link followed, a size cap; used by `check`, `redact` and `run` |
 | `sandbox/setup.rs` | 5 | `sandbox setup` |
 | `sandbox/check.rs` | 5 | `sandbox check`; its probes are a function `run` calls again |
 | `session/` | 3 | the ACP session, its limits and transcript: a library, no command ([below](#the-session)) |
@@ -36,9 +37,10 @@ and by `run` (step 6a): the file exists now with a struct per table,
 and a step changes only the structs of its own tables (`[sandbox]`,
 `[egress]` and `[setup]` are step 5's, `[limits]` step 3's,
 `[inference]` and `[agent]` step 6a's, `[commit]` step 6b's).
-`Policy` is step 4's, and `run` reads it: steps 6a and 6b need step 4
-merged before they use it, and until then take the path and do not
-parse it. `redact.rs` likewise is step 4's and used by step 6b.
+`Policy` is step 4's, and `run` reads it with `Policy::load`: the clone
+URL, the caps and the output types allowed. `redact.rs` likewise is
+step 4's and used by step 6b, which also takes the name of a patch
+(`check::patch_file_name`) and of its base header from `check`.
 
 The egress proxy is not Rust. Step 5 puts mitmproxy's addon, policy and
 tests in `egress/` at the top of the repository, as they are in the old
@@ -122,7 +124,9 @@ Tests sit beside the code they test (`#[cfg(test)]`); tests of the built
 binary go in `crates/agentic-job/tests/`, one file per command, and
 their inputs in `crates/agentic-job/tests/data/COMMAND/`. Corpus tests
 that run the old tree's code fetch it at the pinned commit in CI. They
-do not copy it here.
+do not copy it here. The first is `crates/agentic-job/tests/corpus/`,
+for `policy` and `check`: it is Node, because the code it compares with
+is, and the top of `corpus.test.mjs` says how to run it.
 
 ## CI
 

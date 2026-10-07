@@ -77,6 +77,44 @@ jobs:
       # passes.
       - run: cargo test --locked --test session
 
+  # The old tree's check and the new one, on the same requests and
+  # hand-backs: crates/agentic-job/tests/corpus. The old tree is fetched at
+  # the commit docs/plan.md names as the parity target, and gh-aw's
+  # collector at the commit the old tree vendored it from; neither is
+  # copied here.
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OLD_TREE: ${{ github.workspace }}/old-tree
+      GH_AW: ${{ github.workspace }}/gh-aw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cgwalters-forge/cgwalters-devspace-sandbox
+          ref: df1e867bb551ed8e36bd535f6d304a0861f54913
+          path: old-tree
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: c227508baacbbe271be6c5a4f303936840b3c813
+          path: gh-aw
+          sparse-checkout: actions/setup/js
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked
+      - run: node --test crates/agentic-job/tests/corpus/corpus.test.mjs
+        env:
+          AGENTIC_JOB: target/debug/agentic-job
+          GH_AW_JS: ${{ env.GH_AW }}/actions/setup/js
+
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
@@ -103,7 +141,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, session-sandbox, static, safe-outputs]
+    needs: [docs, rust, corpus, session-sandbox, static, safe-outputs]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
