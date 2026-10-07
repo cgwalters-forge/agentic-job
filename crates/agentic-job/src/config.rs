@@ -248,22 +248,31 @@ impl Default for SandboxCheck {
 pub struct Egress {}
 
 /// The inference proxy and how a run announces itself to it. Step 6a.
+/// `run::inference::Endpoint::from_config` checks it.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Inference {
+    /// The proxy, as `http://HOST:PORT`. Empty: the run has no inference,
+    /// which only an agent with no model behind it can do without.
     pub url: String,
-    pub register: Register,
+    /// How the run gets its token. There is no default: `plain` proves
+    /// nothing about who registers, so it is never chosen by leaving a
+    /// key out.
+    pub register: Option<Register>,
     /// For `github-oidc`: the audience of the identity token.
     pub audience: Option<String>,
     /// For `token-file`: where the token is.
     pub token_file: Option<PathBuf>,
+    /// Where the proxy serves the Anthropic Messages API (`URL/anthropic`
+    /// unless set) and the OpenAI Responses API (`URL/v1`).
+    pub anthropic_url: Option<String>,
+    pub openai_url: Option<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Register {
     /// Send the run's identifier and no proof.
-    #[default]
     Plain,
     /// Send the CI system's identity token.
     GithubOidc,
@@ -271,15 +280,30 @@ pub enum Register {
     TokenFile,
 }
 
+impl Register {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::GithubOidc => "github-oidc",
+            Self::TokenFile => "token-file",
+        }
+    }
+}
+
 /// Which agent, and where its configuration comes from. Step 6a.
+/// `run::agent` reads it.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Agent {
+    /// An entry of the session's registry: `claude`, `opencode` or `fake`.
     pub name: String,
     pub model: Option<String>,
-    /// A public repository holding the agent's configuration.
+    /// A public repository holding the agent's configuration, as the URL
+    /// to clone: the binary builds no forge URL.
     pub config_repo: Option<String>,
+    /// The branch or tag of it (default: its default branch).
     pub config_ref: Option<String>,
+    /// The directory of it the configuration is in (default: its root).
     pub config_path: Option<PathBuf>,
 }
 
@@ -385,14 +409,15 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config, Config::default());
         assert_eq!(config.sandbox.user, Sandbox::DEFAULT_USER);
-        assert_eq!(config.inference.register, Register::Plain);
+        // No mode is chosen for a run that names none.
+        assert_eq!(config.inference.register, None);
     }
 
     #[test]
     fn every_table_of_the_plan_parses() {
         let config = Config::parse(FULL).unwrap();
         assert_eq!(config.sandbox.stop_services, ["docker.service"]);
-        assert_eq!(config.inference.register, Register::GithubOidc);
+        assert_eq!(config.inference.register, Some(Register::GithubOidc));
         assert_eq!(config.inference.audience.as_deref(), Some("proxy"));
         assert_eq!(config.agent.name, "claude");
         assert_eq!(config.limits.timeout_minutes, 75);
