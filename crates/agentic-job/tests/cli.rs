@@ -11,7 +11,13 @@ const ERROR: i32 = 2;
 fn exit_states() {
     let cases: &[(&[&str], i32, &str)] = &[
         (&["--version"], 0, ""),
-        (&["sandbox", "check"], ERROR, "not implemented"),
+        // `sandbox check` itself depends on whether a sandbox is set up
+        // where the tests run; tests/sandbox_host.rs covers it.
+        (
+            &["sandbox", "setup", "--config", "/nonexistent.toml"],
+            ERROR,
+            "/nonexistent.toml",
+        ),
         (&["no-such-command"], ERROR, "unrecognized subcommand"),
         (&["run"], ERROR, "required arguments"),
     ];

@@ -75,11 +75,8 @@ mod tests {
             ],
             None,
         ),
-        (
-            &["sandbox", "setup", "--config", "c.toml"],
-            Some("sandbox setup"),
-        ),
-        (&["sandbox", "check"], Some("sandbox check")),
+        (&["sandbox", "setup", "--config", "c.toml"], None),
+        (&["sandbox", "check"], None),
         (
             &[
                 "run", "--policy", "p.json", "--task", "task.md", "--meta", "m.json", "--out",
@@ -130,6 +127,12 @@ mod tests {
         }
     }
 
+    /// Not in the plan's table: `sandbox check` runs it as the sandbox user.
+    #[test]
+    fn the_hidden_prober_parses() {
+        Cli::try_parse_from(["agentic-job", "sandbox", "probe-local"]).unwrap();
+    }
+
     #[test]
     fn bad_command_lines_are_refused() {
         let cases: &[&[&str]] = &[
@@ -141,6 +144,7 @@ mod tests {
             ],
             &["sandbox"],
             &["sandbox", "setup"],
+            &["sandbox", "check", "--config", "c.toml"],
             &["run", "--policy", "p.json"],
             &["check", "--outputs", "dir"],
             &["check", "--policy", "p.json", "--outputs", "dir"],
