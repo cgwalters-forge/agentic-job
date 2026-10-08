@@ -62,6 +62,21 @@ const OPENCODE_SWITCHES: &[(&str, &str)] = &[
 /// Selects an opencode configuration merged over the global one.
 const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG";
 
+/// The runtime whose discovery switches and request capture we test. Upgrades
+/// require a source audit and fresh evidence, not just a new npm release.
+const OPENCODE_VERSION: &str = "1.18.31";
+
+fn check_opencode_version(success: bool, stdout: &[u8]) -> Result<()> {
+    ensure!(success, "opencode --version failed");
+    let version = std::str::from_utf8(stdout).context("decoding opencode --version")?;
+    ensure!(
+        version.trim() == OPENCODE_VERSION,
+        "opencode runtime mismatch: expected {OPENCODE_VERSION}, got {:?}",
+        version.trim()
+    );
+    Ok(())
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// The agent to become: claude or opencode
@@ -172,6 +187,15 @@ pub fn run(args: &Args) -> Result<Exit> {
         std::fs::read_to_string(path)
     })?;
     let (first, rest) = program.split_first().context("the agent has no program")?;
+    if kind == Kind::Opencode {
+        let output = Command::new(first)
+            .arg("--version")
+            .env_clear()
+            .envs(&env)
+            .output()
+            .context("checking the pinned opencode runtime")?;
+        check_opencode_version(output.status.success(), &output.stdout)?;
+    }
     let err = Command::new(first)
         .args(rest)
         .args(&args.args)
@@ -355,5 +379,19 @@ mod tests {
         assert_eq!(program(Kind::Opencode).unwrap(), ["opencode", "acp"]);
         assert_eq!(program(Kind::Claude).unwrap(), ["claude-agent-acp"]);
         assert!(program(Kind::Fake).is_err());
+    }
+
+    #[test]
+    fn runtime_pin_fails_closed() {
+        for (success, version, accepted) in [
+            (true, b"1.18.31\n".as_slice(), true),
+            (true, b"1.18.32\n".as_slice(), false),
+            (true, b"".as_slice(), false),
+            (true, b"1.18.31\nother".as_slice(), false),
+            (false, b"1.18.31".as_slice(), false),
+            (true, b"\xff".as_slice(), false),
+        ] {
+            assert_eq!(check_opencode_version(success, version).is_ok(), accepted);
+        }
     }
 }

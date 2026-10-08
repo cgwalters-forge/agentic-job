@@ -571,7 +571,9 @@ jobs:
           MAX_TASKS: ${{ inputs.max-tasks }}
           BUDGET: ${{ inputs.budget }}
           PACKAGES: ${{ inputs.packages }}
-          NPM: ${{ inputs.npm }}
+          # Review cannot select a different runtime through caller npm inputs.
+          # Admission remains fake-only until immutable-source isolation is proven.
+          NPM: ${{ inputs.review && inputs.agent == 'opencode' && 'opencode-ai@1.18.31' || inputs.npm }}
           SETUP: ${{ inputs.setup }}
         run: |
           agentic-job config ${CONFIG:+--from "$CONFIG"} \

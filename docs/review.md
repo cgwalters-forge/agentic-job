@@ -57,8 +57,8 @@ currently require a `called_workflows` entry for this reusable workflow.
 `cgwalters-forge/tracker#452` tracks narrowing that policy again. This broader
 broker admission does not replace review event admission or sandbox isolation.
 This is the operator's deployment choice as of 2026-10-08, not a claim that
-workflow-specific proxy admission is enforced. Before enabling a real reviewer,
-restore that restriction by replacing `any_workflow` with `called_workflows` pinned to the reviewed
+workflow-specific proxy admission is enforced. Recommended hardening, not a
+precondition for enabling a real reviewer, is replacing `any_workflow` with `called_workflows` pinned to the reviewed
 reusable workflow's `job_workflow_sha`, and verifying registration accepts that
 identity and refuses other workflows. The identity-token requirement remains.
 The operator must also select a disposable
@@ -115,8 +115,12 @@ before every instruction load). Otherwise a head-steered agent could write
 to promote its own text to instructions. Pinning the base SHA alone does not
 prevent that mid-session attack.
 
-The repository does not currently select a pinned opencode runtime for review;
-the caller chooses its setup. As a concrete source investigation,
+The workflow selects `opencode-ai@1.18.31` for any future opencode review,
+overriding the caller's npm list. The production launcher checks `--version`
+with its sanitized environment and fails closed unless it is exactly 1.18.31.
+This check applies to non-review opencode launches too; those deployments must
+install that version. It is a version check, not a binary-integrity proof, and
+does not make writable configuration safe. As a concrete source investigation,
 [opencode v1.2.3's instruction loader](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/session/instruction.ts)
 shows two distinct paths that must be accounted for before selecting a pin:
 
@@ -164,8 +168,8 @@ source; neither refusal should be removed on their basis.
 ### Real-runtime counterexample
 
 `workflow/review-runtime.test.cjs` now exercises the production launcher against
-opencode **1.18.31**, the version available on the development runner. This is an
-evidence-test version check, **not a review admission pin**. Run it explicitly:
+opencode **1.18.31**, the version available on the development runner. This is a
+shared production version requirement, **not safe review admission**. Run it explicitly:
 
 ```sh
 cargo build --locked
@@ -177,11 +181,17 @@ runtime must be on PATH; `AGENTIC_JOB_TEST_LAUNCHER` can name a built agentic-jo
 binary. Its home and both checkouts are disposable fixtures. A loopback mock
 inference endpoint records every model request and returns deterministic `read`
 tool calls; no real inference service, model judgement or credential is used.
-The test requires a trusted global instruction positive control, both data-file
+The test requires a trusted global instruction positive control, head/base data-file
 contents in subsequent requests, and absence of distinct hostile head AGENTS.md,
 CLAUDE.md, nested AGENTS.md, opencode.json, commands and skills canaries. It also
 checks home Claude instructions and external skills are absent. It does not
-explicitly read the hostile instruction files as data.
+explicitly read the hostile instruction files as data. Same-uid fixture writes
+also create, modify and rename over nested AGENTS.md in the base and in a
+`base-scratch` sibling. Captured requests must show each canary in an
+`Instructions from:` attachment, not merely its data-file control. A separate
+non-prefix `scratch` sibling supplies a data control but no instruction canary.
+These writes happen before startup; they are not runtime tool-write attempts or
+proof that a second sandbox user cannot write the sources.
 
 **The passing test proves a counterexample, not safe admission.** Started in a
 non-prefix sibling base, the head canaries are absent from the captured requests.
@@ -226,6 +236,16 @@ sources immutable to the sandbox user, including their parent directories.
 Alternatively the runtime needs a comprehensive switch that suppresses dynamic
 instruction resolution as well as discovery. Extend the context test to prove
 that a sandbox user's writes cannot introduce instructions, cover all redirected
-sources and tool-read turns, and only then change both admission gates. No workflow
-permissions, token placement, action pins or admission gates changed here. Claude
+sources and tool-read turns, and only then change both admission gates. Writable
+test scratch must be outside the immutable base and outside its string prefix;
+the pinned resolver uses `current.startsWith(root)`, not path-component
+containment. The non-prefix fixture is evidence for that resolver only, not
+proof against other configuration or tool loaders. Production currently has no
+enforced immutable base or designated isolated review scratch directory.
+
+The workflow change only fixes the npm list for a future opencode review to
+`opencode-ai@1.18.31`. It changes no permissions, token placement, action pins
+or admission gates. The launcher refuses mismatched reported versions but does
+not authenticate or make the executable immutable; installation ownership and
+replacement protection still need privileged verification. Claude
 remains refused separately. This change does not close #154.
