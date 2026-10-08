@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
 use crate::session::digest::{Digest, cut};
 use crate::session::{Outcome, Record, RunResult};
@@ -249,6 +250,9 @@ pub fn summarize(inputs: &Inputs) -> Value {
     s.insert("aic_pricing".into(), json!(measured.aic_pricing));
     s.insert("files".into(), json!(measured.files));
     s.insert("patch".into(), measured.patch.clone());
+    if let Some(omitted) = inputs.outcome.get(OMITTED_BINARY_FILES) {
+        s.insert(OMITTED_BINARY_FILES.into(), omitted.clone());
+    }
     s.insert("egress_denied".into(), json!(measured.egress_denied));
     s.insert("redactions".into(), json!(measured.redactions));
     // The model the agent says the session runs, else the one asked for.
