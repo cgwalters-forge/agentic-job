@@ -10,7 +10,16 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const readline = require('node:readline');
 
-test('real opencode request capture: sibling isolation and writable-base counterexample', {
+const runtimeVersion = '1.18.31';
+
+test('workflow installation, production launcher and evidence runtime pins agree', async () => {
+  const launcher = await fs.readFile('crates/agentic-job/src/run/launch.rs', 'utf8');
+  const workflow = await fs.readFile('.github/workflows/agentic-job.yml', 'utf8');
+  assert.ok(launcher.includes(`const OPENCODE_VERSION: &str = "${runtimeVersion}";`));
+  assert.ok(workflow.includes(`inputs.review && inputs.agent == 'opencode' && 'opencode-ai@${runtimeVersion}' || inputs.npm`));
+});
+
+test('real opencode request capture: sibling isolation and writable-source counterexamples', {
   skip: !process.env.AGENTIC_JOB_TEST_REAL_OPENCODE,
   timeout: 120000,
 }, async (t) => {
@@ -19,11 +28,11 @@ test('real opencode request capture: sibling isolation and writable-base counter
   const base = path.join(root, 'base');
   const head = path.join(root, 'head');
   const home = path.join(root, 'home');
-  // This is the evidence fixture's version, not a production admission pin.
+  // Must agree with the production launcher and workflow installation pin.
   // A new runtime needs a new source audit and an explicit fixture update.
   const version = spawnSync('opencode', ['--version'], { encoding: 'utf8' });
   assert.equal(version.status, 0, 'opencode --version failed');
-  assert.equal(version.stdout.trim(), '1.18.31', 'unaudited evidence runtime');
+  assert.equal(version.stdout.trim(), runtimeVersion, 'unaudited evidence runtime');
   const write = async (name, text) => {
     const file = path.join(root, name);
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -49,6 +58,30 @@ test('real opencode request capture: sibling isolation and writable-base counter
   // Project-config discovery is disabled, but the read resolver loads it.
   await write('base/nested/AGENTS.md', 'WRITABLE_BASE_CANARY');
   await write('base/nested/data.txt', 'BASE_DATA_CONTROL');
+  // Same-uid writes demonstrate why chmod alone cannot be an ownership boundary.
+  // Cover create, in-place modification and rename-over in both the base and a
+  // writable scratch sibling sharing the loader's string prefix.
+  const attacks = [];
+  for (const tree of ['base', 'base-scratch']) {
+    for (const operation of ['create', 'modify', 'replace']) {
+      const directory = `${tree}/${operation}`;
+      const canary = `${tree.toUpperCase()}_${operation.toUpperCase()}_CANARY`;
+      await write(`${directory}/data.txt`, `${canary}_DATA`);
+      if (operation !== 'create') await write(`${directory}/AGENTS.md`, 'Original instruction');
+      if (operation === 'replace') {
+        await write(`${directory}/replacement`, canary);
+        await fs.rename(path.join(root, directory, 'replacement'), path.join(root, directory, 'AGENTS.md'));
+      } else {
+        await write(`${directory}/AGENTS.md`, canary);
+      }
+      attacks.push({ file: path.join(root, directory, 'data.txt'), canary,
+        instruction: path.join(root, directory, 'AGENTS.md') });
+    }
+  }
+  await write('scratch/AGENTS.md', 'NONPREFIX_SCRATCH_CANARY');
+  await write('scratch/data.txt', 'SCRATCH_DATA_CONTROL');
+  const reads = [path.join(head, 'nested/data.txt'), path.join(base, 'nested/data.txt'),
+    ...attacks.map((attack) => attack.file), path.join(root, 'scratch/data.txt')];
   await write('home/.config/opencode/AGENTS.md', 'TRUSTED_INSTRUCTION_CONTROL');
   await write('home/.claude/CLAUDE.md', 'HOME_CLAUDE_CANARY');
   await write('home/.agents/skills/hostile/SKILL.md',
@@ -66,16 +99,15 @@ test('real opencode request capture: sibling isolation and writable-base counter
       assert.match(req.url, /chat\/completions$/);
       // Title/summary generation must not consume the scripted read sequence.
       const hasRead = payload.tools?.some((tool) => tool.function?.name === 'read');
-      const index = hasRead ? turn++ : 2;
-      const file = index === 0 ? path.join(head, 'nested/data.txt') : path.join(base, 'nested/data.txt');
-      const delta = index < 2 ? { tool_calls: [{ index: 0, id: `read_${index}`,
-        type: 'function', function: { name: 'read', arguments: JSON.stringify({ filePath: file }) } }] }
+      const index = hasRead ? turn++ : reads.length;
+      const delta = index < reads.length ? { tool_calls: [{ index: 0, id: `read_${index}`,
+        type: 'function', function: { name: 'read', arguments: JSON.stringify({ filePath: reads[index] }) } }] }
         : { content: 'Done.' };
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.end(`data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk',
         created: 0, model: 'mock', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n` +
         `data: ${JSON.stringify({ id: 'mock', object: 'chat.completion.chunk', created: 0,
-          model: 'mock', choices: [{ index: 0, delta: {}, finish_reason: index < 2 ? 'tool_calls' : 'stop' }],
+          model: 'mock', choices: [{ index: 0, delta: {}, finish_reason: index < reads.length ? 'tool_calls' : 'stop' }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
     } catch (error) {
       failures.push(error);
@@ -133,18 +165,23 @@ test('real opencode request capture: sibling isolation and writable-base counter
     clientInfo: { name: 'review-canary', version: '1' } });
   const session = await rpc('session/new', { cwd: base, mcpServers: [] });
   await rpc('session/prompt', { sessionId: session.sessionId,
-    prompt: [{ type: 'text', text: 'Read the two data files requested by the model, then stop.' }] });
+    prompt: [{ type: 'text', text: 'Read the data files requested by the model, then stop.' }] });
   assert.deepEqual(failures, []);
-  assert.ok(turn >= 3, `expected both read results in a later model request: ${stderr}`);
+  assert.ok(turn > reads.length, `expected all read results in a later model request: ${stderr}`);
   const context = JSON.stringify(requests);
-  for (const control of ['TRUSTED_INSTRUCTION_CONTROL', 'HEAD_DATA_CONTROL', 'BASE_DATA_CONTROL']) {
+  for (const control of ['TRUSTED_INSTRUCTION_CONTROL', 'HEAD_DATA_CONTROL', 'BASE_DATA_CONTROL',
+    'SCRATCH_DATA_CONTROL']) {
     assert.ok(context.includes(control), `missing positive control ${control}`);
   }
   for (const canary of [...canaries.map(([, value]) => value), 'HEAD_CONFIG_CANARY',
-    'HOME_CLAUDE_CANARY', 'HOME_SKILL_CANARY']) {
+    'HOME_CLAUDE_CANARY', 'HOME_SKILL_CANARY', 'NONPREFIX_SCRATCH_CANARY']) {
     assert.ok(!context.includes(canary), `automatically loaded ${canary}`);
   }
   // Passing means the counterexample was observed, NOT that review is safe.
   assert.ok(context.includes(`Instructions from: ${path.join(base, 'nested/AGENTS.md')}`));
   assert.ok(context.includes('WRITABLE_BASE_CANARY'), 'read resolver counterexample was not exercised');
+  for (const { instruction, canary } of attacks) {
+    assert.ok(context.includes(`Instructions from: ${instruction}\\n${canary}`),
+      `write/replace counterexample missing: ${canary}`);
+  }
 });
