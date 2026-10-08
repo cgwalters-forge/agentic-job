@@ -19,6 +19,7 @@
 //! is the title and body of the pull request's request, with the
 //! configured trailers.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -45,6 +46,8 @@ pub const MAX_OUTCOME_BYTES: usize = 64 << 10;
 pub const MAX_LINES: usize = 1000;
 /// The file of the run's results that holds the agent's outcome.
 pub const OUTCOME_FILE: &str = "outcome.json";
+/// Where the outcome names the untracked binary files left out of the patch.
+pub const OMITTED_BINARY_FILES: &str = "omitted_untracked_binary_files";
 /// Who the commit is by, unless `[commit] author` says.
 pub const DEFAULT_AUTHOR: (&str, &str) = ("agent", "agent@localhost");
 
@@ -613,12 +616,6 @@ fn build_patch(
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, String> {
     let failed = |what: &str| format!("git {what} failed");
-    if !git.ok(&["reset", "-q", "--soft", base]) {
-        return Err(failed("reset"));
-    }
-    if !git.ok(&["add", "--all"]) {
-        return Err(failed("add"));
-    }
     // Exit status 1: there are differences.
     match git.run(&["diff", "--cached", "--quiet"], b"") {
         Some((0, _)) => return Ok(None),
@@ -651,6 +648,61 @@ fn build_patch(
     patch.extend_from_slice(format!("{BASE_COMMIT_HEADER}: {base}\n").as_bytes());
     patch.extend_from_slice(&formatted[first + 1..]);
     Ok(Some(patch))
+}
+
+/// Stage the working tree, but leave untracked binary build litter out.
+/// Already staged or tracked binaries still reach `check`, which refuses them.
+fn stage_patch(git: &Git<'_>, base: &str, status: &[u8]) -> Result<Vec<String>, String> {
+    if !git.ok(&["reset", "-q", "--soft", base]) {
+        return Err("git reset failed".into());
+    }
+    if !git.ok(&["add", "--all"]) {
+        return Err("git add failed".into());
+    }
+    let stats = git
+        .limited(
+            &["diff", "--cached", "--no-renames", "--numstat", "-z"],
+            MAX_STATUS_BYTES + 1,
+        )
+        .filter(|bytes| bytes.len() <= MAX_STATUS_BYTES)
+        .ok_or("git diff numstat failed or was too large")?;
+    let untracked: HashSet<&[u8]> = status
+        .split(|&b| b == 0)
+        .filter_map(|entry| entry.strip_prefix(b"?? "))
+        .collect();
+    let mut paths = Vec::new();
+    let mut omitted = Vec::new();
+    for entry in stats.split(|&b| b == 0) {
+        if let Some(path) = entry.strip_prefix(b"-\t-\t")
+            && untracked.contains(&path)
+        {
+            // Literal, NUL-delimited pathspecs also handle tabs, newlines and
+            // names that would otherwise be interpreted as pathspec magic.
+            paths.extend_from_slice(b":(literal)");
+            paths.extend_from_slice(path);
+            paths.push(0);
+            omitted.push(String::from_utf8_lossy(path).into_owned());
+        }
+    }
+    if !paths.is_empty()
+        && !matches!(
+            git.run(
+                &[
+                    "reset",
+                    "-q",
+                    base,
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul"
+                ],
+                &paths
+            ),
+            Some((0, _))
+        )
+    {
+        return Err("git reset of untracked binary files failed".into());
+    }
+    omitted.sort();
+    Ok(omitted)
 }
 
 /// The paths `git status --porcelain=v1 -z` lists.
@@ -721,7 +773,29 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     let outcome = read_agent_file(runner, &request.home.join(AGENT_OUTCOME), MAX_OUTCOME_BYTES)
         .and_then(|bytes| serde_json::from_slice::<Object>(&bytes).ok())
         .unwrap_or_default();
-    let outcome = mark_stopped_early(outcome, request.harness);
+    let mut outcome = mark_stopped_early(outcome, request.harness);
+    let staged = if policy.kind == Kind::Branch && changed && !unreadable {
+        stage_patch(&git, base, status.as_deref().unwrap_or_default())
+    } else {
+        Ok(Vec::new())
+    };
+    if let Ok(omitted) = &staged
+        && !omitted.is_empty()
+    {
+        // Only added to what the agent said: a summary that is this note
+        // alone would become the title of the pull request.
+        if let Some(summary) = outcome
+            .text("summary")
+            .filter(|summary| !summary.trim().is_empty())
+        {
+            let summary = format!(
+                "{summary}\nHand-back omitted {} untracked binary file(s); see {OMITTED_BINARY_FILES}.",
+                omitted.len()
+            );
+            outcome.set("summary", json!(summary));
+        }
+        outcome.set(OMITTED_BINARY_FILES, json!(omitted));
+    }
     let mut text = serde_json::to_string(&outcome).context("writing the outcome")?;
     text.push('\n');
     write(&request.run_dir.join(OUTCOME_FILE), text.as_bytes())?;
@@ -730,7 +804,10 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     // An analysis run's change is not handed back.
-    let has_changes = changed && policy.kind == Kind::Branch;
+    let only_litter = staged
+        .as_ref()
+        .is_ok_and(|omitted| !omitted.is_empty() && git.ok(&["diff", "--cached", "--quiet"]));
+    let has_changes = changed && !only_litter && policy.kind == Kind::Branch;
     let mut change = Change {
         files,
         patch: Value::Null,
@@ -748,7 +825,7 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     if let (true, Some((title, body))) = (outputs.wants_patch, &outputs.message) {
         let message = commit_message(title, body, &request.commit.trailers, run_id);
         let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
-        match build_patch(&git, base, &message, max) {
+        match staged.and_then(|_| build_patch(&git, base, &message, max)) {
             Err(why) => {
                 // As in the old tree, the requests go with the change.
                 change.drop_patch(base, why);
@@ -1207,6 +1284,15 @@ mod tests {
         }
 
         fn collect(&self, policy: &Policy, commit: &config::Commit) -> Change {
+            self.collect_with_harness(policy, commit, None)
+        }
+
+        fn collect_with_harness(
+            &self,
+            policy: &Policy,
+            commit: &config::Commit,
+            harness: Option<&RunResult>,
+        ) -> Change {
             let _ = std::fs::remove_dir_all(self.path("safe-outputs"));
             collect(&Request {
                 runner: &Unconfined,
@@ -1215,7 +1301,7 @@ mod tests {
                 policy,
                 commit,
                 run_id: RUN_ID,
-                harness: None,
+                harness,
                 run_dir: &self.path("results"),
                 safe_outputs: &self.path("safe-outputs"),
             })
@@ -1345,6 +1431,142 @@ mod tests {
             sh(&applied, "git diff --name-only HEAD~1"),
             "a.txt\nsub/new-file.txt\n"
         );
+    }
+
+    #[test]
+    fn untracked_binary_litter_does_not_spoil_the_handback() {
+        let home = Home::new();
+        let policy = policy(Kind::Branch, pull_requests());
+        std::fs::write(home.checkout.dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(home.checkout.dir.join("new.txt"), "new text\n").unwrap();
+        std::fs::create_dir(home.checkout.dir.join("__pycache__")).unwrap();
+        let litter = "__pycache__/module.pyc";
+        std::fs::write(home.checkout.dir.join(litter), b"compiled\0python").unwrap();
+        std::fs::write(home.path(AGENT_OUTCOME), r#"{"summary":"Partial work."}"#).unwrap();
+        let harness = harness(Outcome::Budget, Some("max-requests"));
+        let change = home.collect_with_harness(&policy, &config::Commit::default(), Some(&harness));
+        assert!(
+            change.outcome["stopped_early"]
+                .as_str()
+                .unwrap()
+                .contains("limit")
+        );
+        assert_eq!(change.dropped, None);
+        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!([litter]));
+        assert!(
+            change.outcome["summary"]
+                .as_str()
+                .unwrap()
+                .contains("omitted 1")
+        );
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(home.path("results/outcome.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved, change.outcome);
+        assert!(home.checkout.dir.join(litter).exists());
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.patch.unwrap().files, ["a.txt", "new.txt"]);
+    }
+
+    /// A run cut off before it wrote an outcome has no summary to add the
+    /// note to, and the pull request keeps its default title.
+    #[test]
+    fn omitted_litter_does_not_title_the_pull_request() {
+        let home = Home::new();
+        let policy = policy(Kind::Branch, pull_requests());
+        std::fs::write(home.checkout.dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(home.checkout.dir.join("cache.pyc"), b"compiled\0python").unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
+        assert!(change.outcome.get("summary").is_none());
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(
+            verdict.items[0]["title"],
+            default_pull_request(&Object::default(), RUN_ID).title
+        );
+        assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
+    }
+
+    #[test]
+    fn binary_litter_alone_does_not_create_a_pull_request() {
+        let home = Home::new();
+        let policy = policy(Kind::Branch, pull_requests());
+        std::fs::write(home.checkout.dir.join("cache.pyc"), b"compiled\0python").unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert!(change.patch.is_null());
+        assert_eq!(change.dropped, None);
+        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(["cache.pyc"]));
+        assert!(!home.path("safe-outputs").exists());
+    }
+
+    #[test]
+    fn tracked_binary_changes_are_not_silently_omitted() {
+        let home = Home::new();
+        let policy = policy(Kind::Branch, pull_requests());
+        std::fs::write(home.checkout.dir.join("a.txt"), b"changed\0binary").unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert!(change.outcome.get(OMITTED_BINARY_FILES).is_none());
+        assert!(!home.verdict(&policy).ok);
+    }
+
+    #[test]
+    fn binary_additions_use_literal_paths_and_preserve_staged_files() {
+        for name in ["cache.pyc", "tab\tname", "line\nname", ":(glob)*", "-cache"] {
+            for staged in [false, true] {
+                let home = Home::new();
+                let policy = policy(Kind::Branch, pull_requests());
+                std::fs::write(home.checkout.dir.join("a.txt"), "changed\n").unwrap();
+                std::fs::write(home.checkout.dir.join(name), b"compiled\0binary").unwrap();
+                // A matching-looking text filename must never be reset along
+                // with the binary, even when its name contains pathspec magic.
+                std::fs::write(home.checkout.dir.join("keep.txt"), "keep\n").unwrap();
+                if staged {
+                    sh(&home.checkout.dir, "git add --all");
+                }
+                let change = home.collect(&policy, &config::Commit::default());
+                assert_eq!(change.dropped, None, "{name:?}, staged={staged}");
+                assert!(home.checkout.dir.join(name).exists());
+                let verdict = home.verdict(&policy);
+                if staged {
+                    assert!(change.outcome.get(OMITTED_BINARY_FILES).is_none());
+                    assert!(!verdict.ok, "{name:?}: {:?}", verdict.errors);
+                } else {
+                    assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!([name]));
+                    assert!(verdict.ok, "{name:?}: {:?}", verdict.errors);
+                    assert_eq!(verdict.patch.unwrap().files, ["a.txt", "keep.txt"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn larger_mixed_set_omits_only_untracked_binaries() {
+        let home = Home::new();
+        let policy = policy(Kind::Branch, pull_requests());
+        let mut expected = Vec::new();
+        for i in 0..512 {
+            for (kind, contents) in [
+                ("binary", b"compiled\0binary".as_slice()),
+                ("text", b"text\n"),
+            ] {
+                let name = format!("{kind}-{i:04}");
+                std::fs::write(home.checkout.dir.join(&name), contents).unwrap();
+                if kind == "binary" {
+                    expected.push(name);
+                }
+            }
+        }
+        sh(&home.checkout.dir, "git add -- binary-0000 text-0000");
+        expected.remove(0);
+        let change = home.collect(&policy, &config::Commit::default());
+        assert_eq!(change.dropped, None);
+        assert_eq!(change.outcome[OMITTED_BINARY_FILES], json!(expected));
+        let remaining = sh(&home.checkout.dir, "git ls-tree --name-only HEAD");
+        let mut expected_remaining = vec!["a.txt".to_owned(), "binary-0000".to_owned()];
+        expected_remaining.extend((0..512).map(|i| format!("text-{i:04}")));
+        assert_eq!(remaining.lines().collect::<Vec<_>>(), expected_remaining);
     }
 
     /// The checkout's git configuration is the agent's, and so is the

@@ -316,6 +316,13 @@ where the agent gave no reason of its own for stopping. A stopped run that hande
 back neither a pull request nor a comment has nothing to carry them,
 and the apply job fails rather than apply it unmarked.
 
+A stopped run cannot clean up after its own commands, so the hand-back
+of any run leaves untracked binary files (a `__pycache__`, say) out of
+the patch. `outcome.json` and `summary.json` name them in
+`omitted_untracked_binary_files`, and a summary the agent wrote gains a
+line saying how many. A changed binary file that git tracks, or one the
+agent staged, stays in the patch, and `check` refuses it.
+
 ## What a run leaves
 
 Jobs of a called workflow are named `CALLER JOB / JOB`: for the example,
