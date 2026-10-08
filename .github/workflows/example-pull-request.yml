@@ -48,7 +48,7 @@ jobs:
         Do not propose a change yourself.
       repo: ${{ github.repository }}
       outputs: add_comment,noop
-      allow: .github/agentic-job/allow.toml
+      allow: workflow/label-review.toml
       config: .github/agentic-job/hosted.toml
       agent: fake
       setup: .github/agentic-job/e2e/event.sh

@@ -49,6 +49,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: node --test workflow/activation.test.cjs
 
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left

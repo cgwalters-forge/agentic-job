@@ -244,7 +244,7 @@ on:
         value: ${{ jobs.policy.outputs.base }}
 
 # No `permissions` here: a job that names none keeps what the caller
-# granted the call, and only the apply job names none.
+# granted the call; activation and notification also use that token.
 
 # With `pipefail`, which the default shell of a step does without: a check
 # whose output is piped must still fail its step.
@@ -351,7 +351,7 @@ jobs:
       # the summary. Exit state 2 is a bounds file or payload that could
       # not be read, which fails the job.
       - name: Decide whether the event may start a run, and write the task
-        id: event
+        id: decision
         if: ${{ inputs.event }}
         env:
           ALLOW: ${{ inputs.allow }}
@@ -364,10 +364,23 @@ jobs:
           state=0
           "$JOB_DIR/bin/agentic-job" event --allow "$ALLOW" --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" \
             --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --task "$RUNNER_TEMP/task.md" --out "$JOB_DIR" "$@" || state=$?
-          case "$state" in 0) admitted=true ;; 1) admitted=false ;; *) echo "::error::agentic-job event ended with exit state $state"; exit "$state" ;; esac
-          jq -r --arg admitted "$admitted" '"admitted=\($admitted)", "reason=\(.reason)", "item=\(.item.number // "")"' "$JOB_DIR/event.json" | tee -a "$GITHUB_OUTPUT"
-          jq -r --arg admitted "$admitted" '"`agentic-job event`: \(if $admitted == "true" then "admitted" else "refused" end), \(.reason)"' "$JOB_DIR/event.json" | tee -a "$GITHUB_STEP_SUMMARY"
-          [ "$admitted" = true ] || echo "::notice::the event did not start a run: $(jq -r .reason "$JOB_DIR/event.json")"
+          case "$state" in 0 | 1) ;; *) echo "::error::agentic-job event ended with exit state $state"; exit "$state" ;; esac
+      - name: Refuse unsupported routing before any item number is consumed
+        id: event
+        if: ${{ inputs.event }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { admit } = require(process.env.SOURCE_DIR + '/workflow/activation.cjs');
+            const path = process.env.JOB_DIR + '/event.json';
+            const decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
+            fs.writeFileSync(path, JSON.stringify(decision));
+            if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
+            core.setOutput('admitted', String(decision.admitted));
+            core.setOutput('reason', decision.reason);
+            core.setOutput('item', decision.admitted ? decision.item?.number ?? '' : '');
+            await core.summary.addRaw(`agentic-job event: ${decision.admitted ? 'admitted' : 'refused'}, ${decision.reason}`).write();
       # The base is the pull request's where an event named one, and the
       # bounds have to cover it like any other. Comments go to the item
       # the event was about unless the caller named a target.
@@ -413,8 +426,37 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  agent:
+  # Only this trusted machine consumes command labels. No write token is
+  # passed to policy, agent or check; failed removal blocks execution.
+  activate:
     needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: activation-source
+          persist-credentials: false
+          sparse-checkout: workflow
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.event }}
+        with:
+          artifact-ids: ${{ needs.policy.outputs.policy-artifact-id }}
+          path: .agentic-job
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        if: ${{ inputs.event }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { activate } = require('./activation-source/workflow/activation.cjs');
+            const decision = JSON.parse(fs.readFileSync('.agentic-job/event.json', 'utf8'));
+            await activate(decision, github, context.repo);
+
+  agent:
+    needs: [policy, activate]
     # Not for an event that was refused: the run ended in the policy job.
     if: ${{ needs.policy.outputs.admitted == 'true' }}
     runs-on: ${{ fromJSON(inputs.agent-runner) }}
@@ -595,7 +637,7 @@ jobs:
   # can comment. Nothing of the event reaches these steps but numbers,
   # from event.json: the item's and the comment's.
   notify:
-    needs: policy
+    needs: [policy, activate]
     if: ${{ inputs.event && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && needs.policy.outputs.item != '' }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5

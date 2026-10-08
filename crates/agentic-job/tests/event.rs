@@ -708,6 +708,74 @@ fn run(case: &Case, out: &Path) -> Output {
 }
 
 #[test]
+fn label_caller_bounds_feed_activation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let caller = std::fs::read_to_string(root.join(".github/workflows/example-pull-request.yml"))
+        .expect("executable label caller");
+    let bounds_inputs: Vec<_> = caller
+        .lines()
+        .filter_map(|line| line.strip_prefix("      allow: "))
+        .collect();
+    assert_eq!(
+        bounds_inputs,
+        ["workflow/label-review.toml"],
+        "the executable caller must select dedicated label bounds"
+    );
+    let bounds = root.join(bounds_inputs[0]);
+    for (action, label, admitted) in [
+        ("labeled", "agent-review", true),
+        ("labeled", "unrelated", false),
+        ("opened", "agent-review", false),
+    ] {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let payload = std::fs::read_to_string(data("pull_request-labeled.json"))
+            .expect("event fixture")
+            .replace("octo/repo", "cgwalters-forge/agentic-job");
+        let mut event: Value = serde_json::from_str(&payload).expect("fixture JSON");
+        event["action"] = action.into();
+        event["label"]["name"] = label.into();
+        event["sender"]["login"] = "alice".into();
+        let event_path = dir.path().join("payload.json");
+        std::fs::write(
+            &event_path,
+            serde_json::to_vec(&event).expect("serialize event"),
+        )
+        .expect("write event");
+        let output = Command::new(BIN)
+            .arg("event")
+            .arg("--allow")
+            .arg(&bounds)
+            .args(["--event-name", "pull_request_target", "--actor", "alice"])
+            .args(["--repository", "cgwalters-forge/agentic-job"])
+            .arg("--event")
+            .arg(&event_path)
+            .arg("--actor-permission")
+            .arg(data("permission-write.json"))
+            .arg("--out")
+            .arg(dir.path())
+            .output()
+            .expect("event CLI runs");
+        assert_eq!(
+            output.status.code(),
+            Some(if admitted { 0 } else { 1 }),
+            "{action}/{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let activation = Command::new("node")
+            .arg(root.join("workflow/activation-integration.cjs"))
+            .arg(dir.path().join("event.json"))
+            .arg(if admitted { "1" } else { "0" })
+            .output()
+            .expect("Node runs activation");
+        assert!(
+            activation.status.success(),
+            "{action}/{label}: {}",
+            String::from_utf8_lossy(&activation.stderr)
+        );
+    }
+}
+
+#[test]
 fn decisions() {
     for case in CASES {
         let dir = tempfile::tempdir().expect("a scratch directory");

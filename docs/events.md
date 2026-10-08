@@ -14,8 +14,10 @@ and three example callers are on main; CI runs the event path on every
 pull request and every push (`e2e-event`), and the command's decision on
 recorded and hand-written payloads. The workflow does not yet fetch a
 pull request's head for the agent (the task names it, and the agent
-fetches it); label commands are
-[#117](https://github.com/cgwalters-forge/agentic-job/issues/117).
+fetches it). Label-command decisions are implemented in the binary;
+the reusable workflow removes admitted command labels before activation.
+Discussion decisions still need workflow support for
+discussion targets before they can be used with `event: true`.
 
 ## The decision
 
@@ -102,7 +104,7 @@ so the workflow can end quietly.
 [trigger]
 # Which events may start a run: issues, issue_comment, pull_request,
 # pull_request_target, pull_request_review_comment, schedule,
-# workflow_dispatch.
+# workflow_dispatch, discussion (label commands only).
 events = ["issue_comment", "pull_request", "schedule"]
 # The roles an actor may hold, exactly: "maintain" is not "write", and
 # "admin" is not either. gh-aw's default.
@@ -113,6 +115,8 @@ bots = []
 forks = false
 # A comment must start with one of these.
 commands = ["/agent"]
+# Optional label commands for item events. Match the added label exactly.
+labels = ["agent-review"]
 ```
 
 The checks, in order:
@@ -132,8 +136,11 @@ The checks, in order:
    `labeled` for issues; `opened`, `reopened`, `synchronize`,
    `ready_for_review` and `labeled` for pull requests; `created` for
    comments. An edit is not one: the editor may not be the author, and
-   the text that was read is gone. Which label it was is for the
-   caller's `if:` to say, as an expression.
+    the text that was read is gone. With nonempty `labels`, issues and
+    pull requests must instead be `labeled` with a listed label in
+    `event.label.name`: an existing label on the item does not count.
+    With empty or absent `labels`, the previous item-event behavior is
+    unchanged. `discussion` supports only listed label commands.
 5. A comment's actor is its author.
 6. A comment's body starts with one of `commands`, at the very first
    character, as gh-aw matches it. Everything after the command is the
@@ -146,14 +153,87 @@ The checks, in order:
    the same rule applies to its head. Without it, such a comment is
    admitted only with `forks = true`.
 
-What `event.json` carries for the workflow: the item (`issue` or
-`pull_request`, its number, and its URL when it is under the
+What `event.json` carries for the workflow: the item (`issue`,
+`pull_request` or `discussion`, its number, and its URL when it is under the
 repository's; no text of the event is in this file), the default target
 of an `add_comment`; the command; for a pull request its base branch
 and, when the head is the repository's own, the head's ref and sha; a
 `concurrency` key (`issue-N`, `pull-N`, `schedule`, `dispatch`); and
 `react_to`, the comment or item the workflow puts an eyes reaction on so
 the human sees the run started. The `reason` is one line.
+For label commands, `command` is the exact label name, without slash
+normalization. Discussions use `discussion-N` for concurrency and have
+no issue-reaction target.
+
+### Label caller and activation step
+
+A label caller should subscribe to `issues: types: [labeled]` and/or
+`pull_request_target: types: [labeled]`, use trusted base-branch bounds
+with `events = ["issues", "pull_request_target"]` and
+`labels = ["agent-review"]`, and call the reusable workflow with
+`event: true`. A job-level `if: github.event.label.name == 'agent-review'`
+is an optimization, not the authorization check. Keep the existing
+item-level concurrency rule and role/fork checks.
+
+For example, a caller pinned to a workflow with label activation can use:
+
+```yaml
+name: Label review
+on:
+  issues:
+    types: [labeled]
+  pull_request_target:
+    types: [labeled]
+permissions: {}
+jobs:
+  run:
+    if: github.event.label.name == 'agent-review'
+    concurrency:
+      group: label-review-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    with:
+      id: label-${{ github.event.issue.number || github.event.pull_request.number }}
+      repo: ${{ github.repository }}
+      event: true
+      allow: workflow/label-review.toml
+      config: .github/agentic-job/hosted.toml
+      task: Review the triggering item and report findings.
+      agent: fake
+      max-requests: '0'
+```
+
+Replace `COMMIT` with the reviewed workflow commit and use the caller's
+own bounds and host configuration. The dedicated
+[`workflow/label-review.toml`](../workflow/label-review.toml) bounds admit
+only label commands; do not add `labels` to shared bounds used by CI for
+opened or synchronize events. The scripted agent is for validating
+the caller; a real agent also needs its inference settings.
+
+The reusable workflow's trusted `activate` job removes the command label
+**after admission and before starting the agent or notifying the item**.
+It reads the policy job's decision, not interpolated event text, and runs
+code from the reusable workflow's own pinned commit. Removal failure
+fails activation and skips the agent. Reapplying the label starts another
+admission and removal cycle. The
+[`example-pull-request.yml`](../.github/workflows/example-pull-request.yml)
+selects `workflow/label-review.toml` instead of the shared
+`.github/agentic-job/allow.toml` to use this lifecycle; the caller above
+covers issues too.
+
+Activation uses the caller's write permission on its own machine, like
+notification and apply. Policy, agent and check explicitly restrict their
+tokens to read permissions (and the agent's identity permission).
+Discussions are refused at the workflow boundary before routing outputs
+or starting any write job: discussion notification, GraphQL label removal
+and kind-aware output routing remain unimplemented. The parser can still
+describe a discussion decision for another consumer; this is not support
+for running discussions through the reusable workflow.
 
 ## The task file
 
