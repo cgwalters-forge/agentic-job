@@ -47,6 +47,9 @@ pub struct NftRulesArgs {
     /// The egress proxy's uid; without it, the rules of a host that has no proxy
     #[arg(long, value_name = "UID")]
     pub proxy_uid: Option<u32>,
+    /// Literal DNS resolver allowed for the proxy
+    #[arg(long, value_name = "IP")]
+    pub resolver: Vec<std::net::IpAddr>,
 }
 
 impl Command {
@@ -62,7 +65,15 @@ impl Command {
                     .iter()
                     .map(|url| network::Direct::parse(url))
                     .collect::<Result<Vec<_>>>()?;
-                print!("{}", network::rules(&args.uids, &direct, args.proxy_uid));
+                print!(
+                    "{}",
+                    network::rules_with_resolvers(
+                        &args.uids,
+                        &direct,
+                        args.proxy_uid,
+                        &args.resolver
+                    )
+                );
                 Ok(Exit::Success)
             }
         }

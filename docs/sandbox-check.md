@@ -161,8 +161,9 @@ and a replacement must be too ([agentic-job#108](https://github.com/cgwalters-fo
 `sandbox setup` loads nftables rules keyed on the sandbox user's uid and
 its subordinate uids, and by default starts the egress proxy: mitmproxy
 with the addon and policy of `egress/`, as its own user. The rules are
-the old tree's, text for text; a corpus test generates both and
-compares them. With `[egress] proxy = false` only the first three rows
+the old tree's except for resolver-scoped proxy DNS; a corpus test generates
+both and compares them with that intentional difference. With `[egress]
+proxy = false` only the first three rows
 apply. `[egress] direct` lists the endpoints reached without the proxy,
 the inference proxy for one, and brings the tailnet rows.
 
@@ -183,12 +184,14 @@ A control the runner's user cannot make either (no WireServer on this
 cloud, a tailnet that already refuses the port) is printed as a note
 and the probe stands without it.
 
-Two things the rules leave, as the old tree's did, since they are the
-same text. The proxy's user may open port 53 on any address, private
-ones included, because that rule comes before the ones that keep it
-off private addresses; it should name the host's resolvers only
-([agentic-job#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
-And setup's refusal of a resolver on the tailnet reads
+The proxy's TCP and UDP port 53 exception now names only the literal
+resolvers in `/etc/resolv.conf` at setup time. Other DNS destinations are
+rejected for new connections before the public-address policy; the existing
+established/related exception is unchanged. Tailnet denials still precede
+the exceptions. Parser and rule-order unit tests cover this change; it has
+not yet been validated by removing this protection on a privileged host.
+
+Setup's refusal of a resolver on the tailnet still reads
 `/etc/resolv.conf` alone: a local stub whose upstream is the tailnet's
 passes, and the proxy can then resolve tailnet names, though not reach
 them.

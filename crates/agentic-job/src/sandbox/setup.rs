@@ -271,6 +271,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let runner = runner_user(&config)?;
     // Every refusal comes before the first change.
     let existing = preflight(&config, &runner)?;
+    let mut resolvers = Vec::new();
     if config.egress.proxy {
         let resolv_conf = match fs::read_to_string(RESOLV_CONF) {
             Ok(text) => text,
@@ -278,6 +279,8 @@ pub fn run(args: &Args) -> Result<Exit> {
             Err(err) => return Err(err).with_context(|| format!("reading {RESOLV_CONF}")),
         };
         let on_tailnet = network::tailnet_resolvers(&resolv_conf);
+        resolvers = network::resolvers(&resolv_conf)
+            .with_context(|| format!("reading resolvers from {RESOLV_CONF}"))?;
         ensure!(
             on_tailnet.is_empty(),
             "{RESOLV_CONF} names {} on the tailnet, which the egress proxy may not reach: join the tailnet without its DNS (tailscale up --accept-dns=false)",
@@ -328,7 +331,9 @@ pub fn run(args: &Args) -> Result<Exit> {
     let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
         .chain(subuids.iter().cloned())
         .collect();
-    network::apply(&network::rules(&uids, &direct, proxy_uid))?;
+    network::apply(&network::rules_with_resolvers(
+        &uids, &direct, proxy_uid, &resolvers,
+    ))?;
     match proxy_uid {
         Some(_) => println!(
             "{} reaches the network only through the egress proxy, {}",
