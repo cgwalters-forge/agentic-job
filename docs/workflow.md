@@ -214,6 +214,12 @@ Both are merged there and off.
 
 ### Event-triggered callers
 
+The dedicated [review caller](review.md) sets `review: true` and
+`review-task: workflow/review.md` to take a fixed task from the base checkout,
+review an admitted same-repository head SHA with an analysis-only policy, and
+post one validated verdict comment or noop. It requires notifications and
+partial application off, and currently supports only fake agents.
+
 With `event: true` the run is decided from the event that started the
 calling workflow, by `agentic-job event` in the policy job
 ([how it decides](events.md)). The caller adds a `[trigger]` table to

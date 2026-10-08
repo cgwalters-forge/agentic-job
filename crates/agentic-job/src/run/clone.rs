@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use super::enter::{Sandbox, one_line};
+use super::enter::{Runner, Sandbox, one_line};
 use crate::policy::Policy;
 
 /// Under the sandbox user's home: the checkouts, and what the agent
@@ -192,6 +192,88 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     Ok(Checkout { dir, base_commit })
 }
 
+/// Only analysis runs may start from a review head, never propose a patch on it.
+pub fn check_review_head(policy: &Policy, head: &str) -> Result<()> {
+    ensure!(
+        policy.kind == crate::policy::Kind::Analysis,
+        "review-head requires an analysis policy"
+    );
+    ensure!(
+        head.len() == 40
+            && head
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "review-head must be a 40-character lowercase commit SHA"
+    );
+    Ok(())
+}
+
+/// Fetch the exact admitted commit, as the sandbox user with no forge token.
+/// Fetch history too: a shallow base can give an incomplete merge-base/diff.
+/// No ref supplied by the PR author becomes an argument or is executed.
+pub fn review_head(
+    sandbox: &impl Runner,
+    policy: &Policy,
+    checkout: &mut Checkout,
+    head: &str,
+) -> Result<()> {
+    check_review_head(policy, head)?;
+    let dir = utf8(&checkout.dir)?;
+    let git = |args: &[&str]| -> Result<String> {
+        let argv = [
+            &[
+                "timeout",
+                CLONE_TIMEOUT_S,
+                "git",
+                "-C",
+                dir,
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+            ],
+            args,
+        ]
+        .concat();
+        let output = sandbox.run(&argv, b"", MAX_GIT_OUTPUT)?;
+        ensure!(
+            output.success(),
+            "review git command failed: {}",
+            output.error()
+        );
+        Ok(output.text())
+    };
+    if git(&["rev-parse", "--is-shallow-repository"])? == "true" {
+        git(&[
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--unshallow",
+            "origin",
+        ])
+        .context("fetching review base history")?;
+    }
+    git(&[
+        "fetch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--",
+        &policy.clone_url,
+        head,
+    ])
+    .context("fetching admitted review head")?;
+    git(&["checkout", "--quiet", "--detach", head]).context("checking out admitted review head")?;
+    let actual = git(&["rev-parse", "--verify", "HEAD"])?;
+    ensure!(
+        actual == head,
+        "review checkout HEAD does not match admitted SHA"
+    );
+    checkout.base_commit = actual;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +368,116 @@ mod tests {
         assert_eq!(
             argv[argv.len() - 5..],
             ["--depth", "1", "--", "file:///srv/r.git", "d"]
+        );
+    }
+
+    #[test]
+    fn review_heads_require_analysis_and_exact_shas() {
+        let mut policy = policy("o/r", "https://github.com/o/r", "main");
+        let sha = "a".repeat(40);
+        assert!(check_review_head(&policy, &sha).is_err());
+        policy.kind = Kind::Analysis;
+        check_review_head(&policy, &sha).unwrap();
+        for head in [
+            "main",
+            "--upload-pack=x",
+            &"a".repeat(39),
+            &"A".repeat(40),
+            &"g".repeat(40),
+        ] {
+            assert!(check_review_head(&policy, head).is_err(), "{head}");
+        }
+    }
+
+    #[test]
+    fn review_checkout_fetches_the_admitted_sha_and_full_base_history() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let dir = temp.path().join("checkout");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        for content in ["base one", "base two"] {
+            std::fs::write(repo.join("data"), content).unwrap();
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-qm", "Base"]);
+        }
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-qb", "review"]);
+        std::fs::write(repo.join("change"), "admitted head").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "Review"]);
+        let admitted = git(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("change"), "later branch tip").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "Later"]);
+        let url = format!("file://{}", repo.display());
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                "--branch",
+                "main",
+                &url,
+                utf8(&dir).unwrap(),
+            ],
+        );
+        let mut policy = policy("local/repo", &url, "main");
+        policy.kind = Kind::Analysis;
+        let mut checkout = Checkout {
+            dir: dir.clone(),
+            base_commit: base.clone(),
+        };
+        review_head(
+            &super::super::enter::Unconfined,
+            &policy,
+            &mut checkout,
+            &admitted,
+        )
+        .unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), admitted);
+        assert_eq!(checkout.base_commit, admitted);
+        assert_eq!(
+            git(&dir, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        assert_eq!(git(&dir, &["merge-base", "origin/main", "HEAD"]), base);
+        assert_eq!(
+            git(&dir, &["diff", "--name-only", "origin/main...HEAD"]),
+            "change"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("change")).unwrap(),
+            "admitted head"
+        );
+        assert!(
+            review_head(
+                &super::super::enter::Unconfined,
+                &policy,
+                &mut checkout,
+                &"0".repeat(40)
+            )
+            .is_err()
         );
     }
 }
