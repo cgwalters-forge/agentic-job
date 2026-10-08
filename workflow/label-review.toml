@@ -1,0 +1,22 @@
+# Dedicated bounds for the label caller; shared CI bounds admit ordinary PR events.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 1 }
+noop = { max = 1 }
+missing_tool = { max = 3 }
+missing_data = { max = 3 }
+
+[trigger]
+events = ["issues", "pull_request_target"]
+roles = ["admin", "maintain", "write"]
+bots = []
+forks = false
+commands = []
+labels = ["agent-review"]

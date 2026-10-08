@@ -97,6 +97,7 @@ pub fn render(task: Option<&str>, outcome: &Outcome) -> String {
     let what = match decision.item.as_ref().map(|item| item.kind) {
         Some(ItemKind::Issue) => "issue",
         Some(ItemKind::PullRequest) => "pull request",
+        Some(ItemKind::Discussion) => "discussion",
         None => "event",
     };
     if let Some(item) = &decision.item {

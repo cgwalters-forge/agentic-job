@@ -47,6 +47,7 @@ pub const TASK_FILE: &str = "task.md";
 /// subset of these; anything else is refused.
 pub const EVENTS: &[&str] = &[
     "issues",
+    "discussion",
     "issue_comment",
     "pull_request",
     "pull_request_target",
@@ -180,6 +181,10 @@ pub struct Trigger {
     /// Maximum workflow runs per actor in a rolling 24-hour window.
     #[serde(default, rename = "max-runs-per-user")]
     pub max_runs_per_user: Option<u32>,
+    /// Label commands, matched exactly on the label added by the event.
+    /// When nonempty, item events must be `labeled` with a listed label.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 fn default_roles() -> Vec<String> {
@@ -209,6 +214,13 @@ impl Trigger {
             }
             if !LOGIN_RE.is_match(bot) {
                 bail!("[trigger] bots: {bot:?} is not a login");
+            }
+        }
+        for label in &self.labels {
+            if label.trim().is_empty() || label.len() > 50 || label.contains(char::is_control) {
+                bail!(
+                    "[trigger] labels: {label:?} must be nonempty, at most 50 bytes and contain no control characters"
+                );
             }
         }
         let comment_events = ["issue_comment", "pull_request_review_comment"];
@@ -257,6 +269,7 @@ impl Permission {
 pub enum ItemKind {
     Issue,
     PullRequest,
+    Discussion,
 }
 
 /// The issue or pull request the event is about: the default target of
@@ -299,7 +312,8 @@ pub struct Decision {
     /// The actor's role, when one was checked.
     pub role: Option<String>,
     pub item: Option<Item>,
-    /// The command that started the run, without its slash.
+    /// The command that started the run: a slash command without its slash,
+    /// or the exact label name for a label command.
     pub command: Option<String>,
     /// For a pull request, its base branch; the run should start there.
     pub base: Option<String>,
@@ -513,6 +527,7 @@ fn read(input: &Input<'_>, outcome: &mut Outcome) -> std::result::Result<String,
     let action = action.as_str();
     match event {
         "issues" => read_issue(input, action, outcome),
+        "discussion" => read_discussion(input, action, outcome),
         "issue_comment" => read_comment(input, action, outcome),
         "pull_request_review_comment" => read_review_comment(input, action, outcome),
         pull if PULL_REQUEST_EVENTS.contains(&pull) => read_pull_request(input, action, outcome),
@@ -565,6 +580,7 @@ fn read_issue(
     outcome: &mut Outcome,
 ) -> std::result::Result<String, String> {
     allowed_action(ISSUE_ACTIONS, action)?;
+    let command = match_label(input, action)?;
     let issue = input.payload.get("issue").ok_or("no issue in the event")?;
     if issue.get("pull_request").is_some() {
         return Err("an issues event about a pull request".to_string());
@@ -586,6 +602,49 @@ fn read_issue(
     });
     let reason = format!("issue #{} {action} by {}", item.number, input.actor);
     decision.item = Some(item);
+    decision.command = command;
+    Ok(reason)
+}
+
+fn match_label(input: &Input<'_>, action: &str) -> std::result::Result<Option<String>, String> {
+    if input.trigger.labels.is_empty() {
+        return Ok(None);
+    }
+    allowed_action(&["labeled"], action)?;
+    let label = str_at(input.payload, &["label", "name"]).ok_or("the event has no label name")?;
+    if !input.trigger.labels.iter().any(|allowed| allowed == label) {
+        return Err(format!("{label:?} is not one of the bounds' labels"));
+    }
+    Ok(Some(label.to_string()))
+}
+
+fn read_discussion(
+    input: &Input<'_>,
+    action: &str,
+    outcome: &mut Outcome,
+) -> std::result::Result<String, String> {
+    allowed_action(&["labeled"], action)?;
+    if input.trigger.labels.is_empty() {
+        return Err("a discussion needs a label command in the bounds".to_string());
+    }
+    let command = match_label(input, action)?;
+    let discussion = input
+        .payload
+        .get("discussion")
+        .ok_or("no discussion in the event")?;
+    let item = item_of(input, discussion, ItemKind::Discussion)?;
+    outcome.text = Text {
+        author: str_at(discussion, &["user", "login"])
+            .unwrap_or_default()
+            .to_string(),
+        title: str_at(discussion, &["title"]).map(str::to_string),
+        body: str_at(discussion, &["body"]).map(str::to_string),
+        ..Text::default()
+    };
+    outcome.decision.concurrency = format!("discussion-{}", item.number);
+    outcome.decision.command = command;
+    let reason = format!("discussion #{} labeled by {}", item.number, input.actor);
+    outcome.decision.item = Some(item);
     Ok(reason)
 }
 
@@ -613,7 +672,7 @@ fn read_comment(
     // pull_request event. Without it, such a comment is admitted only
     // where forks are, since the run could be about a fork's code.
     let (base, head) = match (kind, input.pull_request) {
-        (ItemKind::Issue, _) => (None, None),
+        (ItemKind::Issue | ItemKind::Discussion, _) => (None, None),
         (ItemKind::PullRequest, Some(pull)) => {
             let number = u64_at(pull, &["number"]).ok_or("the pull request given has no number")?;
             if number != item.number {
@@ -650,6 +709,7 @@ fn read_comment(
     decision.concurrency = match kind {
         ItemKind::Issue => format!("issue-{}", item.number),
         ItemKind::PullRequest => format!("pull-{}", item.number),
+        ItemKind::Discussion => format!("discussion-{}", item.number),
     };
     decision.react_to = Some(ReactTo::Comment { id });
     decision.command = Some(command.clone());
@@ -666,6 +726,7 @@ fn read_pull_request(
     outcome: &mut Outcome,
 ) -> std::result::Result<String, String> {
     allowed_action(PULL_REQUEST_ACTIONS, action)?;
+    let command = match_label(input, action)?;
     let pull = input
         .payload
         .get("pull_request")
@@ -688,6 +749,7 @@ fn read_pull_request(
     });
     decision.base = base_of(pull)?;
     decision.head = head;
+    decision.command = command;
     let reason = format!("pull request #{} {action} by {}", item.number, input.actor);
     decision.item = Some(item);
     Ok(reason)
@@ -877,6 +939,161 @@ mod tests {
             stop_after: None,
             cooldown: None,
             max_runs_per_user: None,
+            labels: vec![],
+        }
+    }
+
+    #[test]
+    fn label_commands_use_the_added_label_and_existing_security_checks() {
+        let permission = Permission {
+            permission: "write".into(),
+            role_name: None,
+            user: PermissionUser {
+                login: "alice".into(),
+            },
+        };
+        let cases = [
+            (
+                "issues",
+                "labeled",
+                Some("agent-review"),
+                "write",
+                false,
+                true,
+            ),
+            ("issues", "labeled", Some("other"), "write", false, false),
+            ("issues", "labeled", None, "write", false, false),
+            (
+                "issues",
+                "opened",
+                Some("agent-review"),
+                "write",
+                false,
+                false,
+            ),
+            (
+                "issues",
+                "unlabeled",
+                Some("agent-review"),
+                "write",
+                false,
+                false,
+            ),
+            (
+                "issues",
+                "labeled",
+                Some("agent-review"),
+                "read",
+                false,
+                false,
+            ),
+            (
+                "pull_request_target",
+                "labeled",
+                Some("agent-review"),
+                "write",
+                false,
+                true,
+            ),
+            (
+                "pull_request_target",
+                "labeled",
+                Some("agent-review"),
+                "write",
+                true,
+                false,
+            ),
+            (
+                "discussion",
+                "labeled",
+                Some("agent-review"),
+                "write",
+                false,
+                true,
+            ),
+            (
+                "discussion",
+                "labeled",
+                Some("other"),
+                "write",
+                false,
+                false,
+            ),
+            (
+                "discussion",
+                "labeled",
+                Some("agent-review"),
+                "read",
+                false,
+                false,
+            ),
+        ];
+        for (event, action, label, role, fork, admitted) in cases {
+            let mut trigger = trigger(&["/agent"]);
+            trigger.labels = vec!["agent-review".into()];
+            let mut permission = permission.clone();
+            permission.permission = role.into();
+            let mut payload = serde_json::json!({
+                "repository": {"id": 1, "full_name": "octo/repo"},
+                "sender": {"login": "alice", "type": "User"},
+                "action": action,
+                "label": {"name": label},
+            });
+            let key = match event {
+                "issues" => "issue",
+                "discussion" => "discussion",
+                _ => "pull_request",
+            };
+            payload[key] = serde_json::json!({
+                "number": 12, "title": "Review this", "body": "Item text",
+                "user": {"login": "bob"},
+                "labels": [{"name": "agent-review"}],
+                "base": {"ref": "main"},
+                "head": {"repo": {"id": if fork { 2 } else { 1 }},
+                    "ref": "feature", "sha": "a".repeat(40)},
+            });
+            let outcome = decide(&Input {
+                trigger: &trigger,
+                event_name: event,
+                payload: &payload,
+                actor: "alice",
+                repository: "octo/repo",
+                permission: Some(&permission),
+                pull_request: None,
+            });
+            assert_eq!(
+                outcome.decision.admitted, admitted,
+                "{event} {action} {label:?} {role} fork={fork}: {}",
+                outcome.decision.reason
+            );
+            if admitted {
+                assert_eq!(outcome.decision.command.as_deref(), Some("agent-review"));
+                assert_eq!(outcome.text.author, "bob");
+                assert_eq!(outcome.decision.item.as_ref().unwrap().number, 12);
+            } else {
+                assert_eq!(outcome.text, Text::default());
+                assert_eq!(outcome.decision.command, None);
+            }
+        }
+    }
+
+    #[test]
+    fn label_configuration_is_validated() {
+        for (label, valid) in [
+            ("agent-review".to_owned(), true),
+            ("review requested".to_owned(), true),
+            ("".to_owned(), false),
+            ("  ".to_owned(), false),
+            ("a\nb".to_owned(), false),
+            ("a".repeat(49), true),
+            ("a".repeat(50), true),
+            ("a".repeat(51), false),
+            ("é".repeat(25), true),
+            ("é".repeat(26), false),
+        ] {
+            let mut trigger = trigger(&["/agent"]);
+            trigger.labels = vec![label.clone()];
+            assert_eq!(trigger.validate().is_ok(), valid, "{label:?}");
         }
     }
 

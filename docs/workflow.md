@@ -4,13 +4,19 @@
 is one agent run as a workflow another repository calls. It is a thin
 wrapper: the `agentic-job` binary decides what a run may ask for, runs
 it and checks what comes back, and the workflow moves files between
-four jobs on four machines. What the workflow decides itself is in the
-apply job, and [listed below](#what-the-apply-job-does-before-it-writes).
+separate jobs on separate machines. The apply job's additional checks are
+[listed below](#what-the-apply-job-does-before-it-writes).
 
 1. **policy**, on a small hosted machine. It checks that the target
    repository is public, fetches or builds the binary, and checks the run's request
    against the caller's bounds file (`agentic-job policy`). A request
    outside the bounds stops here, before a machine is spent on the agent.
+   Discussion events are refused here until notification and output routing
+   can address the discussion namespace safely.
+   **activate**, on another hosted machine, removes an admitted command
+   label with the caller's write token. The agent and notification jobs
+   depend on its success; removal failure starts neither. Runs not started
+   by a command label pass through without writing.
 2. **agent**, on the caller's runner. [The step that secures a host for
    any job](secure-host.md), the action in `secure-host/`, creates the
    unprivileged user, the network rules and the egress proxy, takes root
@@ -211,7 +217,9 @@ each a file to copy:
 - [`example-pull-request.yml`](../.github/workflows/example-pull-request.yml):
   a pull request labeled `agent-review`, on `pull_request_target` so that
   the bounds and the configuration are read from the base branch. The
-  run starts from the pull request's base and is told its head.
+  command label is removed after admission, before the agent starts, so
+  applying it again can request another run. The run starts from the
+  pull request's base and is told its head.
 - [`example-schedule.yml`](../.github/workflows/example-schedule.yml): a
   weekly run with no item, so `comment-target` names where a comment
   goes.
