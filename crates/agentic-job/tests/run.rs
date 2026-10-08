@@ -434,36 +434,6 @@ fn configurations_that_are_refused() {
     assert!(!job.path("out/work/harness/harness.json").exists());
 }
 
-/// Automatic head instructions must not become trusted review instructions.
-#[test]
-fn review_refuses_real_agents_before_starting_or_spending() {
-    let proxy = Proxy::start();
-    for agent in ["claude", "opencode"] {
-        let job = Job::new(&format!("review-{agent}"));
-        let mut policy = job.json("policy.json");
-        policy["kind"] = json!("analysis");
-        job.write("policy.json", &policy.to_string());
-        let configuration = config("no-such-sandbox-user", &plain(&proxy)).replace(
-            "name = \"fake\"",
-            &format!("name = \"{agent}\"\nmodel = \"test/model\""),
-        );
-        let got = Finished::of(
-            job.command(&configuration)
-                .args(["--review-head", &"a".repeat(40)])
-                .output()
-                .unwrap(),
-        );
-        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
-        assert!(
-            got.stderr.contains("review-head supports only fake"),
-            "{}",
-            got.all()
-        );
-        assert!(proxy.seen().is_empty());
-        assert!(!job.path("out/work/harness/harness.json").exists());
-    }
-}
-
 /// Review preparation must fail closed before contacting inference or a sandbox.
 #[test]
 fn review_refuses_invalid_policy_and_heads_before_starting_or_spending() {

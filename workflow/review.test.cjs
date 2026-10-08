@@ -34,13 +34,16 @@ test('review request has no branch, alternate target/token or notification autho
     MAX_OUTPUTS: '1', NOTIFY: 'none', TARGET: '', REPO: 'o/r', GITHUB_REPOSITORY: 'o/r',
     OUTPUT_REPO: '', APPLY_ENVIRONMENT: '', APPLY_PARTIAL: 'false', AGENT: 'fake' };
   checkRequest(env);
-  for (const AGENT of ['claude', 'opencode', '', 'unknown']) {
-    assert.throws(() => checkRequest({ ...env, AGENT }), /instruction-loading isolation/);
+  for (const AGENT of ['fake', 'claude', 'opencode']) {
+    checkRequest({ ...env, AGENT });
+  }
+  for (const AGENT of ['', 'unknown']) {
+    assert.throws(() => checkRequest({ ...env, AGENT }), /supported agent/);
   }
   for (const [key, value] of Object.entries({ EVENT: 'false', KIND: 'branch',
     OUTPUTS: 'all', MAX_OUTPUTS: 'max', NOTIFY: 'comment', TARGET: '*',
     REPO: 'other/repo', OUTPUT_REPO: 'other/repo', APPLY_ENVIRONMENT: 'write',
-    APPLY_PARTIAL: 'true', AGENT: 'claude' })) {
+    APPLY_PARTIAL: 'true' })) {
     assert.throws(() => checkRequest({ ...env, [key]: value }), /Review requires/);
   }
 });
