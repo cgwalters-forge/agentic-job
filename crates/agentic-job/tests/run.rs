@@ -464,6 +464,44 @@ fn review_refuses_real_agents_before_starting_or_spending() {
     }
 }
 
+/// Review preparation must fail closed before contacting inference or a sandbox.
+#[test]
+fn review_refuses_invalid_policy_and_heads_before_starting_or_spending() {
+    let proxy = Proxy::start();
+    for (kind, head, want) in [
+        (
+            "branch",
+            "a".repeat(40),
+            "review-head requires an analysis policy",
+        ),
+        (
+            "analysis",
+            "main".to_owned(),
+            "review-head must be a 40-character lowercase commit SHA",
+        ),
+        (
+            "analysis",
+            "A".repeat(40),
+            "review-head must be a 40-character lowercase commit SHA",
+        ),
+    ] {
+        let job = Job::new("review-invalid");
+        let mut policy = job.json("policy.json");
+        policy["kind"] = json!(kind);
+        job.write("policy.json", &policy.to_string());
+        let got = Finished::of(
+            job.command(&config("no-such-sandbox-user", &plain(&proxy)))
+                .args(["--review-head", &head])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+        assert!(got.stderr.contains(want), "{want}: {}", got.all());
+        assert!(proxy.seen().is_empty());
+        assert!(!job.path("out/work/harness/harness.json").exists());
+    }
+}
+
 /// A complete analysis run with a pinned review head and one validated verdict.
 #[test]
 fn an_analysis_review_starts_at_the_admitted_head_without_a_patch() {

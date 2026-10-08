@@ -84,8 +84,9 @@ pub fn check(policy: &Policy) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkout {
     pub dir: PathBuf,
-    /// The commit the agent started from, which the hand-back's patch is
-    /// against.
+    /// The commit the agent started from, which a branch hand-back's patch is
+    /// against. For an analysis review this is the admitted head, not the
+    /// trusted base commit; it must not be used as an instruction-admission pin.
     pub base_commit: String,
 }
 
@@ -211,6 +212,8 @@ pub fn check_review_head(policy: &Policy, head: &str) -> Result<()> {
 /// Fetch the exact admitted commit, as the sandbox user with no forge token.
 /// Fetch history too: a shallow base can give an incomplete merge-base/diff.
 /// No ref supplied by the PR author becomes an argument or is executed.
+/// Preserve the base checkout: the review head is a separate worktree, not
+/// a replacement for the files a future real reviewer may trust at startup.
 pub fn review_head(
     sandbox: &impl Runner,
     policy: &Policy,
@@ -245,6 +248,14 @@ pub fn review_head(
         );
         Ok(output.text())
     };
+    // CHECKOUT must still be the primary base worktree, not the result of
+    // an earlier call. Otherwise a second call could remove the base while
+    // choosing a sibling of the head worktree.
+    ensure!(
+        git(&["rev-parse", "--absolute-git-dir"])?
+            == git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?,
+        "review preparation requires the primary base checkout, not a linked worktree"
+    );
     if git(&["rev-parse", "--is-shallow-repository"])? == "true" {
         git(&[
             "fetch",
@@ -264,13 +275,56 @@ pub fn review_head(
         head,
     ])
     .context("fetching admitted review head")?;
-    git(&["checkout", "--quiet", "--detach", head]).context("checking out admitted review head")?;
-    let actual = git(&["rev-parse", "--verify", "HEAD"])?;
+    let parent = checkout
+        .dir
+        .parent()
+        .context("review checkout has no parent")?;
+    // Also avoid a string prefix, not just path containment: some runtimes'
+    // file-read instruction loaders use string-prefix checks. The two names
+    // have different first characters, so at least one cannot share DIR's
+    // prefix. Never remove the primary base checkout on a retry.
+    let head_dir = ["review-head", "head-review"]
+        .into_iter()
+        .map(|name| parent.join(name))
+        .find(|path| {
+            let candidate = path.as_os_str().as_encoded_bytes();
+            !candidate.starts_with(dir.as_bytes()) && !dir.as_bytes().starts_with(candidate)
+        })
+        .context("finding a review head path outside the base directory prefix")?;
+    let head_text = utf8(&head_dir)?;
+    let removed = sandbox.run(&["rm", "-rf", "--", head_text], b"", MAX_GIT_OUTPUT)?;
+    ensure!(
+        removed.success(),
+        "removing earlier review head: {}",
+        removed.error()
+    );
+    git(&["worktree", "prune"]).context("pruning earlier review worktree")?;
+    git(&["worktree", "add", "--quiet", "--detach", head_text, head])
+        .context("checking out admitted review head beside the base")?;
+    let output = sandbox.run(
+        &[
+            "timeout",
+            GIT_TIMEOUT_S,
+            "git",
+            "-C",
+            head_text,
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ],
+        b"",
+        MAX_GIT_OUTPUT,
+    )?;
+    ensure!(output.success(), "reading review HEAD: {}", output.error());
+    let actual = output.text();
     ensure!(
         actual == head,
         "review checkout HEAD does not match admitted SHA"
     );
+    // Analysis has no patch base: retain the session's starting commit here,
+    // not a claim that the trusted base was pinned by event admission.
     checkout.base_commit = actual;
+    checkout.dir = head_dir;
     Ok(())
 }
 
@@ -391,11 +445,24 @@ mod tests {
 
     #[test]
     fn review_checkout_fetches_the_admitted_sha_and_full_base_history() {
+        for name in [
+            "checkout",
+            "review",
+            "head",
+            "review-head",
+            "head-review",
+            "review-data",
+        ] {
+            review_checkout_case(name);
+        }
+    }
+
+    fn review_checkout_case(name: &str) {
         use std::process::Command;
 
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
-        let dir = temp.path().join("checkout");
+        let dir = temp.path().join(name);
         let git = |cwd: &Path, args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -414,6 +481,9 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.name", "Test"]);
         git(&repo, &["config", "user.email", "test@example.invalid"]);
+        for name in ["AGENTS.md", "CLAUDE.md", "opencode.json"] {
+            std::fs::write(repo.join(name), format!("BASE_INSTRUCTIONS_{name}")).unwrap();
+        }
         for content in ["base one", "base two"] {
             std::fs::write(repo.join("data"), content).unwrap();
             git(&repo, &["add", "."]);
@@ -421,6 +491,9 @@ mod tests {
         }
         let base = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["checkout", "-qb", "review"]);
+        for name in ["AGENTS.md", "CLAUDE.md", "opencode.json"] {
+            std::fs::write(repo.join(name), format!("HEAD_CANARY_{name}")).unwrap();
+        }
         std::fs::write(repo.join("change"), "admitted head").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-qm", "Review"]);
@@ -455,21 +528,68 @@ mod tests {
             &admitted,
         )
         .unwrap();
-        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), admitted);
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), base);
+        assert_ne!(checkout.dir, dir);
+        assert!(
+            !utf8(&checkout.dir)
+                .unwrap()
+                .starts_with(utf8(&dir).unwrap())
+        );
+        assert!(
+            !utf8(&dir)
+                .unwrap()
+                .starts_with(utf8(&checkout.dir).unwrap())
+        );
+        for name in ["AGENTS.md", "CLAUDE.md", "opencode.json"] {
+            assert_eq!(
+                std::fs::read_to_string(dir.join(name)).unwrap(),
+                format!("BASE_INSTRUCTIONS_{name}"),
+                "head instruction replaced base instructions: {name}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(checkout.dir.join(name)).unwrap(),
+                format!("HEAD_CANARY_{name}")
+            );
+        }
+        let head_dir = checkout.dir.clone();
+        assert_eq!(git(&head_dir, &["rev-parse", "HEAD"]), admitted);
         assert_eq!(checkout.base_commit, admitted);
         assert_eq!(
             git(&dir, &["rev-parse", "--is-shallow-repository"]),
             "false"
         );
-        assert_eq!(git(&dir, &["merge-base", "origin/main", "HEAD"]), base);
+        assert_eq!(git(&head_dir, &["merge-base", "origin/main", "HEAD"]), base);
         assert_eq!(
-            git(&dir, &["diff", "--name-only", "origin/main...HEAD"]),
-            "change"
+            git(&head_dir, &["diff", "--name-only", "origin/main...HEAD"]),
+            "AGENTS.md\nCLAUDE.md\nchange\nopencode.json"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("change")).unwrap(),
+            std::fs::read_to_string(head_dir.join("change")).unwrap(),
             "admitted head"
         );
+        let err = review_head(
+            &super::super::enter::Unconfined,
+            &policy,
+            &mut checkout,
+            &admitted,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("primary base checkout"));
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), base);
+        // A retry from the primary checkout replaces only the earlier head.
+        checkout = Checkout {
+            dir: dir.clone(),
+            base_commit: base.clone(),
+        };
+        review_head(
+            &super::super::enter::Unconfined,
+            &policy,
+            &mut checkout,
+            &admitted,
+        )
+        .unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), base);
+        assert_eq!(git(&checkout.dir, &["rev-parse", "HEAD"]), admitted);
         assert!(
             review_head(
                 &super::super::enter::Unconfined,
