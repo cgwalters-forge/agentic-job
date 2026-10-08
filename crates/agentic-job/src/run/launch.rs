@@ -50,6 +50,14 @@ const XDG_BASE_DIRS: &[&str] = &[
 const OPENCODE_SWITCHES: &[(&str, &str)] = &[
     ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
     ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+    // External skills have their own project/home discovery, independent
+    // of the project-config switch. Also suppress the home Claude prompt
+    // fallback and bundled authentication plugins. These are not enough
+    // for review admission: the read tool's instruction resolver remains.
+    ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
+    ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
+    ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1"),
+    ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
 ];
 /// Selects an opencode configuration merged over the global one.
 const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG";
@@ -285,6 +293,10 @@ mod tests {
             ("OPENCODE_CONFIG", "evil.json"),
             ("OPENCODE_CONFIG_CONTENT", "{}"),
             ("OPENCODE_DISABLE_PROJECT_CONFIG", "0"),
+            ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "0"),
+            ("OPENCODE_DISABLE_CLAUDE_CODE", "0"),
+            ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "0"),
+            ("OPENCODE_DISABLE_AUTOUPDATE", "0"),
             ("ANTHROPIC_API_KEY", "ambient"),
             ("CLAUDE_CONFIG_DIR", "/tmp/x"),
             ("XDG_CONFIG_HOME", "/tmp/xdg"),
@@ -298,6 +310,10 @@ mod tests {
             ("XDG_SESSION_ID", "7"),
             ("OPENCODE_DISABLE_PROJECT_CONFIG", "1"),
             ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+            ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
+            ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
+            ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1"),
+            ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
         ]);
         let env = environment(
             Kind::Opencode,
