@@ -120,9 +120,12 @@ aya fork or denial ring buffer. Setup invokes `bpftool prog loadall OBJECT
 /sys/fs/bpf/agentic-job/links autoattach`, then proves that an actual
 non-root write is refused after bpftool exits. No maps need pinning.
 The current object has two entry points, so this uses `loadall`, not
-`load`, and attaches both: `Hook` identifies which mechanism the host
-offers, not a program selector. Selection of just one entry point remains
-unfinished. Pin presence is only a status hint, never enforcement proof.
+`load`, and attaches both: `Hook` specifies a host prerequisite check,
+not a program selector. Even `--hook lsm` attaches modify-return, which can
+deny before the LSM executes. The CLI therefore reports a **combined-policy**
+probe, not proof of either hook independently. Selection of just one entry
+point and independent enforcement coverage remain unfinished. Pin presence
+is only a status hint, never enforcement proof.
 
 Hosts need bpftool, mounted bpffs, kernel BTF and root for setup, not clang
 or a Rust loader. RHEL 10 uses the `bpftool` RPM; the Ubuntu 26.04 spike

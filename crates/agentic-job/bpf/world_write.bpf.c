@@ -6,11 +6,11 @@
 // off every such path, applied to every process on the host for as long
 // as the program is attached (docs/world-write.md).
 //
-// One body, attached one of two ways by the loader: as a BPF LSM program
-// on the inode_permission hook where `bpf` is in the kernel's LSM list
-// (RHEL 10), or as an fmod_ret program on security_inode_permission()
-// itself where it is not (Ubuntu 26.04). Both run after the kernel's own
-// permission check, so what they see is a write Unix permissions allowed.
+// One body, attached both ways by the loader: as a BPF LSM program on
+// inode_permission and as fmod_ret on security_inode_permission(). The
+// latter can deny before the former runs, even with bpf in the LSM list.
+// Both run after the kernel's DAC check, so what they see is a write
+// Unix permissions allowed. The loader proves the combined policy only.
 //
 // The license string below is what the kernel reads: the helpers it
 // calls are GPL-only, and "Dual MIT/GPL" is one of the strings the kernel

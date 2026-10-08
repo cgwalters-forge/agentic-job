@@ -60,11 +60,11 @@ impl Mode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Hook {
-    /// The LSM hook where bpf is in the kernel's LSM list, else fmod_ret
+    /// Attach both programs; automatically check the host's available hook
     Auto,
-    /// Require the BPF LSM hook to be active
+    /// Attach both programs, requiring bpf in the active LSM list (not an isolated LSM test)
     Lsm,
-    /// Require modify-return on security_inode_permission()
+    /// Attach both programs, without requiring bpf in the active LSM list
     FmodRet,
 }
 
@@ -135,7 +135,7 @@ impl std::fmt::Display for Loaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "World write closed by {}, loaded and pinned by bpftool under {PIN_DIR}, proved to deny, in {:.1} s",
+            "World write closed with both lsm/inode_permission and fmod_ret/security_inode_permission attached, loaded and pinned by bpftool under {PIN_DIR}, combined policy proved to deny (host hook check: {}), in {:.1} s",
             self.hook.describe(),
             self.seconds
         )
@@ -149,7 +149,10 @@ pub fn bpf_lsm_active() -> Result<bool> {
 
 /// The object contains both entry points. Use loadall so libbpf attaches
 /// both rather than silently choosing the first program. The resolved hook
-/// describes the host's enforcement mechanism, not an ELF program selector.
+/// describes the host prerequisite check, not the program that caused denial.
+/// In particular, fmod_ret may deny before the LSM hook is reached even when
+/// bpf is active. The canary proves only the combined policy, never either
+/// attachment independently.
 /// Any error aborts setup; partial attachments are cleaned up as well.
 pub fn load(object: &Path, hook: Hook, test_as: &str) -> Result<Loaded> {
     let started = Instant::now();
@@ -259,6 +262,18 @@ pub fn attached() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_does_not_claim_isolated_hook_enforcement() {
+        for hook in [Hook::Lsm, Hook::FmodRet] {
+            let report = Loaded { hook, seconds: 0.0 }.to_string();
+            assert!(report.contains(
+                "both lsm/inode_permission and fmod_ret/security_inode_permission attached"
+            ));
+            assert!(report.contains("combined policy proved to deny"));
+            assert!(report.contains(hook.describe()));
+        }
+    }
 
     #[test]
     fn probe_requires_the_write_to_have_run() {
