@@ -36,6 +36,14 @@ on:
           standing instruction the event's text follows, 64 KiB at most
         type: string
         required: true
+      review:
+        description: Enforce an analysis-only pull request review with a pinned head and verdict comment
+        type: boolean
+        default: false
+      review-task:
+        description: Review task file in the trusted base checkout, never the review head
+        type: string
+        default: ""
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public
         type: string
@@ -278,11 +286,14 @@ jobs:
       # decided here: the inputs, or the event's pull request and item.
       base: ${{ steps.request.outputs.base }}
       comment-target: ${{ steps.request.outputs.comment-target }}
+      review-head: ${{ steps.event.outputs.review-head }}
     steps:
       # The calling repository, for its bounds file.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Review policy and task are never read from the PR merge/head.
+          ref: ${{ inputs.review && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # Logs, transcripts and patches are published, so nothing is run for
       # a repository that cannot be shown to be public. An answer that is
       # an error counts as not public.
@@ -352,13 +363,27 @@ jobs:
       # not be read, which fails the job.
       - name: Decide whether the event may start a run, and write the task
         id: decision
-        if: ${{ inputs.event }}
+        if: ${{ inputs.event || inputs.review }}
         env:
           ALLOW: ${{ inputs.allow }}
           TASK: ${{ inputs.task }}
           ACTOR: ${{ github.actor }}
+          REVIEW: ${{ inputs.review }}
+          REVIEW_TASK: ${{ inputs.review-task }}
+          EVENT: ${{ inputs.event }}
+          KIND: ${{ inputs.kind }}
+          OUTPUTS: ${{ inputs.outputs }}
+          MAX_OUTPUTS: ${{ inputs.max-outputs }}
+          NOTIFY: ${{ inputs.notify }}
+          TARGET: ${{ inputs.comment-target }}
+          REPO: ${{ inputs.repo }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
+          APPLY_ENVIRONMENT: ${{ inputs.apply-environment }}
+          APPLY_PARTIAL: ${{ inputs.apply-partial }}
+          AGENT: ${{ inputs.agent }}
         run: |
           printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"
+          if [ "$REVIEW" = true ]; then node "$SOURCE_DIR/workflow/review.cjs" task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
           [ ! -e "$RUNNER_TEMP/permission.json" ] || set -- "$@" --actor-permission "$RUNNER_TEMP/permission.json"
           [ ! -e "$RUNNER_TEMP/pull.json" ] || set -- "$@" --pull-request "$RUNNER_TEMP/pull.json"
           state=0
@@ -369,17 +394,24 @@ jobs:
         id: event
         if: ${{ inputs.event }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW: ${{ inputs.review }}
+          BASE: ${{ inputs.base }}
         with:
           script: |
             const fs = require('node:fs');
             const { admit } = require(process.env.SOURCE_DIR + '/workflow/activation.cjs');
             const path = process.env.JOB_DIR + '/event.json';
-            const decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
+            let decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
+            if (process.env.REVIEW === 'true') {
+              decision = require(process.env.SOURCE_DIR + '/workflow/review.cjs').admit(decision, process.env.BASE);
+            }
             fs.writeFileSync(path, JSON.stringify(decision));
             if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
             core.setOutput('admitted', String(decision.admitted));
             core.setOutput('reason', decision.reason);
             core.setOutput('item', decision.admitted ? decision.item?.number ?? '' : '');
+            core.setOutput('review-head', process.env.REVIEW === 'true' && decision.admitted ? decision.head.sha : '');
             await core.summary.addRaw(`agentic-job event: ${decision.admitted ? 'admitted' : 'refused'}, ${decision.reason}`).write();
       # The base is the pull request's where an event named one, and the
       # bounds have to cover it like any other. Comments go to the item
@@ -478,6 +510,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.review && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # The action that secures this machine, from this file's own
       # repository and commit: without them the checkout would quietly
       # take the caller's, and the step below whatever is there.
@@ -581,10 +614,13 @@ jobs:
       - name: Run the agent
         id: run
         timeout-minutes: 340
+        env:
+          REVIEW_HEAD: ${{ needs.policy.outputs.review-head }}
         run: |
           echo '::group::agent (condensed)'
           state=0
-          agentic-job run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$OUT" || state=$?
+          [ -z "$REVIEW_HEAD" ] || set -- --review-head "$REVIEW_HEAD"
+          agentic-job run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$OUT" "$@" || state=$?
           echo '::endgroup::'
           echo "exit=$state" >> "$GITHUB_OUTPUT"
           [ ! -e "$OUT/run/summary.md" ] || cat "$OUT/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
@@ -701,7 +737,9 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .agentic-job-source
-          sparse-checkout: safe-outputs
+          sparse-checkout: |
+            safe-outputs
+            workflow
           persist-credentials: false
       # It empties and recreates /tmp/gh-aw, so it comes before anything
       # is put there. ci.yml checks validation.json against this commit.
@@ -739,6 +777,12 @@ jobs:
       # The collector reports what it refused in its result and succeeds.
       - name: The collector refused nothing
         run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
+      # Fixed trusted code validates the agent's text; no write token here.
+      - name: Validate the review verdict
+        if: ${{ inputs.review }}
+        env:
+          TARGET: ${{ needs.policy.outputs.comment-target }}
+        run: node "$SOURCE_DIR/workflow/review.cjs" check "$GH_AW_TMP/agent_output.json" "$TARGET"
       # The second half: the policy's bounds, and the rules for a patch.
       - name: Check the outputs against the policy
         run: |
@@ -802,6 +846,7 @@ jobs:
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ !inputs.review }}
         with:
           repository: ${{ env.OUTPUT_REPO }}
           ref: ${{ needs.policy.outputs.base }}
@@ -821,6 +866,7 @@ jobs:
       # conflict, where `git am --3way` would look for the file by content
       # and could change another path than the patch names.
       - name: Configure git
+        if: ${{ !inputs.review }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -831,6 +877,7 @@ jobs:
       # that was handed back says. A fork that is behind is fast-forwarded
       # and one that has diverged stops here.
       - name: Fetch the target's base branch, and bring a fork's up to it
+        if: ${{ !inputs.review }}
         run: |
           git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
           [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || { git merge --ff-only refs/agentic-job/target-base && git push origin "HEAD:refs/heads/$BASE"; }
@@ -852,6 +899,7 @@ jobs:
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
       - name: Apply the patch on its own base, and compare what changed with what was checked
+        if: ${{ !inputs.review }}
         run: |
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0

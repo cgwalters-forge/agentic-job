@@ -115,6 +115,9 @@ pub struct Args {
     /// The directory the run's results are written to
     #[arg(long, value_name = "DIR")]
     pub out: PathBuf,
+    /// For an analysis review, fetch and start at this admitted commit SHA
+    #[arg(long, value_name = "SHA")]
+    pub review_head: Option<String>,
     /// The configuration, in place of the root-owned copy `sandbox setup`
     /// made. For tests: a job never passes it, since a file the job can
     /// write is not one the sandbox setup vouched for.
@@ -132,6 +135,7 @@ struct Plan {
     /// What `policy` allowed this run: the target, and where it is cloned
     /// from.
     policy: policy::Policy,
+    review_head: Option<String>,
     task: String,
     sandbox: Sandbox,
     /// This binary, which the sandbox user runs as the agent's launcher.
@@ -321,6 +325,13 @@ impl Plan {
         let run_id = run_id(&meta)?;
         let policy = policy::Policy::load(&args.policy)?;
         clone::check(&policy)?;
+        if let Some(head) = &args.review_head {
+            clone::check_review_head(&policy, head)?;
+            ensure!(
+                kind == Kind::Fake,
+                "review-head supports only fake: real agents' automatic head instruction loading is not isolated"
+            );
+        }
         upload::refuse_earlier_results(&args.out)?;
         // Asked for only where it is used: nothing else holds what lets
         // a process get the job's identity token.
@@ -349,6 +360,7 @@ impl Plan {
                 name: run_name(&meta),
             },
             policy,
+            review_head: args.review_head.clone(),
             task,
             sandbox: Sandbox::new(&config)?,
             exe: clone::utf8(&exe)?.to_owned(),
@@ -366,6 +378,15 @@ impl Plan {
     /// a pointer to the repository's instructions for agents that this
     /// agent does not read by itself.
     fn prompt(&self, checkout: &Checkout) -> Result<String> {
+        if self.review_head.is_some() {
+            // The head's instruction files are part of the hostile review
+            // input, not instructions the harness may elevate into the task.
+            return Ok(format!(
+                "{}{}",
+                brief::hand_back(&self.policy, &self.sandbox.home, &checkout.dir),
+                self.task
+            ));
+        }
         let mut found = Vec::new();
         for name in self.kind.unread_instructions() {
             let path = checkout.dir.join(name);
@@ -409,7 +430,10 @@ impl Plan {
         }
         let source = agent::fetch_source(sandbox, &self.agent, self.kind)?;
         shared.go_on()?;
-        let checkout = clone::clone(sandbox, &self.policy)?;
+        let mut checkout = clone::clone(sandbox, &self.policy)?;
+        if let Some(head) = &self.review_head {
+            clone::review_head(sandbox, &self.policy, &mut checkout, head)?;
+        }
         let prompt = self.prompt(&checkout)?;
         shared.go_on()?;
         let run = self

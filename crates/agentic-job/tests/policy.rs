@@ -166,3 +166,36 @@ fn a_bad_bounds_file_is_an_error_and_not_a_refusal() {
         assert!(stderr.contains(want), "{stderr}");
     }
 }
+#[test]
+fn review_caller_bounds_allow_only_analysis_outputs() {
+    let allow = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/review.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .arg("policy")
+        .arg("--allow")
+        .arg(&allow)
+        .args([
+            "--repo",
+            "cgwalters-forge/agentic-job",
+            "--clone-url",
+            "https://github.com/cgwalters-forge/agentic-job",
+            "--base",
+            "main",
+            "--kind",
+            "analysis",
+            "--outputs",
+            "add_comment,noop",
+            "--max-outputs",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["kind"], "analysis");
+    assert_eq!(policy["max_outputs"], 1);
+    assert!(policy["safe_outputs"].get("create_pull_request").is_none());
+}

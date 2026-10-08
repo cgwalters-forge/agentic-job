@@ -1,0 +1,42 @@
+# Uses base-branch workflow, task, bounds and setup, never the PR's versions.
+# Copy the files named below; pin the reusable workflow to a reviewed commit
+# when calling from another repository. Real inference is deliberately off.
+name: review
+on:
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+permissions: {}
+jobs:
+  review:
+    # Optimization only: the event policy checks actor permissions and forks.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+    concurrency:
+      group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/agentic-job.yml
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    with:
+      id: review-${{ github.event.pull_request.number || github.event.issue.number }}
+      repo: ${{ github.repository }}
+      event: true
+      review: true
+      review-task: workflow/review.md
+      task: ''
+      kind: analysis
+      outputs: add_comment,noop
+      max-outputs: '1'
+      notify: none
+      allow: workflow/review.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/review.sh
+      timeout: '10'
+      max-requests: '0'
+      budget: '100'

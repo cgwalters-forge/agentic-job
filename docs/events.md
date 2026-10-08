@@ -13,11 +13,16 @@ which events, and how the event's text reaches the agent.
 and three example callers are on main; CI runs the event path on every
 pull request and every push (`e2e-event`), and the command's decision on
 recorded and hand-written payloads. The workflow does not yet fetch a
-pull request's head for the agent (the task names it, and the agent
-fetches it). Label-command decisions are implemented in the binary;
+pull request's head for general event runs (the task names it, and the agent
+fetches it); the dedicated review mode checks out the admitted SHA.
+Label-command decisions are implemented in the binary;
 the reusable workflow removes admitted command labels before activation.
 Discussion decisions still need workflow support for
 discussion targets before they can be used with `event: true`.
+
+The dedicated [pull request review caller](review.md) adds a base-branch task,
+an analysis-only head checkout and a checked verdict comment. Real inference
+is disabled by default.
 
 ## The decision
 

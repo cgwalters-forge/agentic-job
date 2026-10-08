@@ -51,6 +51,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
       - run: node --test workflow/apply.test.cjs
+      - run: node --test workflow/review.test.cjs
 
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left
@@ -464,9 +465,55 @@ jobs:
       budget: "100"
       artifact-prefix: event-
 
+  # Bootstrap only: the first PR adding this caller has no base-branch
+  # task/bounds yet. Never substitute its head's files to make that run pass.
+  review-base:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      installed: ${{ steps.files.outputs.installed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - id: files
+        run: |
+          installed=false
+          if [ -f workflow/review.md ] && [ -f workflow/review.toml ] && [ -f .github/agentic-job/e2e/review.sh ]; then installed=true; fi
+          echo "installed=$installed" >> "$GITHUB_OUTPUT"
+
+  e2e-review:
+    needs: review-base
+    if: ${{ needs.review-base.outputs.installed == 'true' }}
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-review-${{ github.run_id }}
+      repo: ${{ github.repository }}
+      event: true
+      review: true
+      review-task: workflow/review.md
+      task: ''
+      kind: analysis
+      outputs: add_comment,noop
+      max-outputs: '1'
+      notify: none
+      allow: workflow/review.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/review.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: review-
+
   e2e-verify:
     if: ${{ always() }}
-    needs: [e2e-full, e2e-limit, e2e-event]
+    needs: [e2e-full, e2e-limit, e2e-event, review-base, e2e-review]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -525,6 +572,29 @@ jobs:
       # The agent's comment went to the pull request this run is for,
       # under the status comment the notify job posted and the conclude
       # job edited, and the eyes reaction is on the pull request.
+      - name: The review path was admitted or refused, without using head policy files
+        env:
+          INSTALLED: ${{ needs.review-base.outputs.installed }}
+          RESULT: ${{ needs.e2e-review.result }}
+          TRIGGER: ${{ needs.e2e-review.outputs.trigger }}
+          EXIT: ${{ needs.e2e-review.outputs.exit }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          if [ "$INSTALLED" != true ]; then test "$RESULT" = skipped; echo 'Review E2E awaits installation of its base-branch files.' >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) if [ "$ACTION" = reopened ]; then test "$RESULT/$TRIGGER/$EXIT" = success/refused/; else test "$RESULT/$TRIGGER/$EXIT" = success/admitted/0; fi ;;
+            push) test "$RESULT/$TRIGGER/$EXIT" = success/refused/ ;;
+          esac
+      - name: Exactly one scripted verdict was posted on the triggering pull request
+        if: ${{ github.event_name == 'pull_request' && github.event.action != 'reopened' && needs.review-base.outputs.installed == 'true' }}
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" --jq '.[] | .body' > "$RUNNER_TEMP/review-comments"
+          grep -F 'VERDICT: APPROVE' "$RUNNER_TEMP/review-comments"
+          gh api --paginate "repos/$GH_REPO/issues/$PR/comments" | jq -se --arg run "$RUN" --arg sha "$HEAD_SHA" '
+            [ .[][] | select((.body | startswith("VERDICT: APPROVE\nREASON: Scripted review")) and (.body | contains($run)) and (.body | contains("Reviewed SHA: " + $sha + "\n"))) ] | length == 1'
       - name: The event-triggered run commented on the pull request, and said how it ended
         if: ${{ github.event_name == 'pull_request' }}
         env:
@@ -633,11 +703,15 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, e2e-full, e2e-limit, e2e-event, e2e-verify]
+    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: jq -e 'all(.[]; .result == "success")' <<<"$NEEDS"
+          REVIEW_INSTALLED: ${{ needs.review-base.outputs.installed }}
+        run: >-
+          jq -e --arg installed "$REVIEW_INSTALLED"
+          'all(to_entries[]; .value.result == "success" or
+          (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"

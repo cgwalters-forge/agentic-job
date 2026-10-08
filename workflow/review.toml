@@ -1,0 +1,18 @@
+# Copy with review.yml and review.md; set repos and bases for the caller.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+max_outputs = 1
+max_patch_bytes = 1024
+max_patch_files = 1
+
+[outputs]
+add_comment = { max = 1 }
+noop = { max = 1 }
+
+[trigger]
+events = ["pull_request_target", "pull_request", "issue_comment"]
+roles = ["admin", "maintain", "write"]
+bots = []
+forks = false
+commands = ["/review"]
