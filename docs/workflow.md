@@ -19,52 +19,55 @@ separate jobs on separate machines. The apply job's additional checks are
    by a command label pass through without writing.
 2. **agent**, on the caller's runner. [The step that secures a host for
    any job](secure-host.md), the action in `secure-host/`, creates the
-   unprivileged user, the network rules and the egress proxy, takes root
-   from the job and probes all of it (`agentic-job sandbox setup` and
+   unprivileged user, the network rules and the egress proxy, removes
+   general root access and probes access (`agentic-job sandbox setup` and
    `sandbox check`); `run` clones the target, drives the agent and
    leaves what may be uploaded.
 3. **check**, on a machine the agent never touched. gh-aw's collector
    validates and sanitizes the agent's requests, then `agentic-job check`
    holds them and the patch to the policy.
-4. **apply**, on a machine of its own, the only job with a credential
-   that can write. It runs gh-aw's handlers on the checked outputs:
+4. **apply**, on a machine of its own, uses a write credential.
+   It runs gh-aw's handlers on the checked outputs:
    a branch and a draft pull request, comments.
+
+`activate`, `notify` and `conclude` also inherit the caller's permissions
+and can remove labels, post reactions and create or edit status comments.
+None of these write-capable jobs executes code produced by the agent.
+`policy` and `check` have `contents: read`; `agent` has `contents: read`
+and `id-token: write`, not repository write permissions.
 
 ## What has run, and what has not
 
 Read this before relying on it.
 
-- All four jobs run in this repository's CI on every pull request, twice,
+- The branch pipeline runs in this repository's CI on same-repository pull requests, twice,
   with the scripted agent (`fake`): once to the end, and once stopped at
   a limit. The egress proxy, the network rules and every probe of
   `sandbox check` are real in those runs. The apply job pushes the
   branches and posts the comment with the job's own token.
-- **No real agent has run on this code yet.** Claude Code and opencode
-  are configured by code with unit tests, and the run's registration at
-  an inference proxy (`github-oidc`, `plain`, `token-file`) by tests
-  against a mock proxy. Neither has met a real proxy or a real model
-  from this workflow.
-- **No pull request has been opened by it.** This organization does not
-  let Actions open pull requests, and the token that could
-  ([below](#the-apply-job-and-its-token)) is not stored yet. CI requires
-  exactly the refusal that follows, with the branch pushed.
+- Claude Code and opencode have run real tasks on RHEL 10 runners.
+  The reusable workflow has been called from
+  `bootc-dev/cgwalters-devspace-sandbox`, where its apply job opened pull
+  requests. [Issue #59](https://github.com/cgwalters-forge/agentic-job/issues/59)
+  records these deployments. A real agent through the reusable workflow
+  on GitHub-hosted runners remains untried; the existing broker is private.
+- This repository's CI expects Actions PR creation to be refused, with
+  the branch pushed. That local setting does not prevent other callers
+  from opening PRs with an appropriate token.
 - The example caller has been dispatched on this repository's main
   branch: once to the end, with the scripted agent's built-in session,
   and once naming a private repository, which stopped in the policy
   job. homegit's `bot-runs list`, `show`, `log` and `reconcile` read
   the first of those runs.
-- The event path (`event: true`) runs in CI on every pull request and
+- The event path (`event: true`) runs in CI on same-repository pull requests and
   push of this repository (`e2e-event`, [below](#event-triggered-callers)):
   admitted on a pull request, with the comments on the pull request;
   refused on a push. The slash-command, label and schedule examples are
   live here with the scripted agent.
-- **It has not been called from another repository.** CI calls it by
-  path, where the workflow's own commit is the run's. That a caller's
-  pin by commit selects the source the binary is built from follows
-  from GitHub's documentation of `job.workflow_sha` and is untried.
+- Fork pull requests do not run CI's write end-to-end jobs.
 - Not tried at all: `apply-environment`, an `output-repo` other than the
   calling repository, bringing a fork's base branch up to date, the
-  tailnet login, a runner that is not GitHub's `ubuntu-26.04`,
+  tailnet login,
   `agent-config-repo`, `kind: analysis`, and applying a `create_issue`:
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
@@ -72,10 +75,17 @@ Read this before relying on it.
 ## A caller
 
 [`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
-complete one, for the scripted agent, started by hand. Copy it with the
-two files it names, and put your own repository in place of this one in
-the bounds file's `repos` and in the default of the example's `repo`
-input. Three more are started by events, [below](#event-triggered-callers):
+complete one, for the scripted agent, started by hand. Copy it and
+`.github/agentic-job/allow.toml` and `.github/agentic-job/hosted.toml` to
+the same paths. Replace `uses: ./.github/workflows/agentic-job.yml` with
+`uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
+using a reviewed commit. Replace the example's `repo` default and the
+bounds file's `repos` with your public repository; the allowed base is
+`main`. Keep the permissions. Commit to your default branch, enable
+Actions and permit the referenced actions/workflow and branch writes.
+The example uses the automatic job token, not a configured secret;
+it returns a draft PR when Actions PR creation is enabled, otherwise a
+pushed branch. Three more are started by events, [below](#event-triggered-callers):
 a slash command in a comment, a label on a pull request, a schedule.
 Every input is described where it is declared, at the top of the
 workflow file; this page says what a caller has to provide for them.
@@ -163,7 +173,8 @@ in the calling repository.
 **Permissions.** The call needs `contents: read` and `id-token: write`
 (the agent job asks for the identity token, for the proxy and the
 tailnet, whether or not the run uses either). The policy, agent and check
-jobs take no more than that. The apply job names no permissions and so
+jobs take no more than that. Activate, notify, conclude and apply name no
+permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `contents: write`, `issues: write`
 (comments and issues) and `pull-requests: write` for the job's own token.
@@ -245,7 +256,7 @@ comment on one too: the policy job fetches the pull request to apply the
 rule. `workflow_dispatch` with `event: true` admits only a dispatcher
 with a listed role, which the plain `example.yml` does not check.
 
-CI's `e2e-event` job calls the workflow with `event: true` on every pull
+CI's `e2e-event` job calls the workflow with `event: true` on same-repository pull
 request of this repository, where the event is admitted and the
 scripted agent's comment lands on the pull request under the status
 comment, and on every push to main, where `push` is not among the
