@@ -375,6 +375,27 @@ test("check: create_issue, through the collector and the check", () => {
     if (want) assert.match(verdict.errors.join("\n"), want, name);
     else assert.equal(verdict.items.length, lines.length, name);
   }
+  const limits = { allowed: ["triage", "blocked"], blocked: ["blocked"] };
+  for (const [name, bounds, fields, ok] of [
+    ["missing labels", limits, {}, true],
+    ["empty labels", limits, { labels: [] }, true],
+    ["allowed label ignoring case", limits, { labels: ["TRIAGE"] }, true],
+    ["disallowed label", limits, { labels: ["other"] }, false],
+    ["blocked takes precedence", limits, { labels: ["BLOCKED"] }, false],
+    ["mixed labels", limits, { labels: ["triage", "other"] }, false],
+    ["empty allowlist without labels", { allowed: [] }, {}, true],
+    ["empty allowlist with empty labels", { allowed: [] }, { labels: [] }, true],
+    ["empty allowlist with a label", { allowed: [] }, { labels: ["triage"] }, false],
+    ["blocklist only without labels", { blocked: ["blocked"] }, {}, true],
+    ["blocklist only with another label", { blocked: ["blocked"] }, { labels: ["other"] }, true],
+    ["blocklist only with blocked label", { blocked: ["blocked"] }, { labels: ["BLOCKED"] }, false],
+  ]) {
+    const bounded = structuredClone(policy);
+    bounded.safe_outputs.create_issue = { max: 1, ...bounds };
+    const verdict = newCheck(handback({ lines: [{ ...issue, ...fields }], base: null }), bounded);
+    assert.equal(verdict.ok, ok, `${name}: ${JSON.stringify(verdict.errors)}`);
+    if (!ok) assert.match(verdict.errors.join("\n"), /label limits/, name);
+  }
 });
 
 test("check: the hand-backs of two real runs of the old tree", async () => {

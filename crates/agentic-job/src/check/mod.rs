@@ -221,6 +221,35 @@ fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
     // by, any issue the request names; nothing bounds which, so a request
     // that names one is refused.
     if output == CREATE_ISSUE {
+        if let Some(limit) = policy.safe_outputs.others.get(output)
+            && (limit.allowed.is_some() || !limit.blocked.is_empty())
+            && let Some(labels) = item.get("labels")
+        {
+            match labels.as_array() {
+                Some(labels) => {
+                    for label in labels {
+                        let permitted = label.as_str().is_some_and(|label| {
+                            label == label.trim()
+                                && !limit
+                                    .blocked
+                                    .iter()
+                                    .any(|blocked| blocked.eq_ignore_ascii_case(label))
+                                && limit.allowed.as_ref().is_none_or(|allowed| {
+                                    allowed
+                                        .iter()
+                                        .any(|allowed| allowed.eq_ignore_ascii_case(label))
+                                })
+                        });
+                        if !permitted {
+                            problems.push(format!(
+                                "a {output} with label {label}, outside the policy's label limits"
+                            ));
+                        }
+                    }
+                }
+                None => problems.push(format!("a {output} whose labels are not an array")),
+            }
+        }
         problems.extend(
             ISSUE_LINKS
                 .iter()
@@ -595,6 +624,47 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn issue_labels_are_checked_not_silently_filtered() {
+        let mut policy = policy();
+        policy.safe_outputs.others.insert(
+            CREATE_ISSUE.to_owned(),
+            crate::policy::OutputLimit {
+                max: 1,
+                allowed: Some(vec!["triage".to_owned(), "blocked".to_owned()]),
+                blocked: vec!["blocked".to_owned()],
+            },
+        );
+        for (labels, ok) in [
+            (json!([]), true),
+            (json!(["TRIAGE"]), true),
+            (json!(["triage", "other"]), false),
+            (json!(["BLOCKED"]), false),
+            (json!(["blocked "]), false),
+            (json!([7]), false),
+            (json!("triage"), false),
+            (Value::Null, false),
+        ] {
+            let item = json!({"type": CREATE_ISSUE, "labels": labels});
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{labels}"
+            );
+        }
+        let limit = policy.safe_outputs.others.get_mut(CREATE_ISSUE).unwrap();
+        limit.allowed = Some(Vec::new());
+        let item = json!({"type": CREATE_ISSUE, "labels": ["triage"]});
+        assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+        policy
+            .safe_outputs
+            .others
+            .get_mut(CREATE_ISSUE)
+            .unwrap()
+            .allowed = None;
+        assert!(redirections(item.as_object().unwrap(), &policy).is_empty());
     }
 
     #[test]
