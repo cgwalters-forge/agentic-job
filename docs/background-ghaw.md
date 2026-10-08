@@ -58,9 +58,13 @@ Caller concurrency is not an atomic quota or a FIFO queue.
 ## Tools and outputs
 
 gh-aw has a read-only GitHub MCP gateway with its own credential and
-per-tool limits. agentic-job has no authenticated read gateway; the agent
-can use the public API unauthenticated through the proxy.
-That integration is [#112](https://github.com/cgwalters-forge/agentic-job/issues/112).
+per-tool limits. It also has a non-MCP `tools.github.mode: gh-proxy` path
+for the ordinary `gh` CLI. agentic-job has neither authenticated read
+path; the agent can use the public API unauthenticated through the egress
+proxy. Reusing the CLI proxy, rather than building a new MCP bridge, is
+the direction for [#112](https://github.com/cgwalters-forge/agentic-job/issues/112).
+The [pinned-source investigation below](#github-cli-proxy-reuse) describes
+the reusable artifacts and what still needs verification.
 Other MCP integrations and browser tooling are
 [#120](https://github.com/cgwalters-forge/agentic-job/issues/120).
 
@@ -95,6 +99,97 @@ Private targets are refused here
 ([#115](https://github.com/cgwalters-forge/agentic-job/issues/115)); gh-aw
 supports them. Apply uses a job token or an environment secret, without
 gh-aw's computed permission union or per-run App-token integration.
+
+## GitHub CLI proxy reuse
+
+This investigation uses the **actual Actions setup pin** in
+`agentic-job.yml`, gh-aw commit
+`c227508baacbbe271be6c5a4f303936840b3c813`, rather than the v0.91.4
+comparison baseline above. The feature already exists at that pin; a
+gh-aw bump is not needed just to obtain it. These are source and artifact
+observations, not evidence of a working agentic-job integration.
+
+The public option is `tools.github.mode: gh-proxy`
+([access modes, lines 94–117](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/docs/src/content/docs/reference/github-tools.md#L94-L117)).
+It skips the GitHub MCP server. The runtime has two separate components:
+
+1. **The credential holder:** gh-aw launches the MCP gateway image as
+   `awmg proxy`, not as an MCP server, with `GH_TOKEN` outside the agent.
+   It listens on TLS port 18443 and applies the GitHub guard policy
+   ([startup, lines 56–75](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/sh/start_cli_proxy.sh#L56-L75)).
+   The compiler emits a repository/integrity policy; no policy means API
+   calls fail with 503
+   ([policy generation, lines 501–554](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/pkg/workflow/compiler_difc_proxy.go#L501-L554)).
+2. **The CLI sidecar:** AWF installs a `gh` wrapper in the agent that
+   sends arguments to the sidecar's HTTP `POST /exec` endpoint. The
+   sidecar runs the real `gh` with `GH_HOST=localhost:18443`, the proxy
+   CA bundle and a Unix-socket HTTP shim for GitHub Enterprise version
+   detection. The sandbox does not receive that configuration or the
+   forge token
+   ([wrapper, lines 1–48](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/agent/gh-cli-proxy-wrapper.sh#L1-L48),
+   [sidecar setup, lines 53–94](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/cli-proxy/entrypoint.sh#L53-L94)).
+
+The normal sidecar refuses `alias`, `auth`, `config` and `extension`,
+but **does not itself enforce read-only access**. Its argument validator
+explicitly delegates write control to the DIFC guard policy
+([security, lines 256–307](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/cli-proxy/security.js#L256-L307)).
+It is not AWF's `api-proxy`, which holds model credentials. Nor does
+the `gh` wrapper provide a transport for a separate `git fetch` process:
+its protocol executes `gh` arguments, not arbitrary commands. Git HTTPS
+reads need their own routing verification; public git reads already
+have a narrowly allowed fetch rule in agentic-job's egress policy.
+
+There is a reusable artifact outside compiled workflows. The gh-aw source
+at the setup pin declares compiler defaults of MCP gateway v0.4.27 and
+AWF v0.28.30
+([versions](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/pkg/constants/version_constants.go#L63-L71),
+[gateway version](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/pkg/constants/version_constants.go#L214-L222)).
+Its action lock records the gateway image digest
+`sha256:c9474061446b0c6f9958f3ddce83561217f1fa7f82d6058b2cbf1242bac472d0`
+([image pin](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/pkg/workflow/data/action_pins.json#L718-L722)).
+Running that exact `ghcr.io/github/gh-aw-mcpg:v0.4.27` image with
+`proxy --help` succeeds without a token and documents both container
+and local usage, a baked-in GitHub WASM guard, `--policy`, upstream
+API routing and TLS options. The artifact exposes a documented standalone
+proxy entry point: invoking it does not require a compiled workflow.
+Standalone serving and enforcement remain unverified. The setup action
+does not provision these images for agentic-job; reuse needs separate
+digest-pinned provisioning. The supplied
+startup script is Docker-specific, however; copying it unchanged would
+not fit a host that deliberately disables the container daemon.
+
+The smallest next step is to reuse this pinned gateway, not implement a
+replacement. Before exposing an opt-in read input, the host-user wiring
+must verify the following boundaries:
+
+- A read-only job token stays with a supervisor outside the sandbox user;
+  the sandbox cannot read its environment, token storage or TLS private
+  key. Do not give the CLI sidecar the real token as a shortcut.
+- Do not transplant the normal CLI sidecar into the supervisor's identity.
+  Its `/exec` service accepts agent-supplied environment overrides,
+  including `PATH`, and runs subprocesses; normal mode does not authenticate
+  requests and listens on all interfaces
+  ([environment handling](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/cli-proxy/security.js#L319-L350),
+  [listener](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/cli-proxy/server.js#L246-L251)).
+  AWF's container boundary matters. Any reuse must keep this service
+  isolated and unprivileged, separate from the token holder, with a fixed
+  minimal environment and restricted listener reachability. Agent-controlled
+  commands must not acquire the supervisor's filesystem or network authority.
+- Caller repository bounds survive proxy configuration. The artifact's
+  help says `--force-public-repos` defaults to true and can force
+  `repos="public"`; it must not silently widen an explicit repository list.
+- A REST mutation, a GraphQL mutation and `gh issue comment` fail at the
+  gateway, while the GraphQL query POSTs used by `gh issue view` succeed.
+  The sidecar's argument checks and an upstream read-only-token refusal
+  alone are not proof of gateway enforcement.
+- A localhost CLI service must not become a bypass around the existing
+  egress write refusals: its network traffic runs outside the sandbox uid.
+  Test public reads, PR diffs, git HTTPS reads and event-triggered reads
+  from the sandbox, not just from the supervisor.
+
+No input, permission change or authenticated gateway has been added here.
+The pinned artifact's help was exercised, but its forwarding and guard
+behavior, sandbox isolation and event end-to-end path remain unverified.
 
 ## Related gh-aw deployments
 

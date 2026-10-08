@@ -268,6 +268,20 @@ scripted agent's comment lands on the pull request under the status
 comment, and on every push to main, where `push` is not among the
 bounds' events and the run ends in the policy job.
 
+### GitHub reads from the agent
+
+There is currently no opt-in authenticated GitHub read input. The
+sandbox user has no `GITHUB_TOKEN` or `GH_TOKEN`; installing `gh` is
+not enough to give it authenticated issue or pull-request access.
+Public HTTP reads and git HTTPS fetches still use the existing egress
+policy, with writes refused.
+
+The planned integration reuses gh-aw's `gh-proxy` mode, with its token
+holder outside the sandbox user. See the
+[pinned-source findings](background-ghaw.md#github-cli-proxy-reuse) for
+the reusable artifact and the remaining enforcement and CI checks.
+Do not pass a forge token through `sandbox.env` to work around this gap.
+
 ### The apply job and its token
 
 With no `apply-environment`, the apply job uses the job's own token,
