@@ -109,6 +109,9 @@ pub struct Args {
     /// The caller's bounds file
     #[arg(long, value_name = "FILE")]
     pub allow: PathBuf,
+    /// Optional organization bounds; both files must admit the request
+    #[arg(long, value_name = "FILE")]
+    pub org_allow: Option<PathBuf>,
     /// The repository the agent works on, as OWNER/NAME
     #[arg(long, value_name = "REPO", allow_hyphen_values = true)]
     pub repo: String,
@@ -590,6 +593,7 @@ impl Bounds {
 
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = Bounds::load(&args.allow)?;
+    let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
     let request = Request {
         repo: &args.repo,
         clone_url: &args.clone_url,
@@ -598,7 +602,15 @@ pub fn run(args: &Args) -> Result<Exit> {
         outputs: &args.outputs,
         max_outputs: &args.max_outputs,
     };
-    match bounds.compile(&request) {
+    let compiled = bounds
+        .compile(&request)
+        .and_then(|policy| match &org_bounds {
+            Some(org) => org
+                .compile(&request)
+                .and_then(|other| intersect(policy, other)),
+            None => Ok(policy),
+        });
+    match compiled {
         Ok(policy) => {
             let json = serde_json::to_string_pretty(&policy).context("writing the policy")?;
             println!("{json}");
@@ -611,6 +623,41 @@ pub fn run(args: &Args) -> Result<Exit> {
             Ok(Exit::Failure)
         }
     }
+}
+
+/// Intersect compiled policies rather than trying to intersect glob patterns.
+/// Each file independently checks the target and any explicitly requested type.
+fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    policy.max_outputs = policy.max_outputs.min(other.max_outputs);
+    policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
+    policy.safe_outputs.others.retain(|name, limit| {
+        if let Some(bound) = other.safe_outputs.others.get(name) {
+            limit.max = limit.max.min(bound.max);
+            true
+        } else {
+            false
+        }
+    });
+    policy.safe_outputs.create_pull_request = match (
+        policy.safe_outputs.create_pull_request,
+        other.safe_outputs.create_pull_request,
+    ) {
+        (Some(mut pr), Some(bound)) => {
+            pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
+            pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
+            for name in bound.protected_files {
+                if !pr.protected_files.contains(&name) {
+                    pr.protected_files.push(name);
+                }
+            }
+            Some(pr)
+        }
+        _ => None,
+    };
+    if policy.safe_outputs.types().next().is_none() {
+        return Err(vec!["the bounds files allow no common output type".into()]);
+    }
+    Ok(policy)
 }
 
 #[cfg(test)]
@@ -1008,6 +1055,64 @@ files = ["README.md", "AGENTS.md"]
         assert!(pr.protect_top_level_dot_folders);
         assert_eq!(pr.protected_files_policy, ProtectedFilesPolicy::Blocked);
         assert_eq!((pr.max_patch_size, pr.max_patch_files), (8192, 100));
+    }
+
+    #[test]
+    fn organization_policy_only_tightens_bounds() {
+        let local = bounds();
+        let mut org = bounds();
+        org.max_outputs = 2;
+        org.max_patch_bytes = 4096;
+        org.max_patch_files = 3;
+        org.outputs.remove("missing_data");
+        org.unprotected_files = Unprotected::default();
+        let request = Request {
+            repo: "cgwalters-bot/homegit",
+            clone_url: "https://github.com/cgwalters-bot/homegit",
+            outputs: "all",
+            max_outputs: "max",
+            ..request()
+        };
+        let a = local.compile(&request).unwrap();
+        let b = org.compile(&request).unwrap();
+        for (left, right) in [(a.clone(), b.clone()), (b, a)] {
+            let policy = intersect(left, right).unwrap();
+            assert_eq!(policy.max_outputs, 2);
+            assert_eq!(policy.max_patch_bytes, 4096);
+            assert_eq!(policy.safe_outputs.max_of("missing_data"), None);
+            let pr = policy.safe_outputs.create_pull_request.unwrap();
+            assert_eq!(pr.max_patch_files, 3);
+            assert!(pr.protected_files.contains(&"README.md".into()));
+        }
+        assert!(
+            org.compile(&Request {
+                outputs: "missing_data",
+                ..request
+            })
+            .is_err()
+        );
+        org.repos = vec!["another/*".into()];
+        assert!(org.compile(&request).is_err());
+    }
+
+    #[test]
+    fn disjoint_output_bounds_refuse_in_both_orders() {
+        let mut local = bounds();
+        let mut org = bounds();
+        local.outputs.retain(|name, _| name == "noop");
+        org.outputs.retain(|name, _| name == "missing_data");
+        let request = Request {
+            outputs: "all",
+            ..request()
+        };
+        let a = local.compile(&request).unwrap();
+        let b = org.compile(&request).unwrap();
+        for (left, right) in [(a.clone(), b.clone()), (b, a)] {
+            assert_eq!(
+                intersect(left, right).unwrap_err(),
+                vec!["the bounds files allow no common output type"]
+            );
+        }
     }
 
     #[test]
