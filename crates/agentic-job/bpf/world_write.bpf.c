@@ -31,9 +31,6 @@ char LICENSE[] SEC("license") = "Dual MIT/GPL";
 #define S_IFDIR 0040000
 #define S_ISVTX 0001000
 #define S_IWOTH 00002
-// include/linux/posix_acl.h: i_acl values that are not an ACL.
-#define ACL_NOT_CACHED ((struct posix_acl *)(-1))
-#define ACL_DONT_CACHE ((struct posix_acl *)(-3))
 #define EACCES 13
 
 // Bounds the verifier needs on loops. A process in more groups than this
@@ -41,33 +38,6 @@ char LICENSE[] SEC("license") = "Dual MIT/GPL";
 // kernel itself allows at most 340 extents in a uid map.
 #define MAX_GROUPS 256
 #define MAX_EXTENTS 340
-
-// Why a write was denied, for the record of it.
-enum reason {
-	REASON_OTHER = 1,
-	// An ACL applies, so the kernel may have granted this by a named
-	// entry rather than the other bits: denied all the same, since the
-	// walk would have taken the other bits off too.
-	REASON_ACL = 2,
-};
-
-// One denied write, as `agentic-job helper world-write-denials` reads it.
-// Fixed layout: the reader checks the size.
-struct denial {
-	__u64 ino;
-	__u32 pid;
-	__u32 uid;
-	__u32 owner;
-	__u32 mode;
-	__u32 mask;
-	__u32 reason;
-	char comm[16];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024);
-} denials SEC(".maps");
 
 // Whether the task's credentials put it in the inode's group.
 static __always_inline bool in_group(const struct cred *cred, __u32 gid)
@@ -78,9 +48,7 @@ static __always_inline bool in_group(const struct cred *cred, __u32 gid)
 	int count = BPF_CORE_READ(groups, ngroups);
 	if (count > MAX_GROUPS)
 		return false;
-	// The array's offset is relocated once (an index into an array of
-	// no declared size is what aya's loader refuses); the index is
-	// arithmetic.
+	// Relocate the array's offset once, then index into it.
 	kgid_t *members = (void *)groups + bpf_core_field_offset(groups->gid);
 	for (int i = 0; i < MAX_GROUPS; i++) {
 		if (i >= count)
@@ -120,23 +88,6 @@ static __always_inline bool uid_mapped(struct user_namespace *ns, __u32 uid)
 	return false;
 }
 
-static __always_inline void record(struct inode *inode, __u32 uid, __u32 owner, __u32 mode, int mask,
-				   enum reason why)
-{
-	struct denial *denial = bpf_ringbuf_reserve(&denials, sizeof(*denial), 0);
-	if (!denial)
-		return;
-	denial->ino = BPF_CORE_READ(inode, i_ino);
-	denial->pid = bpf_get_current_pid_tgid() >> 32;
-	denial->uid = uid;
-	denial->owner = owner;
-	denial->mode = mode;
-	denial->mask = mask;
-	denial->reason = why;
-	bpf_get_current_comm(denial->comm, sizeof(denial->comm));
-	bpf_ringbuf_submit(denial, 0);
-}
-
 // The policy. 0 lets the kernel's decision stand; -EACCES denies.
 static __always_inline int world_write(struct inode *inode, int mask)
 {
@@ -165,13 +116,6 @@ static __always_inline int world_write(struct inode *inode, int mask)
 	struct user_namespace *ns = BPF_CORE_READ(cred, user_ns);
 	if (BPF_CORE_READ(ns, level) > 0 && uid_mapped(ns, owner))
 		return 0;
-	enum reason why = REASON_OTHER;
-	if (bpf_core_field_exists(inode->i_acl)) {
-		struct posix_acl *acl = BPF_CORE_READ(inode, i_acl);
-		if (acl && acl != ACL_NOT_CACHED && acl != ACL_DONT_CACHE)
-			why = REASON_ACL;
-	}
-	record(inode, uid, owner, mode, mask, why);
 	return -EACCES;
 }
 

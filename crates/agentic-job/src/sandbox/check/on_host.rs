@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use super::{Checker, Want, contains};
 use crate::config::Sandbox;
@@ -501,9 +501,8 @@ impl Checker<'_> {
     }
 
     /// Setup attached the BPF program: world-writable paths are still
-    /// there, and a write to one another uid owns is denied, which the
-    /// program records. The control is a world-writable file of the
-    /// user's own.
+    /// there, and a write to one another uid owns is denied. The control
+    /// is a world-writable file of the user's own.
     fn world_write_denied(&mut self, user: &str) -> Result<()> {
         let own = self.sandbox_succeeds(&["sh", "-c", OWN_WORLD_WRITABLE, "sh", &self.canary])?;
         self.report.expect(
@@ -513,31 +512,18 @@ impl Checker<'_> {
             own,
         );
         let canary = world_write::CANARY;
-        let before = std::fs::metadata(canary)
+        let metadata = std::fs::metadata(canary)
             .with_context(|| format!("reading {canary}, which setup leaves"))?;
+        ensure!(
+            metadata.uid() == 0 && metadata.mode() & 0o777 == 0o666,
+            "{canary} must still be root-owned and world-writable for the denial probe"
+        );
         let wrote = self.sandbox_succeeds(&["sh", "-c", APPEND, "sh", canary])?;
         self.report.expect(
             Want::Fail,
             "world-write",
             format!("{user} writes {canary}, root's and world-writable"),
             wrote,
-        );
-        let denials = self.root.world_write_denials()?;
-        let recorded = denials
-            .iter()
-            .any(|denial| denial.ino == before.ino() && denial.uid == self.entry.user().uid);
-        self.report.expect(
-            Want::Succeed,
-            "world-write-denials",
-            format!(
-                "the program recorded the denial ({} denials read, {} of them {user}'s)",
-                denials.len(),
-                denials
-                    .iter()
-                    .filter(|denial| denial.uid == self.entry.user().uid)
-                    .count()
-            ),
-            recorded,
         );
         Ok(())
     }

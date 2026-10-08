@@ -58,7 +58,6 @@ version = "0.0.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
- "aya",
  "chrono",
  "clap",
  "futures",
@@ -147,12 +146,6 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "assert_matches"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
 name = "async-channel"
@@ -248,34 +241,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "aya"
-version = "0.14.0"
-source = "git+https://github.com/cgwalters-bot/aya?rev=acf4dcb4db0b19a0a5e645d0d1fe9dcf79c59eff#acf4dcb4db0b19a0a5e645d0d1fe9dcf79c59eff"
-dependencies = [
- "assert_matches",
- "aya-obj",
- "bitflags 2.13.2",
- "hashbrown 0.17.1",
- "libc",
- "log",
- "object",
- "once_cell",
- "scopeguard",
- "thiserror",
-]
-
-[[package]]
-name = "aya-obj"
-version = "0.3.0"
-source = "git+https://github.com/cgwalters-bot/aya?rev=acf4dcb4db0b19a0a5e645d0d1fe9dcf79c59eff#acf4dcb4db0b19a0a5e645d0d1fe9dcf79c59eff"
-dependencies = [
- "bytes",
- "log",
- "object",
- "thiserror",
-]
 
 [[package]]
 name = "base64"
@@ -428,15 +393,6 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
-name = "crc32fast"
-version = "1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
-dependencies = [
- "cfg-if",
-]
 
 [[package]]
 name = "crossbeam-utils"
@@ -612,12 +568,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -764,10 +714,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "equivalent",
- "foldhash",
-]
 
 [[package]]
 name = "heck"
@@ -991,18 +937,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "object"
-version = "0.39.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
-dependencies = [
- "crc32fast",
- "hashbrown 0.17.1",
- "indexmap 2.14.2",
- "memchr",
 ]
 
 [[package]]
@@ -1299,12 +1233,6 @@ dependencies = [
  "serde_derive_internals",
  "syn 3.0.6",
 ]
-
-[[package]]
-name = "scopeguard"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "semver"
