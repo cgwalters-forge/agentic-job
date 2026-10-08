@@ -39,8 +39,11 @@ When the session ends it kills every process of the sandbox user. What
 
 ## Agents
 
-An agent is an entry of `session/agents.toml`, built into the binary:
-its command, how it is told the model, and whether it takes notices.
+To the session, an agent is an entry of `session/agents.toml`, built into
+the binary: its command, how it is told the model, and whether it takes
+notices. This is not a caller-extensible registry for `run`: `run` also
+has a closed `Kind` enum and agent-specific configuration and launcher
+code. ACP makes the session transport common, not provider setup.
 `claude` is Claude Code through `claude-agent-acp`, `opencode` is
 `opencode acp`, and `fake` is `fake-agent demo`, which plays a recorded
 session and needs no model.
@@ -51,6 +54,78 @@ sandbox user, reads the one file holding the run token, sets the
 agent's environment and becomes the agent. So the binary must be where
 the sandbox user can run it, such as `/usr/local/bin`; `run` checks
 that before it clones.
+
+### Adding an ACP agent to `run`
+
+Paths here are relative to `crates/agentic-job/src/`. Adding a TOML entry
+alone does not make a new `[agent] name` work. Keep provider setup in
+reviewed code: an agent's configuration precedence and alternate login
+paths cannot be secured by assuming it honors a base-URL variable.
+
+First establish the adapter's contract. It must speak ACP on stdio and
+use its own filesystem and terminal tools (the client advertises neither).
+Identify the inference API it speaks, how it takes a base URL and run
+token, and how it selects a model. Check which user, project, environment,
+profile and login settings can override those choices. Determine whether
+a mid-turn `session/prompt` steers the current turn or ends it, and test
+cancellation followed by the hand-back prompt against the actual adapter.
+
+The implementation recipe is:
+
+1. In `session/agents.toml`, add the ACP command and non-secret defaults.
+   Use `model-env` if the adapter selects its model with an environment
+   variable; otherwise the session uses ACP's `session/set_config_option`
+   with the `model` option. Leave `notices` false unless a mid-turn prompt
+   is known to reach the next step without ending the running turn.
+   Registry `env` values go on the wrapped command line: never put a token
+   there, or in `command`.
+2. In `run/agent.rs`, extend `Kind`, its name/parser list and its matches.
+   Choose the proxy API route, declare the one token-bearing home file,
+   implement configuration generation and validation, and decide which
+   instruction files need to be pointed out in the task. If configuration
+   repositories are supported, explicitly select and validate their files;
+   do not copy a directory of plugins or tools. Pin or disable settings
+   that could redirect inference, enable alternate providers or load
+   project configuration. Tokens belong only in the private home file
+   (0600, directory 0700), never root-owned managed settings, argv or logs.
+   If managed settings are needed, provide them through `managed_settings`
+   for `sandbox setup`; `run` cannot write them after hardening.
+3. In `run/launch.rs`, add the sandbox-user launch behavior: read the run's
+   configuration, set only the required environment, and execute the
+   registry command. Extend `KEPT` only for non-secret model settings that
+   must survive filtering. In `session/process.rs`, extend
+   `NOT_INHERITED` for the new agent's provider, credential and configuration
+   variables, so neither the wrapper nor agent inherits ambient settings.
+   Account for configuration-location variables too, while preserving the
+   login session variables needed by rootless containers. The launcher has
+   no privilege or credential the agent lacks; the sandbox and egress
+   policy remain the security boundary.
+
+The current integrations illustrate why the last two steps are code.
+Claude uses `ANTHROPIC_BASE_URL`, a private environment file and managed
+settings that override project provider switches. With the proxy run API,
+it sends a placeholder credential plus the run token in `x-run-token`;
+with token-file registration, the token is the credential itself. Its
+model is `ANTHROPIC_MODEL`, and mid-turn notices are disabled. opencode
+instead gets a single provider's `options.baseURL` and `options.apiKey`
+rewritten in its global JSON configuration; its launcher disables project
+configuration and model fetching. Its model is an ACP session option and
+mid-turn notices are enabled. See [inference.md](inference.md) for the
+proxy modes and routes; an ACP adapter still needs a compatible inference
+API, not just a compatible session protocol.
+
+Extend the table tests beside `run/agent.rs`, `run/launch.rs`,
+`session/agents.rs` and `session/process.rs`. Cover registry/`Kind`
+agreement, model delivery, missing inference, exactly one private token
+file, token-free managed settings and argv, hostile inherited variables,
+and project/configuration overrides. Check `run/probe.rs`'s token-location
+probes for the new file. Review `session/digest.rs`'s subagent tool and cost
+interpretation so task and spending limits remain meaningful. Exercise
+permission requests, notices, cancellation, limits and cleanup through
+the scripted session tests, then verify the real adapter in the sandbox
+with the proxy: generated-config tests alone are not deployment evidence.
+Install the agent and adapter where the sandbox user can execute them,
+and document the tested versions and results before claiming support.
 
 ## Limits
 

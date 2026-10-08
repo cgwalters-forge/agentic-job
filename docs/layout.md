@@ -73,8 +73,8 @@ and cost interpretation. See `run/agent.rs`, `run/launch.rs`,
 Task limits depend on recognizing the agent's subagent tool names.
 Spending limits depend on reported ACP usage; request limits depend on
 the inference proxy. Test these against the actual adapter, not only
-generated configuration. Registry cleanup is tracked in
-[#60](https://github.com/cgwalters-forge/agentic-job/issues/60).
+generated configuration. The [agent-extension recipe](harness.md#adding-an-acp-agent-to-run)
+lists the files to change, the adapter contract and the security tests.
 
 ## Other directories
 
