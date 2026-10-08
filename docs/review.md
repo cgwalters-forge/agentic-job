@@ -57,8 +57,8 @@ currently require a `called_workflows` entry for this reusable workflow.
 `cgwalters-forge/tracker#452` tracks narrowing that policy again. This broader
 broker admission does not replace review event admission or sandbox isolation.
 This is the operator's deployment choice as of 2026-10-08, not a claim that
-workflow-specific proxy admission is enforced. Restoring that restriction would
-require replacing `any_workflow` with `called_workflows` pinned to the reviewed
+workflow-specific proxy admission is enforced. Before enabling a real reviewer,
+restore that restriction by replacing `any_workflow` with `called_workflows` pinned to the reviewed
 reusable workflow's `job_workflow_sha`, and verifying registration accepts that
 identity and refuses other workflows. The identity-token requirement remains.
 The operator must also select a disposable
@@ -158,5 +158,74 @@ it to instructions; the test must distinguish those cases. Include a trusted
 base instruction as a positive control so an empty or broken capture cannot
 pass. Record which project, parent, Git-root and home loaders are disabled or
 redirected, and test that the sandbox user cannot modify their trusted sources.
-No such real-runtime request capture or immutable instruction source is provided
-by the current scripted tests; neither refusal should be removed on their basis.
+The scripted tests provide neither request capture nor an immutable instruction
+source; neither refusal should be removed on their basis.
+
+### Real-runtime counterexample
+
+`workflow/review-runtime.test.cjs` now exercises the production launcher against
+opencode **1.18.31**, the version available on the development runner. This is an
+evidence-test version check, **not a review admission pin**. Run it explicitly:
+
+```sh
+cargo build --locked
+AGENTIC_JOB_TEST_REAL_OPENCODE=1 node --test workflow/review-runtime.test.cjs
+```
+
+Without the opt-in variable the test is skipped, not proof of isolation. The
+runtime must be on PATH; `AGENTIC_JOB_TEST_LAUNCHER` can name a built agentic-job
+binary. Its home and both checkouts are disposable fixtures. A loopback mock
+inference endpoint records every model request and returns deterministic `read`
+tool calls; no real inference service, model judgement or credential is used.
+The test requires a trusted global instruction positive control, both data-file
+contents in subsequent requests, and absence of distinct hostile head AGENTS.md,
+CLAUDE.md, nested AGENTS.md, opencode.json, commands and skills canaries. It also
+checks home Claude instructions and external skills are absent. It does not
+explicitly read the hostile instruction files as data.
+
+**The passing test proves a counterexample, not safe admission.** Started in a
+non-prefix sibling base, the head canaries are absent from the captured requests.
+But reading a base subdirectory data file promotes the adjacent writable
+`AGENTS.md` into `Instructions from:` context in a later model request. The
+fixture represents text a head-steered agent could write there; it does not
+assert an immutable base or run the privileged sandbox. The production review
+session still starts in the head and remains fake-only. The test intentionally
+fails if the counterexample stops being exercised, so a future runtime fix needs
+an explicit test update rather than silently changing the admission evidence.
+
+The launcher's existing project-config and model-fetch switches now also disable
+external skills, Claude-code fallback instructions, default plugins and automatic
+updates. These suppress independent automatic sources, not the read resolver.
+For the source evidence, see
+[1.18.31 instruction.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/session/instruction.ts)
+and [config.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/config.ts),
+and the 1.2.3 investigation above. Both instruction resolvers walk from a read
+file toward the instance directory without consulting the project-config switch.
+The 1.2.3
+[skill loader](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/skill/skill.ts)
+separately scans project/ancestor and home `.claude/skills` and `.agents/skills`
+unless external skills are disabled; native skills still use config directories.
+Its [tool registry](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/tool/registry.ts)
+also imports custom tools from those directories.
+
+Neither switch set is a complete redirect of all automatic sources. Global
+config (`config.json`, `opencode.json`, `opencode.jsonc`, legacy `config`), home
+`.opencode`, custom profiles/config directories, native skills, agents, modes,
+commands, plugins and custom tools still need managed, immutable sources.
+Configuration can reference instructions, skill paths/URLs and file substitutions;
+auth state can select remote well-known configuration, and managed `/etc/opencode`
+configuration also participates. The newer config loader additionally reads
+active-account organization configuration. A complete audit of the newer skill,
+plugin, tool and configuration-path implementations remains outstanding; this
+request capture is not that audit.
+
+To lift opencode's refusal, pin and verify one installed runtime, bind the base
+checkout to the admitted base SHA, start the session there with the head path in
+the standing task, and make the base, Git metadata and all managed automatic
+sources immutable to the sandbox user, including their parent directories.
+Alternatively the runtime needs a comprehensive switch that suppresses dynamic
+instruction resolution as well as discovery. Extend the context test to prove
+that a sandbox user's writes cannot introduce instructions, cover all redirected
+sources and tool-read turns, and only then change both admission gates. No workflow
+permissions, token placement, action pins or admission gates changed here. Claude
+remains refused separately. This change does not close #154.
