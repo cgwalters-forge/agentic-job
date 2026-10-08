@@ -430,8 +430,17 @@ in the same run, after its first attempt pushed, stops at the branch
 that is already there.
 
 Both the trial and the handler keep a carriage return at the end of a
-line (`am.keepcr`), for patches to files with CRLF line ends. No such
-patch has been applied by this job yet.
+line (`am.keepcr`), for patches to files with CRLF line ends.
+`node --test workflow/apply.test.cjs` exercises the workflow's actual
+shell steps locally, including CRLF preservation, Unicode paths, file-list
+mismatches, unrelated bases and a rename into a protected path. File-list
+extraction failures stop the trial; Git's path quoting is disabled for
+the comparison, since `check` rejects control characters in paths.
+
+The separately dispatched `safe-outputs-probe.yml` predates these guards
+and does not yet exercise them. Its fixture-only handler path still needs
+the same checker report, fetched-base ancestry check and trial comparison
+before it can serve as evidence for these protections.
 
 The patch's `From:` line is not proof of anything: `check` holds it to
 nothing ([#22](https://github.com/cgwalters-forge/agentic-job/issues/22)),
