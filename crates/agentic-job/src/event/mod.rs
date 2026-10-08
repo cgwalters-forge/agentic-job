@@ -20,6 +20,7 @@
 //! context, with one difference: the text is fenced.
 
 mod context;
+mod guards;
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -139,6 +140,9 @@ pub struct Args {
     /// only where forks are
     #[arg(long, value_name = "FILE")]
     pub pull_request: Option<PathBuf>,
+    /// Complete, workflow-scoped run history for the configured guard windows
+    #[arg(long, value_name = "FILE")]
+    pub run_history: Option<PathBuf>,
     /// The caller's own task text, put before the event's
     #[arg(long, value_name = "FILE")]
     pub task: Option<PathBuf>,
@@ -167,6 +171,15 @@ pub struct Trigger {
     /// every comment event needs.
     #[serde(default)]
     pub commands: Vec<String>,
+    /// RFC 3339 deadline, inclusive: no run starts at or after it.
+    #[serde(default, rename = "stop-after")]
+    pub stop_after: Option<String>,
+    /// Minimum seconds between workflow runs.
+    #[serde(default)]
+    pub cooldown: Option<u32>,
+    /// Maximum workflow runs per actor in a rolling 24-hour window.
+    #[serde(default, rename = "max-runs-per-user")]
+    pub max_runs_per_user: Option<u32>,
 }
 
 fn default_roles() -> Vec<String> {
@@ -176,6 +189,7 @@ fn default_roles() -> Vec<String> {
 impl Trigger {
     /// Refuse a table that cannot mean what it says.
     pub fn validate(&self) -> Result<()> {
+        guards::validate(self)?;
         for event in &self.events {
             if !EVENTS.contains(&event.as_str()) {
                 bail!("[trigger] events: {event:?} is not one of {EVENTS:?}");
@@ -367,7 +381,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             String::from_utf8(bytes).with_context(|| format!("{}: not UTF-8", path.display()))
         })
         .transpose()?;
-    let outcome = decide(&Input {
+    let mut outcome = decide(&Input {
         trigger,
         event_name: &args.event_name,
         payload: &payload,
@@ -376,6 +390,13 @@ pub fn run(args: &Args) -> Result<Exit> {
         permission: permission.as_ref(),
         pull_request: pull_request.as_ref(),
     });
+    if outcome.decision.admitted
+        && let Some(reason) = guards::check(trigger, args.run_history.as_deref(), &args.actor)?
+    {
+        outcome.decision.admitted = false;
+        outcome.decision.reason = reason;
+        outcome.text = Text::default();
+    }
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
     // The task first and the decision last, so that a decision that says
@@ -853,6 +874,9 @@ mod tests {
             bots: vec![],
             forks: false,
             commands: commands.iter().map(|c| c.to_string()).collect(),
+            stop_after: None,
+            cooldown: None,
+            max_runs_per_user: None,
         }
     }
 

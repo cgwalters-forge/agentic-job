@@ -48,6 +48,28 @@ fn policy(allow: &Path, change: &[(&str, &str)]) -> Output {
 }
 
 #[test]
+fn organization_bounds_cli() {
+    for (file, code) in [("allow.toml", 0), ("absent.toml", 2)] {
+        let output = Command::new(BIN)
+            .arg("policy")
+            .arg("--allow")
+            .arg(data("allow.toml"))
+            .arg("--org-allow")
+            .arg(data(file))
+            .args(REQUEST.iter().flat_map(|(flag, value)| [*flag, *value]))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.is_empty(), code != 0);
+    }
+}
+
+#[test]
 fn a_request_within_the_bounds_prints_its_policy() {
     let output = policy(&data("allow.toml"), &[]);
     assert_eq!(

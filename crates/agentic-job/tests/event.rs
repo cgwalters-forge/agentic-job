@@ -9,6 +9,87 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+#[test]
+fn run_history_cli() {
+    for (name, history, code) in [
+        ("missing flag", None, 1),
+        ("missing file", Some("missing"), 2),
+        ("malformed", Some("{"), 2),
+        (
+            "unannotated",
+            Some(
+                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":1,"workflow_runs":[{"id":2,"workflow_id":1,"actor":{"login":"alice"}}]}"#,
+            ),
+            2,
+        ),
+        (
+            "empty",
+            Some(
+                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":0,"workflow_runs":[]}"#,
+            ),
+            0,
+        ),
+        (
+            "started",
+            Some(
+                r#"{"coverage":"admitted_starts","workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":1,"workflow_runs":[{"id":2,"workflow_id":1,"actor":{"login":"alice"},"admission":{"status":"started","started_at":"2999-01-01T00:00:00Z"}}]}"#,
+            ),
+            1,
+        ),
+        (
+            "creation-only empty history",
+            Some(
+                r#"{"workflow_id":1,"current_run_id":10,"since":"2000-01-01T00:00:00Z","total_count":0,"workflow_runs":[]}"#,
+            ),
+            2,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("allow.toml");
+        std::fs::write(
+            &allow,
+            format!(
+                "{}\ncooldown = 600\n",
+                std::fs::read_to_string(data("allow.toml")).unwrap()
+            ),
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let mut command = Command::new(BIN);
+        command
+            .arg("event")
+            .arg("--allow")
+            .arg(&allow)
+            .args([
+                "--event-name",
+                "schedule",
+                "--actor",
+                "alice",
+                "--repository",
+                "octo/repo",
+            ])
+            .arg("--event")
+            .arg(data("schedule.json"))
+            .arg("--out")
+            .arg(&out);
+        if let Some(contents) = history {
+            let path = dir.path().join("history.json");
+            if contents != "missing" {
+                std::fs::write(&path, contents).unwrap();
+            }
+            command.arg("--run-history").arg(path);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(out.join("task.md").exists(), code == 0, "{name}");
+    }
+}
+
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/event")

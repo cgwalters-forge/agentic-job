@@ -113,6 +113,22 @@ request the file does not cover. So a workflow that takes those from
 whoever dispatches it is still bounded by a file that changes only by a
 commit.
 
+For a custom trusted policy job (CLI groundwork only), an organization
+wrapper can pin a reusable workflow under
+`uses: ORG/.github/.github/workflows/agentic-job.yml@COMMIT` and supply a
+second trusted bounds file to `agentic-job policy --org-allow FILE`.
+The command checks the request independently against both files, then
+takes the lower output and patch caps, the common output types, and the
+union of protected file names. Neither file can widen the other. Explicit
+requests outside either file are refused; `all`/`max` takes the intersection.
+This intersects output policies, not `[trigger]` tables: organization
+trigger admission must be checked separately with `event`. The reusable
+workflow does not yet expose or fetch an organization bounds file; the
+existing policy job cannot be extended by a wrapper merely fetching a file.
+A custom policy job must fetch it from a trusted pinned ref before policy
+evaluation. Reusable-workflow input and invocation wiring remain part of #118;
+the built-in reusable workflow does not support organization bounds yet.
+
 **A configuration file** (`config`) for what depends on the runner
 image and not on the run: the services `sandbox setup` stops, the local
 sockets `sandbox check` accepts, the egress rules, who the hand-back's
