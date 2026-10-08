@@ -11,7 +11,7 @@ that denies the write instead of the walk removing the bit. It is on a
 branch, not wired into a release.
 
 The headline: it works, on both target systems, by two different kernel
-mechanisms; the program is small and the loader is Rust; but owning
+mechanisms; the program is small and loading is delegated to bpftool; but owning
 kernel-facing code and the pin's lifecycle are real costs, and the walk
 is cheaper to keep than it first looks. The recommendation is at the end.
 
@@ -43,9 +43,9 @@ Holes considered and handled: character/block devices, Unix sockets (the
 system bus, journald, the egress proxy) and fifos are excluded by inode
 type; sticky world-writable directories by the sticky bit; procfs and
 sysfs writes are not `MAY_WRITE` on a world-writable regular inode the
-way the rule means; ACLs are recorded (the hook runs after DAC, so an ACL
+way the rule means; ACLs do not bypass the policy (the hook runs after DAC, so an ACL
 grant would already have passed, and the walk would have taken the other
-bit off anyway, so denying is correct and the record notes it); hard
+bit off anyway, so denying is correct); hard
 links are covered because the check is on the target inode; idmapped and
 overlay mounts inside the userns are covered by the userns-mapping
 exemption. Writes through an already-open fd (`write(2)`, `mmap`,
@@ -99,7 +99,7 @@ Other host-wide options on Ubuntu, each rejected:
 - **idmapped / read-only bind mounts of `/`** would change what every
   step sees and break writes the job legitimately makes. Rejected.
 
-## Rust
+## Toolchain
 
 The question "could we write it in Rust?" has two halves.
 
@@ -115,32 +115,34 @@ program is 180 lines with a hand-written minimal `vmlinux` header
 declaring only the members it reads; `clang -target bpf` builds it with no
 nightly. `bpf/world_write.bpf.c` and `bpf/vmlinux_min.h`.
 
-**The loader (userspace side): Rust with aya, mostly.** `aya` is pure Rust
-over the `bpf` syscall (no C, builds for musl), loads the object, applies
-the CO-RE relocations from `/sys/kernel/btf/vmlinux`, attaches the
-program, and reads the ring buffer of denials. All of that is proven in
-this spike on both kernels. Two gaps:
+**Loading (userspace side): bpftool alone.** There is no Rust BPF loader,
+aya fork or denial ring buffer. Setup invokes `bpftool prog loadall OBJECT
+/sys/fs/bpf/agentic-job/links autoattach`, then proves that an actual
+non-root write is refused after bpftool exits. No maps need pinning.
+The current object has two entry points, so this uses `loadall`, not
+`load`, and attaches both: `Hook` specifies a host prerequisite check,
+not a program selector. Even `--hook lsm` attaches modify-return, which can
+deny before the LSM executes. The CLI therefore reports a **combined-policy**
+probe, not proof of either hook independently. Selection of just one entry
+point and independent enforcement coverage remain unfinished. Pin presence
+is only a status hint, never enforcement proof.
 
-- aya has no `fmod_ret` program type. This spike uses a fork
-  (`cgwalters-bot/aya`, branch `bot/fmod-ret`) that adds `FModRet`
-  mirroring `FEntry`; it is small and upstreamable.
-- aya's link pin (`BPF_OBJ_PIN` on the attachment) is **refused with
-  EPERM on both 6.12 and 7.0**, and an LSM link cannot be detached
-  (`link detach` returns "not supported"). bpftool pins the *programs*
-  fine, and the pinned programs hold the attachment, so the loader falls
-  back to `bpftool prog loadall ... autoattach pinmaps` for the pin step
-  and reads the denials with aya. So the loader is Rust except for that one
-  `bpftool` call. Rooting out the EPERM (it is not SELinux: it reproduces
-  under permissive) and giving aya a working link pin would make it pure
-  Rust; that is unfinished.
+Hosts need bpftool, mounted bpffs, kernel BTF and root for setup, not clang
+or a Rust loader. RHEL 10 uses the `bpftool` RPM; the Ubuntu 26.04 spike
+workflow explicitly installs the `bpftool` package and `libbpf-dev`/clang
+for compilation. This does not establish that bpftool is preinstalled on
+the hosted image. Build the external object with:
 
-Recommendation on the toolchain: C for the program, built by `clang` at
-setup or shipped prebuilt and embedded (no toolchain on the runner then);
-aya for the loader, with the fork's `fmod_ret` support and the pin either
-fixed in aya or delegated to `bpftool` (present on both runner images via
-`bpftool`/`linux-tools`). libbpf-rs or plain C+libbpf are the alternatives;
-they handle `fmod_ret` and `lsm` natively but pull in a C build and a
-harder static-musl story, and give up aya's type-safe Rust loader.
+```sh
+clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -Wall -Werror -c crates/agentic-job/bpf/world_write.bpf.c -o world_write.bpf.o
+```
+
+The release pipeline still needs to build this object once and publish it
+beside the binary. The runner performing this rework cannot modify CI or
+release workflows, fetch bpftool/libbpf source, or load BPF as root.
+Source verification of autoattach dispatch and the actual pinned link
+types on 6.12 and 7.0 remains required; the earlier claim that autoattach
+pins programs rather than links must not be treated as established.
 
 ## Operational findings
 
@@ -160,16 +162,15 @@ harder static-musl story, and give up aya's type-safe Rust loader.
   "the agent is blocked", it is "the host is unusable for root too".
 - **Detach is removing the pin directory**, after an RCU grace period;
   there is no `link detach` for LSM links.
-- **Observability**: a ring buffer records every denial (inode, pid, uid,
-  owner, mode, mask, reason, comm); `sandbox world-write denials` (and the
-  `world-write-denials` helper op) drains it as JSON lines, for the probes
-  and the run summary.
+- **No observability API**: enforcement is proved by a plain write, not
+  by reading a denial log.
 - **`sandbox check`** reads which mode setup left (`/etc/agentic-job/world-write`)
   and probes accordingly: with the program, the world-writable paths are
   still present, so the probe is that writing one of root's is denied, the
-  user's own is not, and the denial was recorded.
+  user's own is not. It first checks that the denied target is still
+  root-owned and world-writable.
 
-## Measured
+## Historical measurements (before the bpftool-only rework)
 
 **The mechanism is fast.** On RHEL 10.2 (`cgwalters-devspace-37644059642`,
 6.12.0-211.16.1.el10_2), built with `clang` 21.1.8, loaded and attached
@@ -204,9 +205,10 @@ also take over the setuid-root protection so that no full traversal is
 needed at all, which is a larger piece of work and a second kernel policy
 to own.
 
-Both kernels' results are reproduced by the `spike-world-write` CI
-workflow (ubuntu, one machine per mode) and the RHEL devspace run above;
-links are on #108.
+These are the original spike's results, not new timings for this change.
+The `spike-world-write` workflow still needs its final denial-helper step
+removed, since that API no longer exists. Both modes must be rerun in CI
+and new timings collected; RHEL attachment also needs a privileged host.
 
 ## Recommendation
 
