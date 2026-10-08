@@ -1,6 +1,6 @@
 // The network rules and the egress proxy's files against the old tree's.
 //
-// The ruleset `sandbox setup` loads must be, text for text, what the old
+// Except for resolver-scoped proxy DNS, the ruleset must be what the old
 // tree's setup-runner-sandbox.mjs generates for the same uids, direct
 // endpoints and proxy uid. That script cannot be imported (it runs as it
 // loads), so its constants and its two functions are cut out of its
@@ -57,9 +57,32 @@ for (const [uids, direct, proxy] of CASES) {
       ...(proxy === undefined ? [] : ["--proxy-uid", String(proxy)])];
     const r = spawnSync(AGENTIC_JOB, args, { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout, old.sandboxRules(uids, direct.map(old.tailnetEndpoint), proxy));
+    // Intentional security difference: no blanket DNS exception. With no
+    // --resolver, even public DNS destinations must be rejected.
+    const expected = old.sandboxRules(uids, direct.map(old.tailnetEndpoint), proxy)
+      .replace(`meta skuid ${proxy} meta l4proto { tcp, udp } th dport 53 accept`,
+        `meta skuid ${proxy} meta l4proto { tcp, udp } th dport 53 counter reject`);
+    assert.equal(r.stdout, expected);
   });
 }
+
+test("proxy DNS exceptions name only supplied resolver literals", () => {
+  const args = ["sandbox", "nft-rules", "--uid", "1002", "--proxy-uid", "993",
+    "--resolver", "10.0.0.2", "--resolver", "2001:db8::53"];
+  const r = spawnSync(AGENTIC_JOB, args, { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const blanket = "meta skuid 993 meta l4proto { tcp, udp } th dport 53 accept";
+  const scoped = [
+    "meta skuid 993 ip daddr 10.0.0.2 meta l4proto { tcp, udp } th dport 53 accept",
+    "meta skuid 993 ip6 daddr 2001:db8::53 meta l4proto { tcp, udp } th dport 53 accept",
+    "meta skuid 993 meta l4proto { tcp, udp } th dport 53 counter reject",
+  ].join("\n    ");
+  const baseline = old.sandboxRules(["1002"], [], 993);
+  assert.ok(baseline.includes(blanket));
+  assert.equal(r.stdout, baseline.replace(blanket, scoped));
+  const bad = spawnSync(AGENTIC_JOB, [...args, "--resolver", "10.0.0.2;accept"], { encoding: "utf8" });
+  assert.equal(bad.status, 2);
+});
 
 test("both refuse what is not a tailnet endpoint", () => {
   for (const url of ["http://10.0.0.1:80", "http://proxy.example:18080", "ftp://100.101.102.103", "http://100.128.0.1"]) {

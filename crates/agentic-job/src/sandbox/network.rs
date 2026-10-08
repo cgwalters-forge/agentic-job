@@ -1,8 +1,8 @@
 //! The network rules: nftables, keyed on the sandbox user's uid and on
 //! its subordinate uids, so that containers it starts are covered.
 //!
-//! The ruleset is the old tree's (`setup-runner-sandbox.mjs`), text for
-//! text; a corpus test in CI holds the two together. The sandbox user's
+//! The ruleset follows the old tree's (`setup-runner-sandbox.mjs`), except
+//! proxy DNS is restricted to configured resolvers. The sandbox user's
 //! uids reach no cloud metadata service and, with direct endpoints
 //! configured, nothing on the tailnet but those. With the egress proxy
 //! they reach nothing else at all but loopback, where the proxy listens,
@@ -14,7 +14,7 @@
 //! rules for the runner, which are the real control there.
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::process::Command;
 
@@ -164,6 +164,26 @@ pub fn tailnet_resolvers(resolv_conf: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Parse only literal resolver addresses, never interpolate resolver-file
+/// text into nft syntax. Malformed nameserver directives fail closed.
+pub fn resolvers(resolv_conf: &str) -> Result<Vec<IpAddr>> {
+    let mut addresses = Vec::new();
+    for line in resolv_conf.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("nameserver") {
+            continue;
+        }
+        let address = words.next().context("nameserver without an address")?;
+        let address = address
+            .parse::<IpAddr>()
+            .with_context(|| format!("invalid nameserver address {address:?}"))?;
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    Ok(addresses)
+}
+
 /// The direct endpoints of the configuration.
 pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
     egress.direct.iter().map(|url| Direct::parse(url)).collect()
@@ -173,6 +193,17 @@ pub fn direct(egress: &Egress) -> Result<Vec<Direct>> {
 /// subordinate ranges as `START-END`). Rejected rather than dropped, so
 /// a blocked connection fails at once.
 pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> String {
+    rules_with_resolvers(uids, direct, proxy_uid, &[])
+}
+
+/// DNS exceptions apply only to these resolver addresses. All other DNS
+/// destinations are rejected, including otherwise public addresses.
+pub fn rules_with_resolvers(
+    uids: &[String],
+    direct: &[Direct],
+    proxy_uid: Option<u32>,
+    resolvers: &[IpAddr],
+) -> String {
     let allowed: Vec<String> = direct.iter().map(Direct::element).collect();
     let (tailnet_set, tailnet_rules) = if allowed.is_empty() {
         (String::new(), String::new())
@@ -192,6 +223,10 @@ pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> Stri
         )
     };
     let egress_rules = proxy_uid.map_or_else(String::new, |proxy| {
+        let dns = resolvers.iter().map(|address| {
+            let family = if address.is_ipv4() { "ip" } else { "ip6" };
+            format!("\n    meta skuid {proxy} {family} daddr {address} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} accept")
+        }).collect::<String>();
         format!(
             "
     meta skuid @sandbox_uids oifname \"lo\" meta l4proto {{ tcp, udp }} th dport {DNS_PORT} counter reject
@@ -201,8 +236,8 @@ pub fn rules(uids: &[String], direct: &[Direct], proxy_uid: Option<u32>) -> Stri
     meta skuid {proxy} ct state established,related accept
     meta skuid {proxy} oifname \"{TAILSCALE_IF}\" counter reject
     meta skuid {proxy} ip daddr {TAILNET_V4} counter reject
-    meta skuid {proxy} ip6 daddr {TAILNET_V6} counter reject
-    meta skuid {proxy} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} accept
+    meta skuid {proxy} ip6 daddr {TAILNET_V6} counter reject{dns}
+    meta skuid {proxy} meta l4proto {{ tcp, udp }} th dport {DNS_PORT} counter reject
     meta skuid {proxy} ip daddr {{ {} }} counter reject
     meta skuid {proxy} ip6 daddr {{ {} }} counter reject",
             PROXY_DENIED_V4.join(", "),
@@ -339,7 +374,7 @@ table inet runner_sandbox {
     meta skuid 993 oifname "tailscale0" counter reject
     meta skuid 993 ip daddr 100.64.0.0/10 counter reject
     meta skuid 993 ip6 daddr fd7a:115c:a1e0::/48 counter reject
-    meta skuid 993 meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid 993 meta l4proto { tcp, udp } th dport 53 counter reject
     meta skuid 993 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3, 168.63.129.16 } counter reject
     meta skuid 993 ip6 daddr { ::1/128, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8 } counter reject
   }
@@ -371,6 +406,52 @@ table inet runner_sandbox {
             ["100.100.100.100", "fd7a:115c:a1e0::53"]
         );
         assert!(tailnet_resolvers("nameserver 10.0.0.2\noptions edns0\n").is_empty());
+    }
+
+    #[test]
+    fn resolver_file_addresses() {
+        for (text, expected) in [
+            ("# comment\nsearch example.org\n", vec![]),
+            (
+                "nameserver 10.0.0.2 # local\nnameserver 10.0.0.2\nnameserver ::1\n",
+                vec!["10.0.0.2", "::1"],
+            ),
+        ] {
+            let got = resolvers(text).unwrap();
+            assert_eq!(
+                got.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                expected
+            );
+        }
+        for text in [
+            "nameserver",
+            "nameserver example.org",
+            "nameserver 10.0.0.2;accept",
+            "nameserver fe80::1%eth0",
+        ] {
+            assert!(resolvers(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn dns_exceptions_are_scoped_and_below_tailnet_denial() {
+        let addresses = resolvers("nameserver 10.0.0.2\nnameserver 2001:db8::53\n").unwrap();
+        let rules = rules_with_resolvers(&["1002".into()], &[], Some(993), &addresses);
+        let tailnet = rules
+            .find("ip6 daddr fd7a:115c:a1e0::/48 counter reject")
+            .unwrap();
+        let reject = rules
+            .find("meta skuid 993 meta l4proto { tcp, udp } th dport 53 counter reject")
+            .unwrap();
+        let private = rules.find("meta skuid 993 ip daddr { 0.0.0.0/8").unwrap();
+        for (family, address) in [("ip", "10.0.0.2"), ("ip6", "2001:db8::53")] {
+            let accept = rules.find(&format!("meta skuid 993 {family} daddr {address} meta l4proto {{ tcp, udp }} th dport 53 accept")).unwrap();
+            assert!(tailnet < accept && accept < reject && reject < private);
+        }
+        assert!(!rules.contains("th dport 53 accept\n    meta skuid 993 ip daddr {"));
+        assert!(
+            !rules_with_resolvers(&["1002".into()], &[], None, &addresses).contains("dport 53")
+        );
     }
 
     #[test]

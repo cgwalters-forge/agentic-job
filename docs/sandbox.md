@@ -92,9 +92,11 @@ reached without the proxy, each an IPv4 address and port on the tailnet;
 it is for the [inference proxy](inference.md), so that the run token
 never crosses the egress proxy. With any, the rest of the tailnet is
 rejected by name as well. The proxy's own uid is rejected on the tailnet
-and on private, loopback and link-local addresses, except for port 53,
-which it may open on any address off the tailnet
-([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)). The loaded text stays
+and on private, loopback and link-local addresses, except for TCP and UDP
+port 53 at literal resolvers read from `/etc/resolv.conf` during setup.
+New connections to other DNS destinations, including public ones, are rejected.
+The existing established/related-connection exception is unchanged. Tailnet
+denials precede these exceptions. The loaded text stays
 in `/etc/agentic-job/rules.nft`.
 
 The design follows a suggestion cgwalters made for the gh-aw fork
