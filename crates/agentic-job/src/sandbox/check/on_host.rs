@@ -17,7 +17,7 @@ use crate::config::Sandbox;
 use crate::sandbox::enter::OIDC_REQUEST_VARS;
 use crate::sandbox::local::{ABSTRACT_PREFIX, Reached};
 use crate::sandbox::setup::{self, SELF_COPY};
-use crate::sandbox::{egress, host, network};
+use crate::sandbox::{egress, host, network, world_write};
 
 /// A variable of a process of the runner's, standing in for the tokens in
 /// the environments of real job steps.
@@ -47,6 +47,13 @@ const TAILSCALE_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 const LOCALAPI_STATUS: &str = "http://local-tailscaled.sock/localapi/v0/status";
 
 const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
+
+/// Makes a world-writable file of the user's own in its home, and writes
+/// it: the control of the world-write probe.
+const OWN_WORLD_WRITABLE: &str = r#"f="$HOME/$1-world-writable" && echo x > "$f" && chmod 666 "$f" && echo y >> "$f" && rm -f "$f""#;
+
+/// Appends to the file named.
+const APPEND: &str = r#"echo probe >> "$1""#;
 
 /// Unix sockets every host offers its users, and which answer by who is
 /// asking: the system bus, the journal, the user database, PID 1's
@@ -428,6 +435,29 @@ impl Checker<'_> {
             );
         }
 
+        match world_write::Mode::on_host()? {
+            world_write::Mode::Walk => self.world_write_walked(&user)?,
+            world_write::Mode::Lsm => self.world_write_denied(&user)?,
+        }
+
+        self.setuid_programs()?;
+
+        let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
+        self.report.expect(
+            Want::Succeed,
+            "ptrace-scope",
+            format!(
+                "ptrace is restricted to descendants or more ({PTRACE_SCOPE} is {})",
+                scope.trim()
+            ),
+            scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
+        );
+        Ok(())
+    }
+
+    /// Setup walked: nothing outside the temporary directories is
+    /// world-writable any more.
+    fn world_write_walked(&mut self, user: &str) -> Result<()> {
         // The control is a directory of ours that any user may write,
         // found by the same search the probe makes.
         let open_dir = PathBuf::from(format!("/tmp/agentic-job-{}", self.canary));
@@ -441,7 +471,7 @@ impl Checker<'_> {
             argv.extend(setup::world_writable_find(root));
             // Not its own: what it made world-writable itself, in its
             // home, gives it nothing.
-            argv.extend(["!", "-user", user.as_str(), "-print", "-quit"].map(str::to_owned));
+            argv.extend(["!", "-user", user, "-print", "-quit"].map(str::to_owned));
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             // find also fails for what it may not read; what it printed counts.
             let output = self.sandbox(&argv, b"")?;
@@ -467,18 +497,47 @@ impl Checker<'_> {
             },
             !found.is_empty(),
         );
+        Ok(())
+    }
 
-        self.setuid_programs()?;
-
-        let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
+    /// Setup attached the BPF program: world-writable paths are still
+    /// there, and a write to one another uid owns is denied, which the
+    /// program records. The control is a world-writable file of the
+    /// user's own.
+    fn world_write_denied(&mut self, user: &str) -> Result<()> {
+        let own = self.sandbox_succeeds(&["sh", "-c", OWN_WORLD_WRITABLE, "sh", &self.canary])?;
         self.report.expect(
             Want::Succeed,
-            "ptrace-scope",
+            "world-write-control",
+            format!("{user} writes a world-writable file of its own (control)"),
+            own,
+        );
+        let canary = world_write::CANARY;
+        let before = std::fs::metadata(canary)
+            .with_context(|| format!("reading {canary}, which setup leaves"))?;
+        let wrote = self.sandbox_succeeds(&["sh", "-c", APPEND, "sh", canary])?;
+        self.report.expect(
+            Want::Fail,
+            "world-write",
+            format!("{user} writes {canary}, root's and world-writable"),
+            wrote,
+        );
+        let denials = self.root.world_write_denials()?;
+        let recorded = denials
+            .iter()
+            .any(|denial| denial.ino == before.ino() && denial.uid == self.entry.user().uid);
+        self.report.expect(
+            Want::Succeed,
+            "world-write-denials",
             format!(
-                "ptrace is restricted to descendants or more ({PTRACE_SCOPE} is {})",
-                scope.trim()
+                "the program recorded the denial ({} denials read, {} of them {user}'s)",
+                denials.len(),
+                denials
+                    .iter()
+                    .filter(|denial| denial.uid == self.entry.user().uid)
+                    .count()
             ),
-            scope.trim().parse::<u32>().is_ok_and(|scope| scope >= 1),
+            recorded,
         );
         Ok(())
     }

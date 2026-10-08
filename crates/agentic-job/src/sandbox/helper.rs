@@ -35,6 +35,7 @@ use super::egress;
 use super::enter::{Entry, RUN0};
 use super::host::{self, User};
 use super::setup::SELF_COPY;
+use super::world_write;
 use crate::config::{self, Config};
 use crate::exit::Exit;
 use crate::run::egress::ACCESS_LOG;
@@ -101,6 +102,8 @@ pub enum Op {
     DisableLinger,
     /// Remove the sandbox user's crontab, after a probe installed one
     CrontabRemove,
+    /// Print the writes the world-write program denied since last read, as JSON lines
+    WorldWriteDenials,
 }
 
 pub fn run(op: &Op) -> Result<Exit> {
@@ -136,6 +139,7 @@ pub fn run(op: &Op) -> Result<Exit> {
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
         Op::DisableLinger => passthrough(&exec, &["loginctl", "disable-linger", "--", &user.name]),
         Op::CrontabRemove => passthrough(&exec, &["crontab", "-r", "-u", &user.name]),
+        Op::WorldWriteDenials => world_write::print_denials(),
     }
 }
 
