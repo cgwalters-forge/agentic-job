@@ -319,6 +319,44 @@ the branch was pushed; nothing in `made` stands for it then.
 The workflow's outputs are `exit` (the exit state of `run`),
 `pull-request` and `applied-artifact-id`.
 
+### Auditing downloaded artifacts
+
+Download `agent-run`, `safe-outputs`, `checked-outputs` and, when available,
+`check-diagnostics` into directories
+of those names under one directory, then run `agentic-job audit DIR`.
+For a local `run --out DIR`, the summary is read from `DIR/run` instead.
+An artifact downloaded flat is also accepted. With a custom artifact
+prefix, name the local directories as above.
+
+The audit also accepts a separate, diagnostics-only `check-diagnostics`
+artifact, produced by `node safe-outputs/diagnostics.mjs SOURCE DESTINATION`.
+It contains
+bounded collector errors (`agent_output.json`) and, if the policy check ran,
+its verdict and errors (`report.json`). Requests and patches are omitted.
+The successful `checked-outputs` artifact takes precedence when both exist;
+diagnostics are never input to apply. Publication requires workflow steps
+that run after either refusal gate fails; without that wiring, refusal
+evidence may be missing even after all available artifacts have been
+downloaded.
+
+The audit reports tool call counts and errors, proxy and permission
+denials, raw handed-back requests, collector refusals, the policy check's
+verdict and estimated cost. `--json` emits `agentic-job-audit/v1`, with
+stable finding codes: `proxy_denied`, `permission_denied`, `run_failure`,
+`patch_dropped`, `collector_refused`, `check_refused`, `cost_unknown`,
+`collector_missing`, `check_missing` and `handback_missing`. Missing
+artifacts are not evidence that checks passed. A readable audit exits
+successfully even when it reports refusals; malformed input is an error.
+
+This is an offline inspection, not another check or an attestation: it
+executes nothing from the artifacts and does not apply a patch. Tool
+counts and denials come from `summary.json`; it does not replay the
+transcript. Cost is agent-reported and unverified, even when token counts
+come from the inference proxy. Unknown cost is not zero. `summary.md`,
+which the workflow appends to the step summary, includes the cost line.
+OTLP export is deferred: no collector endpoint or telemetry credentials
+are configured, and audit does not send artifact data anywhere.
+
 ## What the apply job does before it writes
 
 `check` reads a patch's text on a machine without the repository. Three
