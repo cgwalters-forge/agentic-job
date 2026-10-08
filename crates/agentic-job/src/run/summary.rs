@@ -333,6 +333,21 @@ fn row(cells: &[String]) -> String {
     format!("| {} |", cells.join(" | "))
 }
 
+/// Cost is the agent's estimate, not the inference proxy's token count.
+pub fn cost_line(s: &Value) -> String {
+    let number = |key: &str| {
+        s[key]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map_or_else(|| "unknown".to_owned(), |n| n.to_string())
+    };
+    format!(
+        "Cost: {} AIC (agent-reported, unverified); budget: {} AIC.",
+        number("aic"),
+        number("aic_budget")
+    )
+}
+
 /// The run's `summary.md` from its `summary.json`.
 pub fn markdown(s: &Value) -> String {
     let or = |v: &Value, d: &str| if v.is_null() { d.to_owned() } else { text(v) };
@@ -367,6 +382,8 @@ pub fn markdown(s: &Value) -> String {
             },
             text(&s["result"])
         ),
+        String::new(),
+        cost_line(s),
         String::new(),
         row(&["Duration", "Turns", "Tokens in/out", "Est. AIC"].map(str::to_owned)),
         "|---|---|---|---|".to_owned(),
@@ -578,6 +595,21 @@ mod tests {
     }
 
     #[test]
+    fn cost_is_not_verified_or_invented() {
+        for (aic, expected) in [
+            (json!(2.5), "2.5"),
+            (Value::Null, "unknown"),
+            (json!(-1), "unknown"),
+            (json!("free"), "unknown"),
+        ] {
+            assert_eq!(
+                cost_line(&json!({"aic": aic})),
+                format!("Cost: {expected} AIC (agent-reported, unverified); budget: unknown AIC.")
+            );
+        }
+    }
+
+    #[test]
     fn human_units() {
         for (n, count, duration) in [
             (json!(null), "?", "?"),
@@ -617,6 +649,8 @@ mod tests {
             "## Agent run: PVTI_x on o/r (main)
 
 fake/default, 4 cores: **failure**
+
+Cost: 1 AIC (agent-reported, unverified); budget: 500 AIC.
 
 | Duration | Turns | Tokens in/out | Est. AIC |
 |---|---|---|---|

@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::compose;
 use crate::exit::Exit;
-use crate::{check, event, policy, run, sandbox};
+use crate::{audit, check, event, policy, run, sandbox};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentic-job", version, about, propagate_version = true)]
@@ -19,6 +19,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect downloaded run artifacts without executing or applying them
+    Audit(audit::Args),
     /// Check one run's request against the caller's bounds and print policy.json
     Policy(policy::Args),
     /// Prepare and probe the host the agent runs on
@@ -43,6 +45,7 @@ pub enum Command {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
+            Self::Audit(args) => audit::run(args),
             Self::Policy(args) => policy::run(args),
             Self::Sandbox(command) => command.run(),
             Self::Run(args) => run::run(args),
