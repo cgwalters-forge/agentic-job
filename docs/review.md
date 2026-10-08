@@ -146,3 +146,17 @@ AGENTS.md, CLAUDE.md and project configuration must be absent from the recorded
 system prompt or model request log. The current checkout test proves only
 filesystem separation, not absence from a real model's context. Claude remains
 refused independently until equivalent isolation is established for it.
+
+The admission evidence must name the exact runtime version and cover startup
+and later tool reads, not just the first request. Put distinct canaries in the
+head's AGENTS.md, CLAUDE.md, opencode.json, skills and commands, including nested
+instruction files reached by file-read tools. Capture the model requests locally
+with a mock inference endpoint and check the automatically supplied instructions
+and configuration-derived context, rather than asking the model whether it saw
+them. Explicitly reading a head file as review data is different from promoting
+it to instructions; the test must distinguish those cases. Include a trusted
+base instruction as a positive control so an empty or broken capture cannot
+pass. Record which project, parent, Git-root and home loaders are disabled or
+redirected, and test that the sandbox user cannot modify their trusted sources.
+No such real-runtime request capture or immutable instruction source is provided
+by the current scripted tests; neither refusal should be removed on their basis.
