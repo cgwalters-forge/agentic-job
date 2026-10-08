@@ -509,9 +509,28 @@ of the machine that holds the apply token (`runner`), of the repository
 that token is aimed at (`output-repo`). Forward the task, the target
 and the request, and write the rest in the caller's file.
 
-**Issues a run opens.** Where the bounds list `create_issue`, the issue's
-labels and assignees are the agent's, sanitized by gh-aw's collector, as
-gh-aw allows by default; a bounds rule for them is not written yet
+**Issues a run opens.** Issue-label bounds tighten the existing
+`create_issue` output; they do not add new output types or complete
+[#113](https://github.com/cgwalters-forge/agentic-job/issues/113).
+Additional output types, target-specific bounds, computed apply
+permissions and fake-agent CI coverage remain separate work for that
+issue. Where the bounds list `create_issue`, the issue's
+labels can be bounded with `allowed` and `blocked` lists:
+
+```toml
+[outputs.create_issue]
+max = 1
+allowed = ["agent-triage", "documentation"]
+blocked = ["release"]
+```
+
+`check` refuses the entire hand-back if any label is outside `allowed`
+or appears in `blocked`; blocked wins if a label appears in both lists.
+Label matching ignores ASCII case. An empty `allowed` permits no labels;
+omitting it preserves the existing unrestricted behavior except for
+`blocked`. These limits are currently supported only for `create_issue`.
+Assignees remain the agent's, sanitized by gh-aw's collector, as gh-aw
+allows by default; a bounds rule for them is not written yet
 ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)). A
 request that names other issues (`parent`, `blocked_by`) is refused by
 `check`, since nothing bounds which; gh-aw's handler still makes the new

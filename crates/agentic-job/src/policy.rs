@@ -177,10 +177,34 @@ pub struct Unprotected {
 }
 
 /// How many outputs of one type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputLimit {
     pub max: u32,
+    /// Labels an issue may name. Absent preserves the existing unrestricted
+    /// behavior; an empty list permits no labels. Enforced by `check`, not
+    /// by the handler's silent filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<Vec<String>>,
+    /// Labels an issue may never name, even if also allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<String>,
+}
+
+impl OutputLimit {
+    fn validate(&self, output: &str) -> Result<()> {
+        ensure!(
+            output == "create_issue" || (self.allowed.is_none() && self.blocked.is_empty()),
+            "outputs.{output}: label limits are supported only for create_issue"
+        );
+        for label in self.allowed.iter().flatten().chain(&self.blocked) {
+            ensure!(
+                !label.is_empty() && label == label.trim() && !label.chars().any(char::is_control),
+                "outputs.{output}: invalid label {label:?}"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// One run's request, as the command line gives it.
@@ -288,6 +312,9 @@ impl Policy {
                 "the output type {output:?} has no configuration here"
             );
         }
+        for (output, limit) in &self.safe_outputs.others {
+            limit.validate(output)?;
+        }
         if let Some(pr) = &self.safe_outputs.create_pull_request {
             ensure!(pr.draft, "a pull request that is not a draft");
             ensure!(
@@ -351,6 +378,7 @@ impl Bounds {
         }
         ensure!(!self.outputs.is_empty(), "`outputs` lists no output type");
         for (output, limit) in &self.outputs {
+            limit.validate(output)?;
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str()),
                 "the output type {output:?} is not one of {}",
@@ -523,6 +551,14 @@ impl Bounds {
                 .get(output)
                 .map_or(0, |bound| bound.max)
                 .min(max),
+            allowed: self
+                .outputs
+                .get(output)
+                .and_then(|bound| bound.allowed.clone()),
+            blocked: self
+                .outputs
+                .get(output)
+                .map_or_else(Vec::new, |bound| bound.blocked.clone()),
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -624,6 +660,43 @@ files = ["README.md", "AGENTS.md"]
     /// The policy of the request the tests of `check` use.
     pub(crate) fn policy() -> Policy {
         bounds().compile(&request()).unwrap()
+    }
+
+    #[test]
+    fn issue_label_limits_survive_compilation_and_loading() {
+        let mut bounds = bounds();
+        let limit: OutputLimit =
+            toml::from_str("max = 5\nallowed = ['triage', 'blocked']\nblocked = ['blocked']")
+                .unwrap();
+        bounds
+            .outputs
+            .insert("create_issue".to_owned(), limit.clone());
+        bounds.validate().unwrap();
+        let policy = bounds
+            .compile(&Request {
+                outputs: "create_issue",
+                ..request()
+            })
+            .unwrap();
+        let configured = &policy.safe_outputs.others["create_issue"];
+        assert_eq!(configured.max, 3);
+        assert_eq!(configured.allowed, limit.allowed);
+        assert_eq!(configured.blocked, limit.blocked);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        assert_eq!(Policy::load(&path).unwrap(), policy);
+        for output in ["noop", CREATE_PULL_REQUEST, "add_comment"] {
+            assert!(limit.validate(output).is_err(), "{output}");
+        }
+        for label in ["", " ", "triage ", "bad\nlabel"] {
+            let limit = OutputLimit {
+                max: 1,
+                allowed: Some(vec![label.to_owned()]),
+                ..OutputLimit::default()
+            };
+            assert!(limit.validate("create_issue").is_err(), "{label:?}");
+        }
     }
 
     #[test]
@@ -1174,10 +1247,13 @@ files = ["README.md", "AGENTS.md"]
             ..good.clone()
         };
         let mut other_type = good.clone();
-        other_type
-            .safe_outputs
-            .others
-            .insert("create_discussion".to_owned(), OutputLimit { max: 5 });
+        other_type.safe_outputs.others.insert(
+            "create_discussion".to_owned(),
+            OutputLimit {
+                max: 5,
+                ..OutputLimit::default()
+            },
+        );
         let cases = [
             (
                 "a type with no configuration here",
