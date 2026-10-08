@@ -1,0 +1,65 @@
+# Template: install as .github/workflows/job-container.yml to activate.
+name: Job container
+on:
+  push:
+    branches: [main]
+    paths: ['job-container/**', '.github/workflows/job-container.yml']
+  pull_request:
+    paths: ['job-container/**', '.github/workflows/job-container.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test filesystem audit
+        run: python3 -m unittest discover -s job-container -p 'test_*.py' -v
+      - name: Build image
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          IMAGE="ghcr.io/${REPOSITORY,,}/job-container:${GITHUB_SHA}"
+          podman build -t "$IMAGE" job-container
+          echo "name=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Publish image
+        if: github.event_name != 'pull_request'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io -u "$GHCR_USER" --password-stdin
+          podman push "$IMAGE"
+
+  probe:
+    # PRs build/audit only: never publish untrusted changes with a write token.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.build.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      options: --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined --device /dev/fuse
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prove job-container properties
+        run: node job-container/probe.mjs
