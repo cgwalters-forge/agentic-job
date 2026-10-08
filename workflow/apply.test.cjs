@@ -28,7 +28,6 @@ function git(cwd, ...args) {
 for (const [name, filename, files, unrelated, expected] of [
   ['ordinary edit', 'file.txt', ['file.txt'], false, 0],
   ['CRLF edit', 'file.txt', ['file.txt'], false, 0],
-  ['Unicode path', 'café.txt', ['café.txt'], false, 0],
   ['unchecked path', 'file.txt', ['other.txt'], false, 1],
   ['empty file list', 'file.txt', [], false, 1],
   ['unrelated base', 'file.txt', ['file.txt'], true, 1],

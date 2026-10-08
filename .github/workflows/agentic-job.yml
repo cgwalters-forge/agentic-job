@@ -848,9 +848,10 @@ jobs:
       # name and no others, before the handlers apply and push it. A
       # report that cannot be read stops the job: only one that says
       # there is no patch skips this.
-      # Materialize both lists so pipefail catches extraction failures;
-      # process substitutions would hide them. check rejects control
-      # characters in paths, and quotePath=false keeps UTF-8 names literal.
+      # Both lists go through files: a command that fails inside a
+      # process substitution is not seen by `pipefail`, and leaves an empty
+      # list that compares equal to another empty one. `check` takes only
+      # plain ASCII paths, so git has nothing to quote in a list that matches.
       - name: Apply the patch on its own base, and compare what changed with what was checked
         run: |
           patch=$(jq -c .patch "$REPORT")
@@ -860,7 +861,7 @@ jobs:
             { echo "::error::the patch starts from $base, which is not a commit of $REPO's $BASE"; exit 1; }
           git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
           git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP"/aw-*.patch
-          git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
+          git -C "$RUNNER_TEMP/trial" diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
           jq -er '.patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/checked-files"
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
           git worktree remove --force "$RUNNER_TEMP/trial"
