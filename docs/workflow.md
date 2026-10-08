@@ -448,6 +448,20 @@ yet. Should the pinned commit stop being served, every run would go
 without a feed and only warn: CI's `sandbox` jobs require the feed to
 load, so the next pull request here would show it.
 
+The fetch retries transient curl failures up to three times, with a
+60-second retry window and a 60-second timeout per attempt. The retry
+window is not a total wall-clock cap: the last attempt can finish after
+it. A successful fetch still has to pass the pinned checksum check.
+
+The retry and requirements-file regression tests address only part of
+[#108](https://github.com/cgwalters-forge/agentic-job/issues/108). That
+issue remains the tracking item for a faster world-write walk with an
+equivalent protection argument, automated feed-pin maintenance, and a
+CI embedded-source scan that handles `concat!` and multiline macros.
+The host-wide walk is unchanged; no narrower protection is claimed here.
+The issue also tracks source-attested releases instead of manual release
+pins; the current release-pin workflow is described below.
+
 **Steps that run after the agent.** In the agent job, as the runner's
 user: the second check that the repositories are public, the uploads,
 the step that turns the run's exit state into the job's result, and the

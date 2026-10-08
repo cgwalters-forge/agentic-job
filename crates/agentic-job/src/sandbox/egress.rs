@@ -256,21 +256,34 @@ fn check_sha256(path: &Path, pinned: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fetches the threat feed; whether there is one. A fetch that fails
-/// leaves none, and a file that is not the pinned one is an error.
-fn fetch_denylist() -> Result<bool> {
-    let url = denylist_url();
-    let fetched = host::run(Command::new("curl").args([
+/// Builds a feed fetch with a retry window and a per-attempt timeout.
+/// The last attempt can finish after the retry window has elapsed.
+fn denylist_fetch_command(url: &str) -> Command {
+    let mut command = Command::new("curl");
+    command.args([
         "--fail",
         "--silent",
         "--show-error",
         "--location",
+        // Retry curl's transient failures, not checksum failures.
+        "--retry",
+        "3",
+        "--retry-max-time",
+        FETCH_SECONDS,
         "--max-time",
         FETCH_SECONDS,
         "--output",
         DENYLIST_FETCHED,
-        &url,
-    ]));
+        url,
+    ]);
+    command
+}
+
+/// Fetches the threat feed; whether there is one. A fetch that fails
+/// leaves none, and a file that is not the pinned one is an error.
+fn fetch_denylist() -> Result<bool> {
+    let url = denylist_url();
+    let fetched = host::run(&mut denylist_fetch_command(&url));
     if let Err(err) = fetched {
         eprintln!(
             "warning: the egress proxy runs without a threat feed: fetching {url} failed ({err:#})"
@@ -431,6 +444,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn feed_fetch_sets_retry_window_and_per_attempt_timeout() {
+        let url = denylist_url();
+        let command = denylist_fetch_command(&url);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        for pair in [
+            ["--retry", "3"],
+            ["--retry-max-time", FETCH_SECONDS],
+            ["--max-time", FETCH_SECONDS],
+            ["--output", DENYLIST_FETCHED],
+        ] {
+            assert!(args.windows(2).any(|args| args == pair), "{pair:?}");
+        }
+        assert_eq!(args.last(), Some(&url.as_str()));
+        assert!(args.contains(&"--fail"));
+    }
+
+    fn requirements_are_pinned(text: &str) -> bool {
+        let mut lines = text.lines().peekable();
+        while let Some(entry) = lines.next() {
+            if entry.starts_with(['#', ' ']) || entry.is_empty() {
+                continue;
+            }
+            if !entry.contains("==")
+                || !entry.ends_with(" \\")
+                || !lines
+                    .peek()
+                    .is_some_and(|next| next.trim_start().starts_with("--hash=sha256:"))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn requirements_check_includes_the_last_line() {
+        let pinned = "example==1.0 \\\n    --hash=sha256:abc";
+        for (text, accepted) in [
+            (pinned.to_owned(), true),
+            (format!("{pinned}\nunpinned"), false),
+            (format!("{pinned}\nexample==2.0 \\"), false),
+            ("example==1.0\n    --hash=sha256:abc".to_owned(), false),
+            ("example \\\n    --hash=sha256:abc".to_owned(), false),
+        ] {
+            assert_eq!(requirements_are_pinned(&text), accepted, "{text:?}");
+        }
+    }
+
     /// Every requirement is one version with hashes, as `pip
     /// --require-hashes` wants, and mitmproxy is the one requirements.in
     /// names.
@@ -441,11 +506,7 @@ mod tests {
         let lines: Vec<&str> = REQUIREMENTS.lines().collect();
         let entries: Vec<&str> = lines.iter().copied().filter(is_entry).collect();
         assert!(entries.len() > 1, "{entries:?}");
-        for pair in lines.windows(2).filter(|pair| is_entry(&pair[0])) {
-            let (entry, next) = (pair[0], pair[1]);
-            assert!(entry.contains("==") && entry.ends_with(" \\"), "{entry}");
-            assert!(next.trim_start().starts_with("--hash=sha256:"), "{entry}");
-        }
+        assert!(requirements_are_pinned(REQUIREMENTS));
         let direct: Vec<&str> = DIRECT
             .lines()
             .filter(|line| !line.starts_with('#') && !line.is_empty())
