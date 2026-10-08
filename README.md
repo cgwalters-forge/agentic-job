@@ -6,41 +6,58 @@
 agentic-job makes a CI job safe to run untrusted steps in, and then runs
 a coding agent as one of them.
 
-The idea it is built on: **agent security is just CI security.** A
-coding agent that reads an issue and writes a patch is the same kind of
-risk as a build script from a pull request or a dependency's install
-hook. It runs code you did not write, steered by text you did not write,
-on a machine that holds your tokens. A CI job that is safe for one is
-safe for the others, so the hardening here is a step any job can use,
-and the agent is one thing you do after it.
+**Agent security is just CI security.** A coding agent that reads an
+issue and writes a patch is the same kind of risk as a build script from
+a pull request or a dependency's install hook: code you did not write,
+steered by text you did not write, on a machine that holds your tokens.
+The defence is the same for all three. Run that code as a user that
+cannot see the tokens, filter what it can reach on the network, and have
+a different machine check what it produced before anything with a write
+token acts on it. agentic-job is those three things as a setup step any
+job can use, and a workflow that runs an agent that way.
 
 ## What you get
 
-**A hardened runner, in one step.** After `secure-host` runs, the job
-has no root: the runner's user has lost `sudo` and the container daemon.
-Untrusted commands run as a second user that cannot read the job's
-tokens, the checkout or the runner's files, and that reaches the network
-only through a filtering proxy. The step ends by probing all of this
-and fails the job if anything is open.
+**A hardened runner, in one step.** After `secure-host` runs, the
+runner's user can no longer use `sudo` and the container daemon is
+stopped. Untrusted commands run as a second user that cannot read the
+job's tokens, the checkout or the runner's files, and whose HTTP and
+HTTPS go through a filtering proxy. The step ends by probing these
+restrictions and fails the job if one does not hold.
 
 ```yaml
 steps:
   - uses: actions/checkout@v7
   - run: sudo apt-get install -y libfoo-dev   # root: before the step
   - uses: cgwalters-forge/agentic-job/secure-host@COMMIT
-  - run: make check                           # no root from here on
+  - run: make check                           # runner's user, no sudo
+  - run: git archive --prefix=src/ HEAD | agentic-job sandbox exec -- tar -x
   - shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
-    run: ./untrusted.sh                       # as the sandbox user
+    run: cd src && bash ./untrusted.sh < /dev/null   # the sandbox user
 ```
+
+The sandbox user cannot see the checkout, so the job hands it a copy.
+Only steps that go through `sandbox exec` are sandboxed: `make check`
+above lost root but still runs as the user that holds the job's token.
+
+Two limits to know up front. Names still resolve on a hosted runner, so
+a process that wants to can leak data through DNS lookups. And one small
+root-owned helper stays, for what the sandbox itself needs.
+[docs/sandbox-check.md](docs/sandbox-check.md) lists what is probed and
+what is not.
 
 **An agent run with no credentials in reach.** The reusable workflow
 runs Claude Code or opencode in that sandbox on a task you give it. The
-agent has no forge token and no model key. It talks to the model through
-a proxy that holds the key and caps what one run can spend. It cannot
-push, comment or open anything: it leaves a file of requests ("open a
-pull request with this patch", "comment on this issue"), which a second
-job checks on a clean machine and a third applies. Only that third job
-holds a write token, and it runs nothing the agent wrote.
+agent has no forge token and no model key. It reaches the model through
+a proxy on another machine, which holds the key; when a run registers
+with the CI system's identity token, the proxy also caps what that run
+can spend ([docs/inference.md](docs/inference.md) covers the weaker
+modes). The agent cannot push, comment or open anything. It leaves a
+file of requests ("open a pull request with this patch", "comment on
+this issue"), which a second job checks on a clean machine and a third
+applies. The jobs that hold a write token, which are apply and, for runs
+started by an event, the ones that post the run's status, run nothing
+the agent wrote.
 
 ```yaml
 jobs:
@@ -57,7 +74,8 @@ jobs:
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
-permissions and says which runner to use.
+permissions, and a real agent needs an inference proxy the runner can
+reach. [docs/workflow.md](docs/workflow.md) has the whole call.
 
 A run can also start from an event: a `/command` in a comment, a label,
 a pull request, a schedule. The workflow decides who may trigger it
@@ -66,47 +84,63 @@ fenced off as data. See [docs/events.md](docs/events.md).
 
 ## Try it
 
-[`example.yml`](.github/workflows/example.yml) is a caller another
-repository can copy. It uses a scripted agent that needs no model and no
-secret, so it runs as it is: the scripted agent tries the things it must
-not be able to do, changes one file, and the change comes back as a
-branch.
+[`example.yml`](.github/workflows/example.yml) is a complete caller with
+a scripted agent, so it needs no model and no secret. The scripted agent
+tries the things it must not be able to do and changes one file, and the
+change comes back as a draft pull request, or as a pushed branch where
+Actions is not allowed to open pull requests.
+
+To run it in a public repository of your own, copy three files to the
+same paths: `.github/workflows/example.yml`,
+[`.github/agentic-job/allow.toml`](.github/agentic-job/allow.toml) and
+[`.github/agentic-job/hosted.toml`](.github/agentic-job/hosted.toml).
+Then make three edits:
+
+- in `example.yml`, change `uses: ./.github/workflows/agentic-job.yml`
+  to `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
+  with a commit you have read;
+- in `example.yml`, set the default of the `repo` input to your
+  repository;
+- in `allow.toml`, set `repos` to your repository.
+
+Commit them to your default branch and start it:
 
 ```sh
 gh workflow run example.yml -f task='say hello'
 ```
 
-[docs/workflow.md](docs/workflow.md) is the caller's page: what to copy,
-what each input means, and what you have to provide to run a real agent
-(a runner, and an inference proxy it can reach).
-
 ## Why not GitHub Agentic Workflows
 
 For most people, [gh-aw](https://github.com/github/gh-aw) is the right
-choice today, and this project borrows its best idea. The request file
-the agent leaves is gh-aw's *safe outputs* format, and it is checked and
-applied here by gh-aw's own code, unmodified and pinned.
+choice today. This project uses its *safe outputs* format and its
+unmodified, pinned code to check and apply requests.
 
 The difference is where the agent runs. gh-aw puts it in a container
-behind a firewall. That is a good boundary until the work itself needs
-containers: building an image, booting a VM to test it, running rootless
-podman. Nesting those inside the sandbox container means loosening it
-until it stops being the boundary. agentic-job hardens the runner VM
-instead and runs the agent as an ordinary unprivileged user on it, with
-`/dev/kvm`, user namespaces and a login session of its own. That is the
-work this was built for: operating system and container tooling.
+behind a firewall, with
+[VM isolation in preview](https://github.github.com/gh-aw/reference/agent-runtimes/).
+That is a good boundary until the work itself needs containers: gh-aw's
+[mode for that](https://github.com/github/gh-aw-firewall/blob/main/docs/usage.md)
+hands the agent the host's Docker socket, and its own docs warn that
+this lets the agent around the firewall. agentic-job hardens the runner
+VM instead and runs the agent as an ordinary unprivileged user on it,
+with `/dev/kvm`, user namespaces and a login session of its own. That is
+the work this was built for: operating system and container tooling.
 
-Three smaller differences follow from the same principle:
+Three smaller differences:
 
 - The hardening is not tied to the agent. A build-and-test job with no
   agent can use `secure-host` by itself.
-- The model key is never on the runner. gh-aw gives the job the key;
-  here the job gets a token good for one run, and the key stays behind a
-  proxy.
+- The model key is never on the runner. gh-aw keeps it out of the
+  agent's process, in an
+  [API proxy](https://github.com/github/gh-aw-firewall) beside it on the
+  same runner, and has
+  [keyless modes](https://github.github.com/gh-aw/reference/auth/) too.
+  Here the runner gets a token good for one run, and the key stays on
+  another machine.
 - There is no compiler and no new workflow language. You write ordinary
   workflow YAML that calls a reusable workflow.
 
-What you give up is real. gh-aw has a large catalogue of output types,
+gh-aw has much that this does not: a large catalogue of output types,
 GitHub read access for the agent, threat detection, memory across runs
 and many triggers. This has a handful of each, or none.
 [docs/background-ghaw.md](docs/background-ghaw.md) lists the gaps item by
@@ -116,8 +150,10 @@ item.
 
 They are different layers. [Paperclip](https://paperclip.ing) is an
 application that manages a team of agents: who works on what, with what
-budget, reporting to whom. It trusts the machine its agents run on.
-agentic-job is that machine made safe to hand to one agent for one task,
+budget, reporting to whom. Where its agents run is a separate matter,
+and its local adapters
+[run them on the host unsandboxed](https://github.com/paperclipai/paperclip/blob/master/docs/agents-runtime.md#9-security-and-risk-notes).
+agentic-job is a machine made safe to hand to one agent for one task,
 and it has no opinion on who decides the task. Its sibling
 [agent-board](https://github.com/cgwalters-forge/agent-board) is the part
 that answers the questions Paperclip does, using a forge's own project
@@ -126,14 +162,16 @@ board in place of a database.
 ## What is real today
 
 The binary is Rust; the workflow, the sandbox and the checks run on
-every pull request here, end to end, with the scripted agent, on
+same-repository pull requests here, end to end, with the scripted agent, on
 GitHub's hosted Ubuntu 26.04 runners. Claude Code and opencode have each
 run real tasks on it on RHEL 10 runners. It has been called from another
-repository, and its apply job has opened pull requests there.
+repository, bootc-dev/cgwalters-devspace-sandbox, and opened pull requests
+there ([deployment record, #59](https://github.com/cgwalters-forge/agentic-job/issues/59)).
 
 Not yet: a real agent through the reusable workflow on hosted runners
 (the inference proxy that exists is on a private network), private
-repositories, and most of gh-aw's catalogue. The sandbox setup takes two
+repositories, and most of gh-aw's catalogue. Pull requests from forks
+do not get the end-to-end jobs that write. The sandbox setup takes two
 to five minutes on a hosted runner. Nobody but its authors has used it.
 
 ## Where to read more

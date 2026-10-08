@@ -28,8 +28,10 @@ jobs:
 is a runnable example. The template above assumes the repository provides
 `make check` and `untrusted.sh`. The archive transfers tracked files into
 `src` in the sandbox home; the checkout itself is not readable there.
-The example
-is a whole job of this shape, and CI runs it on every pull request: it
+`sandbox exec` starts in the sandbox home and streams its caller's stdin
+to the command; `--stdin` instead streams the step script opened by the
+runner user. Redirecting `untrusted.sh` from `/dev/null` keeps it from
+consuming that script. CI runs the example on every pull request: it
 builds and tests after the lock, as both users, saves a cache and
 uploads an artifact, and ends with `sandbox check` passing again.
 
@@ -49,22 +51,24 @@ machine that is thrown away after the job:
   and stops the daemons that listen for every local user
   (`stop-services`), the container daemon first of all;
 - loads network rules keyed on that user's uids, and starts the egress
-  proxy that is its only way out: reads anywhere but a threat feed,
-  writes only by rule, never the cloud metadata service or the tailnet;
+  proxy for HTTP(S) egress: reads anywhere but a threat feed,
+  writes only by rule, never the cloud metadata service or the tailnet.
+  Configured inference endpoints can be reached directly; allowed
+  resolver sockets can carry DNS out;
 - last, takes root away from the runner's user too: a sudo rule read
   last denies it everything, polkit denies it, the daemons of its
   root-equivalent groups are stopped, and setuid-root programs no
   package owns lose the bit
   ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
 
-The check then proves each of these as the runner's user and as the
+The check probes these restrictions as the runner's user and as the
 sandbox user, with a positive control for every probe
 ([sandbox-check.md](sandbox-check.md)), and the step fails if one does
 not hold.
 
 ## What a later step can count on, and what it cannot
 
-**No step after this one has root.** Not a `run:` step, not another
+**No step after this one has general root access.** Not a `run:` step, not another
 action, not a post step, not the runner's own cleanup. So nothing later
 in the job can undo the step: load a kernel module, change the network
 rules, stop the proxy, read what only root reads, or leave something
@@ -76,7 +80,9 @@ operations: sandbox entry, process cleanup, proxy-log reads and probe controls
 **The sandbox user has nothing of the job's.** No file of the runner's
 (the checkout included), no variable of the step's, no token and no way
 to ask for the job's identity token, no local daemon but the ones the
-configuration names, and the network only through the proxy.
+configuration names. HTTP(S) uses the proxy or configured inference
+endpoints; resolver access and unprobed IPC/UDP paths are exceptions,
+not a guarantee that every network path is filtered.
 
 **The runner's user is still the runner's user.** The lock takes its
 root, not what it owns. A step that runs as it reads the checkout, the
