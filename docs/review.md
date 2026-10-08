@@ -1,251 +1,81 @@
 # Pull request review caller
 
-[`review.yml`](../.github/workflows/review.yml) starts on same-repository pull
-requests (opened, synchronize, ready for review) and `/review` comments by
-an actor with exactly the admin, maintain or write role. It reuses the
-[event admission](events.md) path, including permission lookup and fork
-refusal. Comments on issues and other bases are refused. It does not approve,
-merge or write code: its verdict is a comment, not a GitHub review approval.
+[`review.yml`](../.github/workflows/review.yml) admits same-repository pull
+requests targeting `main` and `/review` comments from actors with admin,
+maintain or write permission. Forks and issue comments are refused. The
+workflow, bounds and [standing task](../workflow/review.md) come from the base,
+not the pull request head.
 
-The caller uses `pull_request_target`, not `pull_request`, so the workflow,
-bounds, configuration, setup and standing task are from the trusted base.
-For comments, these are from the configured base (`main`); review admission
-requires the pull request to target that same base. The standing task lives in
-[`workflow/review.md`](../workflow/review.md), points at base-branch AGENTS.md
-and treats the head's instructions, pull request text and diff as hostile data.
-The reusable workflow reads a regular task file, at most 64 KiB, without
-symlinks, before fencing the event text with the existing event command.
+Review is an analysis run. Real agents start in the base checkout, with the
+exact admitted head SHA checked out beside it and named in the task as data.
+The scripted agent starts in the head so its verdict can report that SHA.
+The only output is one verdict comment or noop. A separate clean check job
+requires `VERDICT: APPROVE`, `VERDICT: CHANGES` or `VERDICT: REJECT`, followed
+by a `REASON:` line of at most 200 Unicode characters. It rejects alternate
+targets and editing fields. The apply job checks out no caller code and posts
+only the checked text; a verdict is not a GitHub approval or merge authority.
 
-The review is `kind: analysis`, with one output allowed: `add_comment` or
-`noop`. Notifications are off, so there is no second status comment. The
-sandbox clones the base history and fetches the exact admitted head SHA before
-starting the agent; branch names from the author are not used. The head is a
-separate sibling worktree; its instruction files do not replace the base
-checkout's files. The scripted agent still starts in the head worktree. The clean check
-job uses code from the reusable workflow's pinned commit to require a first
-line `VERDICT: APPROVE`, `VERDICT: CHANGES` or `VERDICT: REJECT`, then `REASON:`
-with at most 200 Unicode characters in that entire line. It rejects all
-agent-supplied addressing/editing fields and extra
-outputs. Findings may follow. The apply job does not check out the caller's
-repository at all for reviews: it posts checked text with pinned gh-aw code,
-and never runs code from the pull request or the agent.
+## Enabling a real reviewer
 
-## Copying and enabling it
+The checked-in caller still uses `fake` and its scripted setup. To deploy a
+real reviewer, remove that setup and choose `agent: opencode` or `agent: claude`.
+Use a disposable runner with systemd 257 and connectivity to the inference
+proxy, configure `inference-url`, retain `inference-register: github-oidc`,
+and set a nonzero `max-requests`. Opencode also needs a `model` naming a model
+served by the proxy. The reusable workflow supplies its default opencode npm
+pin; a caller can override `npm` like other dependencies. Claude needs its
+pinned ACP adapter in `npm`.
 
-Copy the caller, `workflow/review.toml`, `workflow/review.md`, the hosted
-configuration and `.github/agentic-job/e2e/review.sh` to the same paths. Change
-`repos` in the bounds to your repository and, if necessary, change the caller's
-`base` and the bounds' `bases` together. Pin the reusable workflow's `uses` to
-an agentic-job commit you have reviewed, as in [workflow.md](workflow.md).
-The permission grant is contents read for policy and cloning, id-token write
-for broker registration on the secured agent machine, and pull-requests write
-for the clean apply job. Policy and check explicitly restrict themselves to
-contents read; the agent has contents read and id-token write, never a comment
-token. No `contents: write`, inherited secret or apply environment is needed.
-All actions retain their existing full commit pins.
+The caller grants contents read, id-token write for broker registration, and
+pull-requests write for posting. Policy and check restrict themselves to
+contents read. The agent job has no comment token accessible to the sandbox;
+only the separate apply job posts. No inherited secrets or apply environment
+are needed with GitHub OIDC. Keep the existing full action pins and use a
+reviewed reusable-workflow commit when copying the caller to another repository.
 
-**Nothing in this change enables real inference.** The default agent is
-scripted (`fake`), on the disposable `ubuntu-26.04` agent runner; its verdict
-explicitly says it is not a real code review. Real agents are currently refused
-by both workflow admission and the runner. Before supporting a real agent,
-enforce instruction-loading isolation and test it adversarially against the
-pinned runtime. Enabling inference would then require the operator to remove
-the scripted setup, configure `inference-url` with `github-oidc` registration,
-and set a nonzero request cap. The proxy's current policy admits any workflow
-of the operator's repositories with a verified identity token; it does not
-currently require a `called_workflows` entry for this reusable workflow.
-`cgwalters-forge/tracker#452` tracks narrowing that policy again. This broader
-broker admission does not replace review event admission or sandbox isolation.
-This is the operator's deployment choice as of 2026-10-08, not a claim that
-workflow-specific proxy admission is enforced. Recommended hardening, not a
-precondition for enabling a real reviewer, is replacing `any_workflow` with `called_workflows` pinned to the reviewed
-reusable workflow's `job_workflow_sha`, and verifying registration accepts that
-identity and refuses other workflows. The identity-token requirement remains.
-The operator must also select a disposable
-agent runner with systemd 257 and connectivity to that proxy (the existing
-private-network deployment requires a reachable runner or configured tailnet);
-hosted Ubuntu alone does not make a private proxy reachable.
+For this repository, deployment requires changing `review.yml` from the fake
+setup, selecting `agent-runner` labels for a proxy-reachable disposable runner,
+and supplying `inference-url` (for example from `vars.INFERENCE_URL`) and the
+opencode `model`. A request cap such as `max-requests: '100'` is required;
+`kind: analysis`, `outputs: add_comment,noop`, `max-outputs: '1'`, `notify: none`,
+`allow: workflow/review.toml` and the standing task stay unchanged. No new secret
+is required in OIDC mode. The private runner labels, proxy URL and supported
+model are deployment values, not known from this checkout; hosted Ubuntu alone
+cannot reach a private proxy.
+
+Optional hardening is narrowing which workflows the proxy admits, tracked by
+cgwalters-forge/tracker#452. That does not replace event admission or sandboxing.
 
 ## Coverage and limits
 
-CI runs the admission, task-source, request-bound and hostile-output tests in
-`node --test workflow/review.test.cjs`, and the scripted sandbox review test
-in `cargo test --locked --test run` on the session-sandbox runner. That test
-checks that the admitted SHA, not the current branch tip, is reviewed, and that
-no patch is handed back. The `e2e-review` CI call exercises the existing policy,
-agent, collector, check and comment handler, with a single scripted verdict
-checked, including the admitted head SHA, by `e2e-verify`. The first pull
-request adding these files skips that hosted call because the standing task
-and bounds are not on its base yet; it
-never falls back to untrusted head files. Once installed on the base, every
-same-repository CI pull request runs it, and pushes test event refusal.
-Hosted comment posting still needs GitHub Actions; it cannot be exercised on
-an unprivileged runner without a forge token.
+The run is ephemeral and creates no persistent state. The agent already runs
+arbitrary code inside the sandbox, including tests and writes to its own
+instructions or configuration. Protecting those files from the agent is not a
+security boundary. The boundary is the sandbox, no credentials in reach, and
+one verdict checked and posted by separate jobs. A malicious head can influence
+the verdict; a queued verdict names the admitted SHA, not necessarily the newest
+head, and is never merge authorization.
 
-Review is read-only in authority and outputs, not a read-only filesystem:
-tests may write scratch files in the sandbox, but no code change can be
-published. Admission still requires a write-role actor for automatic events;
-external contributors without that role need a maintainer's `/review` comment
-on a same-repository pull request. Forks never start an agent. A queued review
-reports its admitted SHA, which may no longer be the newest head; it is not
-merge authorization. There is no real-agent quality assertion in scripted CI.
-Claude and opencode are refused in review mode until automatic project
-instruction loading is demonstrably isolated. Launching either in the head
-could elevate a pull request's AGENTS.md or CLAUDE.md into instructions.
-Opencode's project-configuration switches do not establish instruction-loading
-isolation; scripted tests do not prove real-runtime behavior.
+`node --test workflow/review.test.cjs` covers admission, request bounds and
+hostile outputs. The scripted privileged run and hosted comment posting need
+the prepared CI runner and GitHub Actions respectively. They do not assert
+real-model review quality.
 
-### Instruction-loading investigation and remaining admission work
-
-The sibling worktree is preparation, **not real-agent admission**. The base
-checkout currently captures the configured branch when cloned, not an admitted
-base SHA from the event. A real reviewer must instead start in the base checkout
-at that admitted SHA, with the sibling head named explicitly in its standing
-task. Neither workflow admission nor the runner's refusal has been lifted.
-The current scripted session's cwd is still the head, not the base; simply
-removing the refusal would therefore let a real runtime discover head instructions
-at startup. Moving both cwd and the standing task's explicit head path to the
-trusted base is unfinished admission work, not something these tests prove.
-This preparation does not resolve or close agent-isolation issue #154.
-
-The base checkout and its Git metadata are also writable by the sandbox user.
-Before real admission, protect both from that user (or verify the admitted tree
-before every instruction load). Otherwise a head-steered agent could write
-`base/sub/AGENTS.md` and read `base/sub/x`, causing a runtime's file-read loader
-to promote its own text to instructions. Pinning the base SHA alone does not
-prevent that mid-session attack.
-
-The workflow selects `opencode-ai@1.18.31` for any future opencode review,
-overriding the caller's npm list. The production launcher checks `--version`
-with its sanitized environment and fails closed unless it is exactly 1.18.31.
-This check applies to non-review opencode launches too; those deployments must
-install that version. It is a version check, not a binary-integrity proof, and
-does not make writable configuration safe. As a concrete source investigation,
-[opencode v1.2.3's instruction loader](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/session/instruction.ts)
-shows two distinct paths that must be accounted for before selecting a pin:
-
-- `systemPaths()` searches AGENTS.md, CLAUDE.md and deprecated CONTEXT.md from
-  the instance directory up to the worktree root unless project config is
-  disabled. Global instructions come from `OPENCODE_CONFIG_DIR/AGENTS.md`,
-  the global config directory's AGENTS.md, or `~/.claude/CLAUDE.md` (first
-  existing file); the Claude fallback has a separate disabling switch.
-  Configuration can also name absolute, home-relative or globbed instructions
-  and remote instruction URLs. Disabling project config redirects relative
-  instruction globs to `OPENCODE_CONFIG_DIR`, or skips them if unset.
-- `resolve()` can attach directory instruction files when a tool reads a file.
-  This path does **not** check `OPENCODE_DISABLE_PROJECT_CONFIG`. It walks
-  toward the instance directory and uses a string-prefix containment check.
-  A sibling head path therefore must not even share the base directory's string
-  prefix; distinct path components alone are not sufficient for this version.
-  The worktree naming now avoids this overlap, with regression cases for
-  repository names that could otherwise collide with the chosen sibling names.
-
-This investigation is not a claim about an operator's installed version. The
-chosen exact runtime still needs a complete audit of configuration, plugins,
-skills and commands from the project, parents, git root and home, including
-file-read instruction injection. Every automatic source must be disabled or
-redirected to trusted base/managed files, not merely disavowed in the prompt.
-Admission must also require a canary test against that runtime: hostile head
-AGENTS.md, CLAUDE.md and project configuration must be absent from the recorded
-system prompt or model request log. The current checkout test proves only
-filesystem separation, not absence from a real model's context. Claude remains
-refused independently until equivalent isolation is established for it.
-
-The admission evidence must name the exact runtime version and cover startup
-and later tool reads, not just the first request. Put distinct canaries in the
-head's AGENTS.md, CLAUDE.md, opencode.json, skills and commands, including nested
-instruction files reached by file-read tools. Capture the model requests locally
-with a mock inference endpoint and check the automatically supplied instructions
-and configuration-derived context, rather than asking the model whether it saw
-them. Explicitly reading a head file as review data is different from promoting
-it to instructions; the test must distinguish those cases. Include a trusted
-base instruction as a positive control so an empty or broken capture cannot
-pass. Record which project, parent, Git-root and home loaders are disabled or
-redirected, and test that the sandbox user cannot modify their trusted sources.
-The scripted tests provide neither request capture nor an immutable instruction
-source; neither refusal should be removed on their basis.
-
-### Real-runtime counterexample
-
-`workflow/review-runtime.test.cjs` now exercises the production launcher against
-opencode **1.18.31**, the version available on the development runner. This is a
-shared production version requirement, **not safe review admission**. Run it explicitly:
+The opt-in captured-request regression uses a real opencode runtime and a
+loopback deterministic model endpoint, not credentials or real inference:
 
 ```sh
 cargo build --locked
 AGENTIC_JOB_TEST_REAL_OPENCODE=1 node --test workflow/review-runtime.test.cjs
 ```
 
-Without the opt-in variable the test is skipped, not proof of isolation. The
-runtime must be on PATH; `AGENTIC_JOB_TEST_LAUNCHER` can name a built agentic-job
-binary. Its home and both checkouts are disposable fixtures. A loopback mock
-inference endpoint records every model request and returns deterministic `read`
-tool calls; no real inference service, model judgement or credential is used.
-The test requires a trusted global instruction positive control, head/base data-file
-contents in subsequent requests, and absence of distinct hostile head AGENTS.md,
-CLAUDE.md, nested AGENTS.md, opencode.json, commands and skills canaries. It also
-checks home Claude instructions and external skills are absent. It does not
-explicitly read the hostile instruction files as data. Same-uid fixture writes
-also create, modify and rename over nested AGENTS.md in the base and in a
-`base-scratch` sibling. Captured requests must show each canary in an
-`Instructions from:` attachment, not merely its data-file control. A separate
-non-prefix `scratch` sibling supplies a data control but no instruction canary.
-These writes happen before startup; they are not runtime tool-write attempts or
-proof that a second sandbox user cannot write the sources.
+Install the workflow's npm version on PATH first. The test checks a trusted
+instruction positive control and data-file reads, and that hostile head
+AGENTS.md, CLAUDE.md and project configuration are not loaded as instructions
+at startup. Without the opt-in it is skipped. It makes no immutability claim.
 
-**The passing test proves a counterexample, not safe admission.** Started in a
-non-prefix sibling base, the head canaries are absent from the captured requests.
-But reading a base subdirectory data file promotes the adjacent writable
-`AGENTS.md` into `Instructions from:` context in a later model request. The
-fixture represents text a head-steered agent could write there; it does not
-assert an immutable base or run the privileged sandbox. The production review
-session still starts in the head and remains fake-only. The test intentionally
-fails if the counterexample stops being exercised, so a future runtime fix needs
-an explicit test update rather than silently changing the admission evidence.
-
-The launcher's existing project-config and model-fetch switches now also disable
-external skills, Claude-code fallback instructions, default plugins and automatic
-updates. These suppress independent automatic sources, not the read resolver.
-For the source evidence, see
-[1.18.31 instruction.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/session/instruction.ts)
-and [config.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/config.ts),
-and the 1.2.3 investigation above. Both instruction resolvers walk from a read
-file toward the instance directory without consulting the project-config switch.
-The 1.2.3
-[skill loader](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/skill/skill.ts)
-separately scans project/ancestor and home `.claude/skills` and `.agents/skills`
-unless external skills are disabled; native skills still use config directories.
-Its [tool registry](https://github.com/anomalyco/opencode/blob/v1.2.3/packages/opencode/src/tool/registry.ts)
-also imports custom tools from those directories.
-
-Neither switch set is a complete redirect of all automatic sources. Global
-config (`config.json`, `opencode.json`, `opencode.jsonc`, legacy `config`), home
-`.opencode`, custom profiles/config directories, native skills, agents, modes,
-commands, plugins and custom tools still need managed, immutable sources.
-Configuration can reference instructions, skill paths/URLs and file substitutions;
-auth state can select remote well-known configuration, and managed `/etc/opencode`
-configuration also participates. The newer config loader additionally reads
-active-account organization configuration. A complete audit of the newer skill,
-plugin, tool and configuration-path implementations remains outstanding; this
-request capture is not that audit.
-
-To lift opencode's refusal, pin and verify one installed runtime, bind the base
-checkout to the admitted base SHA, start the session there with the head path in
-the standing task, and make the base, Git metadata and all managed automatic
-sources immutable to the sandbox user, including their parent directories.
-Alternatively the runtime needs a comprehensive switch that suppresses dynamic
-instruction resolution as well as discovery. Extend the context test to prove
-that a sandbox user's writes cannot introduce instructions, cover all redirected
-sources and tool-read turns, and only then change both admission gates. Writable
-test scratch must be outside the immutable base and outside its string prefix;
-the pinned resolver uses `current.startsWith(root)`, not path-component
-containment. The non-prefix fixture is evidence for that resolver only, not
-proof against other configuration or tool loaders. Production currently has no
-enforced immutable base or designated isolated review scratch directory.
-
-The workflow change only fixes the npm list for a future opencode review to
-`opencode-ai@1.18.31`. It changes no permissions, token placement, action pins
-or admission gates. The launcher refuses mismatched reported versions but does
-not authenticate or make the executable immutable; installation ownership and
-replacement protection still need privileged verification. Claude
-remains refused separately. This change does not close #154.
+The npm registry available during this change reports `opencode-ai` latest as
+1.18.35, not a stable 2.x release. The workflow default uses that available
+release; the launcher no longer refuses versions. The 2.x migration and its
+configuration/ACP breaking-change review remain pending publication of an
+installable stable 2.x package.
