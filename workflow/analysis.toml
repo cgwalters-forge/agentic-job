@@ -1,0 +1,11 @@
+# CI analysis only: topic branches are readable, but no patch can be applied.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+# `*` matches only one path segment; `**` also admits topic-branch slashes.
+bases = ["**"]
+max_outputs = 1
+max_patch_bytes = 1048576
+max_patch_files = 1
+
+[outputs]
+add_comment = { max = 1 }

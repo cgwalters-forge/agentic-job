@@ -86,6 +86,12 @@ size or a string shaped like a credential; a request naming another
 repository or base than the policy's; and a pull request that is not a
 draft, or does not come with exactly its patch.
 
+The workflow also supplies `--comment-repo OWNER/REPO --comment-target NUMBER`
+when the caller fixes a comment destination. These paired options bind comments
+to that repository and issue/PR, independently of the code repository. Explicit
+redirections, including PR-number aliases and existing-comment/reply IDs, are
+refused rather than silently retargeted.
+
 The patch is read as git reads it and must be exactly what
 `format-patch` writes. Refused are protected files (the policy's, and
 git's own files and CI, hook and editor configuration), paths that are
@@ -148,10 +154,11 @@ it refused, so the job fails on a non-empty `errors` itself.
 The handlers read `GH_AW_AGENT_OUTPUT`,
 `GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG` (JSON, in the variable itself),
 `GH_AW_WORKFLOW_ID` and `GH_AW_WORKFLOW_NAME`. They need the patch at
-`/tmp/gh-aw/aw-BRANCH.patch`; a checkout of the output repository at the
+`/tmp/gh-aw/aw-BRANCH.patch`; for a patch, a checkout of the output repository at the
 base branch, whole and with credentials persisted, since they push with
 it; git's `user.name` and `user.email` (`git am` keeps the patch's
 author and needs a committer); and the token of their step for the API.
+Comment-only results need the API token, not a checkout or a fetched base.
 The configuration is the collector's with settings added:
 `create_pull_request` gets `signed_commits: false` (a signed push is
 made through the API as the token's owner), `fallback_as_issue: false`,

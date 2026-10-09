@@ -118,7 +118,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(workflow, /inputs.review && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
   assert.match(workflow, /node "\$SOURCE_DIR\/workflow\/review.cjs" check/);
   const apply = workflow.split('\n  apply:')[1].split('\n  conclude:')[0];
-  assert.match(apply, /if: \$\{\{ !inputs.review \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
+  assert.match(apply, /if: \$\{\{ needs.check.outputs.has-patch == 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);
   const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   assert.match(ci, /e2e-review:\s+needs: review-base/);

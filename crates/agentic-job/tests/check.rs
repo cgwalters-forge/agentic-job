@@ -8,6 +8,93 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
+#[test]
+fn analysis_comments_use_the_callers_destination_without_a_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let policy = Command::new(BIN)
+        .args([
+            "policy",
+            "--repo",
+            "bootc-dev/bootc",
+            "--clone-url",
+            "https://github.com/bootc-dev/bootc",
+            "--base",
+            "bot/topic",
+            "--kind",
+            "analysis",
+            "--outputs",
+            "add_comment",
+            "--max-outputs",
+            "1",
+            "--allow",
+        ])
+        .arg(data("policy/allow.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        policy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&policy.stderr)
+    );
+    let policy_path = dir.path().join("policy.json");
+    std::fs::write(&policy_path, policy.stdout).unwrap();
+    for (fields, code) in [
+        (serde_json::json!({}), 0),
+        (
+            serde_json::json!({"repo": "tracker/items", "item_number": 170}),
+            0,
+        ),
+        (
+            serde_json::json!({"repo": "bootc-dev/bootc", "item_number": 170}),
+            1,
+        ),
+        (
+            serde_json::json!({"repo": "tracker/items", "item_number": 171}),
+            1,
+        ),
+        (serde_json::json!({"pr_number": 171}), 1),
+    ] {
+        let mut item = fields.as_object().unwrap().clone();
+        item.insert("type".into(), serde_json::json!("add_comment"));
+        item.insert("body".into(), serde_json::json!("Analysis result."));
+        std::fs::write(
+            out.join("outputs.jsonl"),
+            serde_json::to_vec(&item).unwrap(),
+        )
+        .unwrap();
+        let collected = dir.path().join("collected.json");
+        std::fs::write(
+            &collected,
+            serde_json::to_vec(&serde_json::json!({"items": [item], "errors": []})).unwrap(),
+        )
+        .unwrap();
+        let report = dir.path().join("report.json");
+        let result = Command::new(BIN)
+            .arg("check")
+            .arg("--policy")
+            .arg(&policy_path)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .arg("--report")
+            .arg(&report)
+            .args(["--comment-repo", "tracker/items", "--comment-target", "170"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(code),
+            "{fields}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let verdict: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert!(verdict["patch"].is_null());
+    }
+}
+
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data")

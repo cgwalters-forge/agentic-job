@@ -47,9 +47,15 @@ Read this before relying on it.
   branches and posts the comment with the job's own token.
 - Claude Code and opencode have run real tasks on RHEL 10 runners.
   The reusable workflow has been called from
-  `bootc-dev/cgwalters-devspace-sandbox`, where its apply job opened pull
-  requests. [Issue #59](https://github.com/cgwalters-forge/agentic-job/issues/59)
-  records these deployments. A real agent through the reusable workflow
+  `cgwalters-bot/agentic-job-trial`: runs
+  [37587896350](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37587896350)
+  and [37588497422](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37588497422)
+  opened pull requests [#1](https://github.com/cgwalters-bot/agentic-job-trial/pull/1)
+  and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2) there.
+  [Issue #59](https://github.com/cgwalters-forge/agentic-job/issues/59)
+  records these deployments. No caller exists in the operator's runner
+  repository, `bootc-dev/cgwalters-devspace-sandbox`, yet.
+  A real agent through the reusable workflow
   on GitHub-hosted runners remains untried; the existing broker is private.
 - This repository's CI expects Actions PR creation to be refused, with
   the branch pushed. That local setting does not prevent other callers
@@ -322,10 +328,20 @@ the token used, through checked outputs only. And everything the token
 can do is within reach of that one job, so give it no more than pushing
 to the output repository and opening pull requests and comments there.
 
-When `output-repo` is not the target, it is taken to be a fork: the job
+For a patch, when `output-repo` is not the target, it is taken to be a fork: the job
 fast-forwards the fork's base branch to the target's and pushes it
 before the handlers run. A fork whose base branch has commits of its own
 stops the job there.
+
+Without a patch, apply does not check out a repository, configure git or
+fetch/advance a base branch. An analysis can therefore inspect a topic branch
+and comment in an unrelated tracker repository via `output-repo`, even when
+that repository has no such branch. `comment-target` fixes the issue/PR number;
+the read-only check job refuses an explicit repository or item that differs,
+including PR-number aliases, existing-comment IDs and discussion replies.
+Omitting a destination in the request uses the caller's fixed destination.
+Cross-repository writes still require an apply token with access to that
+repository; no permissions or action pins are broadened.
 
 ### A run stopped at a limit
 

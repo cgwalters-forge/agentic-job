@@ -166,7 +166,7 @@ on:
         type: string
         default: ""
       output-repo:
-        description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). A fork of `repo` has its base branch brought up to date first
+        description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a patch, a fork of `repo` has its base branch brought up to date first; comments need no checkout
         type: string
         default: ""
       apply-environment:
@@ -730,6 +730,7 @@ jobs:
       contents: read
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      has-patch: ${{ steps.checked.outputs.has-patch }}
     steps:
       # This repository at this file's commit, for the validation rules
       # generated from the pinned gh-aw.
@@ -786,9 +787,16 @@ jobs:
         run: node "$SOURCE_DIR/workflow/review.cjs" check "$GH_AW_TMP/agent_output.json" "$TARGET"
       # The second half: the policy's bounds, and the rules for a patch.
       - name: Check the outputs against the policy
+        id: checked
+        env:
+          COMMENT_REPO: ${{ inputs.output-repo || github.repository }}
+          COMMENT_TARGET: ${{ needs.policy.outputs.comment-target }}
         run: |
+          destination=()
+          case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
-            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "has-patch=$(jq -r '.patch != null' "$GH_AW_TMP/report.json")" >> "$GITHUB_OUTPUT"
       # The handlers look for a pull request's patch beside the ingested
       # outputs, under the name gh-aw derives from the branch.
       - name: Put the patch beside the ingested outputs
@@ -845,9 +853,10 @@ jobs:
             { echo "::error::the environment $ENVIRONMENT has no secret AGENTIC_JOB_APPLY_TOKEN"; exit 1; }
       # The output repository, whole: the patch is applied on the commit
       # the agent started from, which a shallow clone does not have. The
-      # handlers push with this checkout's credentials.
+      # handlers push with this checkout's credentials. Only check's accepted
+      # patch report enables it; comment-only outputs need no repository/base.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ !inputs.review }}
+        if: ${{ needs.check.outputs.has-patch == 'true' }}
         with:
           repository: ${{ env.OUTPUT_REPO }}
           ref: ${{ needs.policy.outputs.base }}
@@ -867,7 +876,7 @@ jobs:
       # conflict, where `git am --3way` would look for the file by content
       # and could change another path than the patch names.
       - name: Configure git
-        if: ${{ !inputs.review }}
+        if: ${{ needs.check.outputs.has-patch == 'true' }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -878,7 +887,7 @@ jobs:
       # that was handed back says. A fork that is behind is fast-forwarded
       # and one that has diverged stops here.
       - name: Fetch the target's base branch, and bring a fork's up to it
-        if: ${{ !inputs.review }}
+        if: ${{ needs.check.outputs.has-patch == 'true' }}
         run: |
           git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
           [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || { git merge --ff-only refs/agentic-job/target-base && git push origin "HEAD:refs/heads/$BASE"; }
@@ -900,7 +909,7 @@ jobs:
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
       - name: Apply the patch on its own base, and compare what changed with what was checked
-        if: ${{ !inputs.review }}
+        if: ${{ needs.check.outputs.has-patch == 'true' }}
         run: |
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
