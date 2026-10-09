@@ -758,10 +758,9 @@ that is already there.
 Both the trial and the handler keep a carriage return at the end of a
 line (`am.keepcr`), for patches to files with CRLF line ends.
 `node --test workflow/apply.test.cjs` exercises the workflow's actual
-shell steps locally, including CRLF preservation, Unicode paths, file-list
-mismatches, unrelated bases and a rename into a protected path. File-list
-extraction failures stop the trial; Git's path quoting is disabled for
-the comparison, since `check` rejects control characters in paths.
+shell steps locally, including CRLF preservation, file-list mismatches,
+unrelated bases and a rename into a protected path. A file list that
+cannot be read, or is empty, stops the trial.
 
 The separately dispatched `safe-outputs-probe.yml` predates these guards
 and does not yet exercise them. Its fixture-only handler path still needs
