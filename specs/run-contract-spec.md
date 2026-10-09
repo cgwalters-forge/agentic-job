@@ -1,0 +1,203 @@
+# Run Contract Specification
+
+**Version**: 0.1.0  
+**Status**: Implementation snapshot
+
+## 1. Scope
+
+This specification describes agentic-job's existing boundary between an
+untrusted proposals producer, a read-only checker, and a credentialed applier.
+A producer can be a deterministic program or a coding agent. The sandbox
+requirements apply to producers launched by `agentic-job run`; supplying a
+`proposals-artifact` does not sandbox the caller's own job.
+
+The form follows gh-aw's
+[security architecture specification](https://github.com/github/gh-aw/blob/main/specs/security-architecture-spec.md).
+For the shared safe-output model, see its section 5 and the
+[safe-outputs reference](https://github.github.com/gh-aw/reference/safe-outputs/).
+The NDJSON format, text sanitization and handler semantics belong to gh-aw,
+not this specification. agentic-job uses its unmodified collector and handlers
+at the pin documented in [safe outputs](../docs/safe-outputs.md#what-is-gh-aws-and-why).
+The requirements below describe local restrictions and integration differences.
+
+## 2. Terminology and conformance
+
+**Producer** means the untrusted process leaving proposals. **Bounds** are the
+caller's allowed repositories, bases, output types and ceilings. **Policy** is
+the admitted configuration for one run. **Hand-back** is the proposals artifact,
+not a trusted checkout. **Check** validates it on a separate machine; **apply**
+acts on the checked result with a write-capable credential.
+
+The words MUST, MUST NOT, SHOULD and MAY have their
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) meanings. RC identifiers are
+stable requirement names. Conformance means satisfying all RC requirements in
+section 3; it does not claim conformance to gh-aw's entire security architecture.
+Each requirement lists existing enforcement evidence. A runtime probe is a
+check, not proof against every possible attack. Section 4 is excluded from the
+tested conformance claim.
+
+## 3. Requirements
+
+### 3.1 Admission, reads and credentials
+
+**RC-001 — Admission.** A run MUST fit the caller's bounds for clone host,
+repository, base, kind, output types and ceilings. Policy MUST NOT admit a
+pull-request output for an analysis run, more than one pull request, or a
+non-draft pull request. Additional organization bounds MUST only tighten access.
+Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
+`requests_against_the_bounds`, `ceilings_and_pull_request_settings` and
+`organization_policy_only_tightens_bounds`.
+
+**RC-002 — Sandbox reads.** A sandboxed producer MAY read the repository copy
+placed in its own workspace, but MUST NOT be able to list or enter the runner's
+private directories, including its checkout. It MUST NOT inherit the job's
+`ACTIONS_*` variables or read the OIDC request values from accessible processes.
+Enforcement: [on_host.rs](../crates/agentic-job/src/sandbox/check/on_host.rs),
+runtime checks `private-dir:{path}`, `env-job-variables` and `oidc-value:{name}`
+(with positive controls). These run as part of `sandbox check` and run's probes;
+see [probe coverage](../docs/sandbox-check.md) for prerequisites and limits.
+
+**RC-003 — Inference credential.** When inference uses a run token, the
+sandboxed producer MAY hold it in its configured private agent configuration.
+The runner's token file MUST be inaccessible, and the probes MUST refuse a
+token found in another writable file or accessible process environment or
+command line. This is a run-scoped inference token, not a forge credential or
+the model provider's key.
+Enforcement: [run_token.rs](../crates/agentic-job/src/sandbox/check/run_token.rs),
+runtime checks `token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
+`token-files` and `token-processes`.
+
+### 3.2 Proposals and refusals
+
+With `run`, the producer leaves `out/safe-outputs.jsonl` under its home and
+an uncommitted working-tree change; run constructs the patch and exports the
+proposals as `outputs.jsonl`. An external producer supplies that artifact file
+directly. See [hand-back construction](../docs/safe-outputs.md#what-the-agent-does).
+
+**RC-004 — Artifact routing.** A deterministic producer MAY supply a
+`proposals-artifact` without running the agent or activation jobs. Check MUST
+require explicit trusted binary and policy artifact IDs and exactly one
+proposal selector (artifact ID or legacy name). Producer outputs MUST NOT
+select the checker binary, policy or fixed comment destination.
+Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
+`proposals route retains check and token separation`,
+`checker requires explicit trusted IDs and one proposal selector` and
+`wrapper passes trusted checker inputs directly and exports all checker outputs`.
+
+**RC-005 — Hand-back files.** Check MUST accept only `outputs.jsonl`, optional
+`base.json` and at most one `aw-BRANCH.patch`. It MUST refuse unexpected files,
+symlinks, directories, oversized files and recognized secret-shaped strings.
+A pull-request request MUST have exactly its named patch and valid base
+metadata matching the policy repository/base and patch header; a patch without
+a pull-request request MUST be refused.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
+`what_is_refused` and `links_and_directories_are_not_read`;
+[files.rs](../crates/agentic-job/src/files.rs), `reads_only_regular_files_within_the_cap`.
+
+**RC-006 — Collected requests.** Check MUST refuse any collector errors,
+unadmitted type, per-type or total count excess, repository/base redirection,
+or non-draft pull request. Fixed comment destinations MUST reject explicit
+redirections, including aliases and reply/existing-comment IDs, rather than
+silently retargeting them.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
+`what_is_refused` and `fixed_comment_destination`.
+
+**RC-007 — Patch interpretation.** Check MUST refuse protected paths, non-plain
+relative paths, binary changes, symlinks, submodules, new executables, mode
+changes, renames and file-count excess. It MUST also refuse extra mail,
+unsupported mail headers, patch content hidden in the commit message and file
+headers without a mode. Exact-repository policy exceptions MAY relax protected
+names, but not top-level dot-folders or the fixed patch restrictions.
+Enforcement: [check/patch.rs](../crates/agentic-job/src/check/patch.rs), tests
+`what_is_refused` and `unprotected_names_and_folders_follow_the_policy`;
+[patch_git.rs](../crates/agentic-job/tests/patch_git.rs),
+`what_git_writes_is_read_as_git_means_it` and `the_reader_names_all_that_git_am_changes`.
+
+**RC-008 — Failure gate.** A refused hand-back MUST NOT upload applicable
+outputs or start apply. A missing or malformed collector result MUST be an
+error, not an acceptance verdict.
+Enforcement: [refusal.test.cjs](../workflow/refusal.test.cjs),
+`expected refusal never uploads applicable outputs or starts apply`;
+[tests/check.rs](../crates/agentic-job/tests/check.rs),
+`a_check_that_cannot_be_made_is_an_error_and_writes_no_verdict`.
+
+### 3.3 Apply
+
+**RC-009 — Token placement.** Check MUST remain read-only and receive no
+secrets. Only apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
+API steps MUST select that explicitly passed secret when nonempty, otherwise
+`github.token`, independently of the optional apply environment. Event status
+jobs can also write, but are not proposal appliers.
+Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
+`proposals route retains check and token separation`;
+[apply.test.cjs](../workflow/apply.test.cjs),
+`apply alone consumes the optional safe outputs PAT with job-token fallback`
+and the `credential expression wiring: PAT ...` cases.
+
+**RC-010 — Repository-aware patch guard.** Before handing a patch to gh-aw's
+handler, apply MUST verify that the claimed base is an ancestor of the target
+base and that applying on the claimed base changes exactly the checked paths.
+Git's handler configuration MUST disable rename following, so three-way
+application cannot redirect an allowed edit into a protected renamed path.
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
+`apply guard: ordinary edit`, `apply guard: unchecked path`,
+`apply guard: empty file list`, `apply guard: unrelated base` and
+`handler cannot follow a renamed file into a protected path`.
+
+**RC-011 — Non-patch apply.** Comment-only apply MUST skip repository steps,
+including checkout. Issue closing and label addition MUST retain the checked
+repository and caps, not use `output-repo` or triggering-event destinations.
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs),
+`comment-only apply skips every repository step, including checkout` and
+`issue actions keep checked repository and caps, not output-repo or event targets`.
+
+**RC-012 — Issue payload bounds.** Check MUST require explicit repository and
+positive integer targets for `close_issue` and `add_labels`, and refuse target
+aliases. Closing MUST reject `body`; issue creation MUST reject relationships
+to other issues. Labels MUST fit the policy's case-insensitive allow/block
+bounds. Added labels MUST also fit the per-request count and the 1–64-character
+ASCII subset documented in [safe outputs](../docs/safe-outputs.md#closing-issues-and-adding-labels),
+rather than be silently filtered or changed.
+Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
+`bounded_issue_actions`, `issue_action_payloads_are_not_silently_changed`,
+`issue_labels_are_checked_not_silently_filtered` and
+`an_issue_that_links_other_issues_is_refused`.
+
+## 4. Not yet enforced
+
+These limitations are not additional guarantees:
+
+- Project-update payload checking restricts exact projects and fields,
+  explicit repository and issue-only numeric content, and string/number field
+  values in [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `redirections_to`.
+  That payload grammar has no dedicated enforcing test here and is not part of
+  the tested conformance claim.
+- Patch author identity is not bound to the producer or operator; see
+  [issue 22](https://github.com/cgwalters-forge/agentic-job/issues/22).
+- Token selection has source and expression tests, not live tests of
+  environment-only secret delivery or environment protection gates. See
+  [token setup](../docs/workflow.md#the-apply-job-and-its-token).
+- The separate-job design runs pinned handlers, not producer scripts, in apply.
+  There is no comprehensive test proving that every future workflow step with
+  a credential avoids executing producer code. Source review remains necessary.
+
+## 5. Conformance evidence
+
+The linked Rust unit/integration tests and Node workflow tests are the current
+evidence; there is no `run-contract-compliance` fixture directory yet. Sandbox
+probes need a prepared host, and old-tree parity tests need external inputs;
+a skipped privileged path is not a conformance result. Follow
+[AGENTS.md](../AGENTS.md#build-and-checks) for commands and prerequisites.
+
+A first compliance set should reuse the hand-back corpus as input/expected
+accept-or-refuse vectors, keyed by RC-005 through RC-008, beginning with a valid
+draft patch and its unexpected-file, protected-path and mismatched-base variants.
+
+## 6. Non-goals
+
+This contract does not guarantee that an accepted patch is correct or benign,
+that all secrets are recognized by pattern matching, or that DNS cannot leak
+data. It does not specify model behavior, the full sandbox or inference
+protocol, every safe-output type, or GitHub's token permission model. It does
+not confer isolation on an arbitrary caller job that uploads proposals, and
+does not add gh-aw's compiler, workflow language or threat-detection service.

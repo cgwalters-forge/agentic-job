@@ -206,6 +206,8 @@ to five minutes on a hosted runner. Nobody but its authors has used it.
   user and not a container.
 - [docs/safe-outputs.md](docs/safe-outputs.md): how requests are checked
   and applied.
+- [specs/run-contract-spec.md](specs/run-contract-spec.md): the run contract
+  and its enforcement evidence.
 - [docs/inference.md](docs/inference.md): the proxy, and what it needs.
 - [docs/events.md](docs/events.md): starting runs from events.
 - [docs/dispatch.md](docs/dispatch.md): fixed operator dispatch profiles and setup.
