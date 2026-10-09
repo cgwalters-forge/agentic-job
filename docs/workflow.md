@@ -164,19 +164,46 @@ for the bounds, just as for agent runs.
 
 ```yaml
 jobs:
+  proposals:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: mkdir proposals && printf '%s\n' '{"type":"noop","message":"No proposals today."}' > proposals/outputs.jsonl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: board-proposals
+          path: proposals/outputs.jsonl
+          if-no-files-found: error
   apply:
     needs: proposals # uploads outputs.jsonl as board-proposals
     uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    permissions:
+      contents: read
+      issues: write # apply may post the allowed comments
+      id-token: write # GitHub validates the skipped agent job's permission too
     with:
       id: board
       repo: OWNER/REPO
       allow: .github/agentic-job/allow.toml
-      outputs: create_issue,noop
+      outputs: add_comment,noop
+      max-outputs: '2'
       proposals-artifact: board-proposals
 ```
 
-Grant the call `contents: read` and the write permissions its allowed outputs
-need (for example `issues: write`), or configure `apply-environment` as below.
+Copy the [shipped bounds file](../.github/agentic-job/allow.toml) to the path
+above, set its `repos` and the call's `repo` to your public repository, and
+replace `COMMIT` with a reviewed commit. Put these jobs in a workflow with
+your chosen trigger. The producer above sends a noop; replace it with your
+job's requests. For comments, set `comment-target` to an existing issue number.
+`add_comment,noop` is within the shipped bounds; `create_issue` requires your
+own explicit bounds entry. Set `max-outputs` no higher than your bounds file's
+`max_outputs` (the workflow default is 3).
+
+Keep the permissions above, or configure `apply-environment` as below and
+omit `issues: write`. Even proposals-only callers need `id-token: write`:
+GitHub validates the reusable workflow's permission requests before deciding
+which jobs to skip. No OIDC token is requested in proposals mode.
+CI's `e2e-proposals` runs this noop producer and call without a sandbox or model.
 The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.

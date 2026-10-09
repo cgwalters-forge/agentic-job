@@ -82,3 +82,67 @@ test('proposals route retains check and token separation', () => {
       /inputs.proposals-artifact == ''/);
   }
 });
+
+test('documented proposals caller matches the CI trial and shipped bounds', () => {
+  const docs = readFileSync(join(__dirname, '../docs/workflow.md'), 'utf8');
+  const snippet = docs.split('## Proposals from a non-agent job\n')[1]
+    .split('```yaml\n')[1].split('```')[0];
+  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  const producer = ci.split('\n  proposals:\n')[1].split('\n  e2e-proposals:\n')[0];
+  const caller = ci.split('\n  e2e-proposals:\n')[1].split('\n  e2e-full:\n')[0];
+  // Compare the executable producer verbatim, including its action pin.
+  assert.equal(snippet.split('    steps:\n')[1].split('  apply:\n')[0],
+    producer.split('    steps:\n')[1].trimEnd() + '\n');
+  for (const block of [snippet.split('  apply:\n')[1], caller]) {
+    assert.match(block, /contents: read\n      issues: write[^\n]*\n      id-token: write/);
+    assert.match(block, /allow: \.github\/agentic-job\/allow.toml/);
+    assert.match(block, /outputs: add_comment,noop/);
+    assert.match(block, /max-outputs: '2'/);
+    assert.match(block, /proposals-artifact: board-proposals/);
+  }
+  const bounds = readFileSync(join(__dirname, '../.github/agentic-job/allow.toml'), 'utf8');
+  for (const type of ['add_comment', 'noop']) assert.match(bounds, new RegExp(`^${type} =`, 'm'));
+  assert.ok(Number(bounds.match(/^max_outputs = (\d+)$/m)[1]) >= 2);
+  assert.match(ci.split('\n  ci:\n')[1], /needs: \[.*proposals, e2e-proposals,/);
+});
+
+// Mirror ActionCommand.TryParseV2/TryParse command recognition: modern syntax
+// follows leading whitespace, but legacy syntax can appear anywhere in a line.
+function runnerCommand(line) {
+  const registered = new Set(['error', 'warning', 'set-output', 'add-mask', 'stop-commands']);
+  const modern = line.trimStart().match(/^::([^ :]+)(?: [^]*?)?::/);
+  if (modern && registered.has(modern[1].toLowerCase())) return modern[1].toLowerCase();
+  const start = line.indexOf('##[');
+  if (start < 0) return null;
+  const end = line.indexOf(']', start);
+  if (end < 0) return null;
+  const name = line.slice(start + 3, end).split(' ')[0].toLowerCase();
+  return registered.has(name) ? name : null;
+}
+
+test('policy errors preserve the exit status and escape annotation data', () => {
+  const wrapper = join(__dirname, 'policy-command.cjs');
+  const hostile = 'bad%\r\n  ::warning::data\n' +
+    ['warning', 'set-output name=hostile', 'add-mask', 'stop-commands', 'WaRnInG']
+      .map(command => `embedded ##[${command}]hostile`).join('\r\n');
+  // Ensure the test parser recognizes the attacks even behind the old prefix.
+  for (const line of hostile.split(/[\r\n]/).filter(Boolean).slice(1)) {
+    assert.ok(runnerCommand(line));
+    if (line.includes('##[')) assert.ok(runnerCommand(`policy: ${line}`));
+  }
+  for (const status of [0, 1, 2]) {
+    const result = spawnSync(process.execPath, [wrapper, process.execPath, '-e',
+      `process.stdout.write('policy'); process.stderr.write(${JSON.stringify(hostile)}); process.exitCode=${status}`],
+    { encoding: 'utf8' });
+    assert.equal(result.status, status);
+    assert.equal(result.stdout, 'policy');
+    assert.equal(result.stderr.split('\n').some(line => line.startsWith('::error::') &&
+      line.includes('bad%25%0D%0A  ::warning::data')), status !== 0);
+    assert.deepEqual(result.stderr.split(/[\r\n]/).map(runnerCommand).filter(Boolean),
+      status === 0 ? [] : ['error']);
+    assert.doesNotMatch(result.stderr, /##\[/);
+    assert.match(result.stderr, /policy: embedded # #\[set-output name=hostile\]hostile/);
+  }
+  const step = workflow.split('- name: Check the request against')[1].split('- id: binary')[0];
+  assert.match(step, /node "\$SOURCE_DIR\/workflow\/policy-command.cjs"/);
+});
