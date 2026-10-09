@@ -58,13 +58,20 @@ test('each CI apt operation has acquisition retries and a short step timeout', (
   let operations = 0;
   for (const file of ['ci.yml', 'build.yml']) {
     const workflow = fs.readFileSync(path.join(root, '.github/workflows', file), 'utf8');
+    assert.match(workflow, /run: sudo node secure-host\/apt\.mjs/);
     for (const match of workflow.matchAll(/^      - run: (sudo apt-get[^\n]*)\n([^]*?)(?=^      - |\s*$)/gm)) {
       operations++;
+      assert.ok(workflow.indexOf('run: sudo node secure-host/apt.mjs') < match.index, file);
       assert.match(match[1], /-o Acquire::Retries=3/, file);
       assert.match(match[2], /^        timeout-minutes: 5$/m, file);
     }
   }
   assert.equal(operations, 3);
+  const action = fs.readFileSync(path.join(root, 'secure-host/action.yml'), 'utf8');
+  assert.ok(action.includes('run: sudo node "$ACTION/apt.mjs"'));
+  assert.ok(action.indexOf('run: sudo node "$ACTION/apt.mjs"') < action.indexOf('- name: Get the binary'));
+  const binary = fs.readFileSync(path.join(root, 'secure-host/binary.mjs'), 'utf8');
+  assert.match(binary, /run\("sudo", \["node", join\(HERE, "apt.mjs"\)\]\);\s+run\("sudo", \["apt-get"/);
 });
 
 test('only README and documentation Markdown can skip E2E', () => {
