@@ -72,6 +72,34 @@ order, it:
   programs. [The lock and its probes](sandbox-check.md#after-setup-nothing-has-root)
   describe the remaining privileged operations.
 
+The world-write and setuid inventory use one GNU `find -O3` invocation,
+not a Rust metadata walk or a command per path. It stays on the root
+filesystem (`-xdev`), with additional starting points for `/tmp` and
+`/var/tmp` only when those are separate filesystems. Temporary trees are
+still inventoried for setuid programs, but never lose world-write.
+Both actions are inside the pruning branch, so neither revisits a
+pruned tree. Busy temporary trees tolerate disappearing directory entries.
+
+The traversal no longer descends into procfs or sysfs, read-only **and
+nosuid** mounts with no writable or suid-capable mount at or below them.
+Closed directories are still walked regardless of ownership: a later setup
+or job step can reopen them, exposing paths that must already be hardened.
+The pruned filesystems cannot offer the sandbox a writable path or executable
+setuid program. Read-only alone is insufficient: a setuid program there
+could still execute, so read-only mounts without `nosuid` remain walked.
+The tool cache has no blanket exemption: it is walked even if closed.
+The final probes remain independent searches as the sandbox user.
+
+To reproduce a small, nonprivileged local traversal benchmark (30,000 files
+in a private tree), run
+`cargo test --workspace --locked hardening_walk_local_benchmark -- --ignored --nocapture`.
+This fixture measures traversal only, not hosted-runner setup or image
+composition; the setup stage log is the authoritative hosted measurement.
+The earlier private-directory pruning speedup does not apply: this fixture
+now visits the private tree in both versions. The remaining optimizations
+are the single combined walk and pseudo-filesystem/read-only mount prunes;
+their hosted-runner savings still require fresh-runner measurement.
+
 Every command in the sandbox is then started through the root-owned
 helper, which invokes `run0 --pipe --user=…`. This creates a transient
 service with its own PAM session

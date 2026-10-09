@@ -269,6 +269,10 @@ jobs:
       - run: sudo apt-get install -y --no-install-recommends at cron pkexec podman uidmap python3-venv nftables cargo socat
       - name: Setup refuses a machine that is not fresh
         run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
+      # Root-only fixture: a subordinate owner can reopen a closed directory,
+      # but setup's inventory must already have stripped its unowned setuid file.
+      - name: Hardening inventories subordinate-owned private directories
+        run: cargo test --locked --lib hardening_walk_subordinate_owner -- --ignored --nocapture
       # For whoever has to say why a local-sockets probe failed, and what
       # the runner's user is before setup takes its root away.
       - name: What listens on this runner, and what its user is
