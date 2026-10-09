@@ -6,6 +6,10 @@ maintain or write permission. Forks and issue comments are refused. The
 workflow, bounds and [standing task](../workflow/review.md) come from the base,
 not the pull request head.
 
+To try the scripted caller in another repository, follow the
+[complete copy and edit list](workflow.md#event-triggered-callers), including
+the setup script, bounds and standing task. No label is needed for this caller.
+
 Review is an analysis run. Real agents start in the base checkout, with the
 exact admitted head SHA checked out beside it and named in the task as data.
 The scripted agent starts in the head so its verdict can report that SHA.

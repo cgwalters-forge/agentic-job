@@ -42,6 +42,8 @@ jobs:
     with:
       id: pull-${{ github.event.pull_request.number }}
       event: true
+      # Comment-only: policy refuses pull request outputs and no patch is handed back.
+      kind: analysis
       task: >-
         Review the pull request named below: fetch its head, read the change against its base
         branch, and answer with one comment that says what you found and what you would change.
