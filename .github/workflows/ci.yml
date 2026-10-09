@@ -587,6 +587,28 @@ jobs:
           if [ -f workflow/review.md ] && [ -f workflow/review.toml ] && [ -f .github/agentic-job/e2e/review.sh ]; then installed=true; fi
           echo "installed=$installed" >> "$GITHUB_OUTPUT"
 
+  # Exercise the shipped caller, not a separately maintained imitation.
+  # Pushes and same-repository PRs only; no fork source with a write token.
+  e2e-dispatch:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["implement","triage","research","review"]' || '["implement","triage","research"]') }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/dispatch.yml
+    with:
+      task: Exercise the shipped scripted dispatch caller; no model is needed.
+      scripted: true
+      repo: ${{ github.repository }}
+      item: ${{ matrix.profile == 'review' && format('{0}', github.event.pull_request.number) || '64' }}
+      kind: ${{ matrix.profile }}
+
   e2e-review:
     needs: [changes, review-base]
     if: ${{ needs.changes.outputs.e2e == 'true' && needs.review-base.outputs.installed == 'true' }}
@@ -615,9 +637,35 @@ jobs:
       budget: '100'
       artifact-prefix: review-
 
+  # Proposed verifier code may read dispatch results, but never gets cleanup's
+  # write token. Cleanup waits for this job even when verification fails.
+  e2e-dispatch-verify:
+    if: ${{ always() && needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [changes, e2e-dispatch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the shipped dispatch profiles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.e2e-dispatch.result }}
+          PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
+        run: node workflow/dispatch-verify.cjs
+
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review]
+    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-dispatch-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -792,7 +840,7 @@ jobs:
       - name: Remove the scratch branches
         if: ${{ always() }}
         run: |
-          for branch in "$FULL" "$LIMIT"; do
+          for branch in "$FULL" "$LIMIT" "dispatch/implement/agent-run-$GITHUB_RUN_ID"; do
             gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
           done
       # Pull requests are closed as issues, which to the API they are.
@@ -829,7 +877,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-verify]
+    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-dispatch, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -838,9 +886,11 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           REVIEW_INSTALLED: ${{ needs.review-base.outputs.installed }}
           E2E: ${{ needs.changes.outputs.e2e }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: >-
-          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E"
+          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork "$FORK"
           'all(to_entries[]; .value.result == "success" or
           (.value.result == "skipped" and $e2e == "false" and
-           (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-verify"))) or
-          (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"
+            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-dispatch", "e2e-dispatch-verify", "e2e-verify"))) or
+           (.key == "e2e-review" and .value.result == "skipped" and $installed == "false") or
+            ((.key | IN("e2e-dispatch", "e2e-dispatch-verify")) and .value.result == "skipped" and $fork == "true"))' <<<"$NEEDS"

@@ -2,10 +2,34 @@
 
 use std::process::Command;
 
+use clap::Parser;
+
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 /// What `exit::ERROR` is; spelled out because it is the interface.
 const ERROR: i32 = 2;
+
+#[test]
+fn built_in_dispatch_installer_command_parses_without_entering_the_sandbox() {
+    let workflow = include_str!("../../../.github/workflows/agentic-job.yml");
+    let command = workflow
+        .lines()
+        .find(|line| line.trim_start().starts_with("agentic-job sandbox exec "))
+        .unwrap();
+    // This fixed installer has only whitespace-separated words and one
+    // quoted variable path; do not execute it or enter a privileged sandbox.
+    let argv = command.split_whitespace().map(|arg| arg.trim_matches('"'));
+    let cli = agentic_job::cli::Cli::try_parse_from(argv).unwrap();
+    let agentic_job::cli::Command::Sandbox(agentic_job::sandbox::Command::Exec(args)) = cli.command
+    else {
+        panic!("expected a sandbox exec command");
+    };
+    assert_eq!(
+        args.stdin.unwrap().to_str().unwrap(),
+        "$SOURCE_DIR/workflow/dispatch-$PROFILE.sh"
+    );
+    assert_eq!(args.argv, ["sh", "-s"]);
+}
 
 #[test]
 fn exit_states() {

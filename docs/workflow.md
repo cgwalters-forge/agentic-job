@@ -394,7 +394,10 @@ The dedicated [review caller](review.md) sets `review: true` and
 `review-task: workflow/review.md` to take a fixed task from the base checkout,
 review an admitted same-repository head SHA with an analysis-only policy, and
 post one validated verdict comment or noop. It requires notifications and
-partial application off, and currently supports only fake agents.
+partial application off, and supports fake, opencode and Claude agents. Real
+reviewers start in the trusted base checkout with the exact head beside it;
+see [real reviewer setup](review.md#enabling-a-real-reviewer). The
+[dispatch caller](dispatch.md) also supports operator-selected PR reviews.
 
 With `event: true` the run is decided from the event that started the
 calling workflow, by `agentic-job event` in the policy job

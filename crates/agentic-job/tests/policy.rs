@@ -223,7 +223,8 @@ fn a_bad_bounds_file_is_an_error_and_not_a_refusal() {
 
 #[test]
 fn dispatch_profiles_use_the_example_bounds() {
-    let allow = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dispatch/allow.toml");
+    let allow =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/agentic-job/dispatch.toml");
     for (kind, outputs, repo, code) in [
         (
             "branch",
@@ -276,6 +277,41 @@ fn dispatch_profiles_use_the_example_bounds() {
             assert_eq!(policy["safe_outputs"]["create_pull_request"]["draft"], true);
         }
     }
+}
+
+#[test]
+fn dispatch_documented_unprotected_files_hint_is_valid() {
+    let bounds = include_str!("../../../.github/agentic-job/dispatch.toml")
+        .replace("# [unprotected_files]", "[unprotected_files]")
+        .replace(
+            "# repos = [\"OWNER/REPO\"]",
+            "repos = [\"cgwalters-forge/agentic-job\"]",
+        )
+        .replace("# files =", "files =");
+    let dir = tempfile::tempdir().unwrap();
+    let allow = dir.path().join("dispatch.toml");
+    std::fs::write(&allow, bounds).unwrap();
+    let output = policy(
+        &allow,
+        &[
+            ("--repo", "cgwalters-forge/agentic-job"),
+            (
+                "--clone-url",
+                "https://github.com/cgwalters-forge/agentic-job",
+            ),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let protected = policy["safe_outputs"]["create_pull_request"]["protected_files"]
+        .as_array()
+        .unwrap();
+    assert!(!protected.contains(&serde_json::json!("README.md")));
+    assert!(protected.contains(&serde_json::json!("AGENTS.md")));
 }
 
 #[test]
