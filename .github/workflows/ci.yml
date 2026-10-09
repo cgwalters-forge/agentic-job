@@ -507,7 +507,7 @@ jobs:
       artifact-prefix: analysis-
 
   # Same read-only analysis, but hostile output names another item. Check
-  # must fail before the job holding the issue-write token applies anything.
+  # must be refused before the job holding the issue-write token applies anything.
   e2e-analysis-refused:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
@@ -518,6 +518,7 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml
     with:
       id: e2e-analysis-refused-${{ github.run_id }}
+      expect-check-refusal: true
       repo: ${{ github.repository }}
       base: ${{ github.head_ref || 'main' }}
       kind: analysis
@@ -706,10 +707,12 @@ jobs:
           RESULT: ${{ needs.e2e-analysis.result }}
           REFUSED: ${{ needs.e2e-analysis-refused.result }}
           REFUSED_EXIT: ${{ needs.e2e-analysis-refused.outputs.exit }}
+          REFUSAL: ${{ needs.e2e-analysis-refused.outputs.check-refusal }}
           REFUSED_APPLIED: ${{ needs.e2e-analysis-refused.outputs.applied-artifact-id }}
         run: |
           test "$RESULT" = success
-          test "$REFUSED" = failure
+          test "$REFUSED" = success
+          grep -F "an add\_comment with item\_number outside the caller's fixed item" <<< "$REFUSAL"
           test "$REFUSED_EXIT" = 0
           test -z "$REFUSED_APPLIED"
           gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '

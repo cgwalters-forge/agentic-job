@@ -191,6 +191,10 @@ on:
           branch and say so
         type: string
         default: fail
+      expect-check-refusal:
+        description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
+        type: boolean
+        default: false
       comment-target:
         description: >-
           The issue or pull request of the output repository an `add_comment` goes to, or `*` for
@@ -242,6 +246,9 @@ on:
       applied-artifact-id:
         description: The artifact holding applied.json, which names what the apply job made
         value: ${{ jobs.apply.outputs.artifact-id }}
+      check-refusal:
+        description: The policy-check refusal reason, empty when outputs were accepted
+        value: ${{ jobs.check.outputs.refusal }}
       pull-request:
         description: The number of the pull request the run opened, if it opened one
         value: ${{ jobs.apply.outputs.pull-request }}
@@ -844,22 +851,36 @@ jobs:
               core.setFailed(error.message);
             }
       # The second half: the policy's bounds, and the rules for a patch.
+      # Expected refusal changes reporting only: require the CLI's refusal
+      # exit/report, and retain failures from the summary pipeline too.
       - name: Check the outputs against the policy
         id: checked
         env:
           COMMENT_REPO: ${{ inputs.output-repo || github.repository }}
           COMMENT_TARGET: ${{ needs.policy.outputs.comment-target }}
+          EXPECT_REFUSAL: ${{ inputs.expect-check-refusal }}
         run: |
           destination=()
           case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
+          set +e
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
             --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          test "${statuses[1]}" = 0
+          if [ "$EXPECT_REFUSAL" = true ]; then
+            test "${statuses[0]}" = 1
+            jq -e '.ok == false and (.errors | type == "array" and length > 0)' "$GH_AW_TMP/report.json"
+            echo 'refused=true' >> "$GITHUB_OUTPUT"
+          else
+            test "${statuses[0]}" = 0
+          fi
           echo "has-patch=$(jq -r '.patch != null' "$GH_AW_TMP/report.json")" >> "$GITHUB_OUTPUT"
       # Trusted report readers only; this job still has no write token.
       # core.error escapes workflow-command characters in hostile path text.
       - name: Show why check refused the outputs
         id: refusal
-        if: ${{ failure() }}
+        if: ${{ failure() || steps.checked.outputs.refused == 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -870,9 +891,12 @@ jobs:
             core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       # The handlers look for a pull request's patch beside the ingested
       # outputs, under the name gh-aw derives from the branch.
+      # A refusal test must never publish applicable outputs or start a writer.
       - name: Put the patch beside the ingested outputs
+        if: ${{ success() && !inputs.expect-check-refusal }}
         run: find "$JOB_DIR/safe-outputs" -maxdepth 1 -name 'aw-*.patch' -exec cp -t "$GH_AW_TMP" {} +
       - id: upload
+        if: ${{ success() && !inputs.expect-check-refusal }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.artifact-prefix }}checked-outputs
@@ -895,7 +919,7 @@ jobs:
     # decides only this; the check job decided whether it may be applied.
     if: >-
       ${{ !cancelled() && needs.check.result == 'success' && (inputs.proposals-artifact != '' || needs.agent.outputs.exit == '0' ||
-          (inputs.apply-partial && contains(fromJSON('["3", "124"]'), needs.agent.outputs.exit))) }}
+          (inputs.apply-partial && contains(fromJSON('["3", "124"]'), needs.agent.outputs.exit))) && !inputs.expect-check-refusal }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 15
     environment: ${{ inputs.apply-environment }}
