@@ -58,3 +58,64 @@ test('conclusion excludes wildcard targets and retains output-repository routing
   assert.match(conclude, /\[\[ "\$TARGET" =~ \^\[0-9\]\+\$/);
   assert.doesNotMatch(conclude, /AGENTIC_JOB_APPLY_TOKEN/);
 });
+
+test('expected policy refusal succeeds only with a refusal report and a working summary writer', () => {
+  const dir = fs.mkdtempSync(join(homedir(), 'workflow-expected-refusal-'));
+  try {
+    const binary = join(dir, 'agentic-job');
+    fs.writeFileSync(binary, '#!/bin/bash\nif [ "$REPORT" != missing ]; then cp "$REPORT" "$GH_AW_TMP/report.json"; fi\nexit "$STATUS"\n');
+    fs.chmodSync(binary, 0o700);
+    const report = join(dir, 'fixture.json');
+    for (const [name, expect, status, verdict, summary, code] of [
+      ['expected refusal', 'true', '1', { ok: false, errors: ['wrong item'] }, 'summary', 0],
+      ['unexpected acceptance', 'true', '0', { ok: true, errors: [] }, 'summary', 1],
+      ['operational failure', 'true', '1', null, 'summary', 2],
+      ['other exit', 'true', '2', { ok: false, errors: ['wrong item'] }, 'summary', 1],
+      ['empty refusal', 'true', '1', { ok: false, errors: [] }, 'summary', 1],
+      ['summary failure', 'true', '1', { ok: false, errors: ['wrong item'] }, 'missing/summary', 1],
+      ['normal refusal', 'false', '1', { ok: false, errors: ['wrong item'] }, 'summary', 1],
+      ['normal acceptance', 'false', '0', { ok: true, errors: [], patch: null }, 'summary', 0],
+    ]) {
+      fs.rmSync(join(dir, 'report.json'), { force: true });
+      fs.writeFileSync(report, JSON.stringify(verdict));
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', script('Check the outputs against the policy', 'run')], {
+        encoding: 'utf8', env: { ...process.env, JOB_DIR: dir, GH_AW_TMP: dir,
+          COMMENT_TARGET: '64', COMMENT_REPO: 'owner/repo', EXPECT_REFUSAL: expect,
+          STATUS: status, REPORT: verdict === null ? 'missing' : report,
+          GITHUB_OUTPUT: join(dir, 'output'), GITHUB_STEP_SUMMARY: join(dir, summary) },
+      });
+      assert.equal(result.status, code, `${name}: ${result.stdout}${result.stderr}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('expected refusal never uploads applicable outputs or starts apply', async () => {
+  assert.match(workflow, /failure\(\) \|\| steps.checked.outputs.refused == 'true'/);
+  for (const marker of ['- name: Put the patch beside the ingested outputs', '- id: upload']) {
+    const check = workflow.split('\n  check:')[1].split('\n  apply:')[0];
+    assert.match(check.split(marker)[1], /^\n        if: \$\{\{ success\(\) && !inputs.expect-check-refusal \}\}/);
+  }
+  assert.match(workflow.split('\n  apply:')[1], /&& !inputs.expect-check-refusal \}\}/);
+  const ci = fs.readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  assert.match(ci, /expect-check-refusal: true/);
+  assert.match(ci, /test "\$REFUSED" = success/);
+  assert.match(ci, /test -z "\$REFUSED_APPLIED"/);
+  const dir = fs.mkdtempSync(join(homedir(), 'workflow-ci-refusal-'));
+  try {
+    fs.writeFileSync(join(dir, 'report.json'), JSON.stringify({ ok: false,
+      errors: ["an add_comment with item_number outside the caller's fixed item"] }));
+    const { refusalReasons } = await import('../safe-outputs/diagnostics.mjs');
+    const reason = (await refusalReasons(dir)).join('; ');
+    const assertion = ci.split('\n').find(line => line.includes('grep -F') && line.includes('$REFUSAL')).trim();
+    for (const [value, code] of [[reason, 0], ['unrelated refusal', 1], ['', 1]]) {
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', assertion], {
+        encoding: 'utf8', env: { ...process.env, REFUSAL: value },
+      });
+      assert.equal(result.status, code, result.stderr);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

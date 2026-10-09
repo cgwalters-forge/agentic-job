@@ -525,6 +525,15 @@ Omitting a destination in the request uses the caller's fixed destination.
 Cross-repository writes still require an apply token with access to that
 repository; no permissions or action pins are broadened.
 
+CI's misdirected-analysis caller sets `expect-check-refusal: true`. Only a
+policy-check exit of 1 with a nonempty refusal report counts as success;
+collector, setup and other operational failures still fail, as does unexpected
+acceptance. The caller exposes `check-refusal`, which CI asserts names the
+fixed-item violation. Expected-refusal runs upload no checked outputs and never
+start apply, even if the check unexpectedly accepts them. This changes only
+result reporting and job/step conditions: permissions, token placement, action
+pins and the validation rules are unchanged.
+
 ### A run stopped at a limit
 
 A run that reaches its timeout or a request, task or spending limit is
