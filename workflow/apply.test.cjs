@@ -59,7 +59,9 @@ test('comment-only apply skips every repository step, including checkout', () =>
     'Apply the patch on its own base, and compare what changed with what was checked']) {
     assert.ok(apply.split(`- name: ${name}\n`)[1].startsWith(`        ${gate}\n`), name);
   }
-  assert.match(workflow, /has-patch: \$\{\{ steps.checked.outputs.has-patch \}\}/);
+  const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  assert.match(checker, /has-patch: \$\{\{ steps.checked.outputs.has-patch \}\}/);
+  assert.match(checker, /value: \$\{\{ jobs.check.outputs.has-patch \}\}/);
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     const report = join(root, 'report.json');

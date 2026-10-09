@@ -7,9 +7,11 @@ const { homedir } = require('node:os');
 const { test } = require('node:test');
 
 const workflow = fs.readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const checker = fs.readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
 
 function script(name, key) {
-  const section = workflow.split(`- name: ${name}\n`)[1].split(/\n      - /)[0];
+  const source = name === 'How the run ended' ? workflow : checker;
+  const section = source.split(`- name: ${name}\n`)[1].split(/\n      - /)[0];
   const indent = key === 'script' ? 12 : 10;
   return section.split(`${key}: |\n`)[1].split('\n')
     .filter(line => line.startsWith(' '.repeat(indent))).map(line => line.slice(indent)).join('\n');
@@ -92,9 +94,9 @@ test('expected policy refusal succeeds only with a refusal report and a working 
 });
 
 test('expected refusal never uploads applicable outputs or starts apply', async () => {
-  assert.match(workflow, /failure\(\) \|\| steps.checked.outputs.refused == 'true'/);
+  assert.match(checker, /failure\(\) \|\| steps.checked.outputs.refused == 'true'/);
   for (const marker of ['- name: Put the patch beside the ingested outputs', '- id: upload']) {
-    const check = workflow.split('\n  check:')[1].split('\n  apply:')[0];
+    const check = checker.split('\n  check:')[1];
     assert.match(check.split(marker)[1], /^\n        if: \$\{\{ success\(\) && !inputs.expect-check-refusal \}\}/);
   }
   assert.match(workflow.split('\n  apply:')[1], /&& !inputs.expect-check-refusal \}\}/);

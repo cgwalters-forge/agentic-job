@@ -1,0 +1,203 @@
+# Read-only validation on a machine the proposal producer never touched.
+# Trusted artifacts must come directly from policy, never through the producer.
+name: Check agentic-job proposals
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Checker runner labels as JSON
+        type: string
+        default: '"ubuntu-24.04"'
+      binary-artifact-id:
+        description: Immutable binary upload ID from the trusted policy job in this run
+        type: string
+        required: true
+      policy-artifact-id:
+        description: Immutable policy upload ID from the trusted policy job in this run
+        type: string
+        required: true
+      safe-outputs-artifact-id:
+        description: Immutable untrusted proposal upload ID; required unless proposals-artifact is set
+        type: string
+        default: ""
+      proposals-artifact:
+        description: Legacy untrusted proposals artifact name; never selects trusted code or policy
+        type: string
+        default: ""
+      review:
+        description: Validate an analysis-only review verdict
+        type: boolean
+        default: false
+      comment-target:
+        description: Trusted policy's effective comment destination
+        type: string
+        required: true
+      output-repo:
+        description: Fixed output repository, empty for the calling repository
+        type: string
+        default: ""
+      expect-check-refusal:
+        description: Require a policy refusal and publish no applicable outputs
+        type: boolean
+        default: false
+      artifact-prefix:
+        description: Caller namespace for artifact names within this run
+        type: string
+        default: ""
+    outputs:
+      artifact-id:
+        description: Immutable checked upload ID for apply; absent on refusal
+        value: ${{ jobs.check.outputs.artifact-id }}
+      refusal:
+        description: Bounded refusal diagnostic, not authorization to apply
+        value: ${{ jobs.check.outputs.refusal }}
+      has-patch:
+        description: Whether the trusted checker report contains a patch
+        value: ${{ jobs.check.outputs.has-patch }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GH_AW_TMP: /tmp/gh-aw
+  JOB_DIR: ${{ github.workspace }}/.agentic-job
+  SOURCE_DIR: ${{ github.workspace }}/.agentic-job-source
+
+jobs:
+  check:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      refusal: ${{ steps.refusal.outputs.reason }}
+      has-patch: ${{ steps.checked.outputs.has-patch }}
+    steps:
+      # Empty IDs must not turn download-artifact into a download of all uploads.
+      - name: Require explicit artifact contracts
+        env:
+          BINARY: ${{ inputs.binary-artifact-id }}
+          POLICY: ${{ inputs.policy-artifact-id }}
+          PROPOSALS: ${{ inputs.safe-outputs-artifact-id }}
+          NAME: ${{ inputs.proposals-artifact }}
+        run: |
+          [[ "$BINARY" =~ ^[0-9]+$ && "$POLICY" =~ ^[0-9]+$ ]] || { echo '::error::trusted artifact IDs are required'; exit 1; }
+          if [ -z "$NAME" ]; then
+            [[ "$PROPOSALS" =~ ^[0-9]+$ ]] || { echo '::error::a proposal artifact ID is required'; exit 1; }
+          else
+            [ -z "$PROPOSALS" ] || { echo '::error::choose a proposal ID or legacy name, not both'; exit 1; }
+          fi
+      # Same source commit as the whole wrapper: a local reusable call is pinned
+      # to its caller workflow's commit, not the target repository checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agentic-job-source
+          sparse-checkout: |
+            safe-outputs
+            workflow
+          persist-credentials: false
+      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}
+          path: .agentic-job
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.proposals-artifact == '' }}
+        with:
+          artifact-ids: ${{ inputs.safe-outputs-artifact-id }}
+          path: .agentic-job/safe-outputs
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.proposals-artifact != '' }}
+        with:
+          name: ${{ inputs.proposals-artifact }}
+          path: .agentic-job/safe-outputs
+      - name: Write the collector's configuration
+        run: |
+          chmod +x "$JOB_DIR/agentic-job"
+          jq .safe_outputs "$JOB_DIR/policy.json" > "$GH_AW_TMP/config.json"
+      - name: Ingest the outputs with gh-aw's collector
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_SAFE_OUTPUTS: ${{ env.JOB_DIR }}/safe-outputs/outputs.jsonl
+          GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ env.GH_AW_TMP }}/config.json
+          GH_AW_VALIDATION_CONFIG_PATH: ${{ env.SOURCE_DIR }}/safe-outputs/validation.json
+        with:
+          script: |
+            const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+            require(`${dir}/setup_globals.cjs`).setupGlobals(core, github, context, exec, io, getOctokit);
+            await require(`${dir}/collect_ndjson_output.cjs`).main();
+      - name: The collector refused nothing
+        run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
+      - name: Validate the review verdict
+        if: ${{ inputs.review }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TARGET: ${{ inputs.comment-target }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { checkOutputs } = require(`${process.env.SOURCE_DIR}/workflow/review.cjs`);
+            try {
+              checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET);
+            } catch (error) {
+              fs.writeFileSync(`${process.env.GH_AW_TMP}/report.json`, JSON.stringify({ ok: false, errors: [error.message] }));
+              core.setFailed(error.message);
+            }
+      - name: Check the outputs against the policy
+        id: checked
+        env:
+          COMMENT_REPO: ${{ inputs.output-repo || github.repository }}
+          COMMENT_TARGET: ${{ inputs.comment-target }}
+          EXPECT_REFUSAL: ${{ inputs.expect-check-refusal }}
+        run: |
+          destination=()
+          case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
+          set +e
+          "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
+            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          test "${statuses[1]}" = 0
+          if [ "$EXPECT_REFUSAL" = true ]; then
+            test "${statuses[0]}" = 1
+            jq -e '.ok == false and (.errors | type == "array" and length > 0)' "$GH_AW_TMP/report.json"
+            echo 'refused=true' >> "$GITHUB_OUTPUT"
+          else
+            test "${statuses[0]}" = 0
+          fi
+          echo "has-patch=$(jq -r '.patch != null' "$GH_AW_TMP/report.json")" >> "$GITHUB_OUTPUT"
+      - name: Show why check refused the outputs
+        id: refusal
+        if: ${{ failure() || steps.checked.outputs.refused == 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { refusalReasons } = await import(pathToFileURL(`${process.env.SOURCE_DIR}/safe-outputs/diagnostics.mjs`).href);
+            const reasons = await refusalReasons(process.env.GH_AW_TMP);
+            for (const reason of reasons) core.error(`Refused by check: ${reason}`);
+            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
+      - name: Put the patch beside the ingested outputs
+        if: ${{ success() && !inputs.expect-check-refusal }}
+        run: find "$JOB_DIR/safe-outputs" -maxdepth 1 -name 'aw-*.patch' -exec cp -t "$GH_AW_TMP" {} +
+      - id: upload
+        if: ${{ success() && !inputs.expect-check-refusal }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}checked-outputs
+          path: |
+            ${{ env.GH_AW_TMP }}/agent_output.json
+            ${{ env.GH_AW_TMP }}/config.json
+            ${{ env.GH_AW_TMP }}/report.json
+            ${{ env.GH_AW_TMP }}/aw-*.patch
+          retention-days: 30
+          if-no-files-found: error

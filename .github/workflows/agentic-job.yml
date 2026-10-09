@@ -818,142 +818,22 @@ jobs:
     needs: [policy, agent]
     # Also for a run that failed and still handed something back.
     if: ${{ !cancelled() && needs.policy.result == 'success' && (inputs.proposals-artifact != '' || needs.agent.outputs.safe-outputs-artifact-id != '') }}
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 10
     permissions:
       contents: read
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      refusal: ${{ steps.refusal.outputs.reason }}
-      has-patch: ${{ steps.checked.outputs.has-patch }}
-    steps:
-      # This repository at this file's commit, for the validation rules
-      # generated from the pinned gh-aw.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .agentic-job-source
-          sparse-checkout: |
-            safe-outputs
-            workflow
-          persist-credentials: false
-      # It empties and recreates /tmp/gh-aw, so it comes before anything
-      # is put there. ci.yml checks validation.json against this commit.
-      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
-        with:
-          destination: ${{ runner.temp }}/gh-aw/actions
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }},${{ needs.policy.outputs.policy-artifact-id }}
-          path: .agentic-job
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ inputs.proposals-artifact == '' }}
-        with:
-          artifact-ids: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
-          path: .agentic-job/safe-outputs
-      # The name selects only untrusted proposals, never policy or executable code.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ inputs.proposals-artifact != '' }}
-        with:
-          name: ${{ inputs.proposals-artifact }}
-          path: .agentic-job/safe-outputs
-      # The policy job's own configuration for gh-aw's collector, not
-      # anything that came from the agent's machine.
-      - name: Write the collector's configuration
-        run: |
-          chmod +x "$JOB_DIR/agentic-job"
-          jq .safe_outputs "$JOB_DIR/policy.json" > "$GH_AW_TMP/config.json"
-      # The first half of the check: which types exist, how many of each,
-      # and the sanitizing of their text.
-      - name: Ingest the outputs with gh-aw's collector
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          GH_AW_SAFE_OUTPUTS: ${{ env.JOB_DIR }}/safe-outputs/outputs.jsonl
-          GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ env.GH_AW_TMP }}/config.json
-          GH_AW_VALIDATION_CONFIG_PATH: ${{ env.SOURCE_DIR }}/safe-outputs/validation.json
-        with:
-          script: |
-            const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
-            require(`${dir}/setup_globals.cjs`).setupGlobals(core, github, context, exec, io, getOctokit);
-            await require(`${dir}/collect_ndjson_output.cjs`).main();
-      # The collector reports what it refused in its result and succeeds.
-      - name: The collector refused nothing
-        run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
-      # Fixed trusted code validates the agent's text; no write token here.
-      - name: Validate the review verdict
-        if: ${{ inputs.review }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          TARGET: ${{ needs.policy.outputs.comment-target }}
-        with:
-          script: |
-            const fs = require('node:fs');
-            const { checkOutputs } = require(`${process.env.SOURCE_DIR}/workflow/review.cjs`);
-            try {
-              checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET);
-            } catch (error) {
-              fs.writeFileSync(`${process.env.GH_AW_TMP}/report.json`, JSON.stringify({ ok: false, errors: [error.message] }));
-              core.setFailed(error.message);
-            }
-      # The second half: the policy's bounds, and the rules for a patch.
-      # Expected refusal changes reporting only: require the CLI's refusal
-      # exit/report, and retain failures from the summary pipeline too.
-      - name: Check the outputs against the policy
-        id: checked
-        env:
-          COMMENT_REPO: ${{ inputs.output-repo || github.repository }}
-          COMMENT_TARGET: ${{ needs.policy.outputs.comment-target }}
-          EXPECT_REFUSAL: ${{ inputs.expect-check-refusal }}
-        run: |
-          destination=()
-          case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
-          set +e
-          "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
-            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-          statuses=("${PIPESTATUS[@]}")
-          set -e
-          test "${statuses[1]}" = 0
-          if [ "$EXPECT_REFUSAL" = true ]; then
-            test "${statuses[0]}" = 1
-            jq -e '.ok == false and (.errors | type == "array" and length > 0)' "$GH_AW_TMP/report.json"
-            echo 'refused=true' >> "$GITHUB_OUTPUT"
-          else
-            test "${statuses[0]}" = 0
-          fi
-          echo "has-patch=$(jq -r '.patch != null' "$GH_AW_TMP/report.json")" >> "$GITHUB_OUTPUT"
-      # Trusted report readers only; this job still has no write token.
-      # core.error escapes workflow-command characters in hostile path text.
-      - name: Show why check refused the outputs
-        id: refusal
-        if: ${{ failure() || steps.checked.outputs.refused == 'true' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { pathToFileURL } = require('node:url');
-            const { refusalReasons } = await import(pathToFileURL(`${process.env.SOURCE_DIR}/safe-outputs/diagnostics.mjs`).href);
-            const reasons = await refusalReasons(process.env.GH_AW_TMP);
-            for (const reason of reasons) core.error(`Refused by check: ${reason}`);
-            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
-      # The handlers look for a pull request's patch beside the ingested
-      # outputs, under the name gh-aw derives from the branch.
-      # A refusal test must never publish applicable outputs or start a writer.
-      - name: Put the patch beside the ingested outputs
-        if: ${{ success() && !inputs.expect-check-refusal }}
-        run: find "$JOB_DIR/safe-outputs" -maxdepth 1 -name 'aw-*.patch' -exec cp -t "$GH_AW_TMP" {} +
-      - id: upload
-        if: ${{ success() && !inputs.expect-check-refusal }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ inputs.artifact-prefix }}checked-outputs
-          path: |
-            ${{ env.GH_AW_TMP }}/agent_output.json
-            ${{ env.GH_AW_TMP }}/config.json
-            ${{ env.GH_AW_TMP }}/report.json
-            ${{ env.GH_AW_TMP }}/aw-*.patch
-          retention-days: 30
-          if-no-files-found: error
+    # Local workflow calls use this wrapper's source commit. No secrets cross
+    # this read-only boundary; trusted IDs are passed directly from policy.
+    uses: ./.github/workflows/check.yml
+    with:
+      runner: ${{ inputs.runner }}
+      binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
+      policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      proposals-artifact: ${{ inputs.proposals-artifact }}
+      review: ${{ inputs.review }}
+      comment-target: ${{ needs.policy.outputs.comment-target }}
+      output-repo: ${{ inputs.output-repo }}
+      expect-check-refusal: ${{ inputs.expect-check-refusal }}
+      artifact-prefix: ${{ inputs.artifact-prefix }}
 
   # It runs gh-aw's pinned handlers on the checked outputs, and nothing
   # that came from the agent's machine but those outputs. No `permissions`

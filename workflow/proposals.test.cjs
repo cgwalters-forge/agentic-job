@@ -6,6 +6,7 @@ const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 
 const workflow = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
 const gate = workflow.split('- name: Check the proposals mode\n')[1]
   .split('        run: |\n')[1].split('      #')[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
@@ -68,10 +69,13 @@ test('proposals route retains check and token separation', () => {
   const check = workflow.split('\n  check:\n')[1].split('\n  apply:\n')[0];
   assert.match(check, /needs.policy.result == 'success'/);
   assert.match(check, /permissions:\n      contents: read/);
-  assert.match(check, /name: \$\{\{ inputs.proposals-artifact \}\}/);
-  assert.match(check, /artifact-ids: \$\{\{ needs.agent.outputs.safe-outputs-artifact-id \}\}/);
-  assert.match(check, /agentic-job" check --policy/);
+  assert.match(check, /uses: \.\/\.github\/workflows\/check.yml/);
+  assert.match(check, /safe-outputs-artifact-id: \$\{\{ needs.agent.outputs.safe-outputs-artifact-id \}\}/);
+  assert.match(checker, /name: \$\{\{ inputs.proposals-artifact \}\}/);
+  assert.match(checker, /artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}/);
+  assert.match(checker, /agentic-job" check --policy/);
   assert.doesNotMatch(check, /secrets\./);
+  assert.doesNotMatch(checker, /secrets\./);
   const apply = workflow.split('\n  apply:\n')[1];
   assert.match(apply, /needs.check.result == 'success' && \(inputs.proposals-artifact != ''/);
   assert.match(apply, /inputs.proposals-artifact == '' && needs.agent.outputs.exit != '0'/);
@@ -81,6 +85,42 @@ test('proposals route retains check and token separation', () => {
     assert.match(workflow.split(`\n  ${job}:\n`)[1].split('    steps:')[0],
       /inputs.proposals-artifact == ''/);
   }
+});
+
+test('checker requires explicit trusted IDs and one proposal selector', () => {
+  const section = checker.split('- name: Require explicit artifact contracts\n')[1].split('\n      #')[0];
+  const script = section.split('        run: |\n')[1].split('\n')
+    .filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  for (const [name, change, expected] of [
+    ['agent upload', {}, 0],
+    ['legacy proposals', { PROPOSALS: '', NAME: 'board-proposals' }, 0],
+    ['missing binary', { BINARY: '' }, 1],
+    ['missing policy', { POLICY: '' }, 1],
+    ['missing proposals', { PROPOSALS: '' }, 1],
+    ['both selectors', { NAME: 'board-proposals' }, 1],
+    ['multiple trusted IDs', { POLICY: '2,4' }, 1],
+    ['proposal ID is not shell', { PROPOSALS: '$(exit 99)' }, 1],
+    ['legacy name is data', { PROPOSALS: '', NAME: '$(exit 99)' }, 0],
+  ]) {
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', script], {
+      encoding: 'utf8', env: { ...process.env, BINARY: '1', POLICY: '2', PROPOSALS: '3', NAME: '', ...change },
+    });
+    assert.equal(result.status, expected, `${name}: ${result.stdout}${result.stderr}`);
+  }
+});
+
+test('wrapper passes trusted checker inputs directly and exports all checker outputs', () => {
+  const check = workflow.split('\n  check:\n')[1].split('\n  apply:\n')[0];
+  for (const input of ['binary-artifact-id', 'policy-artifact-id', 'comment-target']) {
+    assert.ok(check.includes(`${input}: \${{ needs.policy.outputs.${input} }}`));
+  }
+  for (const output of ['artifact-id', 'refusal', 'has-patch']) {
+    assert.ok(checker.includes(`value: \${{ jobs.check.outputs.${output} }}`));
+  }
+  assert.match(checker, /permissions:\n  contents: read/);
+  assert.match(checker, /repository: \$\{\{ job.workflow_repository \}\}/);
+  assert.match(checker, /ref: \$\{\{ job.workflow_sha \}\}/);
+  assert.doesNotMatch(check, /secrets:|needs.agent.outputs.(binary|policy|comment)/);
 });
 
 test('documented proposals caller matches the CI trial and shipped bounds', () => {
