@@ -534,6 +534,27 @@ Do not pass a forge token through `sandbox.env` to work around this gap.
 
 ### The apply job and its token
 
+`AGENTIC_JOB_APPLY_TOKEN` serves the same role as gh-aw's `safe-outputs.github-token`
+for [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs):
+the applying job's credential when the built-in `GITHUB_TOKEN` is not enough.
+That job token cannot [write to another repository](https://docs.github.com/en/actions/concepts/security/github_token#about-the-github_token)
+or [write organization Projects](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/automating-projects-using-actions).
+It also cannot open pull requests whose CI runs **without approval**:
+[GitHub now creates approval-required runs](https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs).
+Use an appropriately scoped PAT or GitHub App token for those operations.
+
+gh-aw's `github-token` maps to our `AGENTIC_JOB_APPLY_TOKEN` secret;
+its `target-repo` is fixed by the caller: pull requests, comments and new issues
+go to `output-repo` (or the calling repository when omitted), while issue actions
+and project updates use the run's `repo`.
+Unlike gh-aw's `allowed-repos`, which permits the agent to select write destinations,
+`repos` in our bounds file validates only the run's target `repo`, not `output-repo`.
+Output destinations are caller-fixed, are not bounded by that list, and cannot be
+dynamically selected by the agent. gh-aw's wildcard `target-repo: "*"` has no
+equivalent here.
+The storage difference is that our secret lives in a caller environment restricted
+to the protected default branch, entered only by apply.
+
 With no `apply-environment`, the apply job uses the job's own token,
 which can write only to the calling repository: `repo` then has to be
 the calling repository, and `output-repo` is left out. Many organizations do
