@@ -78,6 +78,79 @@ Read this before relying on it.
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
 
+## CI runner use
+
+CI always starts and reports the required job named `ci`; it does not use
+workflow-level path exclusions. Its read-only `changes` job checks the complete
+Git diff (PR merge base to head, or push before to after), without an API's
+changed-file pagination limit. Only `README.md` and Markdown under `docs/`
+skip the six `e2e-*` callers, `review-base` and their write-capable verifier.
+Renames check both names; empty diffs, missing history and unknown events run
+the suite. Other checks, including sandbox probes, still run. In particular,
+`workflow/review.md` is executable reviewer input, not documentation for this
+filter. Workflow, sandbox, policy, fixtures and checks changes run every caller.
+The aggregate accepts only those named skips when `changes` explicitly reports
+`false`; detection failures, unexpected skips and cancelled jobs remain red.
+
+CI already cancels superseded PR runs with its workflow/ref concurrency group;
+main pushes are not cancelled. The dedicated review caller now cancels an older
+review when an automatic PR event arrives, using its existing per-PR job group.
+Comment events cannot cancel an active review before actor authorization. A
+non-command comment never enters the group. GitHub still replaces a pending
+job in the same group even with cancellation off, so an unauthorized `/review`
+can displace a pending review (an existing denial-of-service limit, not write
+authority). Cancellation is best-effort: an
+already-posted verdict still names its old SHA, and cancelling CI can leave
+scratch branches/comments if its cleanup does not finish. No cancellation is
+merge authorization or rollback.
+
+For a recent successful same-repository PR run,
+[37870929248](https://github.com/cgwalters-forge/agentic-job/actions/runs/37870929248),
+the sum of each caller's non-skipped job durations was:
+
+| Caller | Runner-minutes | Jobs that ran | Distinct coverage |
+| --- | ---: | ---: | --- |
+| `e2e-full` | 7.27 | 5 | Patch/quoted handler inputs, branch and comment application |
+| `e2e-limit` | 5.63 | 5 | Task limit, partial hand-back, forced source build |
+| `e2e-event` | 6.20 | 7 | Event admission, base selection, notifications and conclusion |
+| `e2e-review` | 4.33 | 5 | Base-owned review task, analysis verdict and reviewed SHA |
+| `e2e-verify` | 0.33 | 1 | Forge assertions and cleanup |
+
+These are elapsed runner-minutes, excluding queue waits, not billing-rounded
+minutes or six minutes multiplied by every job. On main run
+[37871861845](https://github.com/cgwalters-forge/agentic-job/actions/runs/37871861845),
+event and review each ran only policy to prove refusal (2.22 and 2.08 minutes).
+`e2e-analysis` and `e2e-analysis-refused` are not present in those samples, so
+their costs remain unmeasured: the former exercises fixed-destination topic
+analysis, the latter proves hostile destination refusal before apply.
+
+All callers repeat binary acquisition and sandbox setup, but they prove
+different contracts. Keep policy, agent, check and apply on separate machines:
+sharing the agent's machine with a checker or writer would erase the boundary
+the suite tests. Serial calls still create separate reusable-workflow jobs and
+do not save runner-minutes. Combining the analysis pair or full/limit into a
+new multi-scenario workflow would add machinery and reduce isolation; no callers
+are combined here. The docs-only gate saves the whole caller group instead.
+
+Landing several reviewed commits on one branch with one CI run is an operator
+workflow outside this repository. This public organization repository is
+eligible for GitHub's merge queue; an administrator must confirm/enable it in
+the branch rules. It is **not** single-build batching for free:
+[GitHub's queue documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
+explicitly says merge limits do not combine `merge_group` builds. The queue can
+avoid repeated manual rebases and limit build concurrency, but still tests
+cumulative groups. Enabling it also requires CI's required check on
+`merge_group` and updating the event-refusal assertions; neither is enabled
+here. Prefer operator batching for the immediate capacity problem.
+
+The only new checkout uses the existing full action pin, no persisted
+credential, full history and the workflow's existing contents-read permission.
+The new path/test steps execute repository code only in read-only jobs. All
+other CI workflow changes are caller dependencies/conditions and narrowly
+allowlisted aggregate skips; verifier permissions and cleanup steps are
+unchanged. Review changes only its cancellation condition. No action pins,
+token placement, sandbox controls or output guards change.
+
 ## Proposals from a non-agent job
 
 A caller job can upload an artifact containing `outputs.jsonl` in the

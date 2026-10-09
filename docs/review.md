@@ -60,6 +60,14 @@ one verdict checked and posted by separate jobs. A malicious head can influence
 the verdict; a queued verdict names the admitted SHA, not necessarily the newest
 head, and is never merge authorization.
 
+Automatic PR events cancel superseded reviews in the caller's per-PR job
+concurrency group. `/review` comments share the group but cannot cancel an
+active run before authorization; ordinary comments do not enter it. GitHub can
+still replace a pending job in that group with an unauthorized `/review`
+request; this is not a guarantee of queued-review availability. A verdict
+already posted is not removed by cancellation. See [CI runner use](workflow.md#ci-runner-use)
+for the docs-only CI filter and the batching trade-offs.
+
 `node --test workflow/review.test.cjs` covers admission, request bounds and
 hostile outputs. The scripted privileged run and hosted comment posting need
 the prepared CI runner and GitHub Actions respectively. They do not assert
