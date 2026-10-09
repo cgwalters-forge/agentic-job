@@ -601,7 +601,7 @@ pub fn generate(
     let inference = || {
         endpoint.zip(token).with_context(|| {
             format!(
-                "the agent {} needs inference: set [inference] url and register",
+                "the agent {} needs inference: set [inference] url and register (workflow inputs inference-url and inference-register)",
                 kind.as_str()
             )
         })

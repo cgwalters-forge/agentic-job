@@ -445,6 +445,39 @@ jobs:
           path: .agentic-job/bin/
           retention-days: 1
           if-no-files-found: error
+      # Validate the same effective configuration before spending an agent runner.
+      # No network probe here: this machine need not be on the proxy's network.
+      - name: Write the configuration
+        if: ${{ steps.event.outputs.admitted != 'false' }}
+        env: &configuration-env
+          CONFIG: ${{ inputs.config }}
+          AGENT: ${{ inputs.agent }}
+          MODEL: ${{ inputs.model }}
+          CONFIG_REPO: ${{ inputs.agent-config-repo != '' && format('https://github.com/{0}', inputs.agent-config-repo) || '' }}
+          CONFIG_REF: ${{ inputs.agent-config-ref }}
+          CONFIG_PATH: ${{ inputs.agent-config-path }}
+          URL: ${{ inputs.inference-url }}
+          REGISTER: ${{ inputs.inference-url != '' && inputs.inference-register || '' }}
+          AUDIENCE: ${{ inputs.inference-audience }}
+          TOKEN_FILE: ${{ inputs.inference-token-file }}
+          TIMEOUT: ${{ inputs.timeout }}
+          MAX_REQUESTS: ${{ inputs.max-requests }}
+          MAX_TASKS: ${{ inputs.max-tasks }}
+          BUDGET: ${{ inputs.budget }}
+          PACKAGES: ${{ inputs.packages }}
+          NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') }}
+          SETUP: ${{ inputs.setup }}
+        run: |
+          "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} \
+            --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
+            --string agent.config-ref="$CONFIG_REF" --string agent.config-path="$CONFIG_PATH" \
+            --string inference.url="$URL" --string inference.register="$REGISTER" \
+            --string inference.audience="$AUDIENCE" --string inference.token-file="$TOKEN_FILE" \
+            --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
+            --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
+            --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
+            > "$JOB_DIR/config.toml"
+          cat "$JOB_DIR/config.toml"
       # With the event's decision and the task it wrote, when there was
       # one; a refused event leaves its decision and nothing else.
       - id: policy
@@ -524,7 +557,9 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .agentic-job-source
-          sparse-checkout: secure-host
+          sparse-checkout: |
+            secure-host
+            workflow
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -555,25 +590,7 @@ jobs:
       # An input that was left empty sets nothing, so the caller's file
       # stands; `register` means nothing without a proxy.
       - name: Write the configuration
-        env:
-          CONFIG: ${{ inputs.config }}
-          AGENT: ${{ inputs.agent }}
-          MODEL: ${{ inputs.model }}
-          CONFIG_REPO: ${{ inputs.agent-config-repo != '' && format('https://github.com/{0}', inputs.agent-config-repo) || '' }}
-          CONFIG_REF: ${{ inputs.agent-config-ref }}
-          CONFIG_PATH: ${{ inputs.agent-config-path }}
-          URL: ${{ inputs.inference-url }}
-          REGISTER: ${{ inputs.inference-url != '' && inputs.inference-register || '' }}
-          AUDIENCE: ${{ inputs.inference-audience }}
-          TOKEN_FILE: ${{ inputs.inference-token-file }}
-          TIMEOUT: ${{ inputs.timeout }}
-          MAX_REQUESTS: ${{ inputs.max-requests }}
-          MAX_TASKS: ${{ inputs.max-tasks }}
-          BUDGET: ${{ inputs.budget }}
-          PACKAGES: ${{ inputs.packages }}
-          # Shared opencode default for all runs; callers may override like other tools.
-          NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || '') }}
-          SETUP: ${{ inputs.setup }}
+        env: *configuration-env
         run: |
           agentic-job config ${CONFIG:+--from "$CONFIG"} \
             --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
@@ -585,6 +602,11 @@ jobs:
             --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
             > "$JOB_DIR/config.toml"
           cat "$JOB_DIR/config.toml"
+      # A TCP control, as the runner user, before installing or changing the host.
+      # It sends no HTTP request, identity token or model credential.
+      - name: Check inference proxy reachability
+        if: ${{ inputs.agent != 'fake' }}
+        run: python3 "$SOURCE_DIR/workflow/inference-preflight.py" "$JOB_DIR/config.toml"
       # The step any job can run first, with the binary the policy job
       # made and the configuration written above: `sandbox setup`, which
       # ends by taking root from this job, and `sandbox check`. Every
