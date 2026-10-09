@@ -109,6 +109,8 @@ the proxy's variables and `sandbox.env`; a variable named `ACTIONS_*`
 the configuration and again at entry. `--pipe` needs systemd 257; setup
 checks only that `run0` is there.
 
+The agent job leaves the tailnet itself in an `always()` step, logging out through the root-owned helper after hardening rather than the Tailscale action's sudo-dependent post hook.
+
 ## Network
 
 The nftables rules match the sandbox user's uid and its subordinate
