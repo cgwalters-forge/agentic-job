@@ -70,6 +70,12 @@ pub struct Args {
     /// Where to write the verdict, with the reasons for a refusal, as JSON
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
+    /// Fixed repository for comments, supplied by the trusted caller
+    #[arg(long, requires = "comment_target", value_name = "OWNER/REPO")]
+    pub comment_repo: Option<String>,
+    /// Fixed issue or pull request number for comments
+    #[arg(long, requires = "comment_repo", value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
+    pub comment_target: Option<u64>,
 }
 
 /// What `check` decided. `--report` holds this as JSON.
@@ -197,17 +203,69 @@ fn item_type(item: &Map<String, Value>) -> &str {
 /// base branch and whether it is a draft; whether a handler honours them
 /// is the handler's configuration, which this does not see. The policy
 /// has fixed all three, so a request that says otherwise is refused.
+#[cfg(test)]
 fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
+    redirections_to(item, policy, None)
+}
+
+fn redirections_to(
+    item: &Map<String, Value>,
+    policy: &Policy,
+    comment: Option<(&str, u64)>,
+) -> Vec<String> {
     let output = item_type(item);
     let differs = |key: &str, same: &dyn Fn(&str) -> bool| {
         item.get(key)
             .filter(|value| !value.as_str().is_some_and(same))
             .map(|value| format!("a {output} with {key} {value}, which is not the policy's"))
     };
-    let mut problems: Vec<String> =
-        differs("repo", &|repo| repo.eq_ignore_ascii_case(&policy.repo))
-            .into_iter()
-            .collect();
+    let repo = if output == "add_comment" {
+        comment.map_or(policy.repo.as_str(), |(repo, _)| repo)
+    } else {
+        &policy.repo
+    };
+    let mut problems: Vec<String> = differs("repo", &|value| value.eq_ignore_ascii_case(repo))
+        .into_iter()
+        .collect();
+    if output == "add_comment"
+        && let Some((_, target)) = comment
+    {
+        for key in [
+            "item_number",
+            "pr",
+            "pr_number",
+            "issue_number",
+            "pull_request_number",
+            "pull_number",
+            "pr-number",
+        ] {
+            if let Some(value) = item.get(key) {
+                let number = value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()));
+                if number != Some(target) {
+                    problems.push(format!(
+                        "an add_comment with {key} outside the caller's fixed item"
+                    ));
+                }
+            }
+        }
+        // These select an existing comment or a discussion reply, not the
+        // caller's issue/PR. No trusted comment-ID allowlist is configured.
+        for key in [
+            "comment_id",
+            "commentId",
+            "comment-id",
+            "reply_to_id",
+            "target",
+        ] {
+            if item.contains_key(key) {
+                problems.push(format!(
+                    "an add_comment with {key}, outside the caller's fixed destination"
+                ));
+            }
+        }
+    }
     if output == CREATE_PULL_REQUEST {
         problems.extend(differs("base", &|base| base == policy.base));
         if item
@@ -296,6 +354,15 @@ pub fn patch_file_name(branch: &str) -> String {
 /// directory or the collector's result; whatever is wrong with the
 /// hand-back is a refusal, in the verdict.
 pub fn check_outputs(dir: &Path, collected: &Path, policy: &Policy) -> Result<Verdict> {
+    check_outputs_to(dir, collected, policy, None)
+}
+
+fn check_outputs_to(
+    dir: &Path,
+    collected: &Path,
+    policy: &Policy,
+    comment: Option<(&str, u64)>,
+) -> Result<Verdict> {
     let mut errors = Vec::new();
     let mut names = std::fs::read_dir(dir)
         .and_then(|entries| {
@@ -377,7 +444,11 @@ pub fn check_outputs(dir: &Path, collected: &Path, policy: &Policy) -> Result<Ve
         }
     }
 
-    errors.extend(items.iter().flat_map(|item| redirections(item, policy)));
+    errors.extend(
+        items
+            .iter()
+            .flat_map(|item| redirections_to(item, policy, comment)),
+    );
 
     let patch_names: Vec<&str> = contents
         .keys()
@@ -449,7 +520,8 @@ pub fn check_outputs(dir: &Path, collected: &Path, policy: &Policy) -> Result<Ve
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
-    let verdict = check_outputs(&args.outputs, &args.collected, &policy)?;
+    let comment = args.comment_repo.as_deref().zip(args.comment_target);
+    let verdict = check_outputs_to(&args.outputs, &args.collected, &policy, comment)?;
     if let Some(report) = &args.report {
         let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;
         std::fs::write(report, json + "\n")
@@ -478,6 +550,42 @@ mod tests {
     const BASE: &str = "1111111111111111111111111111111111111111";
     const BRANCH: &str = "agent-run-7";
     const PATCH_NAME: &str = "aw-agent-run-7.patch";
+
+    #[test]
+    fn fixed_comment_destination() {
+        let policy = policy();
+        for (fields, accepted) in [
+            (json!({}), true),
+            (json!({"repo": "TRACKER/ITEMS", "item_number": 64}), true),
+            (json!({"repo": "tracker/items", "pr_number": "64"}), true),
+            (json!({"repo": "bootc-dev/bootc"}), false),
+            (json!({"item_number": 65}), false),
+            (json!({"pr": 65}), false),
+            (json!({"pr_number": 65}), false),
+            (json!({"item_number": "aw_other"}), false),
+            (json!({"item_number": null}), false),
+            (json!({"comment_id": 64}), false),
+            (json!({"reply_to_id": "other"}), false),
+            (json!({"target": "status"}), false),
+        ] {
+            let mut item = fields.as_object().unwrap().clone();
+            item.insert("type".into(), json!("add_comment"));
+            assert_eq!(
+                redirections_to(&item, &policy, Some(("tracker/items", 64))).is_empty(),
+                accepted,
+                "{fields}"
+            );
+        }
+        let item = json!({"type": "create_pull_request", "repo": "tracker/items"});
+        assert!(
+            !redirections_to(
+                item.as_object().unwrap(),
+                &policy,
+                Some(("tracker/items", 64))
+            )
+            .is_empty()
+        );
+    }
 
     fn patch_of(path: &str) -> String {
         format!(

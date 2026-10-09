@@ -454,6 +454,60 @@ jobs:
       budget: "100"
       artifact-prefix: event-
 
+  # An analysis of the topic branch writes only to the named scratch issue.
+  # No contents write permission: apply must not checkout/fetch/push a base.
+  e2e-analysis:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-analysis-${{ github.run_id }}
+      repo: ${{ github.repository }}
+      base: ${{ github.head_ref || 'main' }}
+      kind: analysis
+      task: Analyze the checked out topic branch and comment on the named scratch issue.
+      outputs: add_comment
+      max-outputs: '1'
+      comment-target: '64'
+      notify: none
+      allow: workflow/analysis.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/event.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: analysis-
+
+  # Same read-only analysis, but hostile output names another item. Check
+  # must fail before the job holding the issue-write token applies anything.
+  e2e-analysis-refused:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: ./.github/workflows/agentic-job.yml
+    with:
+      id: e2e-analysis-refused-${{ github.run_id }}
+      repo: ${{ github.repository }}
+      base: ${{ github.head_ref || 'main' }}
+      kind: analysis
+      task: Try to comment outside the caller's fixed destination.
+      outputs: add_comment
+      max-outputs: '1'
+      comment-target: '64'
+      notify: none
+      allow: workflow/analysis.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/misdirected.sh
+      timeout: '5'
+      max-requests: '0'
+      budget: '100'
+      artifact-prefix: analysis-refused-
+
   # Bootstrap only: the first PR adding this caller has no base-branch
   # task/bounds yet. Never substitute its head's files to make that run pass.
   review-base:
@@ -502,7 +556,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() }}
-    needs: [e2e-full, e2e-limit, e2e-event, review-base, e2e-review]
+    needs: [e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -618,6 +672,26 @@ jobs:
             git log -1 --format='%H %an <%ae>%n%B' "origin/$branch" | tee -a "$GITHUB_STEP_SUMMARY"
           done <<< "$FULL docs/e2e-scratch.md"$'\n'"$LIMIT docs/e2e-partial.md"
       # The comments of this run among those of the runs beside it.
+      - name: The topic-branch analysis posted one comment on the named issue
+        env:
+          RESULT: ${{ needs.e2e-analysis.result }}
+          REFUSED: ${{ needs.e2e-analysis-refused.result }}
+          REFUSED_EXIT: ${{ needs.e2e-analysis-refused.outputs.exit }}
+          REFUSED_APPLIED: ${{ needs.e2e-analysis-refused.outputs.applied-artifact-id }}
+        run: |
+          test "$RESULT" = success
+          test "$REFUSED" = failure
+          test "$REFUSED_EXIT" = 0
+          test -z "$REFUSED_APPLIED"
+          gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" | jq -se --arg run "$RUN" '
+            [ .[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run))
+              and (.body | contains("A comment from the scripted agent of an event-triggered run."))) ] | length == 1'
+      - name: The refused comment was not posted on either item
+        run: |
+          for item in "$ISSUE" 65; do
+            gh api --paginate "repos/$GH_REPO/issues/$item/comments" | jq -se --arg run "$RUN" '
+              any(.[][]; ((.body | contains($run)) and (.body | contains("This misdirected analysis must be refused.")))) | not'
+          done
       - name: The comments are on the scratch issue, and the run stopped at a limit says so
         env:
           NOTE: "**Partial work.** The run was stopped at a request, task or spending limit"

@@ -25,6 +25,71 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
+test('comment-only apply skips every repository step, including checkout', () => {
+  const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
+  const gate = "if: ${{ needs.check.outputs.has-patch == 'true' }}";
+  assert.match(apply, new RegExp(`uses: actions/checkout@[^\\n]+\\n        ${gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  for (const name of ['Configure git', "Fetch the target's base branch, and bring a fork's up to it",
+    'Apply the patch on its own base, and compare what changed with what was checked']) {
+    assert.ok(apply.split(`- name: ${name}\n`)[1].startsWith(`        ${gate}\n`), name);
+  }
+  assert.match(workflow, /has-patch: \$\{\{ steps.checked.outputs.has-patch \}\}/);
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    const report = join(root, 'report.json');
+    writeFileSync(report, JSON.stringify({ patch: null }));
+    // No .git exists and the output repository need not contain the topic base.
+    const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Apply the patch on its own base, and compare what changed with what was checked')], { REPORT: report });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const filename of ['full', 'limit', 'event']) {
+  test(`scripted ${filename} comments inherit the caller's fixed destination`, () => {
+    const setup = readFileSync(join(__dirname, `../.github/agentic-job/e2e/${filename}.sh`), 'utf8');
+    const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
+    const comments = fixture.filter(step => step.write?.path.endsWith('safe-outputs.jsonl'))
+      .flatMap(step => step.write.content.trim().split('\n').map(line => JSON.parse(line)))
+      .filter(output => output.type === 'add_comment');
+    assert.equal(comments.length, 1);
+    assert.deepEqual(Object.keys(comments[0]).sort(), ['body', 'type']);
+  });
+}
+
+test('scripted negative analysis reaches check with a misdirected comment', () => {
+  const setup = readFileSync(join(__dirname, '../.github/agentic-job/e2e/misdirected.sh'), 'utf8');
+  const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
+  // Fake runs must exercise redaction before any hand-back may be uploaded.
+  assert.ok(fixture.some(step => step.execute?.command.includes('gh%s_%s')));
+  const outputs = fixture.filter(step => step.write?.path.endsWith('safe-outputs.jsonl'));
+  assert.equal(outputs.length, 1);
+  assert.deepEqual(JSON.parse(outputs[0].write.content), {
+    type: 'add_comment', item_number: 65, body: 'This misdirected analysis must be refused.',
+  });
+  const outcome = fixture.find(step => step.write?.path.endsWith('outcome.json'));
+  assert.equal(JSON.parse(outcome.write.content).stopped_early, null);
+});
+
+test('negative analysis verification refuses any posted misdirected comment', () => {
+  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  const filter = ci.split('- name: The refused comment was not posted on either item\n')[1]
+    .split("--arg run \"$RUN\" '\n")[1].split("'\n")[0].trim();
+  const hostile = { body: 'This misdirected analysis must be refused. actions/runs/123' };
+  for (const [comments, expected] of [
+    [[], 0],
+    [[{ body: 'unrelated comment' }], 0],
+    [[hostile], 1],
+    [[{ body: 'unrelated comment' }, hostile], 1],
+  ]) {
+    const result = spawnSync('jq', ['-se', '--arg', 'run', 'actions/runs/123', filter], {
+      encoding: 'utf8', input: JSON.stringify(comments),
+    });
+    assert.equal(result.status, expected, result.stderr);
+  }
+});
+
 for (const [name, filename, files, unrelated, expected] of [
   ['ordinary edit', 'file.txt', ['file.txt'], false, 0],
   ['CRLF edit', 'file.txt', ['file.txt'], false, 0],

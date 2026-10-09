@@ -176,8 +176,14 @@ The binary is Rust; the workflow, the sandbox and the checks run on
 same-repository pull requests here, end to end, with the scripted agent, on
 GitHub's hosted Ubuntu 26.04 runners. Claude Code and opencode have each
 run real tasks on it on RHEL 10 runners. It has been called from another
-repository, bootc-dev/cgwalters-devspace-sandbox, and opened pull requests
-there ([deployment record, #59](https://github.com/cgwalters-forge/agentic-job/issues/59)).
+repository, `cgwalters-bot/agentic-job-trial`: runs
+[37587896350](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37587896350)
+and [37588497422](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37588497422)
+opened pull requests [#1](https://github.com/cgwalters-bot/agentic-job-trial/pull/1)
+and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2) there
+([deployment record, #59](https://github.com/cgwalters-forge/agentic-job/issues/59)).
+No caller exists in the operator's runner repository,
+`bootc-dev/cgwalters-devspace-sandbox`, yet.
 
 Not yet: a real agent through the reusable workflow on hosted runners
 (the inference proxy that exists is on a private network), private
