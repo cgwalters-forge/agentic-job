@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../../..');
@@ -17,6 +18,139 @@ const workflow = readFileSync(join(root, '.github/workflows/agentic-job.yml'), '
 const configStep = workflow.split('- name: Write the handlers\' configuration\n')[1]
   .split('        run: |\n')[1].split(/\n        [^ ]/)[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+
+test('project boundary refusal cannot use the tolerated PR refusal exception', () => {
+  assert.match(workflow, /core\.setOutput\("project-refused", "true"\)/);
+  const final = workflow.split('- name: Every output was applied, or only the pull request was refused')[1];
+  assert.match(final, /PROJECT_REFUSED: \$\{\{ steps\.apply\.outputs\.project-refused \}\}/);
+  const guard = final.split('        run: |\n')[1].split('\n')[0].trim();
+  for (const [value, code] of [['true', 1], ['', 0]]) {
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', guard], { env: { ...process.env, PROJECT_REFUSED: value } });
+    assert.equal(result.status, code);
+  }
+});
+
+test('agent-board proposals pass the pinned collector and bounded project check', async () => {
+  // reconcile plan --snapshot fixtures/board.json --emit, as documented by
+  // agent-board. Keep its target_repo/content_number grammar, not issue aliases.
+  const proposal = { content_number: 1, content_type: 'issue', fields: { Status: 'Triage' },
+    project: 'https://github.com/orgs/example/projects/1', target_repo: 'example/intake', type: 'update_project' };
+  const work = mkdtempSync(join(homedir(), 'project-test-'));
+  const file = name => join(work, name);
+  try {
+    mkdirSync(file('outputs'));
+    writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["example/intake"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.update_project]\nmax = 1\nprojects = ["${proposal.project}"]\nfields = ["Status"]\n`);
+    const policy = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', proposal.target_repo,
+      '--clone-url', 'https://github.com/example/intake', '--base', 'main', '--kind', 'analysis',
+      '--outputs', 'update_project', '--max-outputs', '3'], { encoding: 'utf8' });
+    assert.equal(policy.status, 0, policy.stderr);
+    writeFileSync(file('policy.json'), policy.stdout);
+    writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policy.stdout).safe_outputs));
+    for (const [name, items, ok] of [
+      ['real board output', [proposal], true],
+      ['another project', [{ ...proposal, project: 'https://github.com/orgs/example/projects/2' }], false],
+      ['unlisted field', [{ ...proposal, fields: { Priority: 'P1' } }], false],
+      ['another repository', [{ ...proposal, target_repo: 'example/other' }], false],
+      ['over count', [proposal, proposal], false],
+      ['schema mutation', [{ ...proposal, operation: 'create_fields' }], false],
+      ['draft content', [{ ...proposal, content_type: 'draft_issue' }], false],
+      ['null is not clearing', [{ ...proposal, fields: { Status: null } }], false],
+      ['routing alias', [{ ...proposal, target_repo: undefined, targetRepo: 'example/other' }], false],
+    ]) {
+      writeFileSync(file('outputs/outputs.jsonl'), items.map(item => JSON.stringify(item)).join('\n') + '\n');
+      const collected = spawnSync(process.execPath, [join(here, 'collect.cjs'), js, file('outputs/outputs.jsonl'),
+        file('config.json'), join(root, 'safe-outputs/validation.json'), proposal.target_repo, file('collected.json')], { encoding: 'utf8' });
+      assert.equal(collected.status, 0, collected.stderr);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      assert.equal(checked.status, ok ? 0 : 1, `${name}: ${checked.stderr}`);
+    }
+    const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+      ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: proposal.target_repo, OUTPUT_REPO: 'example/other',
+      BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}',
+    } });
+    assert.equal(configured.status, 0, configured.stderr);
+    const config = JSON.parse(readFileSync(file('handler-config.json')));
+    assert.equal(config.update_project['target-repo'], proposal.target_repo);
+    const guardSource = workflow.split('const guarded = client => {')[1].split('client.hook.before')[0];
+    const preflight = workflow.split('const pending = new Map();')[1].split('const guarded = client => {')[0];
+    for (const [name, fieldName, present, requested, ok] of [
+      ['existing exact field', 'Status', true, { Status: 'Triage' }, true],
+      ['missing field cannot create schema', 'Status', false, { Status: 'Triage' }, false],
+      ['case normalization cannot escape bounds', 'STATUS', true, { Status: 'Triage' }, false],
+      ['unknown option', 'Status', true, { Status: 'Nonexistent option' }, false],
+      ['unknown iteration', 'Status', true, { Sprint: 'Unknown' }, false],
+      ['invalid number', 'Status', true, { Estimate: 'not a number' }, false],
+      ['partially numeric string', 'Status', true, { Estimate: '12bad' }, false],
+      ['nonfinite number', 'Status', true, { Estimate: 'Infinity' }, false],
+      ['mixed successful and skipped fields', 'Status', true, { Status: 'Triage', Sprint: 'Unknown' }, false],
+      ['all fields valid', 'Status', true, { Status: 'Triage', Sprint: 'Sprint 1', Estimate: '12' }, true],
+      ['option disappears after preflight', 'Status', true, { Status: 'Triage' }, false],
+      ['mixed completed and skipped after preflight', 'Status', true, { Estimate: '12', Status: 'Triage' }, false],
+      ['mutation has no completion payload', 'Status', true, { Status: 'Triage' }, false],
+      ['underscore field before membership write', 'Status', true, { Status: 'Triage', Estimate_points: 12 }, false],
+      ['hyphen field before membership write', 'Status', true, { Status: 'Triage', 'Estimate-points': 12 }, false],
+    ]) {
+      const request = { ...proposal, fields: requested };
+      const projectConfig = { ...config, update_project: { ...config.update_project, fields: ['Status', 'Sprint', 'Estimate', 'Estimate_points', 'Estimate-points'] } };
+      const writes = [];
+      let applying = false;
+      const client = { graphql: async (query, vars) => {
+        if (query.includes('viewer {')) return { viewer: { login: 'project-writer' } };
+        if (query.includes('projectV2(number:')) return { organization: { projectV2: { id: 'project', url: proposal.project } } };
+        if (query.includes('repository(owner:')) return { repository: { owner: { __typename: 'Organization', login: 'example' }, issue: { id: 'issue' } } };
+        if (query.includes('projectItems(')) return { node: { projectItems: { nodes: name.includes('membership') ? [] : [{ id: 'item', project: { id: 'project' } }], pageInfo: { hasNextPage: false } } } };
+        if (query.includes('fields(')) return { node: { fields: { nodes: present ? [
+          { id: 'field', name: fieldName, dataType: 'SINGLE_SELECT', options: applying && name.includes('after preflight') ? [] : [{ id: 'triage', name: 'Triage' }] },
+          { id: 'sprint', name: 'Sprint', dataType: 'ITERATION', configuration: { iterations: [{ id: 'iteration', title: 'Sprint 1' }] } },
+          { id: 'estimate', name: 'Estimate', dataType: 'NUMBER' },
+          { id: 'underscore', name: 'Estimate_points', dataType: 'NUMBER' },
+          { id: 'hyphen', name: 'Estimate-points', dataType: 'NUMBER' },
+        ] : [], pageInfo: { hasNextPage: false } } } };
+        writes.push({ query, vars });
+        if (name === 'mutation has no completion payload') return { updateProjectV2ItemFieldValue: null };
+        return { updateProjectV2ItemFieldValue: { projectV2Item: { id: 'item' } } };
+      } };
+      const sandbox = { client, github: client, projectRefusal: false, URL, core: { setOutput() {} },
+        require: () => ({ readFileSync: () => JSON.stringify({ items: [request] }) }),
+        process: { env: { GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: JSON.stringify(projectConfig) } } };
+      let prepared = true;
+      try {
+        await runInNewContext(`(async () => { const pending = new Map(); ${preflight}
+          (client => { ${guardSource} })(client);
+          globalThis.complete = () => !projectRefusal && [...pending.values()].every(count => count === 0);
+        })()`, sandbox);
+      } catch (error) {
+        prepared = false;
+        assert.equal(ok, false, `${name}: ${error}`);
+      }
+      Object.assign(globalThis, {
+        core: { info() {}, warning() {}, debug() {}, error() {}, setOutput() {}, startGroup() {}, endGroup() {} },
+        context: { repo: { owner: 'example', repo: 'intake' }, payload: {} }, github: client,
+      });
+      // Reproduce the pinned handler's false success, then prove the actual
+      // workflow preflight prevented that handler from making any writes.
+      if (!prepared && ['unknown option', 'unknown iteration', 'invalid number', 'mixed successful and skipped fields'].includes(name)) {
+        const rawHandler = await require(join(js, 'update_project.cjs')).main(projectConfig.update_project);
+        const rawResult = await rawHandler(request, {});
+        assert.equal(rawResult.success, true, name);
+        assert.equal(writes.length, name === 'mixed successful and skipped fields' ? 1 : 0, name);
+        writes.length = 0;
+      }
+      if (prepared) {
+        applying = true;
+        const handler = await require(join(js, 'update_project.cjs')).main(projectConfig.update_project);
+        const result = await handler(request, {});
+        assert.equal(result.success && sandbox.complete(), ok, `${name}: ${JSON.stringify(result)}`);
+      }
+      const incompleteWrite = name === 'mixed completed and skipped after preflight' || name === 'mutation has no completion payload';
+      assert.equal(writes.length, ok ? Object.keys(requested).length : incompleteWrite ? 1 : 0, name);
+      if (ok) assert.deepEqual(writes[0].vars, { projectId: 'project', itemId: 'item', fieldId: 'field', value: { singleSelectOptionId: 'triage' } });
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
 
 test('checked issue actions preserve the actual handler payload', async () => {
   const repo = 'owner/source';
