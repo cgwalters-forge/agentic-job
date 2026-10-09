@@ -180,8 +180,10 @@ need (for example `issues: write`), or configure `apply-environment` as below.
 The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.
-`exit` is empty because no agent ran. Project updates and issue closure are
-not yet exposed; this mode currently supports the existing output types.
+`exit` is empty because no agent ran. Issue closure and label additions use the
+[bounded issue actions](safe-outputs.md#closing-issues-and-adding-labels).
+Project updates remain unexposed; they need named-project/field bounds and a
+separate apply token with organization Projects write access, not the job token.
 
 ## A caller
 
@@ -826,7 +828,7 @@ blocked = ["release"]
 or appears in `blocked`; blocked wins if a label appears in both lists.
 Label matching ignores ASCII case. An empty `allowed` permits no labels;
 omitting it preserves the existing unrestricted behavior except for
-`blocked`. These limits are currently supported only for `create_issue`.
+`blocked`. `add_labels` also uses these limits, but requires `allowed` explicitly.
 Assignees remain the agent's, sanitized by gh-aw's collector, as gh-aw
 allows by default; a bounds rule for them is not written yet
 ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)). A
