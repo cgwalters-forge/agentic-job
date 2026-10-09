@@ -235,22 +235,16 @@ release's binary, `false` for a build, empty when `binary` was supplied).
 
 ## Where the binary comes from
 
-[`secure-host/release.json`](../secure-host/release.json) names a
-release of this repository, the SHA-256 of each binary it published,
-and a digest of the source it was built from: the content, modes and
-names of `Cargo.lock`, `Cargo.toml`, `crates` and `egress`.
-[`binary.mjs`](../secure-host/binary.mjs) computes the same digest of
-the action's own commit. When the two agree it fetches the release's
-binaries and checks them against the checksums; a file that does not
-match stops the job. When they do not agree, which is any commit that
-changed the source since the release, it builds the binary from that
-source, which needs rustup on the runner.
-
-So a job that names the action by a commit has named the binary: the
-checksums are in the file at that commit. What ties a release's bytes
-to its source is this repository's release workflow and nothing a
-caller can check for itself, so a job that would sooner build than
-trust that passes `build: true`.
+[`binary.mjs`](../secure-host/binary.mjs) computes the source digest at
+the action's pinned commit and fetches `build-FULL_DIGEST`. It verifies
+the release manifest's GitHub attestation before checking the source
+digest and binary checksums. A missing release falls back to a source
+build with a notice; failed verification stops the job. Main publishes
+these releases automatically, without a pin PR. See
+[the workflow's binary trust model](workflow.md#things-a-caller-should-know)
+for the verification and publishing boundaries. Fetching needs Node and
+`gh` with attestation support, but no token; building needs rustup.
+Pass `build: true` to build even when a prebuilt exists.
 
 ## Without the action
 

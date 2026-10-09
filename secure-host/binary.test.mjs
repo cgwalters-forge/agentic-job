@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { BUILT_FROM, NAMES, checked, digest, readPin } from "./binary.mjs";
+import { BUILT_FROM, NAMES, REPOSITORY, TARGET, checked, digest, fetchRelease, readPin } from "./binary.mjs";
 
 function tree() {
   const root = mkdtempSync(join(tmpdir(), "source-"));
@@ -65,10 +65,61 @@ test("only the pinned bytes are taken", () => {
   assert.throws(() => checked(pin, NAMES[0], Buffer.from("another binary")), /refusing it/);
 });
 
-test("the pin in this repository reads, and a release without checksums does not", () => {
-  const pin = readPin();
-  assert.match(pin.repository, /^[\w.-]+\/[\w.-]+$/);
+test("a release without checksums does not read", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pin-")), "release.json");
-  writeFileSync(path, JSON.stringify({ ...pin, release: "v1", sha256: { [NAMES[0]]: "0".repeat(64) } }));
+  writeFileSync(path, JSON.stringify({ release: "v1", sha256: { [NAMES[0]]: "0".repeat(64) } }));
   assert.throws(() => readPin(path), /no checksum for/);
+});
+
+test("source-addressed releases verify before trusting bytes and fail closed", async () => {
+  const source = "a".repeat(64);
+  const bytes = Buffer.from("binary");
+  const manifest = { repository: REPOSITORY, release: `build-${source}`, target: TARGET, source,
+    sha256: Object.fromEntries(NAMES.map((name) => [name, createHash("sha256").update(bytes).digest("hex")])) };
+  const cases = [
+    ["valid", {}, false, false, true],
+    ["absent", null, false, false, false],
+    ["wrong source", { source: "b".repeat(64) }, false, false, /refusing/],
+    ["wrong repository", { repository: "other/repo" }, false, false, /refusing/],
+    ["wrong target", { target: "other" }, false, false, /refusing/],
+    ["wrong tag", { release: "latest" }, false, false, /refusing/],
+    ["bad attestation", {}, true, false, /signature/],
+    ["bad binary", {}, false, true, /refusing/],
+  ];
+  for (const [name, change, badSignature, badBytes, expected] of cases) {
+    let verified = false;
+    const options = {
+      fetchFile: async (url, missing) => {
+        assert.ok(url.startsWith(`https://github.com/${REPOSITORY}/releases/download/build-${source}/`));
+        if (url.endsWith("release.json")) {
+          assert.equal(missing, true);
+          return change === null ? null : Buffer.from(JSON.stringify({ ...manifest, ...change }));
+        }
+        if (url.endsWith("provenance.jsonl")) return Buffer.from("bundle");
+        assert.equal(verified, true, "binary downloaded before verification");
+        return badBytes ? Buffer.from("tampered") : bytes;
+      },
+      verify: (program, args) => {
+        assert.equal(program, "gh");
+        assert.ok(args.includes("--cert-identity"));
+        assert.ok(args.includes(`https://github.com/${REPOSITORY}/.github/workflows/pin.yml@refs/heads/main`));
+        assert.ok(args.includes("refs/heads/main"));
+        assert.ok(args.includes("--deny-self-hosted-runners"));
+        if (badSignature) throw new Error("signature refused");
+        verified = true;
+      },
+    };
+    const out = mkdtempSync(join(tmpdir(), "release-"));
+    if (expected instanceof RegExp) await assert.rejects(fetchRelease(source, out, options), expected, name);
+    else assert.equal(await fetchRelease(source, out, options), expected, name);
+  }
+  for (const failedAsset of ["release.json", "provenance.jsonl", `agentic-job-${TARGET}`]) {
+    await assert.rejects(fetchRelease(source, mkdtempSync(join(tmpdir(), "failure-")), {
+      fetchFile: async (url) => {
+        if (url.endsWith(`/${failedAsset}`)) throw new Error("download failed");
+        return url.endsWith("release.json") ? Buffer.from(JSON.stringify(manifest)) : bytes;
+      },
+      verify: () => {},
+    }), /download failed/, failedAsset);
+  }
 });
