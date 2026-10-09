@@ -11,7 +11,7 @@
 # The binary every job runs comes from this file's own repository at this
 # file's own commit, so a caller that pins the workflow pins the binary:
 # the policy job takes a release's by the checksum in
-# secure-host/release.json when that release was built from the source at
+# an attested release manifest when that release was built from the source at
 # this commit, and builds it from that source otherwise, or when the
 # caller says so. The agent's machine is secured by the action of that
 # directory, the same step any job can run first (docs/secure-host.md).
@@ -323,7 +323,7 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .agentic-job-source
           persist-credentials: false
-      # A release's binaries, by the checksums in secure-host/release.json
+      # A release's binaries, by its attested source-matching checksums
       # at this commit, when that release was built from this commit's
       # source; a build of that source otherwise, or when the caller says
       # so. The action that secures a host gets its binary the same way,

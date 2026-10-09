@@ -1,42 +1,17 @@
-# Keeps the pin fresh. When what the binaries are built from changes on
-# main, a job at the new commit finds no release of its source and builds
-# its own binary, two minutes each time, until someone releases and pins.
-# This does both: it builds the binaries, publishes them as a release of
-# their own, and pushes a branch whose one commit pins that release in
-# secure-host/release.json. Merging that branch's pull request is the
-# only step left to a person, and CI's `release-pin` job holds it to what
-# a pin by hand is held to: the tag is of the source the pin names, and
-# the published files have the pinned checksums.
-#
-# The pull request has to be opened by someone: this organization does
-# not let Actions open one, and one opened with a job's token would not
-# start CI. The job tries, and says where the branch is.
-#
-# Only for main, also when started by hand: a release pinned here was
-# built by main's own workflow from main's own source. Its tag carries
-# the run's id, so it is always this run's and never one somebody
-# published beforehand under a name this workflow would come to.
-name: pin
+# Publishes source-addressed builds, without changing main or opening a PR.
+name: prebuilt
 
 on:
   push:
     branches: [main]
-    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**"]
+    paths: [Cargo.lock, Cargo.toml, "crates/**", "egress/**", "secure-host/binary.mjs", ".github/workflows/build.yml", ".github/workflows/pin.yml"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One at a time, the newest last: a later run pins a later source.
 concurrency:
   group: ${{ github.workflow }}
-
-defaults:
-  run:
-    shell: bash
-
-env:
-  PIN: secure-host/release.json
 
 jobs:
   source:
@@ -49,86 +24,56 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # No tag, and so nothing more to do, where the pin already names
-      # this source.
-      - name: Whether this source is pinned already
-        id: source
-        run: |
-          digest=$(node secure-host/binary.mjs digest)
-          echo "source $digest, the pin is of $(jq -r .source "$PIN")"
-          [ "$digest" = "$(jq -r .source "$PIN")" ] || echo "tag=build-${digest:0:12}-$GITHUB_RUN_ID" | tee -a "$GITHUB_OUTPUT"
+      - id: source
+        run: echo "tag=build-$(node secure-host/binary.mjs digest)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: source
-    if: ${{ needs.source.outputs.tag != '' }}
     uses: ./.github/workflows/build.yml
     with:
       cache: false
       release: ${{ needs.source.outputs.tag }}
 
-  # The only job with a write token, and it builds nothing: it publishes
-  # the files the build job made and proposes their pin.
+  # Only publishing gets a contents-write token; it executes no binaries.
   publish:
     needs: [source, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
-      # For the pull request, where an organization lets Actions open one.
-      pull-requests: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.source.outputs.tag }}
-      BRANCH: pin/${{ needs.source.outputs.tag }}
-      TARGET: x86_64-unknown-linux-musl
     steps:
-      # For the script that writes the pin, and nothing else of it runs.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: agentic-job
           path: dist
-      - name: The checksums match
-        working-directory: dist
-        run: sha256sum --check "agentic-job-$TARGET.sha256" "fake-agent-$TARGET.sha256"
-      # Of the files the build job made, before anything is published:
-      # whoever can write to this repository can change a release's
-      # files, and the pin must not come to name what they put there.
-      - name: Write the pin of this build
-        run: node secure-host/binary.mjs pin --dist dist --release "$TAG" --repository "$GITHUB_REPOSITORY" | tee "$RUNNER_TEMP/release.json"
-      # `gh release create` ignores --target for a tag that exists, and
-      # would publish this commit's binaries under another commit's tag.
-      - name: The tag does not exist yet
-        run: >
-          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG"
-          --jq 'map(select(.ref == "refs/tags/'"$TAG"'")) | length'
-          | grep -qx 0
-      # Not the latest release: that stays the last one with a version.
-      - name: Publish
-        run: >
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false
-          --title "$TAG" --notes "Built from $GITHUB_SHA by the pin workflow, for secure-host/release.json."
-          "dist/agentic-job-$TARGET" "dist/agentic-job-$TARGET.sha256"
-          "dist/fake-agent-$TARGET" "dist/fake-agent-$TARGET.sha256"
-      - name: What was published is what was built
+      # Sign the manifest from this run's uncached build, without executing it.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attest
+        with:
+          subject-path: dist/release.json
+      - name: Stage the verification bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" dist/provenance.jsonl
+      # Exercise the caller's tokenless verification policy before publishing.
+      - name: Verify the attested manifest without a token
+        run: >-
+          GH_TOKEN= GITHUB_TOKEN= gh attestation verify dist/release.json
+          --bundle dist/provenance.jsonl --repo cgwalters-forge/agentic-job
+          --cert-identity https://github.com/cgwalters-forge/agentic-job/.github/workflows/pin.yml@refs/heads/main
+          --source-ref refs/heads/main --deny-self-hosted-runners
+      # Repeated builds of the same source leave the first release intact.
+      - name: Publish if absent
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published" --pattern "*-$TARGET"
-          for name in agentic-job fake-agent; do cmp "dist/$name-$TARGET" "$RUNNER_TEMP/published/$name-$TARGET"; done
-      # One commit on a branch of this commit, through the API: no
-      # credential is left in a checkout. Branches of earlier runs go,
-      # and their pull requests with them: this pin is of a later source.
-      - name: Push the pin as a branch
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/pin/" --jq '.[].ref' |
-            xargs -r -I{} gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/{}"
-          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$GITHUB_SHA" --jq .ref
-          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$PIN" -f branch="$BRANCH" -f sha="$(git rev-parse "HEAD:$PIN")" \
-            -f content="$(base64 -w0 "$RUNNER_TEMP/release.json")" \
-            -f message="secure-host: Pin $TAG"$'\n\n'"The source changed on main, and jobs build their binary until a release of it is pinned. Built and published by the pin workflow at $GITHUB_SHA." --jq .commit.sha
-      - name: Open the pull request, or say where the branch is
-        run: |
-          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "secure-host: Pin $TAG" \
-            --body "The pin of a release built from $GITHUB_SHA by the pin workflow. CI's \`release-pin\` job checks it." ||
-            echo "::warning::the pull request could not be opened from here: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$BRANCH?expand=1" | tee -a "$GITHUB_STEP_SUMMARY"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > "$RUNNER_TEMP/draft"; then
+            [ "$(cat "$RUNNER_TEMP/draft")" = true ] || exit 0
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --latest=false --title "$TAG" --notes "Built from $GITHUB_SHA; checksums are in the attested manifest." dist/*
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false

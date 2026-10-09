@@ -10,7 +10,7 @@ on:
         type: boolean
         default: true
       release:
-        description: The tag the build is published as, for the pin its summary prints
+        description: The tag the build is published as, recorded in its manifest
         type: string
         default: TAG
 
@@ -46,14 +46,13 @@ jobs:
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
-      # secure-host/release.json for a release of this build: what a job
-      # at a commit with this source fetches the binaries by.
-      - name: The pin of this build
+      # The manifest binds the source digest to the binary checksums.
+      - name: The manifest of this build
         shell: bash
         env:
           RELEASE: ${{ inputs.release }}
         run: |
-          { echo '```json'; node secure-host/binary.mjs pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          node secure-host/binary.mjs pin --dist dist --release "$RELEASE" --repository "$GITHUB_REPOSITORY" > dist/release.json
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binary is static and runs
         run: |
