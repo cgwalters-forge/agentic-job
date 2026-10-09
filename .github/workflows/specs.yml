@@ -1,0 +1,18 @@
+# No write permissions or secrets: TLC executes only this checkout's model.
+name: specs
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tlc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Hosted Ubuntu includes Java; no new setup action or write token.
+      - run: bash specs/check.sh
