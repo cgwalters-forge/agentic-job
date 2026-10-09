@@ -66,6 +66,17 @@ sandbox user, with a positive control for every probe
 ([sandbox-check.md](sandbox-check.md)), and the step fails if one does
 not hold.
 
+Setup logs monotonic wall times for service shutdown, package and npm
+installation, proxy startup, the combined world-write/setuid traversal,
+setuid package-ownership checks and the optional sandbox script. Each
+`Sandbox setup stage NAME: SECONDSs (ok|failed)` line measures only that
+stage, including its subprocesses; a failed stage still reports its time
+and returns its original error. These are not timings for the whole
+`secure-host` step: binary acquisition and the final probes are separate.
+Use fresh hosted runners when comparing traversal changes; a second walk
+on the same machine benefits from the filesystem cache and is not a
+representative setup measurement.
+
 ## What a later step can count on, and what it cannot
 
 **No step after this one has general root access.** Not a `run:` step, not another
