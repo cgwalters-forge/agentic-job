@@ -144,6 +144,7 @@ const has = (program) => spawnSync("sh", ["-c", `command -v ${program}`], { stdi
 function build(out) {
   if (!has("musl-gcc")) {
     if (!has("apt-get")) throw new Error("a build needs musl-gcc, and this machine has no apt-get to install it with");
+    run("sudo", ["node", join(HERE, "apt.mjs")]);
     run("sudo", ["apt-get", "install", "-y", "--no-install-recommends", "musl-tools"]);
   }
   run("rustup", ["target", "add", TARGET]);
