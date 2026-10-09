@@ -275,6 +275,63 @@ fn redirections_to(
             problems.push(format!("a {output} that is not a draft"));
         }
     }
+    if output == "update_project" {
+        // Only the board proposal grammar is exposed. The handler also supports
+        // project/schema/draft mutations and aliases: none are bounded here.
+        const KEYS: &[&str] = &[
+            "type",
+            "project",
+            "target_repo",
+            "content_type",
+            "content_number",
+            "fields",
+        ];
+        for key in item.keys().filter(|key| !KEYS.contains(&key.as_str())) {
+            problems.push(format!("an update_project with unsupported field {key}"));
+        }
+        let limit = policy.safe_outputs.others.get(output);
+        if !item
+            .get("project")
+            .and_then(Value::as_str)
+            .is_some_and(|project| {
+                limit.is_some_and(|limit| limit.projects.iter().any(|allowed| allowed == project))
+            })
+        {
+            problems.push("an update_project outside the policy's named projects".to_owned());
+        }
+        if item.get("target_repo").and_then(Value::as_str) != Some(policy.repo.as_str()) {
+            problems
+                .push("an update_project requires the policy's explicit target_repo".to_owned());
+        }
+        if item.get("content_type").and_then(Value::as_str) != Some("issue")
+            || !item
+                .get("content_number")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n > 0 && n <= 2_147_483_647)
+        {
+            problems.push(
+                "an update_project requires issue content and a positive integer content_number"
+                    .to_owned(),
+            );
+        }
+        match item.get("fields").and_then(Value::as_object) {
+            Some(fields) if !fields.is_empty() => {
+                for (field, value) in fields {
+                    if !limit.is_some_and(|limit| limit.fields.contains(field)) {
+                        problems.push(format!(
+                            "an update_project with field {field:?} not listed in the policy"
+                        ));
+                    }
+                    if !(value.is_string() || value.is_number()) {
+                        problems.push(format!(
+                            "an update_project with unsupported value for {field:?}"
+                        ));
+                    }
+                }
+            }
+            _ => problems.push("an update_project requires a nonempty fields object".to_owned()),
+        }
+    }
     if matches!(output, "close_issue" | "add_labels") {
         if !item
             .get("repo")
@@ -879,6 +936,7 @@ mod tests {
                     max,
                     allowed: Some(labels.iter().map(|label| (*label).to_owned()).collect()),
                     blocked: vec!["release".to_owned()],
+                    ..crate::policy::OutputLimit::default()
                 },
             );
             let item = json!({"type": "add_labels", "repo": policy.repo, "item_number": 7, "labels": labels});
@@ -904,6 +962,7 @@ mod tests {
                 max: 1,
                 allowed: Some(vec!["triage".to_owned(), "blocked".to_owned()]),
                 blocked: vec!["blocked".to_owned()],
+                ..crate::policy::OutputLimit::default()
             },
         );
         for (labels, ok) in [

@@ -1039,6 +1039,7 @@ jobs:
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
             | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
+            | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
       # The first line of what a partial run opens or posts says so too,
@@ -1084,7 +1085,107 @@ jobs:
             // one is counted when it is made, so a request gh-aw retries counts once.
             let issues = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_issue?.max ?? 0;
             const creates = (options, what) => options.method === "POST" && new RegExp(`^/repos/[^/]+/[^/]+/${what}$`).test(options.url);
+            let projectRefusal = false;
+            // Preflight every field before any handler can mutate the forge.
+            // The pinned handler otherwise reports success for skipped values.
+            const pending = new Map();
+            const writeKey = variables => JSON.stringify([variables.projectId, variables.fieldId, variables.value]);
+            const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
+            try {
+              const items = JSON.parse(require('node:fs').readFileSync(process.env.GH_AW_AGENT_OUTPUT, 'utf8')).items;
+              for (const item of items.filter(item => item.type === 'update_project')) {
+                if (!project?.projects.includes(item.project)) throw new Error("project is outside the apply bounds");
+                const [, kind, login, , number] = new URL(item.project).pathname.split('/');
+                const owner = kind === 'orgs' ? 'organization' : 'user';
+                const found = await github.graphql(`query($login: String!, $number: Int!) {
+                  ${owner}(login: $login) { projectV2(number: $number) { id } }
+                }`, { login, number: Number(number) });
+                const projectId = found[owner]?.projectV2?.id;
+                if (!projectId) throw new Error("bounded project could not be resolved");
+                const fields = [];
+                let after = null;
+                do {
+                  const result = await github.graphql(`query($projectId: ID!, $after: String) {
+                    node(id: $projectId) { ... on ProjectV2 { fields(first: 100, after: $after) {
+                      nodes {
+                        ... on ProjectV2Field { id name dataType }
+                        ... on ProjectV2SingleSelectField { id name dataType options { id name } }
+                        ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } }
+                      }
+                      pageInfo { hasNextPage endCursor }
+                    } } }
+                  }`, { projectId, after });
+                  const page = result.node.fields;
+                  fields.push(...page.nodes);
+                  if (page.pageInfo.hasNextPage && (!page.pageInfo.endCursor || page.pageInfo.endCursor === after)) {
+                    throw new Error("project field pagination did not advance");
+                  }
+                  after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+                } while (after);
+                for (const [name, raw] of Object.entries(item.fields)) {
+                  const matches = fields.filter(field => field.name === name);
+                  if (!project.fields.includes(name) || matches.length !== 1) throw new Error(`project field ${name} is not an exact existing bounded field`);
+                  const field = matches[0];
+                  const normalized = name.split(/[\s_-]+/).map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+                  if (normalized.toUpperCase() === 'REPOSITORY' || fields.find(candidate => candidate.name.toLowerCase() === normalized.toLowerCase())?.id !== field.id) {
+                    throw new Error(`project field ${name} cannot be addressed exactly by the pinned handler`);
+                  }
+                  let value;
+                  if (field.dataType === 'NUMBER') {
+                    const number = typeof raw === 'number' ? raw : Number(raw);
+                    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(raw).trim()) || !Number.isFinite(number)) throw new Error(`invalid number for project field ${name}`);
+                    value = { number };
+                  } else if (field.dataType === 'SINGLE_SELECT' || field.dataType === 'ITERATION') {
+                    const iteration = field.dataType === 'ITERATION';
+                    const options = iteration ? field.configuration?.iterations : field.options;
+                    const option = options?.find(option => (iteration ? option.title : option.name).toLowerCase() === String(raw).toLowerCase());
+                    if (!option) throw new Error(`unknown option or iteration for project field ${name}`);
+                    value = iteration ? { iterationId: option.id } : { singleSelectOptionId: option.id };
+                  } else if (field.dataType === 'DATE') {
+                    const date = String(raw);
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error(`invalid date for project field ${name}`);
+                    value = { date };
+                  } else if (field.dataType === 'TEXT') {
+                    value = { text: String(raw) };
+                  } else {
+                    throw new Error(`unsupported type for project field ${name}`);
+                  }
+                  const key = writeKey({ projectId, fieldId: field.id, value });
+                  pending.set(key, (pending.get(key) ?? 0) + 1);
+                }
+              }
+            } catch (error) {
+              core.setOutput("project-refused", "true");
+              throw error;
+            }
             const guarded = client => {
+              const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
+              if (project) {
+                // gh-aw normalizes names and creates missing fields. Refuse
+                // schema writes and IDs not read with an exact bounded name.
+                const graphql = client.graphql.bind(client);
+                const admitted = new Set();
+                client.graphql = async (query, variables) => {
+                  if (/\bcreateProjectV2Field\b/.test(query) ||
+                      (/\bupdateProjectV2ItemFieldValue\b/.test(query) && (!admitted.has(variables.fieldId) || !(pending.get(writeKey(variables)) > 0)))) {
+                    projectRefusal = true;
+                    throw new Error("project schema or field ID is outside the named field bounds");
+                  }
+                  const result = await graphql(query, variables);
+                  if (/\bupdateProjectV2ItemFieldValue\b/.test(query)) {
+                    if (!result?.updateProjectV2ItemFieldValue?.projectV2Item?.id) {
+                      projectRefusal = true;
+                      throw new Error("project field update did not complete");
+                    }
+                    const key = writeKey(variables);
+                    pending.set(key, pending.get(key) - 1);
+                  }
+                  for (const field of result?.node?.fields?.nodes ?? []) {
+                    if (project.fields.includes(field.name)) admitted.add(field.id);
+                  }
+                  return result;
+                };
+              }
               client.hook.before("request", options => {
                 if (creates(options, "issues") && issues <= 0) throw new Error("no issue beyond this run's create_issue outputs is opened");
               });
@@ -1100,6 +1201,10 @@ jobs:
             };
             require(`${dir}/setup_globals.cjs`).setupGlobals(core, guarded(github), context, exec, io, (...args) => guarded(getOctokit(...args)));
             await require(`${dir}/safe_output_handler_manager.cjs`).main();
+            if (projectRefusal || [...pending.values()].some(count => count !== 0)) {
+              core.setOutput("project-refused", "true");
+              throw new Error("a project write was refused by the apply bounds");
+            }
       # What was made, for whoever reads the run: `pull_request` is null
       # when none was opened, and `refused` then says whether the forge
       # refused it to Actions after the branch was pushed.
@@ -1136,7 +1241,9 @@ jobs:
           OUTCOME: ${{ steps.apply.outcome }}
           FAILED: ${{ steps.apply.outputs.items_failed }}
           PUSHES_FAILED: ${{ steps.apply.outputs.code_push_failure_count }}
+          PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
         run: |
+          [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json") refused=$(jq .refused "$GH_AW_TMP/applied.json")
           if [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; }; then exit 0; fi
