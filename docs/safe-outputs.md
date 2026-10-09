@@ -38,6 +38,16 @@ the pinned commit gives.
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
 `noop`, `missing_tool` and `missing_data`.
 
+The proposals-artifact entry point does not add output types. In particular,
+`update_project` and `close_issue` remain unsupported: named-project and field
+bounds, named-repository bounds, and their acceptance/refusal tests are still
+needed before these operations can be exposed through the pinned gh-aw handlers.
+That part of [#160](https://github.com/cgwalters-forge/agentic-job/issues/160)
+remains open. Organization project writes would require a separately configured
+apply token with access to the project (for a fine-grained token, organization
+Projects write permission); the repository job token cannot provide that access.
+Such a token must stay in the apply job, never in the proposals producer or check.
+
 ## The bounds and the policy
 
 A caller keeps a bounds file in its repository
@@ -74,6 +84,14 @@ comment target is available, in the run's conclusion comment.
 the collector reads that part as it is.
 
 ## What the agent does
+
+The producer need not be an agent. Any caller job can upload `outputs.jsonl`
+and pass its artifact name as `proposals-artifact` to the reusable workflow;
+see the [ten-line caller example](workflow.md#proposals-from-a-non-agent-job).
+The same collector, policy check and apply handlers run on separate machines,
+without sandbox setup or inference. For non-patch requests only `outputs.jsonl`
+is needed. Optional `base.json` and `aw-BRANCH.patch` use the same hand-back
+contract and patch checks described below; no other files are accepted.
 
 `run`'s brief tells the agent to put its requests in
 `out/safe-outputs.jsonl` under its home and to leave its change

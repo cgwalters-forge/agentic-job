@@ -72,6 +72,38 @@ Read this before relying on it.
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
 
+## Proposals from a non-agent job
+
+A caller job can upload an artifact containing `outputs.jsonl` in the
+[safe-output format](safe-outputs.md), then call this workflow with
+`proposals-artifact` naming it. The producer needs no write credential.
+Policy still reads the caller's bounds; check still collects and validates
+the requests on a separate read-only machine; only apply receives the write
+token. No agent, sandbox setup or inference runs. Event admission, review and
+partial application are not available in this mode. Use a trusted caller ref
+for the bounds, just as for agent runs.
+
+```yaml
+jobs:
+  apply:
+    needs: proposals # uploads outputs.jsonl as board-proposals
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+    with:
+      id: board
+      repo: OWNER/REPO
+      allow: .github/agentic-job/allow.toml
+      outputs: create_issue,noop
+      proposals-artifact: board-proposals
+```
+
+Grant the call `contents: read` and the write permissions its allowed outputs
+need (for example `issues: write`), or configure `apply-environment` as below.
+The artifact name selects untrusted data only; it does not select the policy,
+binary or handler code. Upload just the hand-back files, not a checkout.
+For patch proposals the existing branch, base and patch guards still apply.
+`exit` is empty because no agent ran. Project updates and issue closure are
+not yet exposed; this mode currently supports the existing output types.
+
 ## A caller
 
 [`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
