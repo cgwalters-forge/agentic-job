@@ -6,10 +6,34 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { admit, taskFile, checkRequest, checkOutputs } = require('./review.cjs');
+const { admit, taskFile, checkRequest, checkOutputs, resolveDispatch } = require('./review.cjs');
 
 const decision = { admitted: true, event: 'pull_request_target', action: 'opened',
   item: { kind: 'pull_request', number: 147 }, base: 'main', head: { sha: 'a'.repeat(40) } };
+
+test('dispatch resolves an open same-repository head and refuses hostile routing', async () => {
+  const env = { REVIEW: 'true', EVENT: 'false', KIND: 'analysis', OUTPUTS: 'add_comment,noop',
+    MAX_OUTPUTS: '1', NOTIFY: 'none', APPLY_PARTIAL: 'false', ITEM: '147', TARGET: '147',
+    REPO: 'o/r', BASE: 'main' };
+  const data = { number: 147, state: 'open', base: { ref: 'main', repo: { full_name: 'o/r' } },
+    head: { sha: 'a'.repeat(40), repo: { full_name: 'o/r' } } };
+  const api = value => ({ rest: { pulls: { get: async args => {
+    assert.deepEqual(args, { owner: 'o', repo: 'r', pull_number: 147 });
+    return { data: value };
+  } } } });
+  assert.equal(await resolveDispatch(env, api(data)), data.head.sha);
+  for (const change of [{ TARGET: '*' }, { ITEM: '01' }, { KIND: 'branch' },
+    { OUTPUTS: 'all' }, { MAX_OUTPUTS: '3' }, { EVENT: 'true' }, { REVIEW: 'false' },
+    { OUTPUT_REPO: 'other/repo' }]) {
+    await assert.rejects(resolveDispatch({ ...env, ...change }, api(data)));
+  }
+  for (const change of [{ state: 'closed' }, { number: 148 },
+    { head: { sha: '--evil', repo: { full_name: 'o/r' } } },
+    { head: { ...data.head, repo: { full_name: 'fork/r' } } },
+    { base: { ...data.base, ref: 'other' } }]) {
+    await assert.rejects(resolveDispatch(env, api({ ...data, ...change })));
+  }
+});
 
 test('review admission narrows, never overrides, event authorization', () => {
   for (const event of ['pull_request', 'pull_request_target']) {
@@ -115,7 +139,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(caller, /kind: analysis/);
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit/);
-  assert.match(workflow, /inputs.review && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
+  assert.match(workflow, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
   assert.match(workflow, /require\(`\$\{process.env.SOURCE_DIR\}\/workflow\/review.cjs`\)/);
   assert.match(workflow, /errors: \[error.message\]/);
   const apply = workflow.split('\n  apply:')[1].split('\n  conclude:')[0];

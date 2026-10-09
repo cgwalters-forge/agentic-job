@@ -48,6 +48,10 @@ on:
         description: Review task file in the trusted base checkout, never the review head
         type: string
         default: ""
+      review-item:
+        description: Positive pull request number for an operator-dispatched review (not an event run)
+        type: string
+        default: ""
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public
         type: string
@@ -83,6 +87,10 @@ on:
         description: "The agent: `claude`, `opencode`, or `fake`, a scripted one that needs no inference"
         type: string
         default: fake
+      fake-profile:
+        description: Built-in scripted trial, implement, comment or review; only with agent fake and no setup
+        type: string
+        default: ""
       model:
         description: The model, as the agent names it (empty for the agent's own default)
         type: string
@@ -240,6 +248,9 @@ on:
         description: A token that can push to the output repository and open pull requests and comments there
         required: false
     outputs:
+      review-head:
+        description: The exact review head resolved by the read-only policy job
+        value: ${{ jobs.policy.outputs.review-head }}
       exit:
         description: "The exit state of `agentic-job run`: 0, 1 (failed), 3 (a limit), 4 (never started), 124 (the timeout)"
         value: ${{ jobs.agent.outputs.exit }}
@@ -297,7 +308,7 @@ jobs:
       # decided here: the inputs, or the event's pull request and item.
       base: ${{ steps.request.outputs.base }}
       comment-target: ${{ steps.request.outputs.comment-target }}
-      review-head: ${{ steps.event.outputs.review-head }}
+      review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
     steps:
       - name: Check the proposals mode
         env:
@@ -316,8 +327,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Review policy and task are never read from the PR merge/head.
-          ref: ${{ inputs.review && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+          # Event review policy/task come from the base, never the PR head.
+          # Dispatch uses the operator's trusted caller commit, not target code.
+          ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # Logs, transcripts and patches are published, so nothing is run for
       # a repository that cannot be shown to be public. An answer that is
       # an error counts as not public.
@@ -387,7 +399,7 @@ jobs:
       # not be read, which fails the job.
       - name: Decide whether the event may start a run, and write the task
         id: decision
-        if: ${{ inputs.event || inputs.review }}
+        if: ${{ inputs.event || (inputs.review && !inputs.review-item) }}
         env:
           ALLOW: ${{ inputs.allow }}
           TASK: ${{ inputs.task }}
@@ -437,6 +449,29 @@ jobs:
             core.setOutput('item', decision.admitted ? decision.item?.number ?? '' : '');
             core.setOutput('review-head', process.env.REVIEW === 'true' && decision.admitted ? decision.head.sha : '');
             await core.summary.addRaw(`agentic-job event: ${decision.admitted ? 'admitted' : 'refused'}, ${decision.reason}`).write();
+      # Operator dispatch has no event admission; resolve the head here with
+      # read-only API access, never from agent text or the caller's task.
+      - name: Resolve a dispatched review
+        id: dispatch-review
+        if: ${{ inputs.review-item != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW: ${{ inputs.review }}
+          EVENT: ${{ inputs.event }}
+          KIND: ${{ inputs.kind }}
+          OUTPUTS: ${{ inputs.outputs }}
+          MAX_OUTPUTS: ${{ inputs.max-outputs }}
+          NOTIFY: ${{ inputs.notify }}
+          TARGET: ${{ inputs.comment-target }}
+          ITEM: ${{ inputs.review-item }}
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
+          APPLY_PARTIAL: ${{ inputs.apply-partial }}
+        with:
+          script: |
+            const { resolveDispatch } = require(process.env.SOURCE_DIR + '/workflow/review.cjs');
+            core.setOutput('review-head', await resolveDispatch(process.env, github));
       # The base is the pull request's where an event named one, and the
       # bounds have to cover it like any other. Comments go to the item
       # the event was about unless the caller named a target.
@@ -568,7 +603,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.review && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+          ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
       # The action that secures this machine, from this file's own
       # repository and commit: without them the checkout would quietly
       # take the caller's, and the step below whatever is there.
@@ -641,6 +676,18 @@ jobs:
         with:
           binary: /usr/local/bin/agentic-job
           config: ${{ env.JOB_DIR }}/config.toml
+      # The session comes from this workflow's pinned source, not target code.
+      # It is installed only as the sandbox user, with no credential in reach.
+      - name: Install the built-in scripted session
+        if: ${{ inputs.fake-profile != '' }}
+        env:
+          PROFILE: ${{ inputs.fake-profile }}
+          AGENT: ${{ inputs.agent }}
+          SETUP: ${{ inputs.setup }}
+        run: |
+          [ "$AGENT" = fake ] && [ -z "$SETUP" ] || { echo '::error::fake-profile requires agent fake and no setup'; exit 1; }
+          case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
+          agentic-job sandbox exec --stdin "$SOURCE_DIR/workflow/dispatch-$PROFILE.sh" -- sh -s
       # For an event-triggered run the task is the one the policy job
       # wrote, downloaded with the policy: the caller's task and then the
       # event's text, fenced.

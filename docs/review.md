@@ -27,8 +27,8 @@ Use a disposable runner with systemd 257 and connectivity to the inference
 proxy, configure `inference-url`, retain `inference-register: github-oidc`,
 and set a nonzero `max-requests`. Opencode also needs a `model` naming a model
 served by the proxy. The reusable workflow supplies its default opencode npm
-pin; a caller can override `npm` like other dependencies. Claude needs its
-pinned ACP adapter in `npm`.
+pin; a caller can override `npm` like other dependencies. Claude's pinned ACP
+adapter is also supplied by default; neither agent needs an explicit `npm` input.
 
 The caller grants contents read, id-token write for broker registration, and
 pull-requests write for posting. Policy and check restrict themselves to
