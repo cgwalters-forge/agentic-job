@@ -36,6 +36,34 @@ None of these write-capable jobs executes code produced by the agent.
 `policy` and `check` have `contents: read`; `agent` has `contents: read`
 and `id-token: write`, not repository write permissions.
 
+## Reusable checker contract
+
+The whole workflow calls [check.yml](../.github/workflows/check.yml) at its
+own source commit. This is the first extracted piece of the composition
+migration; policy, apply and agent preparation/execution remain in the wrapper.
+Existing callers need no changes, including proposals-only callers.
+
+The checker takes `binary-artifact-id` and `policy-artifact-id` directly from
+the trusted policy job in the **same workflow run**, never from the proposal
+producer. It takes untrusted proposals by `safe-outputs-artifact-id`, or by
+the legacy `proposals-artifact` name, exclusively. Missing IDs fail before
+downloads: an empty artifact selector must not download every upload and let
+producer data stand in for trusted policy or executable code. IDs identify
+immutable uploads, not proof that the producer secured its host.
+
+Pass the policy's effective `comment-target`, the caller's fixed `output-repo`
+and review/refusal settings unchanged. The checker returns `artifact-id`,
+`refusal` and `has-patch`; only its checked artifact goes to apply. Expected
+refusal returns diagnostics but no applicable artifact. Its paths remain
+`.agentic-job` for downloaded policy/binary, `.agentic-job/safe-outputs` for
+proposals and `/tmp/gh-aw` for collector/checker results.
+
+The extraction preserves the ten-minute read-only job, all action pins and
+checkout source selection. No secrets are passed to the nested workflow;
+apply alone retains the apply token. The wrapper's admission, failed-run check,
+partial-apply, activation and notification gates are unchanged. Patch ancestry
+semantics are unchanged. Tailscale inputs and setup/cleanup are not changed.
+
 ## What has run, and what has not
 
 Read this before relying on it.
