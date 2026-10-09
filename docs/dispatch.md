@@ -72,7 +72,10 @@ admission to a specific caller remains optional hardening tracked in
 
 For cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
 restricted to the protected default branch, and store its sole secret
-`AGENTIC_JOB_APPLY_TOKEN` there. Use a fine-grained bot PAT restricted to the
+`AGENTIC_JOB_APPLY_TOKEN` there. This is gh-aw's `safe-outputs.github-token` for
+[cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
+see [the mapping and job-token limits](workflow.md#the-apply-job-and-its-token).
+Use a fine-grained bot PAT restricted to the
 exact targets with Contents, Issues and Pull requests read/write, no workflow
 write or administration. Preflight names a missing `APPLY_ENVIRONMENT` too.
 Only apply enters the environment; a missing environment token fails closed.
