@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::{CONTAINER_UID, Checker, Want};
 use crate::sandbox::enter::Output;
-use crate::sandbox::{egress, network};
+use crate::sandbox::{egress, host, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
@@ -407,6 +407,22 @@ impl Checker<'_> {
         // spoken to in plain HTTP.
         for (endpoint, url) in endpoints.into_iter().zip(self.config.egress.direct.clone()) {
             let host_v4 = endpoint.host.to_string();
+            let reached = host::command(&direct(&[&url]))
+                .map(|mut command| host::succeeds(&mut command))
+                .unwrap_or(false);
+            self.report.expect(
+                Want::Succeed,
+                "tailnet-direct-control",
+                if reached {
+                    format!("{} reaches {url} (control)", self.runner.name)
+                } else {
+                    format!("control failed: the runner cannot reach {url}; check the proxy and its network")
+                },
+                reached,
+            );
+            if !reached {
+                continue;
+            }
             // Any HTTP response will do: the point is the connection.
             let got = self.sandbox_succeeds(&curl(&[&url]))?;
             self.report.expect(
