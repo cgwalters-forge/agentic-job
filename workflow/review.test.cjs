@@ -122,7 +122,7 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(apply, /if: \$\{\{ needs.check.outputs.has-patch == 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);
   const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
-  assert.match(ci, /e2e-review:\s+needs: review-base/);
+  assert.match(ci, /e2e-review:\s+needs: \[changes, review-base\]/);
   assert.match(ci, /Exactly one scripted verdict was posted/);
   assert.match(ci, /HEAD_SHA: \$\{\{ github.event.pull_request.head.sha \}\}/);
   assert.match(ci, /contains\("Reviewed SHA: " \+ \$sha \+ "\\n"\)/);

@@ -19,6 +19,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Job-level filtering keeps the required ci check present on docs-only runs.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      e2e: ${{ steps.paths.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        run: node workflow/ci-paths.cjs
+
   docs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -57,6 +71,7 @@ jobs:
       - run: node --test workflow/proposals.test.cjs
       # Read-only contract tests; no forge token or agent-produced code.
       - run: node --test workflow/dispatch.test.cjs
+      - run: node --test workflow/ci-paths.test.cjs
 
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left
@@ -373,6 +388,8 @@ jobs:
   #
   # A pull request from a fork cannot run these: its token cannot write.
   e2e-full:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: &e2e-permissions
       contents: write # push the pull request's branch
       issues: write # add_comment
@@ -403,6 +420,8 @@ jobs:
   # state of a limit, and what it had done is applied as a draft that
   # says it is partial.
   e2e-limit:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: *e2e-permissions
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -435,6 +454,8 @@ jobs:
   # list no `push` event: the run ends in the policy job, a success with
   # the other jobs skipped. e2e-verify checks both.
   e2e-event:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: *e2e-permissions
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -459,6 +480,8 @@ jobs:
   # An analysis of the topic branch writes only to the named scratch issue.
   # No contents write permission: apply must not checkout/fetch/push a base.
   e2e-analysis:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
       issues: write
@@ -486,6 +509,8 @@ jobs:
   # Same read-only analysis, but hostile output names another item. Check
   # must fail before the job holding the issue-write token applies anything.
   e2e-analysis-refused:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
       issues: write
@@ -513,6 +538,8 @@ jobs:
   # Bootstrap only: the first PR adding this caller has no base-branch
   # task/bounds yet. Never substitute its head's files to make that run pass.
   review-base:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -529,8 +556,8 @@ jobs:
           echo "installed=$installed" >> "$GITHUB_OUTPUT"
 
   e2e-review:
-    needs: review-base
-    if: ${{ needs.review-base.outputs.installed == 'true' }}
+    needs: [changes, review-base]
+    if: ${{ needs.changes.outputs.e2e == 'true' && needs.review-base.outputs.installed == 'true' }}
     permissions:
       contents: read
       pull-requests: write
@@ -557,8 +584,8 @@ jobs:
       artifact-prefix: review-
 
   e2e-verify:
-    if: ${{ always() }}
-    needs: [e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review]
+    if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
+    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -768,7 +795,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-verify]
+    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -776,7 +803,10 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           REVIEW_INSTALLED: ${{ needs.review-base.outputs.installed }}
+          E2E: ${{ needs.changes.outputs.e2e }}
         run: >-
-          jq -e --arg installed "$REVIEW_INSTALLED"
+          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E"
           'all(to_entries[]; .value.result == "success" or
+          (.value.result == "skipped" and $e2e == "false" and
+          (.key | IN("e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-verify"))) or
           (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"

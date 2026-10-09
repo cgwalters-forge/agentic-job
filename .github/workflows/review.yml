@@ -16,7 +16,9 @@ jobs:
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
     concurrency:
       group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: false
+      # Only automatic PR events supersede a review; arbitrary comments must
+      # not be able to cancel it before event authorization runs.
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     uses: ./.github/workflows/agentic-job.yml
     permissions:
       contents: read
