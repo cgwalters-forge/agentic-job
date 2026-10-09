@@ -50,6 +50,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
+      # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
+      - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
       - run: node --test workflow/apply.test.cjs
       - run: node --test workflow/review.test.cjs
       - run: node --test workflow/proposals.test.cjs

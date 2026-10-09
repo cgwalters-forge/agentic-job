@@ -108,7 +108,7 @@ impl Config {
         let endpoint = Endpoint::from_config(&self.inference)?;
         ensure!(
             endpoint.is_some() || !kind.needs_inference(),
-            "the agent {} needs inference: set [inference] url and register",
+            "the agent {} needs inference: set [inference] url and register (workflow inputs inference-url and inference-register)",
             kind.as_str()
         );
         if let Some(endpoint) = &endpoint {
@@ -202,7 +202,7 @@ mod tests {
             ),
             (
                 format!("{CLAUDE}{CAPPED}"),
-                "the agent claude needs inference",
+                "the agent claude needs inference: set [inference] url and register (workflow inputs inference-url and inference-register)",
             ),
             (
                 format!("{CLAUDE}{PROXY}{CAPPED}"),

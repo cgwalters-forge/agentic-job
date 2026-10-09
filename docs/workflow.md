@@ -155,6 +155,42 @@ Name the workflow by a commit you have read, not by a branch. The binary
 is built from that same commit, so the pin covers both. Never pass
 `secrets: inherit`: the workflow declares the one secret it uses.
 
+### Real agent checklist
+
+Before replacing `agent: fake`, ask the inference and network operator for
+the following. Hosted Ubuntu alone cannot reach a private proxy.
+
+- **Proxy URL and audience:** set repository variables `INFERENCE_URL` and
+  `INFERENCE_AUDIENCE`, and pass them as `inference-url` and
+  `inference-audience`. These are addresses/identity names, not secrets.
+  Keep `inference-register: github-oidc`: no repository secret or provider
+  API key is needed for inference in this mode.
+- **A network route:** either a disposable self-hosted `agent-runner` on
+  the proxy's network, or `tailscale-oauth-client-id`, `tailscale-audience`
+  and `tailscale-tags`. The tailnet administrator must create an OAuth
+  client configured to trust GitHub's OIDC issuer and the requested audience,
+  authorize this workflow's identity to mint ephemeral tagged nodes, and
+  grant those tags access to the proxy's TCP port in the tailnet policy.
+  The client id is not a client secret; do not supply an OAuth secret.
+- **Broker admission:** the broker operator must enable a `called_workflows`
+  policy entry for `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml`,
+  the exact commit pinned by the caller (`job_workflow_sha`), and the calling
+  repository's numeric id (not just its name). Update that entry when the
+  workflow pin changes. See [inference admission](inference.md#which-workflows-a-broker-admits).
+- **Agent programs and limits:** `agent: claude` defaults to
+  `@agentclientprotocol/claude-agent-acp@0.88.0` (the ACP adapter, which brings
+  the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
+  Override `npm` with exact `NAME@VERSION` pins if needed, and choose
+  `model`, `max-requests`, `budget` and `timeout` with the operator.
+  These package pins do not pin every transitive dependency.
+
+The policy job validates the effective configuration, including overrides
+of the caller's `config`, before starting the agent machine. After joining
+the tailnet, the agent job makes a TCP connection to the effective proxy URL
+as the runner user, before sandbox setup. This control sends no credentials
+and proves only reachability, not broker admission or model availability.
+A failure names the missing network route rather than blaming sandbox rules.
+
 ### What a caller provides
 
 **A bounds file** in its repository (`allow`): which repositories and
