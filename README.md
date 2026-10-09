@@ -59,6 +59,10 @@ applies. The jobs that hold a write token, which are apply and, for runs
 started by an event, the ones that post the run's status, run nothing
 the agent wrote.
 
+Apply's optional `AGENTIC_JOB_APPLY_TOKEN` is gh-aw's `safe-outputs.github-token`
+for [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
+see [token setup and limits](docs/workflow.md#the-apply-job-and-its-token).
+
 ```yaml
 jobs:
   agent:
