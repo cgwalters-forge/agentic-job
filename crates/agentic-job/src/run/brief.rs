@@ -142,7 +142,19 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
         home.join(AGENT_OUTCOME).display(),
         MAX_OUTCOME_BYTES / KIB,
     );
-    text.push('\n');
+    text.push_str(
+        "\nContainers in this sandbox. If Podman is installed and the egress proxy is enabled, \
+         networked build RUN steps and container commands need the host network and the proxy's \
+         public CA bundle. For Alpine or Debian/Ubuntu images use \
+         `podman build --network=host -v \
+         /etc/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro -t local-build .`; \
+         use the same network and mount flags with `podman run`. For Fedora/RHEL images change \
+         the mount destination to `/etc/pki/tls/certs/ca-bundle.crt`. The image must have the \
+         destination available. Podman passes HTTP(S) proxy variables by default; keep \
+         `--http-proxy` enabled. Tools that ignore those variables need their own proxy setting. \
+         The mount is not baked into the image. Do not disable TLS verification. These are not \
+         configured Podman defaults.\n\n",
+    );
     text
 }
 
@@ -171,6 +183,24 @@ mod tests {
             Path::new("/home/agent"),
             Path::new("/home/agent/work/r"),
         )
+    }
+
+    #[test]
+    fn container_recipe_reaches_branch_and_analysis_agents() {
+        for kind in [Kind::Branch, Kind::Analysis] {
+            let brief = text(&policy(kind, json!({})));
+            for required in [
+                "podman build --network=host",
+                "/etc/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "use the same network and mount flags with `podman run`",
+                "keep `--http-proxy` enabled",
+                "Do not disable TLS verification",
+                "not configured Podman defaults",
+            ] {
+                assert!(brief.contains(required), "missing {required} for {kind:?}");
+            }
+        }
     }
 
     #[test]

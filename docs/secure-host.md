@@ -125,6 +125,46 @@ CI exercises the rows it can: the checkout, a Rust cache saved by its
 post step, an artifact upload, `sudo` and `docker` refused. The rest
 follows from who owns which files and has not been run here.
 
+### Containers
+
+The standalone action does not install Podman or its uid-mapping helpers.
+On Ubuntu, install them before `secure-host`:
+
+```yaml
+- run: sudo apt-get update && sudo apt-get install -y podman uidmap
+- uses: cgwalters-forge/agentic-job/secure-host@COMMIT
+```
+
+With the egress proxy enabled (the default), a container's own network
+cannot reach the host's loopback proxy. Use the host network and mount
+the public CA bundle read-only where the image expects its trust bundle.
+For Alpine and Debian/Ubuntu images, as the sandbox user:
+
+```sh
+podman build --network=host \
+  -v /etc/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro \
+  -t local-build .
+podman run --rm --network=host \
+  -v /etc/egress-proxy/ca-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro \
+  local-build
+```
+
+For Fedora/RHEL images, replace the mount destination with
+`/etc/pki/tls/certs/ca-bundle.crt`. The image must have that destination
+available. Podman passes the host's HTTP(S) proxy variables by default;
+do not disable its `--http-proxy` option. A tool that ignores those
+variables needs its own proxy setting. These mounts apply to build
+`RUN` steps or the running container, not the resulting image: later
+runs need the flags again. Setup does not configure Podman defaults.
+An image build that rewrites its trust bundle can conflict with the
+read-only mount; use an image-specific trust configuration in that case.
+Tools with separate trust stores also need their own CA configuration.
+
+Host networking does not grant root or bypass the sandbox uid's network
+rules; it exposes the same host services the sandbox user can already
+reach. The mount contains public certificates, not the proxy's private
+key. Do not work around TLS failures by disabling certificate checks.
+
 **Running as the sandbox user.** `agentic-job sandbox exec -- COMMAND`
 runs a command as the sandbox user, in its home, and ends with the
 command's exit state. As a step's shell it takes the script by file,

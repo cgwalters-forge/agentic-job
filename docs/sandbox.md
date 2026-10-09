@@ -161,7 +161,8 @@ show, and what was tried by hand elsewhere, is
 - A container the agent starts has no network of its own. It reaches the
   proxy only on the host's network, and trusts it only if the
   certificate is mounted into it, as the probes do; nothing configures
-  podman to do either.
+  podman to do either. Use the [container recipe](secure-host.md#containers)
+  for networked builds and runs.
 - The agent can read whatever is world-readable on the host, and connect
   to whatever listens for every local user unless the caller stops it.
 - `setup.npm` runs the packages' install scripts as root, which is why
