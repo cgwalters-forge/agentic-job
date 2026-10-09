@@ -19,7 +19,7 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::Mode;
@@ -298,7 +298,9 @@ pub fn run(args: &Args) -> Result<Exit> {
     )?;
     drop_image_environment()?;
     close_private_dirs(&config, &runner)?;
-    stop_services(&config.sandbox.stop_services)?;
+    timed_setup("stop-services", || {
+        stop_services(&config.sandbox.stop_services)
+    })?;
     install_self()?;
     // The helper's copy, the configuration it reads and the programs it
     // runs are what the runner's one sudo rule gives root to: their
@@ -311,8 +313,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     {
         make_roots_alone(Path::new(path))?;
     }
-    install_packages(&config.setup.packages)?;
-    install_npm(&config.setup.npm)?;
+    timed_setup("packages", || install_packages(&config.setup.packages))?;
+    timed_setup("npm", || install_npm(&config.setup.npm))?;
     // After the packages: one of them may be what a rule is for (polkit,
     // at), and a rule is written only for what is there. The runner's
     // rules take effect now too, which nothing running needs: the job's
@@ -326,7 +328,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let proxy_uid = config
         .egress
         .proxy
-        .then(|| egress::start(&config.egress))
+        .then(|| timed_setup("egress-proxy", || egress::start(&config.egress)))
         .transpose()?;
     let uids: Vec<String> = std::iter::once(sandbox.uid.to_string())
         .chain(subuids.iter().cloned())
@@ -346,8 +348,8 @@ pub fn run(args: &Args) -> Result<Exit> {
         ),
     }
     // After the installs, which are the last things to write as root.
-    strip_world_write()?;
-    strip_unowned_setuid()?;
+    timed_setup("world-write-and-setuid-walk", strip_world_write)?;
+    timed_setup("setuid-package-ownership", strip_unowned_setuid)?;
     fix_ssh_crypto_policy()?;
     restrict_ptrace()?;
     println!(
@@ -359,7 +361,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         runner.home.display()
     );
     if let Some(script) = &config.setup.script {
-        run_setup_script(&config, script)?;
+        timed_setup("sandbox-script", || run_setup_script(&config, script))?;
     }
     write_managed_settings(&config)?;
     // Late, so a setup that failed leaves nothing `sandbox check` and
@@ -733,6 +735,18 @@ fn close_private_dirs(config: &Config, runner: &User) -> Result<()> {
             .with_context(|| format!("closing {}", dir.display()))?;
     }
     Ok(())
+}
+
+/// Log monotonic wall time even when a stage fails, without changing its result.
+fn timed_setup<T>(stage: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let started = Instant::now();
+    let result = run();
+    println!(
+        "Sandbox setup stage {stage}: {:.3}s ({})",
+        started.elapsed().as_secs_f64(),
+        if result.is_ok() { "ok" } else { "failed" }
+    );
+    result
 }
 
 /// `find` arguments that match what is world-writable under `root` and
@@ -1428,6 +1442,13 @@ mod tests {
             });
             assert_eq!(got, want, "{text:?}");
         }
+    }
+
+    #[test]
+    fn setup_timing_preserves_results() {
+        assert_eq!(timed_setup("test", || Ok(42)).unwrap(), 42);
+        let error = timed_setup::<()>("test", || bail!("stage failure")).unwrap_err();
+        assert_eq!(error.to_string(), "stage failure");
     }
 
     #[test]
