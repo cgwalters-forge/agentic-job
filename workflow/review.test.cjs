@@ -134,14 +134,17 @@ test('scripted review reports the checked-out SHA', () => {
 
 test('caller and write job retain the trusted-source boundary', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+  const checker = fs.readFileSync(path.join(__dirname, '../.github/workflows/check.yml'), 'utf8');
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   assert.match(caller, /pull_request_target:\s+types: \[opened, synchronize, ready_for_review\]/);
   assert.match(caller, /kind: analysis/);
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit/);
   assert.match(workflow, /inputs.review && !inputs.review-item && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
-  assert.match(workflow, /require\(`\$\{process.env.SOURCE_DIR\}\/workflow\/review.cjs`\)/);
-  assert.match(workflow, /errors: \[error.message\]/);
+  const check = workflow.split('\n  check:')[1].split('\n  apply:')[0];
+  assert.match(check, /review: \$\{\{ inputs.review \}\}/);
+  assert.match(checker, /require\(`\$\{process.env.SOURCE_DIR\}\/workflow\/review.cjs`\)/);
+  assert.match(checker, /errors: \[error.message\]/);
   const apply = workflow.split('\n  apply:')[1].split('\n  conclude:')[0];
   assert.match(apply, /if: \$\{\{ needs.check.outputs.has-patch == 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);
