@@ -60,6 +60,26 @@ function checkOutputs(output, number) {
   }
 }
 
+async function resolveDispatch(env, github) {
+  if (env.REVIEW !== 'true' || env.EVENT !== 'false' || env.KIND !== 'analysis' ||
+      env.OUTPUTS !== 'add_comment,noop' || env.MAX_OUTPUTS !== '1' ||
+      env.NOTIFY !== 'none' || env.APPLY_PARTIAL !== 'false' ||
+      (env.OUTPUT_REPO && env.OUTPUT_REPO !== env.REPO) ||
+      env.TARGET !== env.ITEM || !/^[1-9][0-9]*$/.test(env.ITEM) ||
+      !Number.isSafeInteger(Number(env.ITEM)) ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.REPO)) {
+    throw new Error('Dispatch review requires one verdict or noop on the selected PR, analysis only, no event, notifications or partial apply');
+  }
+  const [owner, repo] = env.REPO.split('/');
+  const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(env.ITEM) });
+  if (data.number !== Number(env.ITEM) || data.state !== 'open' ||
+      data.base?.ref !== env.BASE || data.base?.repo?.full_name !== env.REPO ||
+      data.head?.repo?.full_name !== env.REPO || !/^[0-9a-f]{40}$/.test(data.head?.sha ?? '')) {
+    throw new Error('Dispatch review requires an open same-repository PR on the configured base');
+  }
+  return data.head.sha;
+}
+
 if (require.main === module) {
   const [command, file, number] = process.argv.slice(2);
   if (command === 'task') {
@@ -72,4 +92,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { admit, taskFile, checkRequest, checkOutputs };
+module.exports = { admit, taskFile, checkRequest, checkOutputs, resolveDispatch };

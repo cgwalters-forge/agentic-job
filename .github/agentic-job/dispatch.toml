@@ -1,4 +1,4 @@
-# Replace with exact public target repositories; no wildcard write destinations.
+# Bounds for the shipped dispatch caller. Copy and replace the exact repo.
 hosts = ["github.com"]
 repos = ["cgwalters-forge/agentic-job"]
 bases = ["main"]
@@ -12,3 +12,8 @@ add_comment = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
+
+# To deliberately permit protected documentation:
+# [unprotected_files]
+# repos = ["OWNER/REPO"]
+# files = ["README.md"]

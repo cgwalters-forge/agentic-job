@@ -89,6 +89,8 @@ a scripted agent, so it needs no model and no secret. The scripted agent
 tries the things it must not be able to do and changes one file, and the
 change comes back as a draft pull request, or as a pushed branch where
 Actions is not allowed to open pull requests.
+The scripted agent ignores the task text. The [dispatch trial](docs/dispatch.md)
+includes editable sessions for patches, comments and reviews without a model.
 
 To run it in a public repository of your own, copy three files to the
 same paths: `.github/workflows/example.yml`,
@@ -103,13 +105,13 @@ Then make three edits:
   repository;
 - in `allow.toml`, set `repos` to your repository.
 
-Commit them to your default branch and start it:
-
 Recent main commits normally have a prebuilt binary, published automatically
 from their source without a pin PR. If you start before that build finishes,
 the run prints a notice and builds locally (about two minutes). Downloads
 are verified against a source-matching attested manifest; see
 [where the binary comes from](docs/workflow.md#things-a-caller-should-know).
+
+Commit them to your default branch and start it:
 
 ```sh
 gh workflow run example.yml -f task='say hello'
@@ -186,7 +188,8 @@ No caller exists in the operator's runner repository,
 `bootc-dev/cgwalters-devspace-sandbox`, yet.
 
 Not yet: a real agent through the reusable workflow on hosted runners
-(the inference proxy that exists is on a private network), private
+(hosted Ubuntu alone cannot reach the existing private inference proxy; see the
+[deployment checklist](docs/workflow.md#what-a-caller-provides)), private
 repositories, and most of gh-aw's catalogue. Pull requests from forks
 do not get the end-to-end jobs that write. The sandbox setup takes two
 to five minutes on a hosted runner. Nobody but its authors has used it.
