@@ -183,9 +183,9 @@ on:
         default: ""
       apply-environment:
         description: >-
-          An environment of the calling repository whose secret AGENTIC_JOB_APPLY_TOKEN the apply
-          job writes with (empty for the job's own token, which can write only to the calling
-          repository)
+          An environment of the calling repository gating apply. Explicitly pass CGWALTERS_BOT_PAT
+          or legacy AGENTIC_JOB_APPLY_TOKEN; missing credentials fail closed. Empty skips environment
+          gates; with no passed secret apply uses the calling repository's job token
         type: string
         default: ""
       apply-partial:
@@ -241,9 +241,12 @@ on:
         type: string
         default: ""
     secrets:
-      # The one secret, named only in the apply job. A caller never passes
-      # `secrets: inherit`; with `apply-environment` it passes nothing, and
-      # the apply job takes the environment's secret of this name.
+      # Explicit aliases only, consumed only by apply. Never use inherit.
+      # Callers must pass the selected alias even for an environment secret;
+      # the environment's same-name value takes precedence (docs/workflow.md).
+      CGWALTERS_BOT_PAT:
+        description: The bot user's PAT; preferred over the legacy alias when both are supplied
+        required: false
       AGENTIC_JOB_APPLY_TOKEN:
         description: A token that can push to the output repository and open pull requests and comments there
         required: false
@@ -868,11 +871,11 @@ jobs:
       - name: The apply environment has its token
         if: ${{ inputs.apply-environment != '' }}
         env:
-          HAS_TOKEN: ${{ secrets.AGENTIC_JOB_APPLY_TOKEN != '' }}
+          HAS_TOKEN: ${{ (secrets.CGWALTERS_BOT_PAT || secrets.AGENTIC_JOB_APPLY_TOKEN) != '' }}
           ENVIRONMENT: ${{ inputs.apply-environment }}
         run: |
           [ "$HAS_TOKEN" = true ] ||
-            { echo "::error::the environment $ENVIRONMENT has no secret AGENTIC_JOB_APPLY_TOKEN"; exit 1; }
+            { echo "::error::the environment $ENVIRONMENT has no passed CGWALTERS_BOT_PAT or AGENTIC_JOB_APPLY_TOKEN secret"; exit 1; }
       # The output repository, whole: the patch is applied on the commit
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials. Only check's accepted
@@ -883,7 +886,8 @@ jobs:
           repository: ${{ env.OUTPUT_REPO }}
           ref: ${{ needs.policy.outputs.base }}
           fetch-depth: 0
-          token: ${{ secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
+          # Same selection as the guard and handlers; only apply gets this PAT.
+          token: ${{ secrets.CGWALTERS_BOT_PAT || secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
           persist-credentials: true
       - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
         with:
@@ -1005,7 +1009,8 @@ jobs:
           GH_AW_WORKFLOW_ID: agentic-job
           GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
         with:
-          github-token: ${{ secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
+          # Use the checkout's credential selection for API writes too.
+          github-token: ${{ secrets.CGWALTERS_BOT_PAT || secrets.AGENTIC_JOB_APPLY_TOKEN || github.token }}
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
             // Issues may be opened up to the run's create_issue count, by any handler;

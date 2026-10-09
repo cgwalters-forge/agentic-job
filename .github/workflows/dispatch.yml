@@ -5,6 +5,13 @@ run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}
 
 on:
   workflow_call:
+    # Forward only these declared aliases, never inherit. Environment-only
+    # callers must explicitly pass the alias through this wrapper too.
+    secrets:
+      CGWALTERS_BOT_PAT:
+        required: false
+      AGENTIC_JOB_APPLY_TOKEN:
+        required: false
     outputs:
       review-head:
         description: Exact PR head resolved for the review profile
@@ -121,6 +128,12 @@ jobs:
     # copying elsewhere, replace this with the full reviewed source SHA:
     # cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     uses: ./.github/workflows/agentic-job.yml
+    # Scripted CI passes neither credential value. A configured environment
+    # needs the explicit alias even when its value is available only to apply.
+    # No secret reaches target, the agent process or the nested checker.
+    secrets:
+      CGWALTERS_BOT_PAT: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT != '' && secrets.CGWALTERS_BOT_PAT || '' }}
+      AGENTIC_JOB_APPLY_TOKEN: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT != '' && secrets.AGENTIC_JOB_APPLY_TOKEN || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code.

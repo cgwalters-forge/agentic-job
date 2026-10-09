@@ -72,10 +72,18 @@ admission to a specific caller remains optional hardening tracked in
 
 For cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
 restricted to the protected default branch, and store its sole secret
-`AGENTIC_JOB_APPLY_TOKEN` there. Use a fine-grained bot PAT restricted to the
+`CGWALTERS_BOT_PAT` there (legacy `AGENTIC_JOB_APPLY_TOKEN` also works), and
+explicitly pass the same declared alias as described in
+[credential setup](workflow.md#the-apply-job-and-its-token). Use a fine-grained bot PAT restricted to the
 exact targets with Contents, Issues and Pull requests read/write, no workflow
 write or administration. Preflight names a missing `APPLY_ENVIRONMENT` too.
-Only apply enters the environment; a missing environment token fails closed.
+Only apply enters the environment; a missing resolved credential fails closed.
+The shipped caller explicitly forwards both declared aliases when an apply
+environment is configured; scripted CI forwards no credential value. If you
+call `dispatch.yml` as a reusable workflow, explicitly pass the selected alias
+to that wrapper too. A passed repository/organization secret can satisfy the
+credential guard even if the environment has no same-name secret; protection
+rules still gate apply, but the guard does not prove secret provenance.
 Never use `secrets: inherit`. For same-repository trials the apply job uses
 its job token instead; no environment is needed.
 

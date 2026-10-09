@@ -73,7 +73,9 @@ jobs:
       #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       #   max-requests: "150"
       # To apply with a token of your own, from an environment of this
-      # repository that holds the secret AGENTIC_JOB_APPLY_TOKEN:
+      # repository that holds CGWALTERS_BOT_PAT (legacy AGENTIC_JOB_APPLY_TOKEN
+      # also works). Explicitly pass that alias under the job's secrets key;
+      # see docs/workflow.md for the full call, never use secrets: inherit.
       #   output-repo: OWNER/FORK
       #   apply-environment: agent-apply
       # Without one: this organization keeps Actions from opening pull

@@ -24,7 +24,7 @@ separate jobs on separate machines. The apply job's additional checks are
    `sandbox check`); `run` clones the target, drives the agent and
    leaves what may be uploaded.
 3. **check**, on a machine the agent never touched. gh-aw's collector
-   validates and sanitizes the agent's requests, then `agentic-job check`
+   validates and sanitizes the producer's requests, then `agentic-job check`
    holds them and the patch to the policy.
 4. **apply**, on a machine of its own, uses a write credential.
    It runs gh-aw's handlers on the checked outputs:
@@ -266,6 +266,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    secrets:
+      CGWALTERS_BOT_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
     with:
       id: ${{ inputs.item }}
       task: ${{ inputs.task }}
@@ -283,7 +285,7 @@ jobs:
 
 Name the workflow by a commit you have read, not by a branch. The binary
 is built from that same commit, so the pin covers both. Never pass
-`secrets: inherit`: the workflow declares the one secret it uses.
+`secrets: inherit`: pass only the declared apply credential alias you use.
 
 ### Real agent checklist
 
@@ -534,7 +536,12 @@ Do not pass a forge token through `sandbox.env` to work around this gap.
 
 ### The apply job and its token
 
-With no `apply-environment`, the apply job uses the job's own token,
+Check and apply serve any job that proposes writes, including the
+[non-agent proposals route](#proposals-from-a-non-agent-job). The producer
+receives no apply credential. This is also the idea behind
+[gh-aw's cross-repository safe outputs](https://github.github.com/gh-aw/reference/safe-outputs/#cross-repository-operations).
+
+With neither a passed apply secret nor `apply-environment`, apply uses the job's own token,
 which can write only to the calling repository: `repo` then has to be
 the calling repository, and `output-repo` is left out. Many organizations do
 not let Actions open pull requests. The handlers then push the branch
@@ -550,22 +557,75 @@ whose outputs have none. A comment that comes after the pull request
 in the same hand-back then begins with gh-aw's note that the pull
 request failed.
 
-With `apply-environment: NAME`, the apply job enters that environment of
-the calling repository and uses its secret `AGENTIC_JOB_APPLY_TOKEN`:
-a token that can push to `output-repo` and open pull requests and
-comments there. The workflow declares that one secret; the caller passes
-nothing, and GitHub's documentation says a called job that names an
-environment gets the environment's secret of the declared name. That is
-untried here. If the environment has no such secret the job stops; it
-does not fall back to its own token. To set it up:
+The preferred declared secret is `CGWALTERS_BOT_PAT`, the bot user account's
+personal access token in our deployment. `AGENTIC_JOB_APPLY_TOKEN` remains a
+supported legacy alias. If both resolve to nonempty values, `CGWALTERS_BOT_PAT`
+wins. Checkout and the API handlers use the same selection. A passed secret
+also works without an environment; then GitHub's environment protection rules
+do not gate its use.
+
+With `apply-environment: NAME`, only apply enters that environment of the
+calling repository. A missing credential fails before checkout or handlers;
+it never silently substitutes the job token. GitHub's current
+[reusable-workflow documentation](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow)
+says the caller **must explicitly pass the secret even if it exists only in
+the environment**. The environment's same-name secret takes precedence over
+a repository/organization secret. Our earlier instruction to pass nothing
+was incorrect. To set it up:
 
 1. Create the environment in the calling repository, limited to its
    default branch, and protect that branch.
-2. Store the token as the environment's secret `AGENTIC_JOB_APPLY_TOKEN`.
-3. Call with `apply-environment: NAME` and, for a fork, `output-repo`.
+2. Store the token as `CGWALTERS_BOT_PAT` (or the legacy alias).
+3. Explicitly pass that same alias and set `apply-environment: NAME` and,
+   for a fork, `output-repo`:
+
+   ```yaml
+   jobs:
+     apply:
+       uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+       permissions:
+         contents: read
+         id-token: write
+       secrets:
+         CGWALTERS_BOT_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+       with:
+         id: proposals
+         repo: OWNER/REPO
+         allow: .github/agentic-job/allow.toml
+         proposals-artifact: board-proposals
+         outputs: add_comment,noop
+         comment-target: '123'
+         apply-environment: writes
+   ```
+
+For a repository/organization secret, the **stored name is caller-chosen**:
+map `CGWALTERS_BOT_PAT: ${{ secrets.YOUR_BOT_PAT }}` (or map to the legacy alias).
+For an environment-only secret, use one of the declared alias names both in
+storage and in the explicit mapping. Although expressions support
+`secrets[inputs.name]`, that does not bypass `workflow_call`'s declared-secret
+interface or the explicit-passing requirement. This workflow does not expose
+an arbitrary environment-secret-name input or use `secrets: inherit`.
+
+CI's proposals caller passes its existing `GITHUB_TOKEN` under the new alias;
+this exercises the reusable-workflow interface without storing a PAT or
+changing permissions. Local regression tests cover the missing-secret guard,
+shared credential selection and apply-only consumption. Neither proves real
+environment delivery. Still to try on GitHub: an environment-only bot PAT
+with explicit passing; legacy delivery; environment precedence over a
+same-name repository secret; missing/omitted-secret refusal before writes;
+and required-reviewer/branch protection gates. These require a trusted caller
+and real environment setup, not credentials in the proposal producer.
+
+GitHub App token minting is **not implemented yet**. An App can avoid a
+long-lived PAT (its private key still needs protected storage), but the
+workflow must first narrow an installation token to the checked destinations
+and admitted permissions. In particular, PR creation can need both target and
+fork access, issue actions use `repo` rather than `output-repo`, and organization
+Projects require another permission. Do not substitute an unrestricted
+installation token or claim App support from the PAT alias alone.
 
 For `update_project`, use that same environment secret, not an additional token:
-`AGENTIC_JOB_APPLY_TOKEN` must have organization **Projects: Read and write**
+the selected apply credential must have organization **Projects: Read and write**
 for a fine-grained PAT or GitHub App, and repository **Issues: Read** (plus
 Metadata read) on the issue repository. A classic PAT needs **project** scope
 and repository access (`repo` for private repositories). Organization approval

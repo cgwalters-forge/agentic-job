@@ -75,7 +75,17 @@ test('caller fixes capabilities and token boundary', () => {
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
     assert.ok(workflow.includes(line), line);
   }
-  assert.doesNotMatch(workflow, /^\s+(secrets:|runner:)/m);
+  assert.doesNotMatch(workflow, /^\s+runner:/m);
+  assert.doesNotMatch(workflow, /secrets: inherit/);
+  const target = workflow.split('\n  target:\n')[1].split('\n  run:\n')[0];
+  assert.doesNotMatch(target, /secrets(?:[.:]|\[)/);
+  const forwarded = workflow.split('\n  run:\n')[1].split('    secrets:\n')[1].split('    permissions:\n')[0];
+  const aliases = ['CGWALTERS_BOT_PAT', 'AGENTIC_JOB_APPLY_TOKEN'];
+  assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), aliases);
+  for (const alias of aliases) {
+    assert.ok(workflow.includes(`      ${alias}:\n        required: false`));
+    assert.ok(forwarded.includes(`${alias}: \${{ !inputs.scripted && vars.APPLY_ENVIRONMENT != '' && secrets.${alias} || '' }}`));
+  }
   assert.match(bounds, /^repos = \["cgwalters-forge\/agentic-job"\]$/m);
   assert.match(bounds, /^max_outputs = 3$/m);
   for (const type of ['create_pull_request', 'add_comment', 'noop', 'missing_tool', 'missing_data']) {

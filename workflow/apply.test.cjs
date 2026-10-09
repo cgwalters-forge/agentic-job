@@ -25,6 +25,37 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
+test('apply alone consumes explicitly declared PAT aliases with one credential selection', () => {
+  const jobs = workflow.split('\njobs:\n')[1];
+  const before = jobs.split('\n  apply:\n')[0];
+  const [apply, after] = jobs.split('\n  apply:\n')[1].split('\n  conclude:\n');
+  for (const alias of ['CGWALTERS_BOT_PAT', 'AGENTIC_JOB_APPLY_TOKEN']) {
+    assert.ok(workflow.includes(`      ${alias}:\n`));
+    assert.ok(!before.includes(`secrets.${alias}`));
+    assert.ok(!after.includes(`secrets.${alias}`));
+  }
+  const selection = 'secrets.CGWALTERS_BOT_PAT || secrets.AGENTIC_JOB_APPLY_TOKEN';
+  assert.ok(apply.includes(`HAS_TOKEN: \${{ (${selection}) != '' }}`));
+  for (const key of ['token', 'github-token']) {
+    assert.ok(apply.includes(`${key}: \${{ ${selection} || github.token }}`));
+  }
+  assert.ok(apply.indexOf('- name: The apply environment has its token') < apply.indexOf('uses: actions/checkout@'));
+  assert.ok(apply.includes("if: ${{ inputs.apply-environment != '' }}"));
+  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  const proposals = ci.split('\n  e2e-proposals:\n')[1].split('\n  e2e-full:\n')[0];
+  assert.ok(proposals.includes('CGWALTERS_BOT_PAT: ${{ secrets.GITHUB_TOKEN }}'));
+});
+
+for (const [present, expected] of [['true', 0], ['false', 1], ['', 1]]) {
+  test(`environment credential guard fails closed: presence ${JSON.stringify(present)}`, () => {
+    const result = command(__dirname, 'bash', ['-euo', 'pipefail', '-c', step('The apply environment has its token')], {
+      HAS_TOKEN: present, ENVIRONMENT: 'writes',
+    });
+    assert.equal(result.status, expected, result.stderr);
+    if (expected !== 0) assert.match(result.stdout, /no passed CGWALTERS_BOT_PAT or AGENTIC_JOB_APPLY_TOKEN secret/);
+  });
+}
+
 test('issue actions keep checked repository and caps, not output-repo or event targets', () => {
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {

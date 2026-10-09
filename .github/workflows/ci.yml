@@ -413,6 +413,11 @@ jobs:
       issues: write # apply may post the allowed comments
       id-token: write # GitHub validates the skipped agent job's permission too
     uses: ./.github/workflows/agentic-job.yml
+    # Exercise explicit secret passing without a PAT or inherited secrets.
+    # This is the existing job token with the unchanged permissions above;
+    # the producer still receives none, and only apply consumes this alias.
+    secrets:
+      CGWALTERS_BOT_PAT: ${{ secrets.GITHUB_TOKEN }}
     with:
       id: board
       repo: ${{ github.repository }}
