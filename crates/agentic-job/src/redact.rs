@@ -183,6 +183,7 @@ mod tests {
         let jwt = format!("eyJ{0}.eyJ{0}.sig", "abcdefghij");
         let cases: &[(&str, String, bool)] = &[
             ("a GitHub token", token("ghp_"), true),
+            ("a GitHub Actions job token", token("ghs_"), true),
             ("a GitHub refresh token", token("ghr_"), true),
             ("a fine-grained GitHub token", token("github_pat_"), true),
             ("an Anthropic key", token("sk-ant-"), true),
@@ -226,6 +227,35 @@ mod tests {
                 assert_eq!(redacted, format!("before {REPLACEMENT} after"), "{name}");
             }
         }
+    }
+
+    #[test]
+    fn github_job_token_is_redacted_from_public_run_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = token("ghs_");
+        let names = [
+            "transcript.jsonl",
+            "condensed.log",
+            "summary.md",
+            "outcome.json",
+        ];
+        for name in names {
+            std::fs::write(dir.path().join(name), format!("before {secret} after\n")).unwrap();
+        }
+
+        // Shape redaction must work even without registering the token as
+        // a literal: the job token is not an inference registration token.
+        let mut redactor = Redactor::new::<&str>([]).unwrap();
+        assert!(redactor.finds(secret.as_bytes()));
+        redactor.redact_tree(dir.path()).unwrap();
+        for name in names {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(name)).unwrap(),
+                format!("before {REPLACEMENT} after\n"),
+                "{name}"
+            );
+        }
+        assert_eq!(redactor.count(), names.len());
     }
 
     #[test]

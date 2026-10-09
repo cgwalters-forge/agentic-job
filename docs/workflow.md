@@ -524,13 +524,13 @@ not enough to give it authenticated issue or pull-request access.
 Public HTTP reads and git HTTPS fetches still use the existing egress
 policy, with writes refused.
 
-The pinned gh-aw `gh-proxy` stack is not a small host-user configuration
-change. The [integration decision](background-ghaw.md#host-user-integration-decision)
-recommends token injection in the existing isolated egress proxy instead,
-with a read-only agent job token and an explicit GraphQL POST exception for
-`gh` reads. That alternative is not implemented or enabled; the input,
-credential provisioning and scripted-agent isolation proof remain work for #112.
-Do not pass a forge token through `sandbox.env` to work around this gap.
+The [integration decision](background-ghaw.md#host-user-integration-decision)
+now calls for handing the read-only job token directly to the agent as
+`GH_TOKEN`, not injecting credentials at the egress proxy. That design is
+not implemented or enabled yet. Permission verification, token delivery,
+the GraphQL POST exception and scripted-agent isolation proof remain work
+for #112. Do not pass a forge token through `sandbox.env` to work around
+the missing permission verification.
 
 ### The apply job and its token
 
