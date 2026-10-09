@@ -80,9 +80,13 @@ setuid-root programs, and one that no package owns loses the bit, as
 someone's own way to root; the distribution's (`sudo`, `su`, `pkexec`,
 `mount`) stay, each closed by its own policy or needing a password root
 does not have; file capabilities (`cap_setuid` on a program) are not
-looked for. On the hosted image the walk also finds, and strips, the
-setuid programs inside the container daemon's image layers under
-`/var/lib/containerd`, which are files of the host like any other. Root
+looked for. Reachable container daemon image layers under
+`/var/lib/containerd` are files of the host like any other; layers behind
+directories the sandbox cannot search are pruned only if neither its primary
+UID nor any subordinate UID owns them. A subordinate owner can reopen a closed
+directory; its setuid programs must therefore remain inventoried.
+[The traversal exclusions](sandbox.md#what-sandbox-setup-does) explain why
+read-only mounts are pruned only when also `nosuid`. Root
 processes in the job's cgroup besides setup's own are listed, never
 killed: on the hosted runner the job shares its cgroup with the
 platform's own `provjobd`, which runs as root and is what runs the job.

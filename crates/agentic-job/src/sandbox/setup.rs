@@ -781,22 +781,29 @@ pub fn setuid_root_find(root: &str) -> Vec<String> {
 /// slowest thing setup does, writes down the setuid-root programs it
 /// passes for [`strip_unowned_setuid`].
 fn strip_world_write() -> Result<()> {
-    let fixed = host::run(
-        Command::new("find")
-            .args(world_writable_find("/"))
-            .args(["-print", "-exec", "chmod", "o-w", "{}", "+"])
-            .args([
-                ",",
-                "-type",
-                "f",
-                "-perm",
-                "-4000",
-                "-user",
-                "root",
-                "-fprint",
-                SETUID_LIST,
-            ]),
-    )?;
+    let mounts = fs::read_to_string("/proc/self/mountinfo")
+        .context("reading mount table for hardening walk")?;
+    let mut args = hardening_find("/", &readonly_mounts(&mounts)?);
+    let root_device = fs::metadata("/")?.dev();
+    // Separate temporary filesystems used to have their own scans. Give
+    // them starting points in the same invocation instead, without revisiting
+    // their contents when they are already on the root filesystem.
+    for dir in SHARED_TMP {
+        match fs::metadata(dir) {
+            Ok(metadata) if metadata.dev() != root_device => args.insert(2, (*dir).to_owned()),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("checking filesystem of {dir}"));
+            }
+        }
+    }
+    let fixed =
+        host::run(
+            Command::new("find")
+                .args(args)
+                .args(["-fprint", SETUID_LIST, ")", ")"]),
+        )?;
     let paths: Vec<&str> = fixed.lines().collect();
     if !paths.is_empty() {
         let shown: Vec<&str> = paths.iter().copied().take(10).collect();
@@ -807,6 +814,126 @@ fn strip_world_write() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Keep mount paths as bytes escaped by the kernel, never as find patterns.
+fn readonly_mounts(text: &str) -> Result<Vec<String>> {
+    let mut mounts = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        ensure!(
+            fields.len() >= 10 && fields.contains(&"-"),
+            "invalid mountinfo line"
+        );
+        let mut path = fields[4].to_owned();
+        for (escaped, literal) in [
+            ("\\040", " "),
+            ("\\011", "\t"),
+            ("\\012", "\n"),
+            ("\\134", "\\"),
+        ] {
+            path = path.replace(escaped, literal);
+        }
+        let options: Vec<_> = fields[5].split(',').collect();
+        // Read-only alone does not prevent executing a setuid program.
+        mounts.push((path, options.contains(&"ro") && options.contains(&"nosuid")));
+    }
+    // A writable bind mount below a read-only mount must still be visited.
+    Ok(mounts
+        .iter()
+        .filter(|(path, ro)| {
+            *ro && !mounts
+                .iter()
+                .any(|(child, readonly)| !readonly && Path::new(child).starts_with(path))
+        })
+        .map(|(path, _)| path.clone())
+        .collect())
+}
+
+fn find_literal_path(path: &str) -> String {
+    path.chars()
+        .flat_map(|c| {
+            if "\\*?[]".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// One GNU find pass. Pruning encloses BOTH actions: comma must not bypass it.
+/// Closed directories must still be hardened: another setup or job step can
+/// reopen them later. Only pseudo-filesystems and read-only, nosuid mounts
+/// without writable descendants are pruned, independently of directory modes.
+fn hardening_find(root: &str, readonly: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-O3",
+        root,
+        "-xdev",
+        "-ignore_readdir_race",
+        "(",
+        "-fstype",
+        "proc",
+        "-o",
+        "-fstype",
+        "sysfs",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    for path in readonly {
+        args.extend(["-o".to_owned(), "-path".to_owned(), find_literal_path(path)]);
+    }
+    args.extend(
+        [
+            ")",
+            "-prune",
+            "-o",
+            "(",
+            "(",
+            "!",
+            "-path",
+            "/tmp/*",
+            "!",
+            "-path",
+            "/var/tmp/*",
+            "!",
+            "-path",
+            "/tmp",
+            "!",
+            "-path",
+            "/var/tmp",
+            "(",
+            "-type",
+            "f",
+            "-o",
+            "-type",
+            "d",
+            ")",
+            "-perm",
+            "-0002",
+            "!",
+            "-perm",
+            "-1000",
+            "-print",
+            "-exec",
+            "chmod",
+            "o-w",
+            "{}",
+            "+",
+            ")",
+            ",",
+            "(",
+            "-type",
+            "f",
+            "-perm",
+            "-4000",
+            "-user",
+            "root",
+        ]
+        .map(str::to_owned),
+    );
+    args
 }
 
 /// Whether the host's package manager accounts for the file at PATH.
@@ -839,24 +966,15 @@ pub fn package_owned(path: &str) -> bool {
 /// (sudo, su, pkexec, mount...) stay, each closed by its own policy or
 /// needing a password root does not have.
 fn strip_unowned_setuid() -> Result<()> {
-    let mut listed = match fs::read_to_string(SETUID_LIST) {
+    strip_unowned_setuid_list(Path::new(SETUID_LIST))
+}
+
+fn strip_unowned_setuid_list(list: &Path) -> Result<()> {
+    let listed = match fs::read_to_string(list) {
         Ok(text) => text,
         Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("reading {SETUID_LIST}")),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", list.display())),
     };
-    // The walk left the shared temporary directories out, as sticky ones
-    // meant to be world-writable; a setuid-root file there is as good a
-    // way in as anywhere.
-    for dir in SHARED_TMP.iter().filter(|dir| Path::new(dir).is_dir()) {
-        // Busy directories: a file that goes while the walk is on is no
-        // reason to fail it.
-        let mut args = setuid_root_find(dir);
-        args.insert(1, "-ignore_readdir_race".to_owned());
-        let mut find = Command::new("find");
-        find.args(args);
-        listed.push_str(&host::run(&mut find)?);
-        listed.push('\n');
-    }
     let programs: Vec<&str> = listed.lines().filter(|line| !line.is_empty()).collect();
     let unowned: Vec<&str> = programs
         .iter()
@@ -1461,6 +1579,221 @@ mod tests {
             setuid_root_find("/").join(" "),
             "/ -xdev -type f -perm -4000 -user root -print"
         );
+    }
+
+    #[test]
+    fn hardening_walk_finds_open_directory_and_prunes_readonly_actions() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root_path = fs::canonicalize(temp.path()).unwrap();
+        let root = root_path.as_path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+        let open = root.join("planted");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let private = root.join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let hidden = private.join("hidden");
+        fs::create_dir(&hidden).unwrap();
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o777)).unwrap();
+        let program = private.join("setuid");
+        fs::write(&program, b"fixture").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o4755)).unwrap();
+        let uid = fs::metadata(root).unwrap().uid();
+        let shared = tempfile::tempdir().unwrap();
+        fs::set_permissions(shared.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let shared_program = shared.path().join("setuid");
+        fs::write(&shared_program, b"fixture").unwrap();
+        fs::set_permissions(&shared_program, fs::Permissions::from_mode(0o4755)).unwrap();
+        let shared_open = shared.path().join("open");
+        fs::create_dir(&shared_open).unwrap();
+        fs::set_permissions(&shared_open, fs::Permissions::from_mode(0o777)).unwrap();
+        let list = root.join("setuid-list");
+        // Supply a synthetic read-only mount path without requiring mounts.
+        let mut args = hardening_find(
+            root.to_str().unwrap(),
+            &[private.to_str().unwrap().to_owned()],
+        );
+        args.insert(2, shared.path().to_str().unwrap().to_owned());
+        // Unprivileged tests cannot create root-owned files. Substitute
+        // only the inventory's owner predicate to exercise the same action.
+        let owner = args.iter().position(|arg| arg == "-user").unwrap() + 1;
+        args[owner] = uid.to_string();
+        let output = Command::new("find")
+            .args(args)
+            .args(["-fprint", list.to_str().unwrap(), ")", ")"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let found = String::from_utf8(output.stdout).unwrap();
+        assert!(found.lines().any(|path| Path::new(path) == open));
+        assert!(!found.lines().any(|path| Path::new(path) == hidden));
+        assert_eq!(fs::metadata(open).unwrap().mode() & 0o777, 0o775);
+        assert_eq!(fs::metadata(hidden).unwrap().mode() & 0o777, 0o777);
+        assert_eq!(fs::metadata(shared_open).unwrap().mode() & 0o777, 0o777);
+        assert_eq!(
+            fs::read_to_string(list).unwrap().trim(),
+            shared_program.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn readonly_mount_pruning_preserves_writable_children() {
+        let mounts = "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 / /read\\040only ro,nosuid - ext4 /dev/root rw\n3 1 8:1 / /parent ro,nosuid - ext4 /dev/root rw\n4 3 8:1 / /parent/child rw - ext4 /dev/root rw\n5 1 8:1 / /stacked ro,nosuid - ext4 /dev/root rw\n6 1 8:1 / /stacked rw - ext4 /dev/root rw\n7 1 8:1 / /suid ro - ext4 /dev/root rw\n";
+        assert_eq!(readonly_mounts(mounts).unwrap(), ["/read only"]);
+        assert_eq!(find_literal_path("/a[*]?\\"), "/a\\[\\*\\]\\?\\\\");
+        assert!(readonly_mounts("invalid").is_err());
+    }
+
+    #[test]
+    fn hardening_walk_hardens_directories_before_they_are_reopened() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let uid = fs::metadata(&root).unwrap().uid();
+        let hidden = root.join("hidden");
+        fs::write(&hidden, b"fixture").unwrap();
+        let list = root.join("inventory");
+        // The walking user stands in for setup's root, which can traverse a
+        // directory closed to the sandbox regardless of its owner.
+        for (label, mode) in [("closed", 0o700), ("open", 0o755)] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            fs::set_permissions(&hidden, fs::Permissions::from_mode(0o4777)).unwrap();
+            let mut args = hardening_find(root.to_str().unwrap(), &[]);
+            let owner = args.iter().position(|arg| arg == "-user").unwrap() + 1;
+            args[owner] = uid.to_string();
+            let output = Command::new("find")
+                .args(args)
+                .args(["-fprint", list.to_str().unwrap(), ")", ")"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{label}: {output:?}");
+            // A later job step opening the directory must not expose a path
+            // that retained world-write or escaped the setuid inventory.
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                fs::read_to_string(&list)
+                    .unwrap()
+                    .contains(hidden.to_str().unwrap()),
+                "{label}"
+            );
+            assert_eq!(fs::metadata(&hidden).unwrap().mode() & 0o002, 0, "{label}");
+        }
+    }
+
+    #[test]
+    #[ignore = "root fixture; fresh-runner CI only, before sandbox setup"]
+    fn hardening_walk_subordinate_owner() {
+        if std::env::var_os("AGENTIC_JOB_ROOT_WALK_TEST").is_none() {
+            let status = Command::new("sudo")
+                .args(["-n", "--", "env", "AGENTIC_JOB_ROOT_WALK_TEST=1"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "sandbox::setup::tests::hardening_walk_subordinate_owner",
+                ])
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        // An owner from a subordinate range can reopen its private directory.
+        // setpriv exercises those same kernel owner rights without depending
+        // on the runner's container storage or user-namespace configuration.
+        let subordinate = 200000;
+        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let private = temp.path().join("private");
+        fs::create_dir(&private).unwrap();
+        std::os::unix::fs::chown(&private, Some(subordinate), None).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let program = private.join("setuid");
+        fs::copy("/bin/true", &program).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o4755)).unwrap();
+        let list = temp.path().join("inventory");
+        let args = hardening_find(temp.path().to_str().unwrap(), &[]);
+        let status = Command::new("find")
+            .args(args)
+            .args(["-fprint", list.to_str().unwrap(), ")", ")"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(
+            fs::read_to_string(&list)
+                .unwrap()
+                .contains(program.to_str().unwrap())
+        );
+        strip_unowned_setuid_list(&list).unwrap();
+        let status = Command::new("setpriv")
+            .args([
+                "--reuid=200000",
+                "--regid=200000",
+                "--clear-groups",
+                "chmod",
+                "755",
+            ])
+            .arg(&private)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::metadata(&private).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(fs::metadata(&program).unwrap().mode() & 0o4000, 0);
+        assert!(
+            Command::new("setpriv")
+                .args(["--reuid=1001", "--regid=1001", "--clear-groups"])
+                .arg(&program)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    #[ignore = "local traversal benchmark; creates 30000 files, no host hardening"]
+    fn hardening_walk_local_benchmark() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let private = root.join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        for index in 0..30000 {
+            fs::write(private.join(index.to_string()), b"").unwrap();
+        }
+        let list = root.join("setuid-list");
+        let root_str = root.to_str().unwrap();
+        let mut before = world_writable_find(root_str);
+        before.extend(
+            [
+                "-print",
+                "-exec",
+                "chmod",
+                "o-w",
+                "{}",
+                "+",
+                ",",
+                "-type",
+                "f",
+                "-perm",
+                "-4000",
+                "-user",
+                "root",
+                "-fprint",
+                list.to_str().unwrap(),
+            ]
+            .map(str::to_owned),
+        );
+        let mut after = hardening_find(root_str, &[]);
+        after.extend(["-fprint", list.to_str().unwrap(), ")", ")"].map(str::to_owned));
+        for (label, args) in [("before", before), ("after", after)] {
+            let start = Instant::now();
+            let output = Command::new("find").args(args).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            println!(
+                "Local synthetic walk {label}: {:.6}s (30000 files in private tree)",
+                start.elapsed().as_secs_f64()
+            );
+        }
     }
 
     #[test]
