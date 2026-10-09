@@ -169,15 +169,10 @@ jobs:
           if $PIP --dest "$RUNNER_TEMP/changed" -r "$RUNNER_TEMP/changed.txt" 2> "$RUNNER_TEMP/refusal"; then exit 1; fi
           grep -F 'DO NOT MATCH THE HASHES' "$RUNNER_TEMP/refusal"
 
-  # The release secure-host/release.json pins, if it pins one: its tag is
-  # of the source the pin names, and the binaries it published have the
-  # pinned checksums. A job then uses it exactly when its own source is
-  # that one. And the script that decides all of this, with its tests.
+  # Source-addressed release selection and fail-closed verification tests.
   release-pin:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env:
-      PIN: secure-host/release.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -193,21 +188,12 @@ jobs:
           test ! -s "$RUNNER_TEMP/outside"
       # The digest of a checkout is the digest of the same commit as a
       # runner fetches it for an action, an archive without git.
-      - name: The pinned release is of the source the pin names, and its binaries have the pinned checksums
+      - name: The checkout and action archive have the same source digest
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          release=$(jq -r '.release // ""' "$PIN")
-          [ -n "$release" ] || { echo "::notice::no release is pinned: every job builds its binary"; exit 0; }
-          mkdir "$RUNNER_TEMP/tag" "$RUNNER_TEMP/head"
-          git archive "refs/tags/$release" | tar -x -C "$RUNNER_TEMP/tag"
+          mkdir "$RUNNER_TEMP/head"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/head"
-          test "$(node secure-host/binary.mjs digest --root "$RUNNER_TEMP/tag")" = "$(jq -r .source "$PIN")"
           test "$(node secure-host/binary.mjs digest --root "$RUNNER_TEMP/head")" = "$(node secure-host/binary.mjs digest)"
-          [ "$(node secure-host/binary.mjs digest)" = "$(jq -r .source "$PIN")" ] || echo "::notice::the source changed since $release: jobs at this commit build their binary"
-          gh release download "$release" --dir "$RUNNER_TEMP/release" --pattern "*-$(jq -r .target "$PIN")"
-          node secure-host/binary.mjs verify --dist "$RUNNER_TEMP/release"
 
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
@@ -360,7 +346,7 @@ jobs:
           FETCHED: ${{ steps.host.outputs.fetched }}
         run: |
           echo "fetched: $FETCHED"
-          [ "$(node secure-host/binary.mjs digest)" != "$(jq -r .source secure-host/release.json)" ] || test "$FETCHED" = true
+          test "$FETCHED" = true || echo "::notice::the prebuilt release is not published yet; the action built from source"
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi
 
   # The reusable workflow, called as another repository would call it,

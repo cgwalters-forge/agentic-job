@@ -105,6 +105,12 @@ Then make three edits:
 
 Commit them to your default branch and start it:
 
+Recent main commits normally have a prebuilt binary, published automatically
+from their source without a pin PR. If you start before that build finishes,
+the run prints a notice and builds locally (about two minutes). Downloads
+are verified against a source-matching attested manifest; see
+[where the binary comes from](docs/workflow.md#things-a-caller-should-know).
+
 ```sh
 gh workflow run example.yml -f task='say hello'
 ```

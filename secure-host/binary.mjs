@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-// Gets the binaries for the source this file is part of: a release's, by
-// the checksums in release.json beside it, when that release was built
-// from this very source, and a build of this source otherwise.
+// Gets a source-addressed release using its attested manifest, or builds
+// this source when no manifest has been published yet.
 //
-// What decides that a file is the release's is its checksum in
-// release.json at the commit the caller pinned, and not where it came
-// from: one that does not match stops the job, and nothing is built in
+// What decides that a file is the release's is its checksum in the
+// verified, source-matching manifest, and not where it came from:
+// one that does not match stops the job, and nothing is built in
 // its place. A build is not kept in a cache: a cache is the calling
 // repository's, where any workflow on its default branch or on the run's
 // own ref can leave an entry for a commit nobody has built yet.
@@ -17,7 +16,7 @@
 //   binary.mjs verify --dist DIR         DIR holds the pinned release's files
 //
 // The action and the reusable workflow's policy job both run `get`, the
-// workflows that publish a release run `pin`, and CI runs `verify`: the
+// workflows that publish a release run `pin`, and tests cover verification: the
 // rule is written once. Node's standard library only.
 
 import { spawnSync } from "node:child_process";
@@ -32,7 +31,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // This repository at this file's commit.
 export const ROOT = resolve(HERE, "..");
 
-export const PIN = join(HERE, "release.json");
+export const REPOSITORY = "cgwalters-forge/agentic-job";
 
 // What the binaries are built from. Whatever the build comes to read from
 // elsewhere (an `include_str!` of a file outside these, a toolchain file)
@@ -77,7 +76,7 @@ export function digest(root = ROOT) {
   return hash.digest("hex");
 }
 
-export function readPin(path = PIN) {
+export function readPin(path) {
   const pin = JSON.parse(readFileSync(path, "utf8"));
   for (const name of NAMES) {
     if (pin.release && !/^[0-9a-f]{64}$/.test(pin.sha256?.[name] ?? "")) throw new Error(`${path} pins ${pin.release} with no checksum for ${name}`);
@@ -92,10 +91,11 @@ export function checked(pin, name, bytes) {
   return bytes;
 }
 
-async function download(url) {
+async function download(url, missing = false) {
   for (let attempt = 1; ; attempt++) {
     try {
       const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      if (missing && response.status === 404) return null;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return Buffer.from(await response.arrayBuffer());
     } catch (err) {
@@ -104,12 +104,32 @@ async function download(url) {
   }
 }
 
-async function fetchRelease(pin, out) {
-  const server = process.env.GITHUB_SERVER_URL || "https://github.com";
-  const from = `${server}/${pin.repository}/releases/download/${pin.release}`;
-  for (const name of NAMES) {
-    writeFileSync(join(out, name), checked(pin, name, await download(`${from}/${name}-${pin.target}`)), { mode: MODE_PROGRAM });
+export function validateManifest(pin, source) {
+  if (pin.repository !== REPOSITORY || pin.target !== TARGET || pin.source !== source || pin.release !== `build-${source}`) {
+    throw new Error("release manifest does not describe this source: refusing it");
   }
+}
+
+export async function fetchRelease(source, out, { fetchFile = download, verify = run } = {}) {
+  const release = `build-${source}`;
+  const from = `https://github.com/${REPOSITORY}/releases/download/${release}`;
+  const manifest = await fetchFile(`${from}/release.json`, true);
+  if (manifest === null) return false;
+  const path = join(out, "release.json");
+  const bundle = join(out, "provenance.jsonl");
+  writeFileSync(path, manifest);
+  writeFileSync(bundle, await fetchFile(`${from}/provenance.jsonl`));
+  // Verify before trusting any manifest field. A release editor cannot
+  // substitute bytes or attest a manifest from a PR or another workflow.
+  verify("gh", ["attestation", "verify", path, "--bundle", bundle,
+    "--repo", REPOSITORY, "--cert-identity", `https://github.com/${REPOSITORY}/.github/workflows/pin.yml@refs/heads/main`,
+    "--source-ref", "refs/heads/main", "--deny-self-hosted-runners"]);
+  const pin = readPin(path);
+  validateManifest(pin, source);
+  for (const name of NAMES) {
+    writeFileSync(join(out, name), checked(pin, name, await fetchFile(`${from}/${name}-${TARGET}`)), { mode: MODE_PROGRAM });
+  }
+  return true;
 }
 
 function run(program, args, options = {}) {
@@ -136,15 +156,14 @@ function build(out) {
 
 async function get({ out, build: asked }) {
   if (!out) throw new Error("get: --out DIR is required");
-  const pin = readPin();
   const source = digest();
-  const fits = Boolean(pin.release) && pin.source === source;
-  console.log(`source ${source}; release ${pin.release || "none"} is of ${pin.source || "none"}; a build was asked for: ${Boolean(asked)}`);
   mkdirSync(out, { recursive: true });
-  const fetched = fits && !asked;
-  if (fetched) await fetchRelease(pin, out);
-  else build(out);
-  console.log(fetched ? `fetched ${pin.release} by its checksums` : "built from this source");
+  const fetched = !asked && await fetchRelease(source, out);
+  if (!fetched) {
+    console.log(`::notice::${asked ? "A build was requested" : `No release exists for source ${source}`}; building from this source, about two minutes`);
+    build(out);
+  }
+  console.log(fetched ? `fetched build-${source} by its attested checksums` : "built from this source");
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `fetched=${fetched}\nsource=${source}\n`);
 }
 
@@ -152,13 +171,13 @@ async function get({ out, build: asked }) {
 function pin({ dist, release, repository }) {
   if (!dist || !release) throw new Error("pin: --dist DIR and --release TAG are required");
   const sums = NAMES.map((name) => [name, sha256(readFileSync(join(dist, `${name}-${TARGET}`)))]);
-  const pinned = { repository: repository || readPin().repository, release, target: TARGET, source: digest(), sha256: Object.fromEntries(sums) };
+  const pinned = { repository: repository || REPOSITORY, release, target: TARGET, source: digest(), sha256: Object.fromEntries(sums) };
   console.log(JSON.stringify(pinned, null, 2));
 }
 
 function verify({ dist }) {
   if (!dist) throw new Error("verify: --dist DIR is required");
-  const pin = readPin();
+  const pin = readPin(join(dist, "release.json"));
   for (const name of NAMES) checked(pin, name, readFileSync(join(dist, `${name}-${pin.target}`)));
   console.log(`${dist} holds ${pin.release}, by the pinned checksums`);
 }

@@ -86,7 +86,7 @@ outputs:
 runs:
   using: composite
   steps:
-    # A release's, by the checksums in release.json at this commit, when
+    # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
     # source otherwise (binary.mjs).
     - name: Get the binary

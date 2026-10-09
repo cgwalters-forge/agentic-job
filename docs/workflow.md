@@ -533,8 +533,8 @@ issue remains the tracking item for a faster world-write walk with an
 equivalent protection argument, automated feed-pin maintenance, and a
 CI embedded-source scan that handles `concat!` and multiline macros.
 The host-wide walk is unchanged; no narrower protection is claimed here.
-The issue also tracks source-attested releases instead of manual release
-pins; the current release-pin workflow is described below.
+Source-attested prebuilt releases now replace manual release pins;
+their trust model is described below.
 
 **Steps that run after the agent.** In the agent job, as the runner's
 user: the second check that the repositories are public, the uploads,
@@ -545,23 +545,26 @@ logs the machine out). None of them reads the sandbox user's files; the
 uploads take only what `run` put under its own directory after the gate.
 
 **Where the binary comes from.**
-[`secure-host/release.json`](../secure-host/release.json) names a
-release of this repository, the SHA-256 of the binaries it published,
-and a digest of what that release was built from (the content, modes
-and names of `Cargo.lock`, `Cargo.toml`, `crates` and `egress`). The
-policy job computes the same for the workflow's own commit, with the
-script the action that secures a host uses
-([`secure-host/binary.mjs`](../secure-host/binary.mjs)). When the two
-agree it fetches the release's binaries and checks them against the
-checksums, which takes a few seconds; a file that does not match stops
-the run. When they do not agree, which is any commit that changed the
-source since the release, it builds the binary from that source, which
-takes about two minutes on a hosted runner. Either way a caller that
-pins the workflow's commit pins the binary: the checksums are in the
-file at that commit. What ties a release's bytes to its source is this
-repository's `release` workflow and nothing a caller can check for
-itself, so a caller that would sooner build than trust that passes
-`build-binary: true`.
+[`secure-host/binary.mjs`](../secure-host/binary.mjs) hashes the content,
+modes and names of `Cargo.lock`, `Cargo.toml`, `crates` and `egress` at
+the caller's pinned commit. It looks for `build-FULL_DIGEST`, not the
+latest release. The release contains a manifest with that source digest
+and the binaries' SHA-256 checksums, plus a GitHub build-provenance bundle.
+Before trusting the manifest, `gh attestation verify` checks that it was
+signed by this repository's `pin.yml` workflow on `refs/heads/main`, on a
+GitHub-hosted runner. Then the script checks the manifest's source,
+repository, target and release name, and checks each binary's checksum.
+Replacing release assets, signing from a PR or using another workflow
+cannot substitute a binary. The trust anchor is GitHub's attestation
+service and this repository's main-branch publishing workflow, not a
+mutable release tag or the caller repository's cache.
+
+Only a missing manifest (HTTP 404) falls back to building, with a notice
+that it takes about two minutes. A download or verification failure stops
+the job rather than silently building. A caller can always request a
+source build with `build-binary: true`. Fetching requires Node and `gh`
+with attestation support; GitHub-hosted runners provide them. The bundle
+is downloaded with the release, so verification needs no forge token.
 
 A build cache was not used, though the plan had one. The reason this
 page gave before was wrong: the agent is the sandbox user and has no
@@ -573,21 +576,21 @@ first run at that commit would take it for its binary, the `check` of
 that run included. A cache is also one per calling repository, where a
 release is fetched by every caller.
 
-The pin refreshes itself, but for one click. When a push to main
-changes what the binaries are built from, the `pin` workflow builds
-them, publishes them as a release named for the source and the run
-(`build-DIGEST-RUN`), and pushes a branch `pin/...` whose one commit
-puts that release in `secure-host/release.json`. Someone opens that
-branch's pull request, since this organization does not let Actions
-open one and CI would not start for it if it did; the workflow's
-summary has the link. CI's `release-pin` job checks that the tag is of
-the source the pin names and that the published binaries have the
-pinned checksums, which is all a pin by hand was ever held to. Until
-it merges, jobs build their binary.
+When main's source changes, the `prebuilt` workflow (`pin.yml`) makes an
+uncached build and publishes its source-addressed release. No branch,
+pull request or human merge is needed. Commits that only change docs or
+workflow usage share their source's release. A run started before the
+build finishes still builds locally; subsequent runs fetch the prebuilt.
+The build job has only contents-read access. The publishing job executes
+no built binaries; it has contents-write to publish, OIDC and
+attestations-write to sign the manifest, and no pull-requests permission.
+Uploads are staged in a draft release and published only when complete;
+rerunning repairs an interrupted draft. Repeated builds of the same source
+leave the first published release intact.
 
 A release with a version is still made by hand: raise the workspace's
 version, merge, and run the `release` workflow on main with that tag.
-Its build job's summary prints the `release.json` to pin it with.
+Versioned releases remain separate from automatic prebuilt selection.
 
 **Inputs a caller forwards.** The bounds file holds `repo`, `base`,
 `kind`, `outputs` and `max-outputs`, and nothing holds any other input.
