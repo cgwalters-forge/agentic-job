@@ -25,6 +25,32 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
+test('issue actions keep checked repository and caps, not output-repo or event targets', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(root, 'config.json'), JSON.stringify({
+      close_issue: { max: 2 },
+      add_labels: { max: 3, allowed: ['triage'], blocked: ['release'] },
+    }));
+    const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+      GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source',
+      OUTPUT_REPO: 'owner/other', BASE: 'main', BRANCH_PREFIX: '',
+      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+    assert.deepEqual(config.close_issue, {
+      max: 2, 'target-repo': 'owner/source', target: '*', issue_intent: false, allow_body: false,
+    });
+    assert.deepEqual(config.add_labels, {
+      max: 3, allowed: ['triage'], blocked: ['release'],
+      'target-repo': 'owner/source', target: '*', issue_intent: false, create_if_missing: false,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('comment-only apply skips every repository step, including checkout', () => {
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
   const gate = "if: ${{ needs.check.outputs.has-patch == 'true' }}";

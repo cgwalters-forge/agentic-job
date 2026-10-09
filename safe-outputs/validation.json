@@ -137,6 +137,60 @@
       }
     }
   },
+  "close_issue": {
+    "defaultMax": 1,
+    "fields": {
+      "body": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "confidence": {
+        "type": "string",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+        ],
+        "x-strip-on-error": true
+      },
+      "duplicate_of": {
+        "issueOrPRNumber": true
+      },
+      "issue_number": {
+        "optionalPositiveInteger": true
+      },
+      "rationale": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 280,
+        "x-strip-on-error": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "suggest": {
+        "type": "boolean"
+      }
+    }
+  },
+  "add_labels": {
+    "defaultMax": 5,
+    "fields": {
+      "item_number": {
+        "issueNumberOrTemporaryId": true
+      },
+      "labels": {
+        "required": true,
+        "type": "array"
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
   "noop": {
     "defaultMax": 2,
     "fields": {
