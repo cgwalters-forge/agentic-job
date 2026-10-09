@@ -74,10 +74,18 @@ existing small modules and named constants for limits, protocol values and
 environment keys. Extend case-table tests for acceptance/refusal boundaries
 (for example `policy.rs`, `config/compose.rs` and `session/budget.rs`) rather
 than duplicating test bodies. Rustfmt and warning-free Clippy are required.
+Tests must not use `include_str!` for files outside `crates/` or `egress/`;
+read those files at test time instead. The `release-pin` check enforces this.
 Recent commits usually use `area: Imperative subject` (for example `run: Leave…`);
 explain the reason for a change, not just the diff, in its commit message.
 
 ## Security and scope
+
+Keep it simple: pass the "secure" gut check without extra machinery.
+Watch what [gh-aw](https://github.github.com/gh-aw/) does, and share ideas and
+code with it and other projects where we can, citing sources.
+Hardening is not specific to agents; code and documentation must also read
+correctly for deterministic jobs.
 
 Explain security consequences whenever touching workflows, action pins,
 permissions, token placement, caller bounds or check code. Preserve the
@@ -104,6 +112,7 @@ bounds, pins or tests to make a change pass. Keep changes task-scoped: no
 unrelated formatting, build artifacts, binary files, symlinks, submodules,
 new executables, mode changes or credentials. A run's brief defines protected
 paths and output limits; this guide does not grant exceptions to them.
+Do not leave generated litter such as `__pycache__` in a patch.
 
 ## Hand-back
 
