@@ -103,6 +103,60 @@ fn a_request_within_the_bounds_prints_its_policy() {
 }
 
 #[test]
+fn documented_proposals_request_fits_shipped_and_small_bounds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let docs = std::fs::read_to_string(root.join("docs/workflow.md")).unwrap();
+    let snippet = docs
+        .split("## Proposals from a non-agent job\n")
+        .nth(1)
+        .unwrap()
+        .split("```yaml\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let input = |name: &str| {
+        snippet
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
+            .unwrap()
+            .trim_matches('\'')
+    };
+    let shipped = std::fs::read_to_string(root.join(input("allow"))).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    for ceiling in [5, 2] {
+        let allow = temp.path().join("allow.toml");
+        std::fs::write(
+            &allow,
+            shipped.replace("max_outputs = 5", &format!("max_outputs = {ceiling}")),
+        )
+        .unwrap();
+        let output = policy(
+            &allow,
+            &[
+                ("--repo", "cgwalters-forge/agentic-job"),
+                (
+                    "--clone-url",
+                    "https://github.com/cgwalters-forge/agentic-job",
+                ),
+                ("--outputs", input("outputs")),
+                ("--max-outputs", input("max-outputs")),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "ceiling {ceiling}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["max_outputs"], 2);
+        assert_eq!(value["safe_outputs"]["add_comment"]["max"], 1);
+    }
+}
+
+#[test]
 fn a_request_outside_the_bounds_prints_no_policy() {
     // The change to the request, and a part of the reason.
     let cases: &[(&[(&str, &str)], &str)] = &[

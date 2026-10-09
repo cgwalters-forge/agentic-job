@@ -457,7 +457,7 @@ jobs:
             base=$(jq -r --arg base "$BASE" '.base // $base' "$JOB_DIR/event.json")
             [ -n "$TARGET" ] || target=$(jq -r '.item.number // "*"' "$JOB_DIR/event.json")
           fi
-          "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
+          node "$SOURCE_DIR/workflow/policy-command.cjs" "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" > "$JOB_DIR/policy.json"
           jq . "$JOB_DIR/policy.json"
           printf '%s\n' "base=$base" "comment-target=$target" | tee -a "$GITHUB_OUTPUT"
