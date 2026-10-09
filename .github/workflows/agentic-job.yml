@@ -638,15 +638,32 @@ jobs:
       # Before `sandbox setup`, which closes the tailnet to the sandbox
       # user but for the inference proxy, and tailscaled's socket with it.
       # MagicDNS would answer for every node: names resolve as before.
-      - name: Join the tailnet
+      # Run only the pinned action's setup entry point: its post hook needs
+      # general sudo, which hardening removes. We log out below instead.
+      - name: Fetch Tailscale setup
         if: ${{ inputs.tailscale-oauth-client-id != '' }}
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
-          audience: ${{ inputs.tailscale-audience }}
-          tags: ${{ inputs.tailscale-tags }}
-          hostname: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
-          args: --accept-dns=false
+          repository: tailscale/github-action
+          ref: d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+          path: .agentic-job-tailscale
+          sparse-checkout: dist
+          persist-credentials: false
+      - name: Join the tailnet
+        id: tailnet
+        if: ${{ inputs.tailscale-oauth-client-id != '' }}
+        env:
+          INPUT_OAUTH-CLIENT-ID: ${{ inputs.tailscale-oauth-client-id }}
+          INPUT_AUDIENCE: ${{ inputs.tailscale-audience }}
+          INPUT_TAGS: ${{ inputs.tailscale-tags }}
+          INPUT_HOSTNAME: agentic-job-${{ github.run_id }}-${{ github.run_attempt }}
+          INPUT_ARGS: --accept-dns=false
+          INPUT_VERSION: '1.94.2'
+          INPUT_TIMEOUT: 2m
+          INPUT_RETRY: '5'
+          INPUT_USE-CACHE: 'true'
+          INPUT_LOG-MODE: grouped
+        run: node .agentic-job-tailscale/dist/index.js
       # An input that was left empty sets nothing, so the caller's file
       # stands; `register` means nothing without a proxy.
       - name: Write the configuration
@@ -759,6 +776,19 @@ jobs:
             3/true | 124/true) echo "::warning::the run was stopped at a limit (exit state $EXIT) and handed back what it had" ;;
             *) echo "::error::agentic-job run ended with exit state $EXIT"; exit 1 ;;
           esac
+      # No caller-controlled arguments or general sudo: the helper only
+      # permits logout of this host, using a trusted binary and clean env.
+      # If setup failed before installing the helper, sudo is still open;
+      # use the action's installed binary directly with a bounded clean env.
+      - name: Leave the tailnet
+        if: ${{ always() && steps.tailnet.outcome != 'skipped' && steps.tailnet.outcome != '' }}
+        run: |
+          if [ -x /usr/local/libexec/agentic-job ]; then
+            sudo -n -- /usr/local/libexec/agentic-job helper tailscale-logout
+          else
+            sudo -n -- /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin \
+              /usr/bin/timeout --kill-after=5 60 /usr/local/bin/tailscale logout
+          fi
 
   # For an event-triggered run: an eyes reaction on what started it, and a
   # comment that says a run started, which `conclude` edits when the run

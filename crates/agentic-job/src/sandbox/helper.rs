@@ -95,6 +95,8 @@ pub enum Op {
     },
     /// Print `tailscale status --json`
     TailscaleStatus,
+    /// Log this host out of the tailnet
+    TailscaleLogout,
     /// Run a command through pkexec, as root: a probe's control
     PkexecControl,
     /// Take away the sandbox user's lingering, after a probe enabled it
@@ -103,9 +105,24 @@ pub enum Op {
     CrontabRemove,
 }
 
+impl Op {
+    fn tailscale_argv(&self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::TailscaleStatus => Some(&["tailscale", "status", "--json"]),
+            Self::TailscaleLogout => Some(&["tailscale", "logout"]),
+            _ => None,
+        }
+    }
+}
+
 pub fn run(op: &Op) -> Result<Exit> {
     ensure!(host::is_root(), "`{COMMAND}` runs as root, through sudo");
     program_dirs_are_roots()?;
+    // Cleanup also runs after setup failed before writing its configuration.
+    // Neither Tailscale verb depends on the sandbox user or configuration.
+    if let Some(argv) = op.tailscale_argv() {
+        return passthrough(&Direct, argv);
+    }
     let config = root_config()?;
     let entry = Entry::new(&config)?;
     let user = entry.user();
@@ -132,7 +149,9 @@ pub fn run(op: &Op) -> Result<Exit> {
             out.flush().context("writing the log")?;
             Ok(Exit::Success)
         }
-        Op::TailscaleStatus => passthrough(&exec, &["tailscale", "status", "--json"]),
+        Op::TailscaleStatus | Op::TailscaleLogout => {
+            bail!("Tailscale operations are handled before loading the configuration")
+        }
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
         Op::DisableLinger => passthrough(&exec, &["loginctl", "disable-linger", "--", &user.name]),
         Op::CrontabRemove => passthrough(&exec, &["crontab", "-r", "-u", &user.name]),
@@ -491,6 +510,45 @@ pub fn chdir_allowed(dir: &Path, home: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tailscale_verbs_have_fixed_arguments() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Helper {
+            #[command(subcommand)]
+            op: Op,
+        }
+
+        for (verb, argv) in [
+            ("tailscale-status", vec!["tailscale", "status", "--json"]),
+            ("tailscale-logout", vec!["tailscale", "logout"]),
+        ] {
+            let parsed = Helper::try_parse_from(["helper", verb]).unwrap();
+            assert_eq!(parsed.op.tailscale_argv().unwrap(), argv);
+            for extra in ["--socket=/tmp/agent.sock", "--help=false", "other"] {
+                assert!(Helper::try_parse_from(["helper", verb, extra]).is_err());
+            }
+        }
+        assert!(Op::Ping.tailscale_argv().is_none());
+    }
+
+    #[test]
+    fn privileged_passthrough_preserves_success_and_failure() {
+        for (program, success) in [("true", true), ("false", false)] {
+            let exit = passthrough(&Direct, &[program]).unwrap();
+            assert_eq!(matches!(exit, Exit::Success), success, "{program}");
+        }
+        let command = Direct.command(&["true"]).unwrap();
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            vec![(
+                std::ffi::OsStr::new("PATH"),
+                Some(std::ffi::OsStr::new(&host::root_path()))
+            )],
+        );
+    }
 
     #[test]
     fn directories_the_sandbox_user_may_start_in() {
