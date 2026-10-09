@@ -72,13 +72,21 @@ admission to a specific caller remains optional hardening tracked in
 
 For cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
 restricted to the protected default branch, and store its sole secret
-`AGENTIC_JOB_APPLY_TOKEN` there. This is gh-aw's `safe-outputs.github-token` for
+`SAFE_OUTPUTS_PAT` there, as described in
+[credential setup](workflow.md#the-apply-job-and-its-token).
+This is gh-aw's `safe-outputs.github-token` for
 [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
 see [the mapping and job-token limits](workflow.md#the-apply-job-and-its-token).
 Use a fine-grained bot PAT restricted to the
 exact targets with Contents, Issues and Pull requests read/write, no workflow
 write or administration. Preflight names a missing `APPLY_ENVIRONMENT` too.
-Only apply enters the environment; a missing environment token fails closed.
+Only apply enters the environment; an empty secret falls back to the job token,
+which cannot write cross-repository. The shipped caller explicitly forwards
+`SAFE_OUTPUTS_PAT` whether or not an environment is configured; scripted CI
+forwards no credential value. If you call `dispatch.yml` as a reusable workflow,
+explicitly pass `SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}` to that wrapper
+too. A repository/organization secret also works; environment protection rules
+still gate apply, and the environment's same-name secret takes precedence.
 Never use `secrets: inherit`. For same-repository trials the apply job uses
 its job token instead; no environment is needed.
 

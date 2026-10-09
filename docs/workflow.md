@@ -24,7 +24,7 @@ separate jobs on separate machines. The apply job's additional checks are
    `sandbox check`); `run` clones the target, drives the agent and
    leaves what may be uploaded.
 3. **check**, on a machine the agent never touched. gh-aw's collector
-   validates and sanitizes the agent's requests, then `agentic-job check`
+   validates and sanitizes the producer's requests, then `agentic-job check`
    holds them and the patch to the policy.
 4. **apply**, on a machine of its own, uses a write credential.
    It runs gh-aw's handlers on the checked outputs:
@@ -266,6 +266,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     with:
       id: ${{ inputs.item }}
       task: ${{ inputs.task }}
@@ -283,7 +285,7 @@ jobs:
 
 Name the workflow by a commit you have read, not by a branch. The binary
 is built from that same commit, so the pin covers both. Never pass
-`secrets: inherit`: the workflow declares the one secret it uses.
+`secrets: inherit`: pass only the declared apply credential alias you use.
 
 ### Real agent checklist
 
@@ -534,7 +536,11 @@ Do not pass a forge token through `sandbox.env` to work around this gap.
 
 ### The apply job and its token
 
-`AGENTIC_JOB_APPLY_TOKEN` serves the same role as gh-aw's `safe-outputs.github-token`
+Check and apply serve any job that proposes writes, including the
+[non-agent proposals route](#proposals-from-a-non-agent-job). The producer
+receives no apply credential.
+
+`SAFE_OUTPUTS_PAT` serves the same role as gh-aw's `safe-outputs.github-token`
 for [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs):
 the applying job's credential when the built-in `GITHUB_TOKEN` is not enough.
 That job token cannot [write to another repository](https://docs.github.com/en/actions/concepts/security/github_token#about-the-github_token)
@@ -543,7 +549,7 @@ It also cannot open pull requests whose CI runs **without approval**:
 [GitHub now creates approval-required runs](https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs).
 Use an appropriately scoped PAT or GitHub App token for those operations.
 
-gh-aw's `github-token` maps to our `AGENTIC_JOB_APPLY_TOKEN` secret;
+gh-aw's `github-token` maps to our optional apply credential;
 its `target-repo` is fixed by the caller: pull requests, comments and new issues
 go to `output-repo` (or the calling repository when omitted), while issue actions
 and project updates use the run's `repo`.
@@ -552,10 +558,10 @@ Unlike gh-aw's `allowed-repos`, which permits the agent to select write destinat
 Output destinations are caller-fixed, are not bounded by that list, and cannot be
 dynamically selected by the agent. gh-aw's wildcard `target-repo: "*"` has no
 equivalent here.
-The storage difference is that our secret lives in a caller environment restricted
+For environment-based storage, our secret lives in a caller environment restricted
 to the protected default branch, entered only by apply.
 
-With no `apply-environment`, the apply job uses the job's own token,
+With no nonempty apply secret, apply uses the job's own token (even with an environment),
 which can write only to the calling repository: `repo` then has to be
 the calling repository, and `output-repo` is left out. Many organizations do
 not let Actions open pull requests. The handlers then push the branch
@@ -571,22 +577,79 @@ whose outputs have none. A comment that comes after the pull request
 in the same hand-back then begins with gh-aw's note that the pull
 request failed.
 
-With `apply-environment: NAME`, the apply job enters that environment of
-the calling repository and uses its secret `AGENTIC_JOB_APPLY_TOKEN`:
-a token that can push to `output-repo` and open pull requests and
-comments there. The workflow declares that one secret; the caller passes
-nothing, and GitHub's documentation says a called job that names an
-environment gets the environment's secret of the declared name. That is
-untried here. If the environment has no such secret the job stops; it
-does not fall back to its own token. To set it up:
+The single optional declared secret is `SAFE_OUTPUTS_PAT`. When nonempty,
+it replaces the built-in job token. Checkout and the API handlers use the same
+selection. This replaces the previous credential name, with no legacy alias.
+A passed secret
+also works without an environment; then GitHub's environment protection rules
+do not gate its use.
+
+With `apply-environment: NAME`, only apply enters that environment of the
+calling repository. An empty credential uses the job token; the environment
+still gates apply. GitHub's current
+[reusable-workflow documentation](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow)
+says the caller **must explicitly pass the secret even if it exists only in
+the environment**. The environment's same-name secret takes precedence over
+a repository/organization secret. Our earlier instruction to pass nothing
+was incorrect. GitHub's [secrets documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets#using-secrets-in-a-workflow)
+confirms that referencing an unset secret returns an empty string: explicitly
+passing it is harmless with our optional declaration and job-token fallback.
+Shipped callers already pass this name, so storing the secret is enough.
+To set it up:
 
 1. Create the environment in the calling repository, limited to its
    default branch, and protect that branch.
-2. Store the token as the environment's secret `AGENTIC_JOB_APPLY_TOKEN`.
-3. Call with `apply-environment: NAME` and, for a fork, `output-repo`.
+2. Store the token as `SAFE_OUTPUTS_PAT`.
+3. Explicitly pass that same name and set `apply-environment: NAME` and,
+   for a fork, `output-repo`:
+
+   ```yaml
+   jobs:
+     apply:
+       uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+       permissions:
+         contents: read
+         id-token: write
+       secrets:
+         SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+       with:
+         id: proposals
+         repo: OWNER/REPO
+         allow: .github/agentic-job/allow.toml
+         proposals-artifact: board-proposals
+         outputs: add_comment,noop
+         comment-target: '123'
+         apply-environment: writes
+   ```
+
+For a repository/organization secret, the **stored name is caller-chosen**:
+map `SAFE_OUTPUTS_PAT: ${{ secrets.YOUR_BOT_PAT }}`.
+For an environment-only secret, use `SAFE_OUTPUTS_PAT` both in
+storage and in the explicit mapping. Although expressions support
+`secrets[inputs.name]`, that does not bypass `workflow_call`'s declared-secret
+interface or the explicit-passing requirement. This workflow does not expose
+an arbitrary environment-secret-name input or use `secrets: inherit`.
+
+CI and example callers explicitly pass the optional name; CI can exercise
+job-token fallback without storing a PAT or changing permissions. Local
+regression tests cover empty/unset selection, shared credentials, explicit
+forwarding, scripted dispatch suppression and apply-only consumption. GitHub's
+documentation verifies environment delivery and precedence, not a live run here.
+Still to try on GitHub: an environment-only PAT with explicit passing;
+environment precedence over a same-name repository secret; unset-secret fallback;
+and required-reviewer/branch protection gates. These require a trusted caller
+and real environment setup, not credentials in the proposal producer.
+
+GitHub App token minting is **not implemented yet**. An App can avoid a
+long-lived PAT (its private key still needs protected storage), but the
+workflow must first narrow an installation token to the checked destinations
+and admitted permissions. In particular, PR creation can need both target and
+fork access, issue actions use `repo` rather than `output-repo`, and organization
+Projects require another permission. Do not substitute an unrestricted
+installation token or claim App support from the PAT alias alone.
 
 For `update_project`, use that same environment secret, not an additional token:
-`AGENTIC_JOB_APPLY_TOKEN` must have organization **Projects: Read and write**
+the selected apply credential must have organization **Projects: Read and write**
 for a fine-grained PAT or GitHub App, and repository **Issues: Read** (plus
 Metadata read) on the issue repository. A classic PAT needs **project** scope
 and repository access (`repo` for private repositories). Organization approval

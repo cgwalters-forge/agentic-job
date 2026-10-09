@@ -84,8 +84,9 @@ permissions, token placement, caller bounds or check code. Preserve the
 [job/token separation](docs/workflow.md) and [safe-output contract](docs/safe-outputs.md):
 `policy` and `check` have read-only repository access; `agent` has read access
 and OIDC permission, but the sandbox user has neither forge credentials nor
-the OIDC request credential. Only `apply` receives `AGENTIC_JOB_APPLY_TOKEN`
-(or its configured environment secret), falling back to the job token.
+the OIDC request credential. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
+explicitly passed even for an environment secret. If empty it falls back to
+the job token, whether or not an apply environment is configured.
 `activate`, `notify` and `conclude` inherit caller permissions and can write
 labels/status; none may execute agent-produced code. Release/pin publishing
 and CI end-to-end cleanup also have write-capable jobs: review their permissions.

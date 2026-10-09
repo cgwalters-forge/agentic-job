@@ -5,6 +5,11 @@ run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}
 
 on:
   workflow_call:
+    # Forward only this declared credential, never inherit. Environment-only
+    # callers must explicitly pass the name through this wrapper too.
+    secrets:
+      SAFE_OUTPUTS_PAT:
+        required: false
     outputs:
       review-head:
         description: Exact PR head resolved for the review profile
@@ -121,6 +126,11 @@ jobs:
     # copying elsewhere, replace this with the full reviewed source SHA:
     # cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     uses: ./.github/workflows/agentic-job.yml
+    # Scripted CI passes no credential value. The explicit name is forwarded
+    # even when its value is available only in apply's environment.
+    # No secret reaches target, the agent process or the nested checker.
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
       # use these writes; neither executes agent-produced code.

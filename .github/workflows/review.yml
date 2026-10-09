@@ -20,6 +20,8 @@ jobs:
       # not be able to cancel it before event authorization runs.
       cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     uses: ./.github/workflows/agentic-job.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
       contents: read
       id-token: write

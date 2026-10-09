@@ -393,6 +393,8 @@ jobs:
   # deletes them again.
   #
   # A pull request from a fork cannot run these: its token cannot write.
+  # Never forward a deployment PAT to proposed workflow code. These callers
+  # exercise apply's job-token fallback under their declared permissions.
   # Same noop producer/call as docs/workflow.md; no checkout or producer token.
   proposals:
     needs: changes
@@ -829,7 +831,7 @@ jobs:
             pr=$(jq -r '.pull_request.number // empty' "$RUNNER_TEMP/$run/applied.json")
             if [ -n "$pr" ]; then gh pr view "$pr" --json isDraft,title,url | tee -a "$GITHUB_STEP_SUMMARY" | jq -e --arg title "$title" '.isDraft and .title == $title'
             else jq -e '.refused and .pull_request == null and (.made | map(.type) | unique) - ["add_comment"] == []' "$RUNNER_TEMP/$run/applied.json"
-              echo "::notice::the branch was pushed and the pull request refused: this organization does not let Actions open pull requests, and the apply job has no other token (the environment agent-apply with AGENTIC_JOB_APPLY_TOKEN)"
+              echo "::notice::the branch was pushed and the pull request refused: this organization does not let Actions open pull requests, and the apply job has no other token (optional SAFE_OUTPUTS_PAT)"
             fi
           done <<< "full $FULL_TITLE"$'\n'"limit $LIMIT_TITLE"
       # gh-aw's handlers end what they open with a link to the run.

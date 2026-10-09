@@ -25,6 +25,62 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
+test('apply alone consumes the optional safe outputs PAT with job-token fallback', () => {
+  const jobs = workflow.split('\njobs:\n')[1];
+  const before = jobs.split('\n  apply:\n')[0];
+  const [apply, after] = jobs.split('\n  apply:\n')[1].split('\n  conclude:\n');
+  assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n'));
+  assert.match(workflow.split('    secrets:\n')[1].split('    outputs:\n')[0], /required: false/);
+  assert.ok(!before.includes('secrets.SAFE_OUTPUTS_PAT'));
+  assert.ok(!after.includes('secrets.SAFE_OUTPUTS_PAT'));
+  const selection = 'secrets.SAFE_OUTPUTS_PAT';
+  for (const key of ['token', 'github-token']) {
+    assert.ok(apply.includes(`${key}: \${{ ${selection} || github.token }}`));
+  }
+  assert.ok(apply.includes('environment: ${{ inputs.apply-environment }}'));
+  assert.doesNotMatch(apply, /HAS_TOKEN|no passed .* secret/);
+});
+
+for (const pat of [undefined, '', 'test-pat']) {
+  test(`credential expression wiring: PAT ${JSON.stringify(pat)}`, () => {
+    const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
+    for (const key of ['token', 'github-token']) {
+      const expression = apply.match(new RegExp(`^          ${key}: \\$\\{\\{ (.+) \\}\\}$`, 'm'))[1];
+      // Evaluate the workflow's simple || selection; not an Actions environment-delivery test.
+      assert.equal(Function('secrets', 'github', `return ${expression}`)(
+        { SAFE_OUTPUTS_PAT: pat }, { token: 'job-token' }), pat || 'job-token');
+      assert.ok(!expression.includes('environment'));
+    }
+  });
+}
+
+for (const filename of ['example', 'example-command', 'example-pull-request', 'example-schedule', 'review']) {
+  test(`${filename} explicitly forwards the optional safe outputs PAT`, () => {
+    const caller = readFileSync(join(__dirname, `../.github/workflows/${filename}.yml`), 'utf8');
+    assert.ok(caller.includes('SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}'));
+  });
+}
+
+test('every CI safe-output caller exercises job-token fallback without deployment secrets', () => {
+  const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
+  const jobs = [...ci.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
+  const callers = jobs.filter(([, , job]) =>
+    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch)\.yml/.test(job));
+  assert.deepEqual(callers.map(([, name]) => name), [
+    'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-dispatch', 'e2e-review',
+  ]);
+  for (const [, name, caller] of callers) {
+    assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
+    assert.doesNotMatch(caller, /^      apply-environment:/m, name);
+  }
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-review']) {
+    const caller = callers.find(([, jobName]) => jobName === name)[2];
+    assert.match(caller, /^      contents: read$/m, name);
+    assert.doesNotMatch(caller, /^      contents: write$/m, name);
+  }
+});
+
 test('issue actions keep checked repository and caps, not output-repo or event targets', () => {
   const root = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
