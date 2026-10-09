@@ -35,6 +35,23 @@ async function readReport(path) {
   }
 }
 
+export async function refusalReasons(source) {
+  const reasons = [];
+  for (const name of ['agent_output.json', 'report.json']) {
+    const report = await readReport(join(source, name));
+    if (report === null) continue;
+    if (!Array.isArray(report.errors) || !report.errors.every(e => typeof e === 'string')) {
+      throw new Error(`Invalid diagnostic report: ${name}`);
+    }
+    reasons.push(...report.errors.slice(0, MAX_ERRORS));
+  }
+  // Paths and collector errors can contain hostile text. Keep outputs on one
+  // line and neutralize Markdown/mentions before using them in a comment.
+  return reasons.slice(0, MAX_ERRORS).map(e => e.slice(0, MAX_REASON_CHARS)
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+    .replace(/@/g, '@\u200b').replace(/[\\`*_\[\]<>]/g, '\\$&'));
+}
+
 export async function diagnostics(source, destination) {
   await mkdir(destination, { recursive: true });
   for (const name of ['agent_output.json', 'report.json']) {

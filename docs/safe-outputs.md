@@ -56,6 +56,20 @@ most one pull request. A pull request is a draft. An `analysis` run may
 not ask for one. gh-aw's default list of protected file names and every
 top-level dot-folder stay protected; a bounds file can take names off
 that list for repositories it names exactly, and cannot add to it.
+For example, to allow README edits in one repository, add this to the
+bounds file (not to the caller workflow):
+
+```toml
+[unprotected_files]
+repos = ["OWNER/REPO"]
+files = ["README.md"]
+```
+
+This does not relax the fixed patch refusals below. New executable files
+remain refused: add a script without its executable bit and run it with
+its interpreter. Check refusals appear as run annotations and, when a
+comment target is available, in the run's conclusion comment.
+
 `policy.json` holds, as `safe_outputs`, gh-aw's own configuration format:
 the collector reads that part as it is.
 

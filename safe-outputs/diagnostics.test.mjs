@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { diagnostics } from './diagnostics.mjs';
+import { diagnostics, refusalReasons } from './diagnostics.mjs';
 
 for (const phase of ['collector', 'policy']) {
   test(`${phase} refusal produces a downloadable diagnostics-only layout`, async () => {
@@ -43,6 +43,41 @@ test('diagnostics bounds input and refusal evidence', async () => {
     assert.ok(report.errors[100].includes('omitted'));
     await writeFile(source, ' '.repeat((8 << 20) + 1));
     await assert.rejects(diagnostics(dir, destination), /bounded regular file/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const [name, errors, expected] of [
+  ['agent_output.json', ['collector refusal'], ['collector refusal']],
+  ['report.json', ['protected files: README.md'], ['protected files: README.md']],
+  ['report.json', [], []],
+  ['report.json', ['bad\n::error::\r@user [link](x) `code`'],
+    ['bad ::error:: @\u200buser \\[link\\](x) \\`code\\`']],
+]) {
+  test(`refusal reasons: ${name} ${JSON.stringify(errors)}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'refusal-reasons-'));
+    try {
+      assert.deepEqual(await refusalReasons(dir), []);
+      await writeFile(join(dir, name), JSON.stringify({ errors, items: [{ message: 'not a reason' }] }));
+      assert.deepEqual(await refusalReasons(dir), expected);
+      await writeFile(join(dir, name), JSON.stringify({ errors: [42] }));
+      await assert.rejects(refusalReasons(dir), /Invalid diagnostic report/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('refusal reasons bound report count and text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'refusal-reasons-'));
+  try {
+    for (const name of ['agent_output.json', 'report.json']) {
+      await writeFile(join(dir, name), JSON.stringify({ errors: Array(101).fill('x'.repeat(1001)) }));
+    }
+    const reasons = await refusalReasons(dir);
+    assert.equal(reasons.length, 100);
+    assert.ok(reasons.every(reason => reason.length === 1000));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

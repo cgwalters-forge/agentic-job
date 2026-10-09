@@ -116,7 +116,8 @@ test('caller and write job retain the trusted-source boundary', () => {
   assert.match(caller, /notify: none/);
   assert.doesNotMatch(caller, /contents: write|secrets: inherit/);
   assert.match(workflow, /inputs.review && \(github.event.pull_request.base.sha \|\| inputs.base\)/);
-  assert.match(workflow, /node "\$SOURCE_DIR\/workflow\/review.cjs" check/);
+  assert.match(workflow, /require\(`\$\{process.env.SOURCE_DIR\}\/workflow\/review.cjs`\)/);
+  assert.match(workflow, /errors: \[error.message\]/);
   const apply = workflow.split('\n  apply:')[1].split('\n  conclude:')[0];
   assert.match(apply, /if: \$\{\{ !inputs.review \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}/);
   assert.doesNotMatch(apply, /pull_request.head|refs\/pull/);

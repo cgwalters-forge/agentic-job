@@ -730,6 +730,7 @@ jobs:
       contents: read
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      refusal: ${{ steps.refusal.outputs.reason }}
     steps:
       # This repository at this file's commit, for the validation rules
       # generated from the pinned gh-aw.
@@ -781,14 +782,37 @@ jobs:
       # Fixed trusted code validates the agent's text; no write token here.
       - name: Validate the review verdict
         if: ${{ inputs.review }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TARGET: ${{ needs.policy.outputs.comment-target }}
-        run: node "$SOURCE_DIR/workflow/review.cjs" check "$GH_AW_TMP/agent_output.json" "$TARGET"
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { checkOutputs } = require(`${process.env.SOURCE_DIR}/workflow/review.cjs`);
+            try {
+              checkOutputs(JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')), process.env.TARGET);
+            } catch (error) {
+              fs.writeFileSync(`${process.env.GH_AW_TMP}/report.json`, JSON.stringify({ ok: false, errors: [error.message] }));
+              core.setFailed(error.message);
+            }
       # The second half: the policy's bounds, and the rules for a patch.
       - name: Check the outputs against the policy
         run: |
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
             --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" | tee -a "$GITHUB_STEP_SUMMARY"
+      # Trusted report readers only; this job still has no write token.
+      # core.error escapes workflow-command characters in hostile path text.
+      - name: Show why check refused the outputs
+        id: refusal
+        if: ${{ failure() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { refusalReasons } = await import(pathToFileURL(`${process.env.SOURCE_DIR}/safe-outputs/diagnostics.mjs`).href);
+            const reasons = await refusalReasons(process.env.GH_AW_TMP);
+            for (const reason of reasons) core.error(`Refused by check: ${reason}`);
+            core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       # The handlers look for a pull request's patch beside the ingested
       # outputs, under the name gh-aw derives from the branch.
       - name: Put the patch beside the ingested outputs
@@ -1045,7 +1069,7 @@ jobs:
   # number are numbers.
   conclude:
     needs: [policy, notify, agent, check, apply]
-    if: ${{ always() && inputs.event && inputs.notify != 'none' && needs.notify.result == 'success' }}
+    if: ${{ always() && ((inputs.event && inputs.notify != 'none' && needs.notify.result == 'success') || (needs.check.outputs.refusal != '' && needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*')) }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     env:
@@ -1059,6 +1083,7 @@ jobs:
           RESULTS: ${{ needs.agent.result }}/${{ needs.check.result }}/${{ needs.apply.result }}
           EXIT: ${{ needs.agent.outputs.exit }}
           PR: ${{ needs.apply.outputs.pull-request }}
+          REFUSAL: ${{ needs.check.outputs.refusal }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ ]]
           case "$RESULTS" in
@@ -1067,18 +1092,29 @@ jobs:
             *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
             *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
           esac
+          [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
       - name: Edit the status comment
-        if: ${{ inputs.notify == 'comment' }}
+        if: ${{ inputs.notify == 'comment' && needs.notify.outputs.comment-id != '' }}
         env:
           ID: ${{ needs.notify.outputs.comment-id }}
           TEXT: ${{ steps.ended.outputs.text }}
         run: |
           [[ "$ID" =~ ^[0-9]+$ ]] || { echo "::error::notify left no comment id"; exit 1; }
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT" --jq .html_url
+      # Only a policy-admitted numeric target, never an agent-selected endpoint.
+      - name: Post the refusal to the comment target
+        if: ${{ needs.check.outputs.refusal != '' && needs.policy.outputs.comment-target != '' && needs.policy.outputs.comment-target != '*' && needs.notify.outputs.comment-id == '' }}
+        env:
+          TARGET: ${{ needs.policy.outputs.comment-target }}
+          REPO: ${{ inputs.output-repo || github.repository }}
+          TEXT: ${{ steps.ended.outputs.text }}
+        run: |
+          [[ "$TARGET" =~ ^[0-9]+$ && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT" --jq .html_url
       - name: A reaction that says how it ended
-        if: ${{ inputs.notify == 'reaction' }}
+        if: ${{ inputs.notify == 'reaction' && needs.notify.result == 'success' }}
         env:
           KIND: ${{ needs.notify.outputs.kind }}
           ID: ${{ needs.notify.outputs.id }}
