@@ -117,8 +117,8 @@ It skips the GitHub MCP server. The runtime has two separate components:
    `awmg proxy`, not as an MCP server, with `GH_TOKEN` outside the agent.
    It listens on TLS port 18443 and applies the GitHub guard policy
    ([startup, lines 56–75](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/sh/start_cli_proxy.sh#L56-L75)).
-   The compiler emits a repository/integrity policy; no policy means API
-   calls fail with 503
+   The compiler emits a repository/integrity policy; recognized guarded reads
+   without a policy fail with 503 (not all API calls; see the blocker below)
    ([policy generation, lines 501–554](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/pkg/workflow/compiler_difc_proxy.go#L501-L554)).
 2. **The CLI sidecar:** AWF installs a `gh` wrapper in the agent that
    sends arguments to the sidecar's HTTP `POST /exec` endpoint. The
@@ -190,6 +190,48 @@ must verify the following boundaries:
 No input, permission change or authenticated gateway has been added here.
 The pinned artifact's help was exercised, but its forwarding and guard
 behavior, sandbox isolation and event end-to-end path remain unverified.
+
+### Read-only integration blocker
+
+The v0.4.27 source resolves to commit
+`03c6ca59170fe9179226d8d0a35bb01fd9327643`. Its ordinary proxy is **not a
+read-only enforcement boundary**. In
+[the handler](https://github.com/github/gh-aw-mcpg/blob/03c6ca59170fe9179226d8d0a35bb01fd9327643/internal/proxy/handler.go),
+`ServeHTTP` sends non-read methods directly to `passthrough`, before guard
+initialization or policy evaluation. `handleUnrecognizedPassthrough` also
+forwards unmatched REST reads with empty labels. Therefore neither an explicit
+repository policy nor the absence of a policy reliably bounds all requests.
+The proxy documentation's claim that unmatched reads fail closed does not
+match this handler. These are source findings, not a digest-image runtime test.
+
+The concrete threat is an agent using the credential holder as an authenticated
+write relay or reading outside caller repository bounds. Ephemerality does not
+undo a forge write. A token minted with read permissions limits upstream writes,
+but an upstream refusal is not proof that the gateway refused the operation.
+The separate `issues-read-v1` enclave profile is fail-closed but explicitly
+does not support GraphQL or `gh issue view`; it is not a drop-in replacement.
+
+`workflow/github-read-probe.mjs` supplies a credential-free acceptance probe
+for a future gateway setup with a loopback mock GitHub upstream. Configure its
+policy for `owner/repo`; the independent mock observer must expose
+`GET /observed` as an append-only array of `{method, path}` records, recording
+upstream calls before responding. Run:
+
+```sh
+node workflow/github-read-probe.mjs http://127.0.0.1:18443 http://127.0.0.1:18080
+node --test workflow/github-read-probe.test.mjs
+```
+
+The probe requires successful REST and GraphQL reads, local 403 refusals for
+REST/GraphQL writes and out-of-bounds reads, and no upstream request for a
+refusal. Its unit tests demonstrate detection of write forwarding, upstream
+403s masquerading as local enforcement, unmapped reads and fake read success.
+It does not start or provision the gateway, exercise `gh`, or prove sandbox
+token isolation. Do not point it at GitHub or a credential-bearing service:
+its mutation fixtures are intended only for the mock upstream.
+
+Issue #112 remains open. Authenticated sandbox access stays disabled until
+the gateway contract, CLI routing and fresh-runner isolation tests pass.
 
 ## Related gh-aw deployments
 
