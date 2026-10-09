@@ -1032,11 +1032,13 @@ jobs:
           PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true}'
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
-            --arg target "$COMMENT_TARGET" --argjson pr "$PULL_REQUEST" '
+            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" '
             (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
+            | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
+            | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
           ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
           echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
       # The first line of what a partial run opens or posts says so too,

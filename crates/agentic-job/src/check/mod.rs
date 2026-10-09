@@ -275,39 +275,100 @@ fn redirections_to(
             problems.push(format!("a {output} that is not a draft"));
         }
     }
-    // gh-aw's handler would make the new issue a sub-issue of, or blocked
-    // by, any issue the request names; nothing bounds which, so a request
-    // that names one is refused.
-    if output == CREATE_ISSUE {
-        if let Some(limit) = policy.safe_outputs.others.get(output)
-            && (limit.allowed.is_some() || !limit.blocked.is_empty())
-            && let Some(labels) = item.get("labels")
+    if matches!(output, "close_issue" | "add_labels") {
+        if !item
+            .get("repo")
+            .and_then(Value::as_str)
+            .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo))
         {
-            match labels.as_array() {
-                Some(labels) => {
-                    for label in labels {
-                        let permitted = label.as_str().is_some_and(|label| {
-                            label == label.trim()
-                                && !limit
-                                    .blocked
-                                    .iter()
-                                    .any(|blocked| blocked.eq_ignore_ascii_case(label))
-                                && limit.allowed.as_ref().is_none_or(|allowed| {
-                                    allowed
-                                        .iter()
-                                        .any(|allowed| allowed.eq_ignore_ascii_case(label))
-                                })
-                        });
-                        if !permitted {
-                            problems.push(format!(
-                                "a {output} with label {label}, outside the policy's label limits"
-                            ));
-                        }
-                    }
-                }
-                None => problems.push(format!("a {output} whose labels are not an array")),
+            problems.push(format!("a {output} requires the policy's explicit repo"));
+        }
+        // Do not let handler fallback to event context, aliases or temporary
+        // IDs choose an item. Repository scope remains the compiled run's repo.
+        let key = if output == "close_issue" {
+            "issue_number"
+        } else {
+            "item_number"
+        };
+        if !item
+            .get(key)
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+        {
+            problems.push(format!("a {output} requires a positive integer {key}"));
+        }
+        for alias in [
+            "pr_number",
+            "pull_number",
+            "pull_request_number",
+            "pr",
+            "target",
+            "duplicate_of",
+        ] {
+            if item.contains_key(alias) {
+                problems.push(format!("a {output} with unsupported target field {alias}"));
             }
         }
+        let alias = if output == "close_issue" {
+            "item_number"
+        } else {
+            "issue_number"
+        };
+        if item.contains_key(alias) {
+            problems.push(format!("a {output} with unsupported target field {alias}"));
+        }
+    }
+    if matches!(output, CREATE_ISSUE | "add_labels")
+        && let Some(limit) = policy.safe_outputs.others.get(output)
+        && (limit.allowed.is_some() || !limit.blocked.is_empty())
+        && let Some(labels) = item.get("labels")
+    {
+        match labels.as_array() {
+            Some(labels) => {
+                // The pinned add_labels handler uses max for both requests and
+                // labels per request. Refuse rather than silently drop labels.
+                if output == "add_labels" && labels.len() > limit.max as usize {
+                    problems.push("an add_labels exceeding the per-request label limit".to_owned());
+                }
+                for label in labels {
+                    let permitted = label.as_str().is_some_and(|label| {
+                        label == label.trim()
+                            // A conservative fixed-point subset of gh-aw's
+                            // sanitizer: no Unicode hardening, mention escaping,
+                            // punctuation removal or UTF-16 truncation can alter it.
+                            && (output != "add_labels"
+                                || (!label.is_empty()
+                                    && label.len() <= 64
+                                    && !label.starts_with('-')
+                                    && label.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || b" -_./:".contains(&b)
+                                    })))
+                            && !limit
+                                .blocked
+                                .iter()
+                                .any(|blocked| blocked.eq_ignore_ascii_case(label))
+                            && limit.allowed.as_ref().is_none_or(|allowed| {
+                                allowed
+                                    .iter()
+                                    .any(|allowed| allowed.eq_ignore_ascii_case(label))
+                            })
+                    });
+                    if !permitted {
+                        problems.push(format!(
+                            "a {output} with label {label}, outside the policy's label limits"
+                        ));
+                    }
+                }
+            }
+            None => problems.push(format!("a {output} whose labels are not an array")),
+        }
+    }
+    if output == "close_issue" && item.contains_key("body") {
+        problems.push("a close_issue with body; closure does not post comments".to_owned());
+    }
+    if output == CREATE_ISSUE {
+        // gh-aw's handler links the new issue to any issue the request
+        // names; nothing bounds which, so those requests are refused.
         problems.extend(
             ISSUE_LINKS
                 .iter()
@@ -731,6 +792,106 @@ mod tests {
                 )],
                 "{key}"
             );
+        }
+    }
+
+    #[test]
+    fn bounded_issue_actions() {
+        for (output, number_key) in [
+            ("close_issue", "issue_number"),
+            ("add_labels", "item_number"),
+        ] {
+            let mut policy = policy();
+            policy.safe_outputs.others.insert(
+                output.to_owned(),
+                crate::policy::OutputLimit {
+                    max: 1,
+                    allowed: (output == "add_labels").then(|| vec!["triage".to_owned()]),
+                    ..Default::default()
+                },
+            );
+            let mut plain = json!({"type": output, "repo": policy.repo, "labels": ["triage"]});
+            plain[number_key] = json!(7);
+            for (key, value, ok) in [
+                (number_key, json!(7), true),
+                (number_key, json!(0), false),
+                (number_key, json!("7"), false),
+                (number_key, Value::Null, false),
+                ("repo", json!("other/repo"), false),
+                ("repo", Value::Null, false),
+                ("target", json!("*"), false),
+                ("pr_number", json!(8), false),
+                ("duplicate_of", json!("other/repo#8"), false),
+            ] {
+                let mut item = plain.clone();
+                item[key] = value;
+                assert_eq!(
+                    redirections(item.as_object().unwrap(), &policy).is_empty(),
+                    ok,
+                    "{output} {key}: {item}"
+                );
+            }
+            if output == "add_labels" {
+                for labels in [json!(["release"]), json!([{"name": "triage"}])] {
+                    let mut item = plain.clone();
+                    item["labels"] = labels;
+                    assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
+                }
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out");
+            std::fs::create_dir(&out).unwrap();
+            std::fs::write(out.join(OUTPUTS_FILE), format!("{plain}\n")).unwrap();
+            let collected = dir.path().join("collected.json");
+            for count in [1, 2] {
+                std::fs::write(
+                    &collected,
+                    json!({"items": vec![plain.clone(); count], "errors": []}).to_string(),
+                )
+                .unwrap();
+                assert_eq!(
+                    check_outputs(&out, &collected, &policy).unwrap().ok,
+                    count == 1,
+                    "{output}: {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_action_payloads_are_not_silently_changed() {
+        for (labels, max, ok) in [
+            (vec!["triage", "docs"], 2, true),
+            (vec!["triage", "docs"], 1, false),
+            (vec!["release&"], 1, false),
+            (vec!["release\u{200b}"], 1, false),
+            (vec!["ｒｅｌｅａｓｅ"], 1, false),
+            (vec!["@release"], 1, false),
+            (vec!["-release"], 1, false),
+            (vec![""], 1, false),
+            (vec!["triage "], 1, false),
+            (vec!["area/docs: needs_triage"], 1, true),
+        ] {
+            let mut policy = policy();
+            policy.safe_outputs.others.insert(
+                "add_labels".to_owned(),
+                crate::policy::OutputLimit {
+                    max,
+                    allowed: Some(labels.iter().map(|label| (*label).to_owned()).collect()),
+                    blocked: vec!["release".to_owned()],
+                },
+            );
+            let item = json!({"type": "add_labels", "repo": policy.repo, "item_number": 7, "labels": labels});
+            assert_eq!(
+                redirections(item.as_object().unwrap(), &policy).is_empty(),
+                ok,
+                "{item}"
+            );
+        }
+        let policy = policy();
+        for body in [json!("comment"), json!(""), Value::Null] {
+            let item = json!({"type": "close_issue", "repo": policy.repo, "issue_number": 7, "body": body});
+            assert!(!redirections(item.as_object().unwrap(), &policy).is_empty());
         }
     }
 

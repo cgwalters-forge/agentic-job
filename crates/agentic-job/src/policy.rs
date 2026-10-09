@@ -30,6 +30,8 @@ pub const OUTPUT_TYPES: &[&str] = &[
     CREATE_PULL_REQUEST,
     "add_comment",
     "create_issue",
+    "close_issue",
+    "add_labels",
     "noop",
     "missing_tool",
     "missing_data",
@@ -197,8 +199,13 @@ pub struct OutputLimit {
 impl OutputLimit {
     fn validate(&self, output: &str) -> Result<()> {
         ensure!(
-            output == "create_issue" || (self.allowed.is_none() && self.blocked.is_empty()),
-            "outputs.{output}: label limits are supported only for create_issue"
+            matches!(output, "create_issue" | "add_labels")
+                || (self.allowed.is_none() && self.blocked.is_empty()),
+            "outputs.{output}: label limits are supported only for create_issue and add_labels"
+        );
+        ensure!(
+            output != "add_labels" || self.allowed.is_some(),
+            "outputs.add_labels requires an explicit allowed label list"
         );
         for label in self.allowed.iter().flatten().chain(&self.blocked) {
             ensure!(
@@ -633,6 +640,17 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
     policy.safe_outputs.others.retain(|name, limit| {
         if let Some(bound) = other.safe_outputs.others.get(name) {
             limit.max = limit.max.min(bound.max);
+            limit.allowed = match (&limit.allowed, &bound.allowed) {
+                (Some(own), Some(other)) => Some(
+                    own.iter()
+                        .filter(|label| other.iter().any(|other| other.eq_ignore_ascii_case(label)))
+                        .cloned()
+                        .collect(),
+                ),
+                (None, Some(other)) => Some(other.clone()),
+                (own, None) => own.clone(),
+            };
+            limit.blocked.extend(bound.blocked.iter().cloned());
             true
         } else {
             false
@@ -769,6 +787,76 @@ files = ["README.md", "AGENTS.md"]
                 ..OutputLimit::default()
             };
             assert!(limit.validate("create_issue").is_err(), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn issue_actions_compile_with_label_bounds() {
+        let mut bounds = bounds();
+        for output in ["close_issue", "add_labels"] {
+            bounds.outputs.insert(
+                output.to_owned(),
+                OutputLimit {
+                    max: 2,
+                    allowed: (output == "add_labels").then(|| vec!["triage".to_owned()]),
+                    ..Default::default()
+                },
+            );
+            bounds.validate().unwrap();
+            let policy = bounds
+                .compile(&Request {
+                    outputs: output,
+                    ..request()
+                })
+                .unwrap();
+            policy.validate().unwrap();
+            assert_eq!(policy.safe_outputs.max_of(output), Some(2));
+        }
+        bounds.outputs.get_mut("add_labels").unwrap().allowed = None;
+        assert!(bounds.validate().is_err());
+    }
+
+    #[test]
+    fn label_bounds_intersect_without_widening_either_file() {
+        for (own, other, expected) in [
+            (
+                Some(vec!["triage", "docs"]),
+                Some(vec!["TRIAGE", "release"]),
+                Some(vec!["triage"]),
+            ),
+            (None, Some(vec!["triage"]), Some(vec!["triage"])),
+            (Some(vec!["triage"]), None, Some(vec!["triage"])),
+            (Some(vec!["triage"]), Some(vec![]), Some(vec![])),
+        ] {
+            let configured = |allowed: Option<Vec<&str>>, blocked: &str| {
+                let mut bounds = bounds();
+                bounds.outputs.insert(
+                    "create_issue".to_owned(),
+                    OutputLimit {
+                        max: 2,
+                        allowed: allowed
+                            .map(|labels| labels.into_iter().map(str::to_owned).collect()),
+                        blocked: vec![blocked.to_owned()],
+                    },
+                );
+                bounds
+                    .compile(&Request {
+                        outputs: "create_issue",
+                        ..request()
+                    })
+                    .unwrap()
+            };
+            let policy = intersect(
+                configured(own, "own-blocked"),
+                configured(other, "org-blocked"),
+            )
+            .unwrap();
+            let limit = &policy.safe_outputs.others["create_issue"];
+            assert_eq!(
+                limit.allowed,
+                expected.map(|labels| labels.into_iter().map(str::to_owned).collect())
+            );
+            assert_eq!(limit.blocked, ["own-blocked", "org-blocked"]);
         }
     }
 

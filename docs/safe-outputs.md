@@ -36,17 +36,50 @@ gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
+`close_issue`, `add_labels`,
 `noop`, `missing_tool` and `missing_data`.
 
-The proposals-artifact entry point does not add output types. In particular,
-`update_project` and `close_issue` remain unsupported: named-project and field
-bounds, named-repository bounds, and their acceptance/refusal tests are still
-needed before these operations can be exposed through the pinned gh-aw handlers.
+`update_project` remains unsupported: named-project and field bounds and their
+acceptance/refusal tests are still needed before project operations can be exposed
+through the pinned gh-aw handler.
 That part of [#160](https://github.com/cgwalters-forge/agentic-job/issues/160)
 remains open. Organization project writes would require a separately configured
 apply token with access to the project (for a fine-grained token, organization
 Projects write permission); the repository job token cannot provide that access.
 Such a token must stay in the apply job, never in the proposals producer or check.
+
+### Closing issues and adding labels
+
+These operations are bounded to the run's exact `repo`, admitted by the caller's
+repository bounds, and their per-type `max` and the total `max_outputs`. They do
+not use `output-repo` or fall back to the triggering event's issue. Requests must
+include that explicit `repo` and a positive integer `issue_number` for
+`close_issue`, or `item_number` for `add_labels` (issues or pull requests).
+Temporary IDs, target aliases and duplicate relationships are refused.
+
+```toml
+[outputs.close_issue]
+max = 2
+
+[outputs.add_labels]
+max = 3
+allowed = ["triage", "documentation"]
+blocked = ["release"]
+```
+
+`add_labels` requires an explicit `allowed` list; an empty one permits no labels.
+Labels must be plain strings, matching that list case-insensitively, and not in
+`blocked`. To keep the handler's final API payload identical to the checked labels,
+names must be 1–64 ASCII characters: letters, digits, spaces or `- _ . / :`,
+with no leading/trailing whitespace or leading `-`. Unicode and other punctuation
+are refused rather than sanitized. `max` bounds both requests and labels within
+each request; requests exceeding either limit are refused, not partially applied.
+The handler does not create missing labels. Create the labels first.
+For example, `{"type":"close_issue","repo":"OWNER/REPO","issue_number":7}`
+closes issue 7 without a comment. `body` is refused; use a separately bounded
+`add_comment` request to post a comment.
+Both operations need issue-write access in apply (PR labels can instead use
+pull-request write access). No producer or check token gains write access.
 
 ## The bounds and the policy
 
