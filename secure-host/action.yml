@@ -86,6 +86,11 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Bound apt network waits and avoid the Azure mirror
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+      run: sudo node "$ACTION/apt.mjs"
     # A release's, by its attested source-matching checksums, when
     # that release was built from this commit's source; a build of that
     # source otherwise (binary.mjs).

@@ -77,6 +77,26 @@ Use fresh hosted runners when comparing traversal changes; a second walk
 on the same machine benefits from the filesystem cache and is not a
 representative setup measurement.
 
+Before acquiring the binary or installing setup packages, the action runs
+[`apt.mjs`](../secure-host/apt.mjs) as root. CI's sandbox and static-build jobs
+and the reusable workflow's source-build fallback use the same snippet.
+It replaces `azure.archive.ubuntu.com` with `archive.ubuntu.com` in the runner's
+apt mirror lists and direct sources, leaving mirror-list fallback, security and
+ports mirrors, suites and signing settings intact. This follows the
+[bootc setup fix](https://github.com/bootc-dev/actions/pull/48), but removes the
+Azure endpoint because fallback alone did not prevent stalled package bodies.
+
+HTTP and HTTPS timeouts are 10 seconds, with three acquisition retries.
+`apt-transport-http(1)` documents `Timeout` as both a connection and data timeout;
+`Retries` only retries failed files, so does not itself interrupt a stall.
+`Dl-Limit` is a bandwidth cap, not a minimum-speed watchdog, and is not set.
+A trickling transfer can still last longer: CI retains its five-minute apt
+step timeout as the backstop. Package signature/hash verification is unchanged.
+The added CI lines execute this fixed repository script before apt, with the
+existing read-only job permissions; no action pins or token placement change.
+CI's binary-test line also runs the apt regression tests, including a loopback
+server that sends a partial body and stalls; it needs neither root nor a token.
+
 ## What a later step can count on, and what it cannot
 
 **No step after this one has general root access.** Not a `run:` step, not another
