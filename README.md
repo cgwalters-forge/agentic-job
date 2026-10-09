@@ -126,6 +126,11 @@ VM instead and runs the agent as an ordinary unprivileged user on it,
 with `/dev/kvm`, user namespaces and a login session of its own. That is
 the work this was built for: operating system and container tooling.
 
+Rootless Podman must be installed before hardening. Container build steps
+that need the network also need `--network=host` and a read-only mount of
+the egress proxy's CA bundle at the image's trust-bundle path; these are
+not Podman defaults. See the [container recipe](docs/secure-host.md#containers).
+
 Three smaller differences:
 
 - The hardening is not tied to the agent. A build-and-test job with no
