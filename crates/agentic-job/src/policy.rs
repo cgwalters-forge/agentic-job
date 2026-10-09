@@ -710,6 +710,32 @@ files = ["README.md", "AGENTS.md"]
     }
 
     #[test]
+    fn ci_analysis_bounds_admit_topic_bases_without_patch_outputs() {
+        // Read at test time, not built in: the release pin's digest does not
+        // cover workflow/.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../workflow/analysis.toml");
+        let bounds: Bounds = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        bounds.validate().unwrap();
+        for (base, outputs, allowed) in [
+            ("main", "add_comment", true),
+            ("bot/w2-37863744105", "add_comment", true),
+            ("topic/nested/branch", "add_comment", true),
+            ("bot/../main", "add_comment", false),
+            ("bot/w2-37863744105", "create_pull_request", false),
+        ] {
+            let result = bounds.compile(&Request {
+                repo: "cgwalters-forge/agentic-job",
+                clone_url: "https://github.com/cgwalters-forge/agentic-job",
+                base,
+                kind: Kind::Analysis,
+                outputs,
+                max_outputs: "1",
+            });
+            assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
+        }
+    }
+
+    #[test]
     fn issue_label_limits_survive_compilation_and_loading() {
         let mut bounds = bounds();
         let limit: OutputLimit =
