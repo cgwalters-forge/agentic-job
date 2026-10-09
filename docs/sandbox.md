@@ -109,6 +109,75 @@ the proxy's variables and `sandbox.env`; a variable named `ACTIONS_*`
 the configuration and again at entry. `--pipe` needs systemd 257; setup
 checks only that `run0` is there.
 
+### Why a systemd read-only view has not replaced the walk
+
+The proposal in [#188](https://github.com/cgwalters-forge/agentic-job/issues/188#issuecomment-6081914015)
+would prevent writes to world-writable host paths outside the sandbox's own
+directories without inventorying the image. It must cover every process running
+as the sandbox user, not just the command launched by `sandbox exec`. The walk
+remains mandatory: the proposed two-unit guard does not meet that condition.
+
+In systemd **257**, the [execution documentation](https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml)
+distinguishes these cases:
+
+- `ProtectSystem=strict` makes the hierarchy read-only **except** `/dev`,
+  `/proc` and `/sys`. `ReadOnlyPaths=/` instead selects the root explicitly.
+  `ReadWritePaths=` can carve out the home, runtime and temporary directories;
+  it preserves ordinary permissions, not grants access, and cannot override a
+  read-only filesystem superblock. `PrivateTmp=yes` with `ProtectSystem=strict`
+  leaves the unit's private `/tmp` and `/var/tmp` writable.
+- A root-installed drop-in on `user@UID.service` configures a **system**
+  service, even though its executable is `systemd --user`. Its children inherit
+  its mount namespace. This is different from asking that user manager to apply
+  filesystem settings to individual user units, which the user controls.
+  For those user units, the documented
+  [availability rule](https://github.com/systemd/systemd/blob/v257/man/system-or-user-ns.xml)
+  for `ReadOnlyPaths=`/`ReadWritePaths=` implicitly enables `PrivateUsers=`
+  and requires unprivileged user namespaces. The sandboxing overview says most
+  filesystem namespacing settings need `PrivateUsers=true` in a user manager.
+- [run0's `--property=`](https://github.com/systemd/systemd/blob/v257/man/run0.xml)
+  sets properties on its newly created transient **service**. `--user=NAME`
+  selects the Unix identity, not the per-user manager. The properties are not
+  a policy on every process with that uid, nor execution settings on a slice
+  or a session scope.
+
+There is a specific process outside both proposed views: **`(sd-pam)`**.
+`run0` always uses the `systemd-run0` PAM stack; the upstream
+[user manager unit](https://github.com/systemd/systemd/blob/v257/units/user@.service.in)
+also has `PAMName=systemd-user`. The execution documentation describes the
+long-lived PAM session handler. In the v257
+[executor](https://github.com/systemd/systemd/blob/v257/src/core/exec-invoke.c),
+`exec_invoke()` calls `setup_pam()` before `apply_mount_namespace()`.
+`setup_pam()` forks `(sd-pam)`, drops it to the target uid/gid with
+`fully_set_uid_gid()`, and leaves it waiting to close the session. Only the
+parent continues to install the unit's mount restrictions and exec the command.
+Thus both PAM handlers retain the system executor's filesystem view, not the
+restricted view of the command or user manager. Adding the same properties to
+both units does not change that order. This is source evidence of an uncovered
+process, **not** a demonstrated way for agent code to take over the PAM handler
+or access its `/proc/PID/root`; no such exploit was tested here.
+
+Compatibility is also not proved merely by accepting the properties.
+`PrivateUsers=true` maps only root and the unit identity (units launched by a
+non-root per-user manager omit root); `identity` maps only the first 65,536 ids.
+Neither provides the subordinate-id mappings needed by this project's rootless
+Podman setup.
+`NoNewPrivileges=yes` prevents setuid/file-capability elevation by `newuidmap`
+and `newgidmap`; denying `@mount` prevents container mount operations. Those
+are not suitable blanket fixes while retaining rootless Podman. Keeping host
+`/dev` avoids hiding `/dev/kvm`, whereas `PrivateDevices=yes` would hide it.
+Read-only path settings do not block Unix socket IPC, and writable mounts
+propagated later from the host remain writable inside the unit; the manual
+explicitly warns of both limitations. Namespace support may also be gracefully
+disabled, so a successful unit start is not proof of enforcement.
+
+For the all-process requirement, stop at the PAM-handler exception rather than
+disable the walk or make it opt-in behind a partial guard. A future replacement
+needs a boundary established **before** PAM forks, plus fresh-host tests of the
+session, user-manager units, allowed IPC paths, nested namespaces, Podman and a
+planted world-writable directory outside the allowed paths. These privileged
+tests and hosted before/after timings have not been run for this proposal.
+
 ## Network
 
 The nftables rules match the sandbox user's uid and its subordinate
