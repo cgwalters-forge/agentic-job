@@ -61,8 +61,10 @@ gh-aw has a read-only GitHub MCP gateway with its own credential and
 per-tool limits. It also has a non-MCP `tools.github.mode: gh-proxy` path
 for the ordinary `gh` CLI. agentic-job has neither authenticated read
 path; the agent can use the public API unauthenticated through the egress
-proxy. Reusing the CLI proxy, rather than building a new MCP bridge, is
-the direction for [#112](https://github.com/cgwalters-forge/agentic-job/issues/112).
+proxy. Reusing the CLI proxy, rather than building a new MCP bridge, was
+investigated for [#112](https://github.com/cgwalters-forge/agentic-job/issues/112);
+the [host-user decision below](#host-user-integration-decision) recommends
+the existing egress proxy instead.
 The [pinned-source investigation below](#github-cli-proxy-reuse) describes
 the reusable artifacts and what still needs verification.
 Other MCP integrations and browser tooling are
@@ -158,9 +160,11 @@ digest-pinned provisioning. The supplied
 startup script is Docker-specific, however; copying it unchanged would
 not fit a host that deliberately disables the container daemon.
 
-The smallest next step is to reuse this pinned gateway, not implement a
-replacement. Before exposing an opt-in read input, the host-user wiring
-must verify the following boundaries:
+The initial recommendation was to reuse this pinned gateway, not implement a
+replacement. The checklist below records that investigation's proposed
+boundaries, including a stronger gateway-local refusal requirement. It is
+superseded by the [host-user integration decision](#host-user-integration-decision),
+which relies on the read-only token and egress filter instead:
 
 - A read-only job token stays with a supervisor outside the sandbox user;
   the sandbox cannot read its environment, token storage or TLS private
@@ -230,8 +234,75 @@ It does not start or provision the gateway, exercise `gh`, or prove sandbox
 token isolation. Do not point it at GitHub or a credential-bearing service:
 its mutation fixtures are intended only for the mock upstream.
 
-Issue #112 remains open. Authenticated sandbox access stays disabled until
-the gateway contract, CLI routing and fresh-runner isolation tests pass.
+Issue #112 remains open. Authenticated sandbox access stays disabled. The
+following decision replaces the earlier gateway integration recommendation.
+
+### Host-user integration decision
+
+For the narrow opt-in read design, the gateway's REST write passthrough is
+**not itself a blocker**: a job token minted with read permissions only can
+bound upstream authority, and the existing egress proxy can refuse REST
+write methods before forwarding. The gateway need not be a third read-only
+boundary. The mock probe above tests a stronger gateway contract than this
+design needs; its refusal expectations are not an acceptance test for the
+two-boundary design.
+
+However, reusing the supplied CLI stack is not a few dozen lines of host
+configuration. The pinned
+[startup script](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/sh/start_cli_proxy.sh)
+starts Docker, mounts TLS and log directories and
+waits for readiness. The pinned
+[CLI entrypoint](https://github.com/github/gh-aw-firewall/blob/275bb69827435ce3c06634f9277c7039f0c46374/containers/cli-proxy/entrypoint.sh)
+adds a TCP tunnel, combined CA, `GH_HOST` configuration, Unix-socket Enterprise
+metadata shim and command server. Docker is stopped by our hardening; the
+command server cannot safely run as the token holder. Omitting that sidecar
+still requires provisioning the gateway artifact, a separate service identity,
+TLS publication, sandbox listener admission and CLI compatibility wiring.
+These are source observations, not a new runtime trial of the image.
+
+Two transport details prevent simply setting a proxy environment variable:
+the gateway's [handler](https://github.com/github/gh-aw-mcpg/blob/03c6ca59170fe9179226d8d0a35bb01fd9327643/internal/proxy/handler.go)
+strips `/api/v3` and forwards API paths; this is not a general CONNECT proxy
+for `git https://github.com/...`. Also, `gh issue view` uses GraphQL POSTs.
+Our [default policy](../egress/policy.toml) permits only git-upload-pack and
+npm audit POSTs, so routing that CLI through the existing filter would refuse
+the required read. Allowing direct access to the credential holder instead
+would bypass the filter's REST write refusal. A read-only token does not
+resolve this routing mismatch.
+
+**Recommendation: extend the existing egress addon, not deploy another
+proxy or an agent-command service.** It already terminates TLS outside the
+sandbox, runs as `egress-proxy` with protected state and has a public CA bundle
+and sandbox routing. An opt-in workflow input could supply only the agent
+job's read-only token to that service through protected credential storage,
+never `sandbox.env`. After policy admission, replace Authorization only on
+HTTPS requests to exactly `api.github.com:443`; never on redirects to another
+host, plain HTTP or arbitrary ports. Keep public git HTTPS on its existing
+unauthenticated fetch route: public targets do not need a git credential.
+This avoids a new listener, TLS authority, gateway image and privileged
+command executor. No alternative is implemented here.
+
+There is one explicit exception to settle before implementation: allow POST
+to exactly `/graphql` for `gh` reads and rely on the minted token's read-only
+permissions to refuse GraphQL mutations upstream. Keep other API POSTs and
+REST writes locally refused, regardless of caller write rules when this mode
+is enabled. Do not call all POSTs writes and also promise `gh issue view`;
+do not introduce a home-grown GraphQL parser to reconcile those promises.
+The concrete threat stopped by the token permissions is an authenticated
+forge mutation, which an ephemeral runner cannot undo. Host/scheme/port
+scoping stops sending the injected credential to an agent-controlled server.
+
+The fresh-runner scripted-agent proof would need successful `gh issue view`,
+`gh pr diff`, `gh api --method GET` and public git HTTPS reads; a local refusal
+of a REST POST, with no upstream request; and upstream refusals of both
+`gh issue comment` and a direct GraphQL mutation in a dedicated test repository,
+with no successful mutation. `gh issue comment` uses GraphQL `addComment`, so
+its refusal tests the minted token's permissions, not local enforcement.
+It must also prove the sandbox cannot read credential storage or the service
+environment, and that opting out leaves access unauthenticated. Ordinary
+credential-free unit tests cannot establish minted-token permissions or
+fresh-runner isolation. This recommendation leaves #112 open and adds no
+workflow input, permission, action pin or token-placement change.
 
 ## Related gh-aw deployments
 
