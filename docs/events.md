@@ -206,19 +206,38 @@ jobs:
       id: label-${{ github.event.issue.number || github.event.pull_request.number }}
       repo: ${{ github.repository }}
       event: true
+      kind: analysis
+      outputs: add_comment,noop
       allow: workflow/label-review.toml
       config: .github/agentic-job/hosted.toml
       task: Review the triggering item and report findings.
       agent: fake
+      setup: .github/agentic-job/e2e/event.sh
       max-requests: '0'
 ```
 
-Replace `COMMIT` with the reviewed workflow commit and use the caller's
-own bounds and host configuration. The dedicated
+Save the caller as `.github/workflows/label-review.yml`. Copy
+[`workflow/label-review.toml`](../workflow/label-review.toml),
+[`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) and
+[`.github/agentic-job/e2e/event.sh`](../.github/agentic-job/e2e/event.sh)
+to the same paths in your repository. Replace `COMMIT` with the reviewed
+workflow commit, set `repos` and `bases` in the bounds to your repository
+and base branches, and create the `agent-review` label. Commit these files
+to your default branch before applying the label as an admitted actor.
+The dedicated
 [`workflow/label-review.toml`](../workflow/label-review.toml) bounds admit
 only label commands; do not add `labels` to shared bounds used by CI for
 opened or synchronize events. The scripted agent is for validating
 the caller; a real agent also needs its inference settings.
+
+Comment-only callers should use `kind: analysis` and explicitly request
+`outputs: add_comment,noop`: analysis runs hand back no patch, and policy
+refuses a request to create a pull request for that kind. The setup script
+selects the scripted comment session; without it, `fake` uses its built-in
+file-changing session, not the caller's task. Keep `contents: read`:
+activation, notification and apply need the item write permissions, not
+permission to push a branch. The other event callers' complete copy lists
+are in [the workflow guide](workflow.md#event-triggered-callers).
 
 The reusable workflow's trusted `activate` job removes the command label
 **after admission and before starting the agent or notifying the item**.

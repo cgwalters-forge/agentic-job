@@ -227,7 +227,7 @@ its bounds file (which events, which roles, which bots, whether forks,
 which commands), keys its `concurrency` on the triggering issue or pull
 request, and writes `task` as the standing instruction: the event's text
 follows it in the task file, fenced. Three callers in this repository,
-each a file to copy:
+with their copy lists below, and a dedicated review caller:
 
 - [`example-command.yml`](../.github/workflows/example-command.yml):
   `/agent REQUEST` as a comment on an issue or pull request. Every
@@ -243,6 +243,47 @@ each a file to copy:
 - [`example-schedule.yml`](../.github/workflows/example-schedule.yml): a
   weekly run with no item, so `comment-target` names where a comment
   goes.
+
+Copy each selected caller and its companion files to the **same paths** in
+your repository:
+
+- **Slash command:** [`.github/workflows/example-command.yml`](../.github/workflows/example-command.yml),
+  [`.github/agentic-job/allow.toml`](../.github/agentic-job/allow.toml),
+  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) and
+  [`.github/agentic-job/e2e/event.sh`](../.github/agentic-job/e2e/event.sh).
+- **Label:** [`.github/workflows/example-pull-request.yml`](../.github/workflows/example-pull-request.yml),
+  [`workflow/label-review.toml`](../workflow/label-review.toml),
+  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) and
+  [`.github/agentic-job/e2e/event.sh`](../.github/agentic-job/e2e/event.sh).
+  Create the `agent-review` label before using it. For issues as well as
+  pull requests, use the [label caller in events.md](events.md#label-caller-and-activation-step).
+- **Schedule:** [`.github/workflows/example-schedule.yml`](../.github/workflows/example-schedule.yml),
+  [`.github/agentic-job/allow.toml`](../.github/agentic-job/allow.toml) and
+  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml).
+  Set `comment-target` to an existing issue in your repository. This caller
+  uses the scripted agent's built-in file-changing session, not a setup script.
+- **Dedicated review:** [`.github/workflows/review.yml`](../.github/workflows/review.yml),
+  [`workflow/review.toml`](../workflow/review.toml),
+  [`workflow/review.md`](../workflow/review.md),
+  [`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml) and
+  [`.github/agentic-job/e2e/review.sh`](../.github/agentic-job/e2e/review.sh).
+  This runs on pull request events or `/review`, not a label; see the
+  [review guide](review.md).
+
+In each caller, replace `uses: ./.github/workflows/agentic-job.yml` with
+`uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
+using a reviewed commit. In its bounds file, set `repos` to your public
+repository and `bases` to the base branches you allow. Keep the caller's
+permissions and commit all its companion files to your default branch.
+The setup scripts are read from the trusted caller checkout; do not take
+them from an untrusted pull request head. With `fake`, they select a fixed
+session for testing the wiring, not a response to the task's text.
+
+Comment-only callers use `kind: analysis` with `outputs: add_comment,noop`,
+so no patch is handed back and policy refuses pull request outputs. They
+need no `contents: write`; keep the item write permissions for label
+activation, status and output comments. The command and schedule callers
+also allow pull requests and therefore retain `contents: write` for apply.
 
 What changes with `event: true`. `base` gives way to the pull request's
 base branch where the event names one, and the bounds have to cover it.
