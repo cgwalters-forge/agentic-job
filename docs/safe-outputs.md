@@ -36,17 +36,39 @@ gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
-`close_issue`, `add_labels`,
+`close_issue`, `add_labels`, `update_project`,
 `noop`, `missing_tool` and `missing_data`.
 
-`update_project` remains unsupported: named-project and field bounds and their
-acceptance/refusal tests are still needed before project operations can be exposed
-through the pinned gh-aw handler.
-That part of [#160](https://github.com/cgwalters-forge/agentic-job/issues/160)
-remains open. Organization project writes would require a separately configured
-apply token with access to the project (for a fine-grained token, organization
-Projects write permission); the repository job token cannot provide that access.
-Such a token must stay in the apply job, never in the proposals producer or check.
+### Updating project fields
+
+`update_project` admits exact Projects v2 URLs, exact field names, and a count:
+
+```toml
+[outputs.update_project]
+max = 3
+projects = ["https://github.com/orgs/example/projects/1"]
+fields = ["Status", "Turn", "Run", "Result"]
+```
+
+Both lists must be explicit and nonempty. Each request includes `project`,
+`target_repo` equal to the run's exact `repo`, `content_type: "issue"`, a positive
+integer `content_number`, and a nonempty `fields` object. Values may be strings or
+numbers; null/clearing is not supported by the pinned handler. Field options and types must already exist on
+GitHub. The handler can add the issue to the named project if it is not there.
+Other repositories, unlisted projects or fields, draft/PR content, aliases,
+project/schema mutations and temporary IDs are not exposed. Per-type `max` and
+total `max_outputs` count requests, not fields. The whole hand-back is refused
+when it exceeds either count. This accepts agent-board's documented
+`reconcile plan --emit` output without translating its routing keys.
+
+Organization project writes require the caller's apply environment token; see
+[token setup](workflow.md#the-apply-job-and-its-token). The repository job token
+cannot write organization projects. The token stays only in apply, never in the
+proposals producer or check.
+
+Apply also guards the handler's GraphQL client: it refuses implicit field
+creation and field IDs not read back with an exact allowlisted name. This stops
+the handler's normalization from writing an unlisted field or creating schema.
 
 ### Closing issues and adding labels
 

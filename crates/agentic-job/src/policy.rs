@@ -32,6 +32,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "create_issue",
     "close_issue",
     "add_labels",
+    "update_project",
     "noop",
     "missing_tool",
     "missing_data",
@@ -194,10 +195,49 @@ pub struct OutputLimit {
     /// Labels an issue may never name, even if also allowed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked: Vec<String>,
+    /// Exact GitHub Projects v2 URLs and field names admitted for updates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 impl OutputLimit {
     fn validate(&self, output: &str) -> Result<()> {
+        ensure!(
+            output == "update_project" || (self.projects.is_empty() && self.fields.is_empty()),
+            "outputs.{output}: projects and fields are supported only for update_project"
+        );
+        if output == "update_project" {
+            ensure!(
+                !self.projects.is_empty() && !self.fields.is_empty(),
+                "outputs.update_project requires explicit nonempty projects and fields lists"
+            );
+            for project in &self.projects {
+                static PROJECT_RE: LazyLock<Regex> = LazyLock::new(|| {
+                    Regex::new(
+                        r"^https://github\.com/(orgs|users)/[A-Za-z0-9-]+/projects/[1-9][0-9]*$",
+                    )
+                    .expect("a valid pattern")
+                });
+                ensure!(
+                    PROJECT_RE.is_match(project)
+                        && project
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|n| n.parse::<i32>().is_ok()),
+                    "invalid exact project URL {project:?}"
+                );
+            }
+            for field in &self.fields {
+                ensure!(
+                    !field.is_empty()
+                        && field == field.trim()
+                        && !field.chars().any(char::is_control),
+                    "invalid project field {field:?}"
+                );
+            }
+        }
         ensure!(
             matches!(output, "create_issue" | "add_labels")
                 || (self.allowed.is_none() && self.blocked.is_empty()),
@@ -569,6 +609,14 @@ impl Bounds {
                 .outputs
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.blocked.clone()),
+            projects: self
+                .outputs
+                .get(output)
+                .map_or_else(Vec::new, |bound| bound.projects.clone()),
+            fields: self
+                .outputs
+                .get(output)
+                .map_or_else(Vec::new, |bound| bound.fields.clone()),
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -651,11 +699,25 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
                 (own, None) => own.clone(),
             };
             limit.blocked.extend(bound.blocked.iter().cloned());
+            limit
+                .projects
+                .retain(|project| bound.projects.contains(project));
+            limit.fields.retain(|field| bound.fields.contains(field));
             true
         } else {
             false
         }
     });
+    if policy
+        .safe_outputs
+        .others
+        .get("update_project")
+        .is_some_and(|limit| limit.projects.is_empty() || limit.fields.is_empty())
+    {
+        return Err(vec![
+            "update_project has no common named projects or fields in both bounds files".to_owned(),
+        ]);
+    }
     policy.safe_outputs.create_pull_request = match (
         policy.safe_outputs.create_pull_request,
         other.safe_outputs.create_pull_request,
@@ -754,6 +816,86 @@ files = ["README.md", "AGENTS.md"]
     }
 
     #[test]
+    fn project_bounds_intersect_and_round_trip() {
+        let first = "https://github.com/orgs/example/projects/1";
+        let second = "https://github.com/users/example/projects/2";
+        let compile = |projects: &[&str], fields: &[&str]| {
+            let mut bounds = bounds();
+            bounds.outputs.insert(
+                "update_project".to_owned(),
+                OutputLimit {
+                    max: 2,
+                    projects: projects.iter().map(|s| (*s).to_owned()).collect(),
+                    fields: fields.iter().map(|s| (*s).to_owned()).collect(),
+                    ..OutputLimit::default()
+                },
+            );
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs: "update_project",
+                    ..request()
+                })
+                .unwrap()
+        };
+        for (projects, fields, accepted) in [
+            (vec![second], vec!["Status"], true),
+            (
+                vec!["https://github.com/orgs/other/projects/1"],
+                vec!["Status"],
+                false,
+            ),
+            (vec![second], vec!["Priority"], false),
+            (vec![second], vec!["status"], false),
+        ] {
+            let own = compile(&[first, second], &["Status", "Estimate"]);
+            let other = compile(&projects, &fields);
+            for (left, right) in [(own.clone(), other.clone()), (other, own)] {
+                let result = intersect(left, right);
+                assert_eq!(result.is_ok(), accepted, "{projects:?}, {fields:?}");
+                if let Ok(policy) = result {
+                    let limit = &policy.safe_outputs.others["update_project"];
+                    assert_eq!(limit.projects, vec![second]);
+                    assert_eq!(limit.fields, vec!["Status"]);
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("policy.json");
+                    std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+                    assert_eq!(Policy::load(&path).unwrap(), policy);
+                }
+            }
+        }
+        for (project, field) in [
+            ("http://github.com/orgs/example/projects/1", "Status"),
+            ("https://github.com/orgs/example/projects/0", "Status"),
+            ("https://github.com/orgs/example/projects/1/", "Status"),
+            ("https://github.com/orgs/example/projects/1?x=1", "Status"),
+            (first, ""),
+            (first, " Status"),
+            (first, "Status\n"),
+        ] {
+            let limit = OutputLimit {
+                max: 1,
+                projects: vec![project.to_owned()],
+                fields: vec![field.to_owned()],
+                ..OutputLimit::default()
+            };
+            assert!(
+                limit.validate("update_project").is_err(),
+                "{project:?}, {field:?}"
+            );
+            let mut policy = compile(&[first], &["Status"]);
+            policy
+                .safe_outputs
+                .others
+                .insert("update_project".to_owned(), limit);
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("policy.json");
+            std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+            assert!(Policy::load(&path).is_err(), "{project:?}, {field:?}");
+        }
+    }
+
+    #[test]
     fn issue_label_limits_survive_compilation_and_loading() {
         let mut bounds = bounds();
         let limit: OutputLimit =
@@ -837,6 +979,7 @@ files = ["README.md", "AGENTS.md"]
                         allowed: allowed
                             .map(|labels| labels.into_iter().map(str::to_owned).collect()),
                         blocked: vec![blocked.to_owned()],
+                        ..OutputLimit::default()
                     },
                 );
                 bounds

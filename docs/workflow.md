@@ -209,8 +209,8 @@ binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.
 `exit` is empty because no agent ran. Issue closure and label additions use the
 [bounded issue actions](safe-outputs.md#closing-issues-and-adding-labels).
-Project updates remain unexposed; they need named-project/field bounds and a
-separate apply token with organization Projects write access, not the job token.
+Project updates use [named project and field bounds](safe-outputs.md#updating-project-fields)
+and the apply environment token described below, not the job token.
 
 ## A caller
 
@@ -530,6 +530,22 @@ does not fall back to its own token. To set it up:
    default branch, and protect that branch.
 2. Store the token as the environment's secret `AGENTIC_JOB_APPLY_TOKEN`.
 3. Call with `apply-environment: NAME` and, for a fork, `output-repo`.
+
+For `update_project`, use that same environment secret, not an additional token:
+`AGENTIC_JOB_APPLY_TOKEN` must have organization **Projects: Read and write**
+for a fine-grained PAT or GitHub App, and repository **Issues: Read** (plus
+Metadata read) on the issue repository. A classic PAT needs **project** scope
+and repository access (`repo` for private repositories). Organization approval
+or SSO authorization may also be required. Other output types need their own
+repository write permissions only if allowed. The handler uses the apply step's
+authenticated client; no project credential is given to policy, check or the
+producer. The job token cannot substitute for organization Projects access.
+
+The project workflow changes leave permissions, action pins and token placement
+unchanged. Handler configuration fixes the issue repository to the checked run's
+`repo`, not `output-repo`. The apply-only GraphQL guard prevents gh-aw's implicit
+schema creation and normalized-name writes to unlisted fields. A refused project
+write fails the final outcome even when the PR-refusal exception is enabled.
 
 Three things about that environment are easy to get wrong. Its branch
 rule is evaluated against the ref the caller's run is on, not against
