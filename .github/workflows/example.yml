@@ -40,6 +40,8 @@ jobs:
     #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     # The binary is built from that same commit.
     uses: ./.github/workflows/agentic-job.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
       # The agent job asks for it: to announce the run to the inference
       # proxy, and to join a tailnet.
@@ -73,7 +75,9 @@ jobs:
       #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       #   max-requests: "150"
       # To apply with a token of your own, from an environment of this
-      # repository that holds the secret AGENTIC_JOB_APPLY_TOKEN:
+      # repository that holds SAFE_OUTPUTS_PAT. The job's explicit mapping
+      # also works when the secret exists only in this environment;
+      # see docs/workflow.md for the full call, never use secrets: inherit.
       #   output-repo: OWNER/FORK
       #   apply-environment: agent-apply
       # Without one: this organization keeps Actions from opening pull

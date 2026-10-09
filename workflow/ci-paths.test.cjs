@@ -14,6 +14,59 @@ const event = { before: base, after: head, pull_request: { base: { sha: base }, 
 const root = path.join(__dirname, '..');
 const ci = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
 
+test('draft cleanup accepts only successful closure or confirmed closed state', () => {
+  const step = ci.split('      - name: Close the drafts\n')[1].split('      # From the scratch issue')[0];
+  const command = step.split('        run: |\n')[1].trimEnd()
+    .split('\n').map(line => line.replace(/^          /, '')).join('\n');
+  for (const [name, prs, listExit, patchExit, state, readExit, success, reads] of [
+    ['no drafts', '', 0, 0, 'open', 0, true, 0],
+    ['closed by PATCH', '12 13', 0, 0, 'open', 0, true, 0],
+    ['branch deletion raced with PATCH', '12 13', 0, 1, 'closed', 0, true, 2],
+    ['PATCH failed and still open', '12 13', 0, 1, 'open', 0, false, 1],
+    ['state read failed', '12', 0, 1, 'closed', 1, false, 1],
+    ['listing failed', '', 1, 0, 'closed', 0, false, 0],
+  ]) {
+    const mock = `gh() {
+      if [ "$1" = pr ]; then
+        printf '%s\\n' "$PRS"
+        return "$LIST_EXIT"
+      fi
+      if [ "$2" = -X ]; then
+        printf 'patch %s\\n' "$4" >&2
+        return "$PATCH_EXIT"
+      fi
+      printf 'read %s\\n' "$2" >&2
+      printf '%s\\n' "$STATE"
+      return "$READ_EXIT"
+    }`;
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `${mock}\n${command}`], {
+      encoding: 'utf8',
+      env: { ...process.env, GH_REPO: 'owner/repo', MINE: 'agent-run-1',
+        PRS: prs, LIST_EXIT: String(listExit), PATCH_EXIT: String(patchExit),
+        STATE: state, READ_EXIT: String(readExit) },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status === 0, success, `${name}: ${result.stderr}`);
+    assert.equal((result.stderr.match(/^read /gm) || []).length, reads, name);
+    if (!success && prs) {
+      assert.doesNotMatch(result.stderr, /issues\/13/, `${name}: must stop on a real failure`);
+    }
+  }
+});
+
+test('each CI apt operation has acquisition retries and a short step timeout', () => {
+  let operations = 0;
+  for (const file of ['ci.yml', 'build.yml']) {
+    const workflow = fs.readFileSync(path.join(root, '.github/workflows', file), 'utf8');
+    for (const match of workflow.matchAll(/^      - run: (sudo apt-get[^\n]*)\n([^]*?)(?=^      - |\s*$)/gm)) {
+      operations++;
+      assert.match(match[1], /-o Acquire::Retries=3/, file);
+      assert.match(match[2], /^        timeout-minutes: 5$/m, file);
+    }
+  }
+  assert.equal(operations, 3);
+});
+
 test('only README and documentation Markdown can skip E2E', () => {
   for (const [names, expected] of [
     [['README.md'], false], [['docs/workflow.md', 'docs/nested/page.md'], false],

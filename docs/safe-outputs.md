@@ -15,7 +15,7 @@ requirements behind it are
 [R7](requirements.md#r7-what-leaves-the-sandbox-is-checked-data) and
 [R16](requirements.md#r16-the-agents-writes-are-capped-checked-outputs-applied-elsewhere).
 
-The applying job's `AGENTIC_JOB_APPLY_TOKEN` is our equivalent of gh-aw's
+The applying job's `SAFE_OUTPUTS_PAT` is our equivalent of gh-aw's
 `safe-outputs.github-token` for
 [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs).
 See [the token mapping and setup](workflow.md#the-apply-job-and-its-token)

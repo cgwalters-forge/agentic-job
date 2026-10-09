@@ -21,6 +21,8 @@ concurrency:
 jobs:
   run:
     uses: ./.github/workflows/agentic-job.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
       id-token: write
       contents: write

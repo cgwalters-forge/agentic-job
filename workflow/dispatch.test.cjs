@@ -75,7 +75,21 @@ test('caller fixes capabilities and token boundary', () => {
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
     assert.ok(workflow.includes(line), line);
   }
-  assert.doesNotMatch(workflow, /^\s+(secrets:|runner:)/m);
+  assert.doesNotMatch(workflow, /^\s+runner:/m);
+  assert.doesNotMatch(workflow, /secrets: inherit/);
+  const target = workflow.split('\n  target:\n')[1].split('\n  run:\n')[0];
+  assert.doesNotMatch(target, /secrets(?:[.:]|\[)/);
+  const forwarded = workflow.split('\n  run:\n')[1].split('    secrets:\n')[1].split('    permissions:\n')[0];
+  assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), ['SAFE_OUTPUTS_PAT']);
+  assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n        required: false'));
+  assert.ok(forwarded.includes("SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}"));
+  const expression = forwarded.match(/\$\{\{ (.+) \}\}/)[1];
+  for (const scripted of [false, true]) {
+    for (const pat of ['', 'test-pat']) {
+      assert.equal(Function('inputs', 'secrets', `return ${expression}`)(
+        { scripted }, { SAFE_OUTPUTS_PAT: pat }), scripted ? '' : pat);
+    }
+  }
   assert.match(bounds, /^repos = \["cgwalters-forge\/agentic-job"\]$/m);
   assert.match(bounds, /^max_outputs = 3$/m);
   for (const type of ['create_pull_request', 'add_comment', 'noop', 'missing_tool', 'missing_data']) {

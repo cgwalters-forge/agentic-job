@@ -36,6 +36,8 @@ jobs:
     # Another repository names the workflow by the commit it has read:
     #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     uses: ./.github/workflows/agentic-job.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
       id-token: write
       # For the job's own token to apply the outputs here and to post the

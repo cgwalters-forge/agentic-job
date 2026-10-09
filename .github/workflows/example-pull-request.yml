@@ -35,6 +35,8 @@ jobs:
     concurrency:
       group: agent-pull-${{ github.event.pull_request.number }}
     uses: ./.github/workflows/agentic-job.yml
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
       id-token: write
       contents: read

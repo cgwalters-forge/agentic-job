@@ -58,7 +58,7 @@ test('conclusion excludes wildcard targets and retains output-repository routing
   assert.equal((conclude.match(/needs.policy.outputs.comment-target != '\*'/g) ?? []).length, 2);
   assert.match(conclude, /REPO: \$\{\{ inputs.output-repo \|\| github.repository \}\}/);
   assert.match(conclude, /\[\[ "\$TARGET" =~ \^\[0-9\]\+\$/);
-  assert.doesNotMatch(conclude, /AGENTIC_JOB_APPLY_TOKEN/);
+  assert.doesNotMatch(conclude, /SAFE_OUTPUTS_PAT/);
 });
 
 test('expected policy refusal succeeds only with a refusal report and a working summary writer', () => {
