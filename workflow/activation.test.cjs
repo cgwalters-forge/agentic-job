@@ -63,4 +63,36 @@ test('documented label caller supplies every required reusable workflow input', 
     assert.match(example, new RegExp(`^      ${name}: .+`, 'm'), `missing required input ${name}`);
   }
   assert.match(example, /^      allow: workflow\/label-review\.toml$/m);
+  for (const caller of [example, fs.readFileSync('.github/workflows/example-pull-request.yml', 'utf8')]) {
+    for (const [input, value] of [
+      ['kind', 'analysis'],
+      ['outputs', 'add_comment,noop'],
+      ['agent', 'fake'],
+      ['setup', '.github/agentic-job/e2e/event.sh'],
+    ]) {
+      assert.ok(caller.split('\n').some(line => line.trim() === `${input}: ${value}`), `missing ${input}: ${value}`);
+    }
+    assert.match(caller, /^      contents: read$/m);
+    assert.doesNotMatch(caller, /^      contents: write$/m);
+  }
+});
+
+test('event caller copy lists include every referenced companion file', () => {
+  const guide = fs.readFileSync('docs/workflow.md', 'utf8');
+  const lists = guide.split('Copy each selected caller')[1].split('In each caller,')[0];
+  for (const [label, workflow] of [
+    ['Slash command', 'example-command.yml'],
+    ['Label', 'example-pull-request.yml'],
+    ['Schedule', 'example-schedule.yml'],
+    ['Dedicated review', 'review.yml'],
+  ]) {
+    const list = lists.split(`- **${label}:**`)[1].split('\n- **')[0];
+    const path = `.github/workflows/${workflow}`;
+    assert.ok(list.includes(`](../${path})`), `missing caller ${path}`);
+    const caller = fs.readFileSync(path, 'utf8');
+    for (const [, companion] of caller.matchAll(/^      (?:allow|config|setup|review-task): (.+)$/gm)) {
+      assert.ok(fs.statSync(companion).isFile(), `missing companion ${companion}`);
+      assert.ok(list.includes(`](../${companion})`), `${workflow} copy list omits ${companion}`);
+    }
+  }
 });
