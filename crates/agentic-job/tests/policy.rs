@@ -166,6 +166,64 @@ fn a_bad_bounds_file_is_an_error_and_not_a_refusal() {
         assert!(stderr.contains(want), "{stderr}");
     }
 }
+
+#[test]
+fn dispatch_profiles_use_the_example_bounds() {
+    let allow = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/dispatch/allow.toml");
+    for (kind, outputs, repo, code) in [
+        (
+            "branch",
+            "create_pull_request,noop,missing_tool,missing_data",
+            "cgwalters-forge/agentic-job",
+            0,
+        ),
+        (
+            "analysis",
+            "add_comment,noop,missing_tool,missing_data",
+            "cgwalters-forge/agentic-job",
+            0,
+        ),
+        ("analysis", "add_comment", "other/repo", 1),
+        ("branch", "create_issue", "cgwalters-forge/agentic-job", 1),
+        (
+            "analysis",
+            "create_pull_request",
+            "cgwalters-forge/agentic-job",
+            1,
+        ),
+    ] {
+        let url = format!("https://github.com/{repo}");
+        let output = policy(
+            &allow,
+            &[
+                ("--repo", repo),
+                ("--clone-url", &url),
+                ("--kind", kind),
+                ("--outputs", outputs),
+                ("--max-outputs", "3"),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{kind}/{outputs}/{repo}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if code != 0 {
+            assert!(output.stdout.is_empty());
+            continue;
+        }
+        let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(policy["max_outputs"], 3);
+        for name in outputs.split(',') {
+            assert_eq!(policy["safe_outputs"][name]["max"], 1, "{name}");
+        }
+        if kind == "branch" {
+            assert_eq!(policy["safe_outputs"]["create_pull_request"]["draft"], true);
+        }
+    }
+}
+
 #[test]
 fn review_caller_bounds_allow_only_analysis_outputs() {
     let allow = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/review.toml");
