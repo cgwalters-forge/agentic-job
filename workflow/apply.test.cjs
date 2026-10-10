@@ -546,6 +546,10 @@ test('a PAT that /user does not name finds nothing applied, and says so', async 
   assert.match(warnings[0], /nothing posted before counts as applied/);
   assert.deepEqual((await leaveOutApplied([comment()], [])).warnings, []);
   assert.deepEqual((await leaveOutApplied([comment()], [], { pat: true, me: 'maintainer' })).warnings, []);
+  // Whom the link to the issue is looked for by, after the guard.
+  for (const [token, poster] of [[{}, 'github-actions[bot]'], [{ pat: true, me: 'maintainer' }, 'maintainer'], [{ pat: true }, '']]) {
+    assert.equal((await leaveOutApplied([comment()], [], token)).outputs.poster, poster);
+  }
 });
 
 
@@ -602,7 +606,8 @@ for (const [state, merged, left] of [['open', null, true], ['closed', '2026-10-0
     const { kept, skipped, outputs } = await leaveOutApplied([pull], posted);
     assert.equal(kept.length, left ? 0 : 1);
     assert.deepEqual(skipped.map(item => item.url), left ? ['https://forge/pull/39'] : []);
-    assert.deepEqual(outputs, left ? { 'pull-request-number': 39, 'pull-request-url': 'https://forge/pull/39' } : {});
+    assert.deepEqual(outputs, { poster: 'github-actions[bot]',
+      ...left ? { 'pull-request-number': 39, 'pull-request-url': 'https://forge/pull/39' } : {} });
   });
 }
 
@@ -632,11 +637,110 @@ for (const [state, merged] of [['open', null], ['closed', '2026-10-01T00:00:00Z'
     // Applied as new: the handler then stops at the branch already there.
     assert.equal(kept.length, 1);
     assert.deepEqual(skipped, []);
-    assert.deepEqual(outputs, {});
+    assert.deepEqual(outputs, { poster: 'github-actions[bot]' });
   });
 }
 
 test('a pull request without a checked patch stops the guard', async () => {
   await assert.rejects(leaveOutApplied([pull], [], { patch: null }), /check accepted no patch/);
   assert.equal((await leaveOutApplied([comment()], [], { patch: null })).kept.length, 1);
+});
+
+function refs(items, issue = '64') {
+  const dir = mkdtempSync(join(homedir(), 'refs-test-'));
+  try {
+    writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
+    const result = command(dir, 'bash', ['-e', '-o', 'pipefail', '-c', step('Say which issue a pull request is for')],
+      { GH_AW_TMP: dir, RUNNER_TEMP: dir, OUTPUT_REPO: 'owner/repo', ISSUE: issue });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('a pull request refers to the issue the caller named, and closes nothing', () => {
+  const [opened, commented] = refs([pull, comment()]);
+  assert.equal(opened.body, 'change\n\nRefs owner/repo#64');
+  assert.deepEqual(commented, comment());
+  assert.equal(refs([{ ...pull, body: undefined }])[0].body, '\n\nRefs owner/repo#64');
+  // GitHub's closing keywords, none of which the line starts with.
+  assert.doesNotMatch(opened.body.split('\n').at(-1), /^(close[sd]?|fix(e[sd])?|resolve[sd]?)\b/i);
+  const steps = workflow.split('\n      - name: ').map(text => text.split('\n')[0]);
+  assert.ok(steps.indexOf('Say which issue a pull request is for') < steps.indexOf('Leave out what an earlier attempt applied'));
+  assert.match(workflow.split('- name: Say which issue a pull request is for\n')[1].split('\n')[0],
+    /if: \$\{\{ fromJSON\(inputs\.policy\)\.issue != '' \}\}/);
+});
+
+// Runs the step after upload against a forge holding `posted` on the issue.
+async function result({ made = [], skipped = [], pr = null, issue = '64', posted = [], poster = 'github-actions[bot]', artifacts = '' } = {}) {
+  const dir = mkdtempSync(join(homedir(), 'result-test-'));
+  try {
+    writeFileSync(join(dir, 'applied.json'), JSON.stringify({ made, already_applied: skipped, pull_request: pr }));
+    const outputs = {}, summary = [], queries = [], created = [];
+    const core = { setOutput: (key, value) => { outputs[key] = value; },
+      summary: { addHeading: text => { summary.push(text); return core.summary; },
+        addLink: (text, href) => { summary.push(href); return core.summary; }, write: async () => {} } };
+    const github = {
+      paginate: async (method, params) => method(params),
+      rest: { issues: {
+        listComments: params => { queries.push(params); return posted; },
+        createComment: async params => { created.push(params); },
+      } },
+    };
+    const env = { GH_AW_TMP: dir, OUTPUT_REPO: 'owner/repo', ISSUE: issue, POSTER: poster, ARTIFACT_PREFIX: artifacts,
+      GITHUB_RUN_ID: '7', RUN_URL: 'https://github.com/caller/repo/actions/runs/7' };
+    await new AsyncFunction('require', 'process', 'core', 'github', script('Say where what the run made is'))(
+      require, { env }, core, github);
+    return { outputs, summary, queries, created };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const opened = { number: 39, url: 'https://github.com/owner/repo/pull/39' };
+const on = item => ({ type: 'add_comment', url: `https://github.com/owner/repo/issues/${item}#issuecomment-1` });
+
+for (const [name, change, url, linked] of [
+  ['a pull request', { pr: opened }, opened.url, true],
+  ['a pull request an earlier attempt opened', { pr: opened, skipped: [{ type: 'create_pull_request', url: opened.url }] }, opened.url, true],
+  ['a comment on the issue', { made: [on(64)] }, on(64).url, false],
+  ['a comment an earlier attempt posted on the issue', { skipped: [on(64)] }, on(64).url, false],
+  ['a comment on a pull request of that number', { made: [{ type: 'add_comment', url: 'https://github.com/Owner/Repo/pull/64#issuecomment-2' }] },
+    'https://github.com/Owner/Repo/pull/64#issuecomment-2', false],
+  ['a comment elsewhere', { made: [on(12)] }, on(12).url, true],
+  ['a pull request beside a comment on the issue', { pr: opened, made: [on(64)] }, opened.url, true],
+  // An earlier attempt's comment stays the result when this one opens an issue.
+  ['a comment an earlier attempt posted elsewhere, then an issue', { skipped: [on(12)],
+    made: [{ type: 'create_issue', url: 'https://github.com/owner/repo/issues/5' }] }, on(12).url, true],
+  ['a comment on issue 640', { made: [on(640)] }, on(640).url, true],
+  ['an issue', { made: [{ type: 'create_issue', url: 'https://github.com/owner/repo/issues/5' }] }, 'https://github.com/owner/repo/issues/5', true],
+  ['nothing', { made: [{ type: 'noop' }] }, '', false],
+  ['a pull request, for no issue', { pr: opened, issue: '' }, opened.url, false],
+]) {
+  test(`the result of ${name} is ${url || 'nothing'}, ${linked ? 'linked from' : 'not linked from'} the issue`, async () => {
+    const { outputs, summary, queries, created } = await result(change);
+    assert.equal(outputs['result-url'], url);
+    assert.deepEqual(summary, url ? ['What the run made', url] : []);
+    assert.equal(created.length, linked ? 1 : 0);
+    assert.equal(queries.length, linked ? 1 : 0);
+    if (linked) {
+      assert.deepEqual({ ...created[0], body: undefined }, { owner: 'owner', repo: 'repo', issue_number: 64, body: undefined });
+      assert.match(created[0].body, new RegExp(`^The \\[run\\]\\(https://github\\.com/caller/repo/actions/runs/7\\) for this made ${url.replace(/[.?]/g, '\\$&')}\n\n<!-- agentic-job-linked: 7/[0-9a-f]{16} -->$`));
+    }
+  });
+}
+
+test('the issue is linked to what a run made once per run and call, by the token that posts', async () => {
+  const [first] = (await result({ pr: opened })).created;
+  const again = posted => result({ pr: opened, posted });
+  assert.equal((await again([{ user: actions, body: first.body }])).created.length, 0);
+  // Another poster's copy is not this token's link, and neither is another call's.
+  assert.equal((await again([{ user: mallory, body: first.body }])).created.length, 1);
+  assert.equal((await result({ pr: opened, posted: [{ user: maintainer, body: first.body }], poster: '' })).created.length, 1);
+  assert.equal((await result({ pr: opened, posted: [{ user: maintainer, body: first.body }], poster: 'maintainer' })).created.length, 0);
+  // A re-run whose result is another is not linked again.
+  const other = { number: 40, url: 'https://github.com/owner/repo/pull/40' };
+  assert.equal((await result({ pr: other, posted: [{ user: actions, body: first.body }] })).created.length, 0);
+  assert.equal((await result({ pr: opened, posted: [{ user: actions, body: first.body }], artifacts: 'dispatch-implement-' })).created.length, 1);
 });

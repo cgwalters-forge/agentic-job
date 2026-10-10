@@ -189,6 +189,13 @@ on:
           event-triggered run, and `*` where no event did
         type: string
         default: ""
+      issue:
+        description: >-
+          The issue or pull request of the output repository the run was made for, by number:
+          a pull request the run opens says `Refs` to it, and apply links it to what the run made
+          when that is not a comment on it. Empty for none
+        type: string
+        default: ""
       event:
         description: >-
           Decide the run from the event that started the calling workflow (`agentic-job event`,
@@ -250,6 +257,9 @@ on:
       comment-target:
         description: Where an `add_comment` goes, as decided here
         value: ${{ jobs.policy.outputs.comment-target }}
+      issue:
+        description: The `issue` input
+        value: ${{ jobs.policy.outputs.issue }}
       review-head:
         description: The exact review head resolved by the read-only policy job
         value: ${{ jobs.policy.outputs.review-head }}
@@ -346,6 +356,7 @@ jobs:
       # decided here: the inputs, or the event's pull request and item.
       base: ${{ steps.request.outputs.base }}
       comment-target: ${{ steps.request.outputs.comment-target }}
+      issue: ${{ steps.request.outputs.issue }}
       review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
       source-repository: ${{ job.workflow_repository }}
       source-sha: ${{ job.workflow_sha }}
@@ -546,16 +557,22 @@ jobs:
           OUTPUTS: ${{ inputs.outputs }}
           MAX_OUTPUTS: ${{ inputs.max-outputs }}
           TARGET: ${{ inputs.comment-target }}
+          APPLY_ENVIRONMENT: ${{ inputs.apply-environment }}
+          ISSUE: ${{ inputs.issue }}
         run: |
+          [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
           base=$BASE target=${TARGET:-*}
+          # Without an apply environment apply holds the job token: refuse
+          # here, not after the agent ran, what that token cannot apply.
+          [ -n "$APPLY_ENVIRONMENT" ] || set -- --job-token
           if [ -e "$JOB_DIR/event.json" ]; then
             base=$(jq -r --arg base "$BASE" '.base // $base' "$JOB_DIR/event.json")
             [ -n "$TARGET" ] || target=$(jq -r '.item.number // "*"' "$JOB_DIR/event.json")
           fi
           node "$SOURCE_DIR/workflow/policy-command.cjs" "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
-            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" > "$JOB_DIR/policy.json"
+            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json"
           jq . "$JOB_DIR/policy.json"
-          printf '%s\n' "base=$base" "comment-target=$target" | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
       - id: binary
         if: ${{ steps.event.outputs.admitted != 'false' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

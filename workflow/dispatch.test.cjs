@@ -69,7 +69,7 @@ test('caller fixes capabilities and token boundary', () => {
   assert.match(workflow, /kind: \$\{\{ inputs.kind == 'implement' && 'branch' \|\| 'analysis' \}\}/);
   assert.match(workflow, /inputs.kind == 'review' && 'add_comment,noop'/);
   for (const line of ['allow: .github/agentic-job/dispatch.toml',
-    'comment-target: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}',
+    'comment-target: ${{ inputs.item }}', 'issue: ${{ inputs.item }}', 'output-repo: ${{ inputs.repo }}',
     'apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || \'\' }}', 'apply-partial: false', 'notify: none',
     'model: ${{ needs.target.outputs.agent != \'fake\' && vars.AGENT_MODEL || \'\' }}', 'inference-url: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_URL || \'\' }}',
     'inference-audience: ${{ needs.target.outputs.agent != \'fake\' && vars.INFERENCE_AUDIENCE || \'\' }}']) {
@@ -133,6 +133,16 @@ test('review preflight accepts a PR', async () => {
   await preflight({ PROFILE: 'review' }, { number: 171, pull_request: {} });
 });
 
+test('the URL of what apply made is an output of dispatch, by way of the wrapper', () => {
+  const read = file => fs.readFileSync(path.join(root, `.github/workflows/${file}`), 'utf8');
+  for (const [file, value] of [['dispatch.yml', 'jobs.run.outputs.result-url'],
+    ['agentic-job.yml', 'jobs.apply.outputs.result-url'], ['apply.yml', 'jobs.apply.outputs.result-url']]) {
+    const outputs = (file === 'dispatch.yml' ? read(file).split('  workflow_call:\n')[1] : read(file)).split('\n    outputs:\n')[1];
+    assert.match(outputs, new RegExp(`^      result-url:\n        description: .+\n        value: \\$\\{\\{ ${value.replaceAll('.', '\\.')} \\}\\}$`, 'm'), file);
+  }
+  assert.match(read('apply.yml'), /^      result-url: \$\{\{ steps\.result\.outputs\.result-url \}\}$/m);
+});
+
 test('shipped caller inputs exist in the same-commit reusable workflow', () => {
   const reusable = fs.readFileSync(path.join(root, '.github/workflows/agentic-job.yml'), 'utf8');
   const inputs = new Set([...reusable.split('    inputs:\n')[1].split(/^    outputs:\n/m)[0]
@@ -177,19 +187,22 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
   const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
   const head = 'a'.repeat(40);
   const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
+  const draft = 'https://github.com/owner/repo/pull/150';
+  const link = comment(`The [run](https://github.com/owner/repo/actions/runs/1) for this made ${draft}\n\n<!-- agentic-job-linked: 1/0123456789abcdef -->`);
+  const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
   const verify = (change = {}) => {
     const repo = change.repo ?? 'owner/repo';
     const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147',
       REVIEW_HEAD: head, GITHUB_RUN_ID: '1', RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
     const responses = {
-      [`repos/${repo}/issues/64/comments`]: change.comments ?? [
-        comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')],
+      [`repos/${repo}/issues/64/comments`]: change.comments ?? [...completed, link],
       [`repos/${repo}/issues/147/comments`]: [comment(
         'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head) +
         '\nToolchain: ' + (change.toolchain ?? 'cargo 1.93.1'))],
       [`repos/${repo}/commits/dispatch/implement/agent-run-1`]: {
         files: [{ filename: change.file ?? 'DISPATCH-TRIAL.md' }], parents: [{}] },
-      [`repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':')}dispatch%2Fimplement%2Fagent-run-1&state=all`]: [{ draft: change.draft ?? true }],
+      [`repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':')}dispatch%2Fimplement%2Fagent-run-1&state=all`]: [{ draft: change.draft ?? true,
+        body: change.body ?? `Scripted.\n\nRefs ${repo}#64\n\n<!-- agentic-job-applied: 1/0/0123456789abcdef -->`, html_url: draft }],
     };
     vm.runInNewContext(source, {
       process: { env },
@@ -206,7 +219,8 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
   verify({ repo: 'cgwalters-forge/agentic-job' });
   for (const change of [{ head: 'b'.repeat(40) }, { repo: 'cgwalters-forge/agentic-job', toolchain: 'none' }, { file: 'README.md' }, { comments: [] },
     { draft: false }, { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
-    { comments: [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')] }]) {
+    { comments: [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), link] },
+    { comments: completed }, { comments: [...completed, link, link] }, { body: 'Scripted.\n\nFixes #64' }]) {
     assert.throws(() => verify(change));
   }
 });

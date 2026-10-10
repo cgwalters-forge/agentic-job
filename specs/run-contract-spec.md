@@ -93,6 +93,19 @@ Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
 `e2e-full`, whose scripted agent asks for its comment only after a read with
 the token succeeded and GitHub refused it a GraphQL write.
 
+**RC-018 — What apply's credential can do.** Policy MUST refuse, before an
+agent runs, an output type that the credential apply will hold cannot apply,
+naming the type and the credential it needs. Without an `apply-environment`
+apply holds the job token, which cannot write a Project: `update_project` is
+refused then, and `all` leaves it out. Every other shipped type the job token
+can apply in the calling repository; where the outputs go is the caller's to
+bound (`docs/dispatch.md` requires an apply environment for another
+repository).
+Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), test
+`what_the_job_token_cannot_apply_is_refused`;
+[proposals.test.cjs](../workflow/proposals.test.cjs), the `the policy command
+is told when apply holds only the job token` cases.
+
 ### 3.2 Proposals and refusals
 
 With `run`, the producer leaves `out/safe-outputs.jsonl` under its home and
@@ -210,6 +223,28 @@ comment is there once` in [ci.yml](../.github/workflows/ci.yml), which re-runs
 apply's guard and not its handlers; and `AtMostOnce` and
 `NoFalseSkip` in the [TLA+ model](README.md).
 
+**RC-019 — Finding the result from the issue.** For a caller-named `issue`
+(a number of the output repository, checked by policy), apply MUST end a pull
+request's body with `Refs OWNER/NAME#N` in its own words, never a closing
+keyword nor agent text, before the guard names it. Apply MUST give the URL of
+what it made (the pull request, else the first comment or issue, an earlier
+attempt's before this one's) as the `result-url` output of `apply.yml`,
+`agentic-job.yml` and `dispatch.yml`, and in the run summary. Unless that
+result is a comment on the issue, it MUST leave the issue one comment linking
+the run and the result, named by run and call and looked for as RC-013 looks
+for a comment, so that a re-run does not post it again. Failing to post the link
+MUST NOT fail the run. A pull request title made from the agent's summary
+MUST be cut at a word boundary within its limit.
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
+refers to the issue the caller named, and closes nothing`, the `the result of
+...` cases and `the issue is linked to what a run made once, by the token that
+posts`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
+capabilities and token boundary` and `the URL of what apply made is an output
+of dispatch, by way of the wrapper`; [proposals.test.cjs](../workflow/proposals.test.cjs),
+the issue cases of `the policy command is told when apply holds only the job
+token`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
+`titles_are_cut_between_words` and `made_up_pull_requests`.
+
 ### 3.4 The caller's own agent job
 
 A caller MAY write the agent job itself, between the policy, check and apply
@@ -287,6 +322,20 @@ These limitations are not additional guarantees:
   values in [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `redirections_to`.
   That payload grammar has no dedicated enforcing test here and is not part of
   the tested conformance claim.
+- RC-018 decides by `apply-environment`, not by the secret: the policy job
+  cannot see whether `SAFE_OUTPUTS_PAT` is passed (RC-009 keeps it from
+  policy). A PAT passed without an environment is refused `update_project`,
+  and an environment whose secret is empty or lacks project scope is admitted
+  and fails at apply. Nor does policy check where the job token can write: it
+  writes only the calling repository, and a call whose `repo` or `output-repo`
+  is another, without an apply environment, is admitted and fails at apply
+  (`dispatch.yml` refuses that before the run). The job token cannot push
+  changes under `.github/workflows/` either, which bounds may admit.
+- RC-019 posts no link when the forge refused the pull request and only its
+  branch was pushed: there is no result URL. Its link comment has RC-013's
+  limits for a comment, and a re-run that makes another result is not linked
+  again. An event-triggered run on an issue still gets gh-aw's own `Fixes #N`
+  in a pull request's body (its `auto_close_issue` default), as before.
 - Patch author identity is not bound to the producer or operator; see
   [issue 22](https://github.com/cgwalters-forge/agentic-job/issues/22).
 - Token selection has source and expression tests, not live tests of

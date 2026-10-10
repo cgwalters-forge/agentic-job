@@ -874,7 +874,10 @@ and repository access (`repo` for private repositories). Organization approval
 or SSO authorization may also be required. Other output types need their own
 repository write permissions only if allowed. The handler uses the apply step's
 authenticated client; no project credential is given to policy, check or the
-producer. The job token cannot substitute for organization Projects access.
+producer. The job token cannot substitute for organization Projects access:
+policy refuses `update_project` to a call without `apply-environment`, naming
+the token it needs, and `outputs: all` leaves it out. It cannot see whether a
+secret is passed, so a PAT passed without an environment is refused it too.
 
 The project workflow changes leave permissions, action pins and token placement
 unchanged. Handler configuration fixes the issue repository to the checked run's
@@ -972,7 +975,12 @@ the branch was pushed; nothing in `made` stands for it then.
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
-`pull-request` and `applied-artifact-id`.
+`pull-request`, `applied-artifact-id` and `result-url`: the URL of the pull
+request, or else of the first comment or issue apply made or found made, also
+in the run summary. With `issue` set to a number of the output repository, a
+pull request ends its body with `Refs OWNER/NAME#N`, and apply comments once
+on that issue with a link to the run and its result, unless the result is a
+comment there already. A link that cannot be posted fails no run.
 
 ### Running apply again
 

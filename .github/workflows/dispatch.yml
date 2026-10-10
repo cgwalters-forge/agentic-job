@@ -16,6 +16,9 @@ on:
       review-head:
         description: Exact PR head resolved for the review profile
         value: ${{ jobs.run.outputs.review-head }}
+      result-url:
+        description: The URL of what the run made, its pull request or comment; empty for none
+        value: ${{ jobs.run.outputs.result-url }}
     inputs:
       scripted:
         description: Trusted CI forces the model-free hosted trial regardless of deployment variables
@@ -166,6 +169,9 @@ jobs:
       inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}
       output-repo: ${{ inputs.repo }}
       comment-target: ${{ inputs.item }}
+      # A pull request says `Refs` to the item, and the item links to what
+      # the run made when that is not a comment on it.
+      issue: ${{ inputs.item }}
       apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
       refused-pull-request: branch
       apply-partial: false

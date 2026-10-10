@@ -38,6 +38,15 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "missing_data",
 ];
 
+/// The output types the job token cannot apply, whatever the call grants
+/// it, and the credential each needs instead. GitHub gives a workflow's
+/// token no permission on Projects; every other type writes to a
+/// repository, which the token can when it is the calling one.
+const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[(
+    "update_project",
+    "a token with project scope as SAFE_OUTPUTS_PAT, in an apply environment",
+)];
+
 /// A run hands back one patch, so at most one pull request.
 const MAX_PULL_REQUESTS: u32 = 1;
 
@@ -133,6 +142,9 @@ pub struct Args {
     /// The most outputs in all and of any one type, or "max"
     #[arg(long, value_name = "N", allow_hyphen_values = true)]
     pub max_outputs: String,
+    /// Apply will hold only the job token: refuse what it cannot apply
+    #[arg(long)]
+    pub job_token: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -266,6 +278,8 @@ pub struct Request<'a> {
     pub kind: Kind,
     pub outputs: &'a str,
     pub max_outputs: &'a str,
+    /// Whether apply will hold only the job token.
+    pub job_token: bool,
 }
 
 /// What `policy.json` holds: the request, once it is within the bounds.
@@ -508,6 +522,7 @@ impl Bounds {
             kind,
             outputs,
             max_outputs,
+            job_token,
         } = *request;
         let mut errors = Vec::new();
 
@@ -534,13 +549,22 @@ impl Bounds {
 
         // An analysis run has no change to propose.
         let no_change = kind == Kind::Analysis;
+        // What apply could not do with the credential it will hold: asked
+        // for, it is refused here, not after an agent ran for it.
+        let needs_token = |output: &str| {
+            NOT_FOR_THE_JOB_TOKEN
+                .iter()
+                .find(|(name, _)| job_token && *name == output)
+                .map(|(_, token)| *token)
+        };
         let mut types: Vec<&str> = Vec::new();
         if outputs.trim() == ALL_OUTPUTS {
             types.extend(
                 self.outputs
                     .keys()
                     .map(String::as_str)
-                    .filter(|output| !(no_change && *output == CREATE_PULL_REQUEST)),
+                    .filter(|output| !(no_change && *output == CREATE_PULL_REQUEST))
+                    .filter(|output| needs_token(output).is_none()),
             );
         } else {
             for output in outputs.split(',').map(str::trim).filter(|o| !o.is_empty()) {
@@ -570,6 +594,13 @@ impl Bounds {
                     )
                 }),
         );
+        errors.extend(types.iter().filter_map(|output| {
+            needs_token(output).map(|token| {
+                format!(
+                    "output type {output:?} needs {token}: without an apply environment, apply holds the job token, which cannot apply it"
+                )
+            })
+        }));
         if no_change && types.contains(&CREATE_PULL_REQUEST) {
             errors.push(format!(
                 "an analysis run hands back no change, so it can't {CREATE_PULL_REQUEST}"
@@ -656,6 +687,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         kind: args.kind,
         outputs: &args.outputs,
         max_outputs: &args.max_outputs,
+        job_token: args.job_token,
     };
     let compiled = bounds
         .compile(&request)
@@ -781,6 +813,7 @@ files = ["README.md", "AGENTS.md"]
             kind: Kind::Branch,
             outputs: "create_pull_request,noop",
             max_outputs: "3",
+            job_token: false,
         }
     }
 
@@ -810,6 +843,7 @@ files = ["README.md", "AGENTS.md"]
                 kind: Kind::Analysis,
                 outputs,
                 max_outputs: "1",
+                job_token: false,
             });
             assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
         }
@@ -1236,6 +1270,100 @@ files = ["README.md", "AGENTS.md"]
     }
 
     #[test]
+    fn what_the_job_token_cannot_apply_is_refused() {
+        let mut bounds = bounds();
+        bounds.outputs.insert(
+            "update_project".to_owned(),
+            OutputLimit {
+                max: 1,
+                projects: vec!["https://github.com/orgs/example/projects/2".to_owned()],
+                fields: vec!["Status".to_owned()],
+                ..OutputLimit::default()
+            },
+        );
+        bounds.validate().unwrap();
+        // (the outputs, whether apply holds only the job token, the types
+        // admitted or a part of the refusal)
+        type Expected = Result<&'static [&'static str], &'static str>;
+        let cases: &[(&str, bool, Expected)] = &[
+            (
+                "update_project",
+                true,
+                Err(
+                    "output type \"update_project\" needs a token with project scope as SAFE_OUTPUTS_PAT",
+                ),
+            ),
+            (
+                "noop,update_project",
+                true,
+                Err("without an apply environment, apply holds the job token"),
+            ),
+            ("update_project", false, Ok(&["update_project"])),
+            (
+                "create_pull_request,add_comment,noop,missing_tool,missing_data",
+                true,
+                Ok(&[
+                    "create_pull_request",
+                    "add_comment",
+                    "missing_data",
+                    "missing_tool",
+                    "noop",
+                ]),
+            ),
+            (
+                "all",
+                true,
+                Ok(&[
+                    "create_pull_request",
+                    "add_comment",
+                    "missing_data",
+                    "missing_tool",
+                    "noop",
+                ]),
+            ),
+            (
+                "all",
+                false,
+                Ok(&[
+                    "create_pull_request",
+                    "add_comment",
+                    "missing_data",
+                    "missing_tool",
+                    "noop",
+                    "update_project",
+                ]),
+            ),
+        ];
+        for (outputs, job_token, want) in cases {
+            let result = bounds.compile(&Request {
+                outputs,
+                job_token: *job_token,
+                ..request()
+            });
+            match (result, want) {
+                (Ok(policy), Ok(types)) => assert_eq!(
+                    policy.safe_outputs.types().collect::<Vec<_>>(),
+                    *types,
+                    "{outputs} {job_token}"
+                ),
+                (Err(errors), Err(want)) => assert!(
+                    errors.iter().any(|e| e.contains(want)),
+                    "{outputs} {job_token}: {errors:?}"
+                ),
+                (result, _) => panic!("{outputs} {job_token}: {result:?}"),
+            }
+        }
+        // The other types write to a repository, which the job token can.
+        for output in OUTPUT_TYPES {
+            assert_eq!(
+                NOT_FOR_THE_JOB_TOKEN.iter().any(|(name, _)| name == output),
+                *output == "update_project",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
     fn every_reason_is_given() {
         let request = Request {
             repo: "evil/x",
@@ -1244,6 +1372,7 @@ files = ["README.md", "AGENTS.md"]
             kind: Kind::Analysis,
             outputs: "create_pull_request,delete_repo",
             max_outputs: "many",
+            job_token: false,
         };
         let errors = bounds().compile(&request).unwrap_err();
         assert_eq!(errors.len(), 5, "{errors:?}");

@@ -142,6 +142,19 @@ fn cut(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+/// Squeezed TEXT cut to MAX_CHARS at the last space within them, so that
+/// no word is cut in two; a first word longer than that is cut anyway.
+fn cut_words(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let kept = cut(text, max_chars + 1);
+    match kept.rfind(' ') {
+        Some(space) if space > 0 => kept[..space].to_owned(),
+        _ => cut(text, max_chars),
+    }
+}
+
 /// A JSON object with its keys in the order they were written. The
 /// agent's own request is passed on with one field changed, and should
 /// otherwise read as the agent wrote it. Objects inside it are not kept
@@ -267,7 +280,7 @@ pub struct PullRequest {
 pub fn default_pull_request(outcome: &Object, run_id: &str) -> PullRequest {
     let summary = outcome.text("summary").unwrap_or_default().trim();
     let first = summary.lines().next().unwrap_or_default();
-    let title = cut(&squeeze(first), MAX_TITLE_CHARS);
+    let title = cut_words(&squeeze(first), MAX_TITLE_CHARS);
     let partial = match outcome.get("stopped_early") {
         Some(early) if truthy(early) => {
             let why = early
@@ -1066,6 +1079,27 @@ mod tests {
         }
         let got = default_pull_request(&object(json!({"summary": long})), "9");
         assert_eq!(got.title.chars().count(), MAX_TITLE_CHARS);
+        let words = format!("{} tail", "word ".repeat(30));
+        let got = default_pull_request(&object(json!({"summary": words})), "9");
+        assert_eq!(got.title, "word ".repeat(20).trim_end());
+    }
+
+    #[test]
+    fn titles_are_cut_between_words() {
+        // (the text, the most characters, what is kept)
+        let cases = [
+            ("short title", 20, "short title"),
+            ("exactly ten", 11, "exactly ten"),
+            ("one two three", 7, "one two"),
+            ("one two three", 8, "one two"),
+            ("one two three", 6, "one"),
+            ("ééé ééé", 5, "ééé"),
+            ("unbroken", 4, "unbr"),
+            ("", 4, ""),
+        ];
+        for (text, max, want) in cases {
+            assert_eq!(cut_words(text, max), want, "{text:?} {max}");
+        }
     }
 
     #[test]

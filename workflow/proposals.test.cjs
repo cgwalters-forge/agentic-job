@@ -1,6 +1,7 @@
 // Test the actual mode gate and routing without forge credentials.
 const assert = require('node:assert/strict');
-const { readFileSync, readdirSync } = require('node:fs');
+const { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = require('node:fs');
+const { homedir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
@@ -193,3 +194,34 @@ test('policy errors preserve the exit status and escape annotation data', () => 
   const step = policy.split('- name: Check the request against')[1].split('- id: binary')[0];
   assert.match(step, /node "\$SOURCE_DIR\/workflow\/policy-command.cjs"/);
 });
+
+for (const [environment, issue, expected] of [['', '', ['--job-token']], ['', '64', ['--job-token']], ['apply', '64', []],
+  ['apply', '0', null], ['apply', '64 ', null], ['apply', 'owner/repo#64', null], ['apply', '$(exit 0)', null]]) {
+  test(`the policy command is told when apply holds only the job token: environment ${JSON.stringify(environment)}, issue ${JSON.stringify(issue)}`, () => {
+    const dir = mkdtempSync(join(homedir(), 'request-'));
+    try {
+      mkdirSync(join(dir, 'workflow'));
+      // Stands in for the CLI: the arguments it was given are the policy.
+      writeFileSync(join(dir, 'workflow/policy-command.cjs'),
+        'process.stdout.write(JSON.stringify(process.argv.slice(2)))');
+      const script = policy.split("- name: Check the request against the caller's bounds\n")[1]
+        .split('        run: |\n')[1].split(/\n      [^ ]/)[0]
+        .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+      const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
+        encoding: 'utf8', env: { ...process.env, SOURCE_DIR: dir, JOB_DIR: dir, GITHUB_OUTPUT: join(dir, 'output'),
+          ALLOW: 'allow', REPO: 'o/r', BASE: 'main', KIND: 'implement', OUTPUTS: 'all', MAX_OUTPUTS: '3',
+          TARGET: '', APPLY_ENVIRONMENT: environment, ISSUE: issue },
+      });
+      // An issue is a number, or the run stops before the policy is written.
+      assert.equal(result.status, expected ? 0 : 1, result.stderr);
+      if (!expected) return assert.match(result.stdout, /::error::issue is not a number/);
+      const args = JSON.parse(readFileSync(join(dir, 'policy.json'), 'utf8'));
+      assert.deepEqual(args.slice(args.indexOf('--max-outputs') + 2), expected);
+      // Policy hands on the issue it checked, not the input.
+      assert.match(policy, /^      issue: \$\{\{ steps\.request\.outputs\.issue \}\}$/m);
+      assert.ok(readFileSync(join(dir, 'output'), 'utf8').split('\n').includes(`issue=${issue}`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

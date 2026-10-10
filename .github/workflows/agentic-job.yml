@@ -201,6 +201,13 @@ on:
           event-triggered run, and `*` where no event did
         type: string
         default: ""
+      issue:
+        description: >-
+          The issue or pull request of the output repository the run was made for, by number:
+          a pull request the run opens says `Refs` to it, and apply links it to what the run made
+          when that is not a comment on it. Empty for none
+        type: string
+        default: ""
       event:
         description: >-
           Decide the run from the event that started the calling workflow (`agentic-job event`,
@@ -268,6 +275,9 @@ on:
       pull-request:
         description: The number of the pull request the run opened, if it opened one
         value: ${{ jobs.apply.outputs.pull-request }}
+      result-url:
+        description: The URL of what apply made, the pull request or else the first comment or issue; empty for none
+        value: ${{ jobs.apply.outputs.result-url }}
       trigger:
         description: "For an event-triggered run, what `agentic-job event` decided: `admitted` or `refused`"
         value: ${{ inputs.event && (jobs.policy.outputs.admitted == 'true' && 'admitted' || 'refused') || '' }}
@@ -327,6 +337,7 @@ jobs:
       refused-pull-request: ${{ inputs.refused-pull-request }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       comment-target: ${{ inputs.comment-target }}
+      issue: ${{ inputs.issue }}
       event: ${{ inputs.event }}
       notify: ${{ inputs.notify }}
       title-prefix: ${{ inputs.title-prefix }}

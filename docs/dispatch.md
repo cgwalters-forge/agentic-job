@@ -37,6 +37,16 @@ same-repository pull request number targeting main**, not an issue number. It
 posts a clearly scripted verdict naming the pinned head. This is not an
 approval or permission to merge. Delete trial branches/comments when finished.
 
+Every run's result can be found from the issue it was dispatched for. A draft
+PR ends its body with `Refs OWNER/REPO#N`, which apply writes from the `repo`
+and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
+title is the first line of the agent's summary, cut between words to 100
+characters. Unless the result is a comment on the issue itself (triage,
+research and review), apply leaves one short comment there linking the run and
+its result, once even when the job is re-run. The result's URL is the
+`result-url` output of `dispatch.yml` (and of `agentic-job.yml` and
+`apply.yml`) and is in the run summary.
+
 All targets must use `main` and fit the committed bounds. Do not use globs.
 Protected documentation is refused by default; to deliberately permit a file,
 use `[unprotected_files]` in the bounds file as shown in its commented example.
