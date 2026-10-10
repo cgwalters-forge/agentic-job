@@ -81,6 +81,10 @@ That is the shape, not the whole call: a caller also grants the job its
 permissions, and a real agent needs an inference proxy the runner can
 reach. [docs/workflow.md](docs/workflow.md) has the whole call.
 
+The wrapper shares its prepare/run actions; see the
+[composition extraction status](docs/workflow.md#agent-step-extraction-not-yet-a-complete-composed-pipeline)
+before using them in a caller-owned job.
+
 A run can also start from an event: a `/command` in a comment, a label,
 a pull request, a schedule. The workflow decides who may trigger it
 before anything untrusted runs, and hands the agent the event's text
