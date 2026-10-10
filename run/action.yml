@@ -1,24 +1,11 @@
 name: Run a sandboxed agent
-description: Run on an already locked host and publish untrusted proposals for a separate checker
+description: >-
+  Run on an already locked host and publish untrusted proposals for a separate checker. What the
+  run is (the repository, the review head, the artifact names) is the policy job's run.json
 inputs:
   job-dir:
-    description: Runner-private directory containing policy.json, task.md and meta.json
-    required: true
-  repo:
-    description: Public target repository, OWNER/NAME
-    required: true
-  agent-config-repo:
-    description: Public agent configuration repository, OWNER/NAME, if any
-    default: ""
-  review-head:
-    description: Exact review head resolved by the trusted policy job
-    default: ""
-  artifact-prefix:
-    description: Unique prefix for this producer's artifacts within the workflow run
-    default: ""
-  apply-partial:
-    description: Accept a limit exit only when proposals were handed back
-    default: "false"
+    description: The directory prepare wrote, holding policy.json, task.md, meta.json and the policy job's run.json
+    default: ${{ github.workspace }}/.agentic-job
   github-token:
     description: >-
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
@@ -42,6 +29,42 @@ runs:
       run: |
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check
+    # The policy job's commit must be this action's: a caller that names
+    # another commit for an action would run one version's binary and
+    # settings with another's steps. Pinned remotely, the ref is the
+    # commit; checked out (.agentic-job-source), the checkout's HEAD is.
+    - name: The policy call is this action's commit
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        want=$(jq -r '.source_sha | select(type == "string" and test("\\A[0-9a-f]{40}\\z")) // ""' "$JOB_DIR/run.json") have=$ACTION_REF
+        [[ "$have" =~ ^[0-9a-f]{40}$ ]] || have=$(git -c safe.directory="*" -C "$GITHUB_ACTION_PATH" rev-parse HEAD 2> /dev/null) || have=
+        [[ "$want" =~ ^[0-9a-f]{40}$ && "$have" == "$want" ]] ||
+          { echo "::error::policy.yml ran at ${want:-no commit}, this action at ${have:-no commit}: pin all pieces to one commit"; exit 1; }
+    # From the trusted policy upload prepare put in place, not from the
+    # caller's job: the agent job passes nothing but the upload IDs.
+    - name: Read the run's settings
+      id: settings
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+      run: |
+        jq -e 'all(.[]; type == "string" and (test("[\\r\\n]") | not))' "$JOB_DIR/run.json" > /dev/null ||
+          { echo '::error::run.json is not one line per setting'; exit 1; }
+        jq -r 'to_entries[] | "\(.key)=\(.value)"' "$JOB_DIR/run.json" | tee -a "$GITHUB_OUTPUT"
+    # The session comes from this action's pinned source, not target code.
+    # It is installed only as the sandbox user, with no credential in reach.
+    - name: Install the built-in scripted session
+      if: ${{ steps.settings.outputs.fake_profile != '' }}
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+        PROFILE: ${{ steps.settings.outputs.fake_profile }}
+      run: |
+        case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
+        agentic-job sandbox exec --stdin "$ACTION/../workflow/dispatch-$PROFILE.sh" -- sh -s
     # The agent holds the token and could leak it, so it must not write.
     # A classic personal access token names its scopes, and one with any
     # but read scopes is refused here. Job, App and fine-grained tokens
@@ -68,7 +91,7 @@ runs:
       shell: bash
       env:
         JOB_DIR: ${{ inputs.job-dir }}
-        REVIEW_HEAD: ${{ inputs.review-head }}
+        REVIEW_HEAD: ${{ steps.settings.outputs.review_head }}
         # `agentic-job run` writes it to a file of the sandbox user's and
         # redacts it wherever the run logs or publishes.
         GH_TOKEN: ${{ inputs.github-token }}
@@ -86,8 +109,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        REPO: ${{ inputs.repo }}
-        REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }}
+        REPO: ${{ steps.settings.outputs.repo }}
+        REPOS: ${{ steps.settings.outputs.repo }} ${{ steps.settings.outputs.agent_config_repo }}
       run: |
         [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo '::error::run requires a public target repository name'; exit 1; }
         set -f
@@ -98,20 +121,20 @@ runs:
         done
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: ${{ inputs.artifact-prefix }}agent-run
+        name: ${{ steps.settings.outputs.artifact_prefix }}agent-run
         path: ${{ inputs.job-dir }}/out/run/
         retention-days: 90
         if-no-files-found: ignore
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: ${{ inputs.artifact-prefix }}agent-transcript
+        name: ${{ steps.settings.outputs.artifact_prefix }}agent-transcript
         path: ${{ inputs.job-dir }}/out/transcript.tar.zst
         retention-days: 30
         if-no-files-found: ignore
     - id: safe-outputs
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: ${{ inputs.artifact-prefix }}safe-outputs
+        name: ${{ steps.settings.outputs.artifact_prefix }}safe-outputs
         path: ${{ inputs.job-dir }}/out/safe-outputs/
         retention-days: 30
         if-no-files-found: ignore
@@ -119,7 +142,7 @@ runs:
       shell: bash
       env:
         EXIT: ${{ steps.run.outputs.exit }}
-        PARTIAL: ${{ inputs.apply-partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' }}
+        PARTIAL: ${{ steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' }}
       run: |
         case "$EXIT/$PARTIAL" in
           0/*) ;;

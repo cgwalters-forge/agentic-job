@@ -1,0 +1,599 @@
+# The last piece of an agent run: what check accepted, applied by the
+# only job with a credential that can write, and how the run ended told
+# to whoever started it. It runs nothing that came from the agent's
+# machine but the checked outputs.
+#
+#   apply     gh-aw's pinned handlers on check.yml's accepted outputs;
+#             the only job given SAFE_OUTPUTS_PAT
+#   conclude  edits the status comment notify posted, or posts check's
+#             refusal to the policy's comment target
+#
+# Its inputs are the caller's `needs` of the other pieces, as JSON: the
+# settings come from policy.yml's outputs, so that what is applied is
+# what that call decided. The agent's exit state decides only whether
+# a partial run is applied; check decided whether anything may be.
+name: agentic-job apply
+
+on:
+  workflow_call:
+    inputs:
+      policy:
+        description: "`toJSON(needs.policy.outputs)` of the policy.yml call"
+        type: string
+        required: true
+      agent:
+        description: "`toJSON(needs.agent)` of the agent job (its result and its `exit` output); `{}` for proposals from a non-agent job"
+        type: string
+        default: "{}"
+      check:
+        description: "`toJSON(needs.check)` of the check.yml call (its result and outputs)"
+        type: string
+        required: true
+    secrets:
+      # Explicit optional credential, consumed only by apply. Never use inherit.
+      # Callers must pass this name even for an environment secret;
+      # the environment's same-name value takes precedence (docs/workflow.md).
+      SAFE_OUTPUTS_PAT:
+        description: Optional credential for applying safe outputs; defaults to the job token when empty
+        required: false
+    outputs:
+      applied-artifact-id:
+        description: The artifact holding applied.json, which names what the apply job made
+        value: ${{ jobs.apply.outputs.artifact-id }}
+      pull-request:
+        description: The number of the pull request the run opened, if it opened one
+        value: ${{ jobs.apply.outputs.pull-request }}
+
+# No `permissions` here: a job that names none keeps what the caller
+# granted the call, which apply writes with and conclude comments with.
+
+# With `pipefail`, which the default shell of a step does without: a check
+# whose output is piped must still fail its step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # github/gh-aw's fixed place for a run's files (its constants.cjs).
+  GH_AW_TMP: /tmp/gh-aw
+
+jobs:
+  # It runs gh-aw's pinned handlers on the checked outputs, and nothing
+  # that came from the agent's machine but those outputs. No `permissions`
+  # here: it keeps what the caller granted the call, which with
+  # `apply-environment` should be no more than the other jobs ask for.
+  apply:
+    # A run that ended well, or one stopped at a limit whose caller asked
+    # for partial work. The exit state comes from the agent's machine and
+    # decides only this; the check job decided whether it may be applied.
+    if: >-
+      ${{ !cancelled() && fromJSON(inputs.check).result == 'success' && (fromJSON(inputs.policy).proposals-artifact != '' || format('{0}', fromJSON(inputs.agent).outputs.exit) == '0' ||
+          (fromJSON(inputs.policy).apply-partial == 'true' && contains(fromJSON('["3", "124"]'), fromJSON(inputs.agent).outputs.exit))) && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
+    runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
+    timeout-minutes: 15
+    environment: ${{ fromJSON(inputs.policy).apply-environment }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      pull-request: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+    env:
+      OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
+      REPO: ${{ fromJSON(inputs.policy).repo }}
+      BASE: ${{ fromJSON(inputs.policy).base }}
+      REPORT: /tmp/gh-aw/report.json
+      # What gh-aw's handlers list the things they made in.
+      MADE: /tmp/gh-aw/safe-output-items.jsonl
+      # What the forge answers where Actions may not open pull requests.
+      REFUSAL: GitHub Actions is not permitted to create or approve pull requests
+    steps:
+      # The pieces must be one commit's: a policy call pinned elsewhere
+      # would have this commit's code check (or apply) the settings,
+      # binary and policy of another, possibly an older, weaker one.
+      - name: The policy call is this workflow's commit
+        env:
+          SOURCE_REPOSITORY: ${{ fromJSON(inputs.policy).source-repository }}
+          SOURCE_SHA: ${{ fromJSON(inputs.policy).source-sha }}
+          REPOSITORY: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" == "$REPOSITORY" && "$SOURCE_SHA" == "$SHA" ]] ||
+            { echo "::error::policy.yml ran at $SOURCE_REPOSITORY@$SOURCE_SHA, this workflow at $REPOSITORY@$SHA: pin all pieces to one commit"; exit 1; }
+      # From the caller's composition: an empty ID must not turn
+      # download-artifact into a download of all uploads, the agent's
+      # unchecked proposals included.
+      - name: Require the checked outputs' artifact ID
+        env:
+          CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+        run: |
+          [[ "$CHECKED" =~ ^[1-9][0-9]*$ ]] || { echo '::error::a checked artifact ID is required'; exit 1; }
+      # The output repository, whole: the patch is applied on the commit
+      # the agent started from, which a shallow clone does not have. The
+      # handlers push with this checkout's credentials. Only check's accepted
+      # patch report enables it; comment-only outputs need no repository/base.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        with:
+          repository: ${{ env.OUTPUT_REPO }}
+          ref: ${{ fromJSON(inputs.policy).base }}
+          fetch-depth: 0
+          # Same selection as the handlers; only apply gets this PAT.
+          token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          persist-credentials: true
+      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+          path: ${{ env.GH_AW_TMP }}
+      # `git am` keeps the patch's author and needs a committer, and is to
+      # keep a carriage return at a line's end, as the trial below does. Without
+      # rename detection a patch that does not apply as it is stops with a
+      # conflict, where `git am --3way` would look for the file by content
+      # and could change another path than the patch names.
+      - name: Configure git
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config merge.renames false
+          git config diff.renames false
+          git config am.keepcr true
+      # The target's base branch as this job fetched it, not as anything
+      # that was handed back says. A fork that is behind is fast-forwarded
+      # and one that has diverged stops here.
+      - name: Fetch the target's base branch, and bring a fork's up to it
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        run: |
+          git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
+          [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || { git merge --ff-only refs/agentic-job/target-base && git push origin "HEAD:refs/heads/$BASE"; }
+      # The branch a pull request is pushed as is named in the hand-back,
+      # and the handlers push that name as it is: it has to be this
+      # run's, whatever the agent's machine wrote there.
+      - name: The pull request's branch is this run's
+        run: |
+          jq -e --arg want "agent-run-$GITHUB_RUN_ID" \
+            'all(.items[] | select(.type == "create_pull_request"); .branch == $want)' "$GH_AW_TMP/agent_output.json"
+      # The commit the patch says it starts from is the hand-back's own
+      # claim: it has to be one the target's base branch holds. Applied
+      # there with a plain `git am`, which takes a patch only where it
+      # applies exactly, the patch must change the files `check` saw it
+      # name and no others, before the handlers apply and push it. A
+      # report that cannot be read stops the job: only one that says
+      # there is no patch skips this.
+      # Materialize both lists so pipefail catches extraction failures;
+      # process substitutions would hide them. check rejects control
+      # characters in paths, and quotePath=false keeps UTF-8 names literal.
+      - name: Apply the patch on its own base, and compare what changed with what was checked
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        run: |
+          patch=$(jq -c .patch "$REPORT")
+          [ "$patch" != null ] || exit 0
+          base=$(jq -er '.patch.base_commit' "$REPORT")
+          git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
+            { echo "::error::the patch starts from $base, which is not a commit of $REPO's $BASE"; exit 1; }
+          git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
+          git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP"/aw-*.patch
+          git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
+          jq -er '.patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/checked-files"
+          diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
+          git worktree remove --force "$RUNNER_TEMP/trial"
+      # The collector's configuration with how to apply added: an unsigned
+      # push keeps the author (a signed one is made through the API, as the
+      # token's owner), and a pull request that fails is not to become an
+      # issue. Each input is one string of the result.
+      - name: Write the handlers' configuration
+        env:
+          BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
+          PARTIAL: >-
+            ${{ fromJSON(inputs.agent).outputs.exit == '124' && '[partial: stopped at the timeout] '
+                || fromJSON(inputs.agent).outputs.exit == '3' && '[partial: stopped at a limit] ' || '' }}
+          TITLE_PREFIX: ${{ fromJSON(inputs.policy).title-prefix }}
+          COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
+          PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true}'
+        run: |
+          jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
+            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" '
+            (select(has("create_pull_request")).create_pull_request) += $pr
+              + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title}
+            | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
+            | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
+            | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
+            | (select(has("add_labels")).add_labels) += {"target-repo": $action_repo, target: "*", issue_intent: false, create_if_missing: false}
+            | (select(has("update_project")).update_project) += {"target-repo": $action_repo}
+          ' "$GH_AW_TMP/config.json" > "$GH_AW_TMP/handler-config.json"
+          echo "GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=$(jq -c . "$GH_AW_TMP/handler-config.json")" >> "$GITHUB_ENV"
+      # The first line of what a partial run opens or posts says so too,
+      # in this file's words, chosen by the exit state. A partial run with
+      # neither a pull request, an issue nor a comment would leave nothing
+      # that says it was stopped, so it is not applied.
+      - name: Mark what a partial run opens or posts
+        if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
+        env:
+          STOPPED: ${{ fromJSON(inputs.agent).outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit' }}
+        run: |
+          jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment" or .type == "create_issue")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+            { echo "::error::the run was stopped at $STOPPED and handed back nothing that could say so"; exit 1; }
+          jq --arg note "**Partial work.** The run was stopped at $STOPPED before the task was done; this is what it handed back." \
+            '(.items[] | select(.type == "create_pull_request" or .type == "add_comment" or .type == "create_issue") | .body) |= "\($note)\n\n\(.)"' \
+            "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
+          mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
+      # A re-run of this job applies check's accepted outputs again, and
+      # gh-aw's handlers would post each comment, issue and pull request
+      # again. Each is named by this run, its place and its digest, the
+      # digest over the artifact prefix too: the calls of one run share its
+      # ID, and two may hand back the same request. The name goes last in
+      # the body, after the first line a verdict or a partial run's note
+      # needs, and the next step hides it in what it posts; one whose name is
+      # already posted is left out, the others are applied, so a re-run
+      # completes what an earlier attempt did not. A pull request's name
+      # holds the checked patch too, so a different patch is not taken for
+      # one applied before. Only what this job's token posts counts (the job
+      # token's github-actions[bot], or the user /user names for the PAT;
+      # with a PAT that names nobody, nothing counts), only the last
+      # name in a body, and check refuses requests holding the name: neither
+      # the agent nor a commenter can make a request look applied, not even
+      # with text the handlers decode into a name. Closing an issue (without
+      # a comment: `allow_body` is false), adding labels and
+      # setting a project field are the same done twice and are left alone.
+      - name: Leave out what an earlier attempt applied
+        id: applied
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
+          BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
+          ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
+          # Whether the token below is the PAT; the secret itself stays there.
+          TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const fs = require('node:fs');
+            const { createHash } = require('node:crypto');
+            const file = `${process.env.GH_AW_TMP}/agent_output.json`;
+            const output = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const [owner, repo] = process.env.OUTPUT_REPO.split('/');
+            // The job token posts as github-actions[bot] and cannot read
+            // /user; a PAT posts as the user it names. Any other bot's post
+            // is not this token's. A PAT that /user does not name (an app's
+            // token) has no one here, and nothing posted counts as applied.
+            const me = process.env.TOKEN_IS_PAT === 'true'
+              ? await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null)
+              : 'github-actions[bot]';
+            if (me === null) core.warning('GET /user does not name the SAFE_OUTPUTS_PAT token, so nothing posted before counts as applied, and a re-run posts again');
+            const ours = user => me !== null && user?.login === me;
+            // The patch check accepted is what a pull request applies.
+            const patch = () => {
+              const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+              if (!report.patch?.file) throw new Error('a pull request is to be opened, and check accepted no patch');
+              return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
+            };
+            const kept = [], skipped = [];
+            for (const [index, item] of output.items.entries()) {
+              if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
+              // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
+              const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
+              if (item.type === 'create_pull_request') hash.update('\0').update(patch());
+              const name = `agentic-job-applied: ${process.env.GITHUB_RUN_ID}/${index}/${hash.digest('hex').slice(0, 16)}`;
+              // The last name in a body is the one put there after what was asked.
+              const marked = found => ours(found.user) &&
+                [...String(found.body).matchAll(/<!-- (agentic-job-applied: \d+\/\d+\/[0-9a-f]{16}) -->/g)].at(-1)?.[1] === name;
+              let found;
+              if (item.type === 'add_comment') {
+                const target = /^\d+$/.test(process.env.COMMENT_TARGET) ? process.env.COMMENT_TARGET : item.item_number;
+                if (/^\d+$/.test(String(target))) {
+                  const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(target), per_page: 100 });
+                  found = comments.find(marked);
+                }
+              } else if (item.type === 'create_pull_request') {
+                // The branch is this run's, checked above; the handler names it so.
+                const { normalizeBranchName } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/normalize_branch_name.cjs`);
+                const prefix = normalizeBranchName(process.env.BRANCH_PREFIX);
+                const branch = prefix && !item.branch.startsWith(prefix) ? prefix + item.branch : item.branch;
+                const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, head: `${owner}:${branch}`, state: 'all', per_page: 100 });
+                found = pulls.find(pull => marked(pull) && (pull.state === 'open' || pull.merged_at));
+                if (found) {
+                  core.setOutput('pull-request-number', found.number);
+                  core.setOutput('pull-request-url', found.html_url);
+                }
+              } else {
+                // gh-aw finds its own marked issues the same way; search lags seconds behind.
+                const { data } = await github.rest.search.issuesAndPullRequests({ q: `repo:${owner}/${repo} is:issue in:body "${name}"`, per_page: 100 });
+                found = data.items.find(marked);
+              }
+              if (found) {
+                skipped.push({ type: item.type, name, url: found.html_url });
+              } else {
+                kept.push({ ...item, body: `${item.body ?? ''}\n\n${name}` });
+              }
+            }
+            fs.writeFileSync(file, JSON.stringify({ ...output, items: kept }));
+            fs.writeFileSync(`${process.env.GH_AW_TMP}/skipped.json`, JSON.stringify(skipped));
+            if (skipped.length) {
+              await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
+                .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
+            }
+      # Where the forge refuses the pull request to Actions, gh-aw's
+      # handler opens an issue in its place before it looks at
+      # `fallback_as_issue`: it knows that refusal by its words. So the
+      # refusal reaches the handler in other words, as a pull request that
+      # failed, which that setting does keep from becoming an issue; and
+      # no client the handlers use opens more issues than the run's
+      # create_issue outputs allow, none for a run without that type. The
+      # other words are fixed ones: gh-aw tries again for minutes when an
+      # error's text has a word like `timeout`
+      # in it, which a repository's or a branch's name may. A handler that
+      # failed fails this step, and the last step says what that means
+      # for the job.
+      - name: Apply the outputs with gh-aw's handlers
+        id: apply
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/agent_output.json
+          GH_AW_WORKFLOW_ID: agentic-job
+          GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
+        with:
+          # Use the checkout's credential selection for API writes too.
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
+            // Issues may be opened up to the run's create_issue count, by any handler;
+            // one is counted when it is made, so a request gh-aw retries counts once.
+            let issues = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_issue?.max ?? 0;
+            const creates = (options, what) => options.method === "POST" && new RegExp(`^/repos/[^/]+/[^/]+/${what}$`).test(options.url);
+            let projectRefusal = false;
+            // Preflight every field before any handler can mutate the forge.
+            // The pinned handler otherwise reports success for skipped values.
+            const pending = new Map();
+            const writeKey = variables => JSON.stringify([variables.projectId, variables.fieldId, variables.value]);
+            const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
+            try {
+              const items = JSON.parse(require('node:fs').readFileSync(process.env.GH_AW_AGENT_OUTPUT, 'utf8')).items;
+              for (const item of items.filter(item => item.type === 'update_project')) {
+                if (!project?.projects.includes(item.project)) throw new Error("project is outside the apply bounds");
+                const [, kind, login, , number] = new URL(item.project).pathname.split('/');
+                const owner = kind === 'orgs' ? 'organization' : 'user';
+                const found = await github.graphql(`query($login: String!, $number: Int!) {
+                  ${owner}(login: $login) { projectV2(number: $number) { id } }
+                }`, { login, number: Number(number) });
+                const projectId = found[owner]?.projectV2?.id;
+                if (!projectId) throw new Error("bounded project could not be resolved");
+                const fields = [];
+                let after = null;
+                do {
+                  const result = await github.graphql(`query($projectId: ID!, $after: String) {
+                    node(id: $projectId) { ... on ProjectV2 { fields(first: 100, after: $after) {
+                      nodes {
+                        ... on ProjectV2Field { id name dataType }
+                        ... on ProjectV2SingleSelectField { id name dataType options { id name } }
+                        ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } }
+                      }
+                      pageInfo { hasNextPage endCursor }
+                    } } }
+                  }`, { projectId, after });
+                  const page = result.node.fields;
+                  fields.push(...page.nodes);
+                  if (page.pageInfo.hasNextPage && (!page.pageInfo.endCursor || page.pageInfo.endCursor === after)) {
+                    throw new Error("project field pagination did not advance");
+                  }
+                  after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+                } while (after);
+                for (const [name, raw] of Object.entries(item.fields)) {
+                  const matches = fields.filter(field => field.name === name);
+                  if (!project.fields.includes(name) || matches.length !== 1) throw new Error(`project field ${name} is not an exact existing bounded field`);
+                  const field = matches[0];
+                  const normalized = name.split(/[\s_-]+/).map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+                  if (normalized.toUpperCase() === 'REPOSITORY' || fields.find(candidate => candidate.name.toLowerCase() === normalized.toLowerCase())?.id !== field.id) {
+                    throw new Error(`project field ${name} cannot be addressed exactly by the pinned handler`);
+                  }
+                  let value;
+                  if (field.dataType === 'NUMBER') {
+                    const number = typeof raw === 'number' ? raw : Number(raw);
+                    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(raw).trim()) || !Number.isFinite(number)) throw new Error(`invalid number for project field ${name}`);
+                    value = { number };
+                  } else if (field.dataType === 'SINGLE_SELECT' || field.dataType === 'ITERATION') {
+                    const iteration = field.dataType === 'ITERATION';
+                    const options = iteration ? field.configuration?.iterations : field.options;
+                    const option = options?.find(option => (iteration ? option.title : option.name).toLowerCase() === String(raw).toLowerCase());
+                    if (!option) throw new Error(`unknown option or iteration for project field ${name}`);
+                    value = iteration ? { iterationId: option.id } : { singleSelectOptionId: option.id };
+                  } else if (field.dataType === 'DATE') {
+                    const date = String(raw);
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error(`invalid date for project field ${name}`);
+                    value = { date };
+                  } else if (field.dataType === 'TEXT') {
+                    value = { text: String(raw) };
+                  } else {
+                    throw new Error(`unsupported type for project field ${name}`);
+                  }
+                  const key = writeKey({ projectId, fieldId: field.id, value });
+                  pending.set(key, (pending.get(key) ?? 0) + 1);
+                }
+              }
+            } catch (error) {
+              core.setOutput("project-refused", "true");
+              throw error;
+            }
+            const guarded = client => {
+              const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
+              if (project) {
+                // gh-aw normalizes names and creates missing fields. Refuse
+                // schema writes and IDs not read with an exact bounded name.
+                const graphql = client.graphql.bind(client);
+                const admitted = new Set();
+                client.graphql = async (query, variables) => {
+                  if (/\bcreateProjectV2Field\b/.test(query) ||
+                      (/\bupdateProjectV2ItemFieldValue\b/.test(query) && (!admitted.has(variables.fieldId) || !(pending.get(writeKey(variables)) > 0)))) {
+                    projectRefusal = true;
+                    throw new Error("project schema or field ID is outside the named field bounds");
+                  }
+                  const result = await graphql(query, variables);
+                  if (/\bupdateProjectV2ItemFieldValue\b/.test(query)) {
+                    if (!result?.updateProjectV2ItemFieldValue?.projectV2Item?.id) {
+                      projectRefusal = true;
+                      throw new Error("project field update did not complete");
+                    }
+                    const key = writeKey(variables);
+                    pending.set(key, pending.get(key) - 1);
+                  }
+                  for (const field of result?.node?.fields?.nodes ?? []) {
+                    if (project.fields.includes(field.name)) admitted.add(field.id);
+                  }
+                  return result;
+                };
+              }
+              client.hook.before("request", options => {
+                if (creates(options, "issues") && issues <= 0) throw new Error("no issue beyond this run's create_issue outputs is opened");
+                // The handlers strip HTML comments from bodies; the name the
+                // step before put last in a body is hidden only as it is sent.
+                if (typeof options.body === "string") {
+                  options.body = options.body.replace(/^(agentic-job-applied: \d+\/\d+\/[0-9a-f]{16})$(?![\s\S]*^agentic-job-applied:)/m, "<!-- $1 -->");
+                }
+              });
+              client.hook.after("request", (response, options) => {
+                if (creates(options, "issues")) issues -= 1;
+              });
+              client.hook.error("request", (error, options) => {
+                if (!creates(options, "pulls") || !String(error.message).includes(process.env.REFUSAL)) throw error;
+                core.setOutput("refused", "true");
+                throw new Error("Actions may not open pull requests in the output repository; the branch is pushed there");
+              });
+              return client;
+            };
+            require(`${dir}/setup_globals.cjs`).setupGlobals(core, guarded(github), context, exec, io, (...args) => guarded(getOctokit(...args)));
+            await require(`${dir}/safe_output_handler_manager.cjs`).main();
+            if (projectRefusal || [...pending.values()].some(count => count !== 0)) {
+              core.setOutput("project-refused", "true");
+              throw new Error("a project write was refused by the apply bounds");
+            }
+      # What was made, for whoever reads the run: `pull_request` is null
+      # when none was opened, and `refused` then says whether the forge
+      # refused it to Actions after the branch was pushed.
+      - name: Write applied.json
+        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        env:
+          PR: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+          PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
+          REFUSED: ${{ steps.apply.outputs.refused == 'true' }}
+          EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
+        run: |
+          touch "$MADE"
+          jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
+            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$REFUSED" '
+            {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made, refused: $refused,
+             already_applied: $skipped[0],
+             pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
+             handlers: $handlers[0]}' | tee "$GH_AW_TMP/applied.json"
+      - id: upload
+        if: ${{ always() && steps.apply.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ fromJSON(inputs.policy).artifact-prefix }}applied
+          path: ${{ env.GH_AW_TMP }}/applied.json
+          retention-days: 90
+          if-no-files-found: error
+      # A run that asked for a pull request and has none did not do what
+      # it was for, and neither did one of whose outputs a handler failed.
+      # The one failure a caller may take for an answer is the forge's
+      # refusal of the pull request and of nothing else, with the branch
+      # pushed: one output failed, and it was the one that pushes.
+      - name: Every output was applied, or only the pull request was refused
+        env:
+          MODE: ${{ fromJSON(inputs.policy).refused-pull-request }}
+          OUTCOME: ${{ steps.apply.outcome }}
+          FAILED: ${{ steps.apply.outputs.items_failed }}
+          PUSHES_FAILED: ${{ steps.apply.outputs.code_push_failure_count }}
+          PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
+        run: |
+          [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
+          asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
+          opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json") refused=$(jq .refused "$GH_AW_TMP/applied.json")
+          if [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; }; then exit 0; fi
+          [ "$refused/$FAILED/$PUSHES_FAILED/$MODE" = true/1/1/branch ] ||
+            { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened, refused to Actions: $refused)"; exit 1; }
+          echo "::warning::the branch is pushed to $OUTPUT_REPO and the pull request was refused: $REFUSAL there. Allow it in the repository's settings, or give the apply job a token (apply-environment)"
+
+  # How an event-triggered run ended, for whoever started it: the status
+  # comment `notify` posted is edited to say so, or a reaction says it
+  # where the caller asked for reactions alone. The results of the jobs
+  # are this workflow's own; the exit state and the pull request's
+  # number are numbers.
+  conclude:
+    needs: apply
+    if: ${{ always() && ((fromJSON(inputs.policy).event == 'true' && fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true') || (fromJSON(inputs.check).outputs.refusal != '' && fromJSON(inputs.policy).comment-target != '' && fromJSON(inputs.policy).comment-target != '*')) }}
+    runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      WORKFLOW: ${{ github.workflow }}
+    steps:
+      # The pieces must be one commit's: a policy call pinned elsewhere
+      # would have this commit's code check (or apply) the settings,
+      # binary and policy of another, possibly an older, weaker one.
+      - name: The policy call is this workflow's commit
+        env:
+          SOURCE_REPOSITORY: ${{ fromJSON(inputs.policy).source-repository }}
+          SOURCE_SHA: ${{ fromJSON(inputs.policy).source-sha }}
+          REPOSITORY: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" == "$REPOSITORY" && "$SOURCE_SHA" == "$SHA" ]] ||
+            { echo "::error::policy.yml ran at $SOURCE_REPOSITORY@$SOURCE_SHA, this workflow at $REPOSITORY@$SHA: pin all pieces to one commit"; exit 1; }
+      - name: How the run ended
+        id: ended
+        env:
+          RESULTS: ${{ fromJSON(inputs.agent).result }}/${{ fromJSON(inputs.check).result }}/${{ needs.apply.result }}
+          EXIT: ${{ fromJSON(inputs.agent).outputs.exit }}
+          PR: ${{ needs.apply.outputs.pull-request }}
+          REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
+        run: |
+          [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ ]]
+          case "$RESULTS" in
+            success/success/success) text="✅ [$WORKFLOW]($RUN_URL) ended well${PR:+ and opened pull request #$PR}." reaction=rocket ;;
+            success/skipped/skipped) text="✅ [$WORKFLOW]($RUN_URL) ended well and handed back nothing to apply." reaction=rocket ;;
+            *cancelled*) text="⏹️ [$WORKFLOW]($RUN_URL) was cancelled." reaction=confused ;;
+            *) text="❌ [$WORKFLOW]($RUN_URL) failed (agent, check, apply: $RESULTS; the agent's exit state: ${EXIT:-none})." reaction=confused ;;
+          esac
+          [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
+          [ "${EXIT:-0}" = 0 ] || [ "$reaction" != rocket ] || text="$text The run was stopped at a limit (exit state $EXIT); what it handed back is marked partial."
+          printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
+      # Notify's comment is edited; if posting it failed (which does not
+      # stop the run), the status goes in a new comment on the same item.
+      - name: Edit the status comment
+        if: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true' }}
+        env:
+          ID: ${{ fromJSON(inputs.policy).notify-comment-id }}
+          ITEM: ${{ fromJSON(inputs.policy).notify-item }}
+          TEXT: ${{ steps.ended.outputs.text }}
+        run: |
+          if [[ "$ID" =~ ^[0-9]+$ ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$ID" -f body="$TEXT" --jq .html_url
+          else
+            [[ "$ITEM" =~ ^[0-9]+$ ]] || { echo "::error::notify left no comment id and no item"; exit 1; }
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" -f body="$TEXT" --jq .html_url
+          fi
+      # Only a policy-admitted numeric target, never an agent-selected endpoint.
+      - name: Post the refusal to the comment target
+        if: ${{ fromJSON(inputs.check).outputs.refusal != '' && fromJSON(inputs.policy).comment-target != '' && fromJSON(inputs.policy).comment-target != '*' && !(fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') }}
+        env:
+          TARGET: ${{ fromJSON(inputs.policy).comment-target }}
+          REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
+          TEXT: ${{ steps.ended.outputs.text }}
+        run: |
+          [[ "$TARGET" =~ ^[0-9]+$ && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT" --jq .html_url
+      - name: A reaction that says how it ended
+        if: ${{ fromJSON(inputs.policy).notify == 'reaction' && fromJSON(inputs.policy).notified == 'true' }}
+        env:
+          KIND: ${{ fromJSON(inputs.policy).notify-kind }}
+          ID: ${{ fromJSON(inputs.policy).notify-id }}
+          REACTION: ${{ steps.ended.outputs.reaction }}
+        run: |
+          [[ "$ID" =~ ^[0-9]+$ ]] || { echo "::error::notify left nothing to react to"; exit 1; }
+          case "$KIND" in
+            issue) path="issues/$ID/reactions" ;;
+            comment) path="issues/comments/$ID/reactions" ;;
+            review_comment) path="pulls/comments/$ID/reactions" ;;
+          esac
+          gh api -X POST "repos/$GITHUB_REPOSITORY/$path" -f content="$REACTION" --jq .content

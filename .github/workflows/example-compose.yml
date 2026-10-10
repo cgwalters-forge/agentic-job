@@ -1,0 +1,187 @@
+# A caller that writes the agent job itself, from the pieces of
+# agentic-job.yml (docs/workflow.md), to run steps of its own on the
+# agent's machine: privileged ones before secure-host, others after run.
+# Use it only for such steps: everything else agentic-job.yml takes as
+# inputs, and calling that is simpler.
+#
+# The agent job is this file's, not agentic-job.yml's, so its identity
+# token's `job_workflow_ref` names this file. A broker entry that admits
+# `called_workflows: agentic-job.yml` does not match it, and the broker
+# has to admit this repository's own workflows, which is wider
+# (docs/inference.md#which-workflows-a-broker-admits). Decide that with
+# the broker's operator before copying this for a real agent.
+#
+# It runs the scripted agent, which needs no inference and no secret,
+# for an analysis that comments once on the issue it names. CI's
+# `e2e-compose` runs it, with its two example steps.
+name: example-compose
+run-name: compose ${{ inputs.item }}
+
+on:
+  workflow_call:
+    # Forward only these declared credentials, never inherit.
+    secrets:
+      SAFE_OUTPUTS_PAT:
+        required: false
+      GH_READ_TOKEN:
+        required: false
+    inputs:
+      task:
+        type: string
+        required: true
+      item:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      task:
+        description: The task (public, like everything about a run)
+        type: string
+        required: true
+      item:
+        description: The issue of this repository the run comments on
+        type: string
+        required: true
+
+permissions: {}
+
+# One run at a time for each issue.
+concurrency:
+  group: compose-${{ inputs.item }}
+  cancel-in-progress: false
+
+jobs:
+  # Another repository names each piece by the commit it has read, the
+  # same for all three, which also pins the binary and the agent job's
+  # actions (the policy call's source-repository and source-sha):
+  #   uses: cgwalters-forge/agentic-job/.github/workflows/NAME.yml@COMMIT
+  policy:
+    uses: ./.github/workflows/policy.yml
+    # Policy reads; activate and notify act on no event here.
+    permissions:
+      contents: read
+    with:
+      id: ${{ github.repository }}#${{ inputs.item }}
+      repo: ${{ github.repository }}
+      task: ${{ inputs.task }}
+      kind: analysis
+      outputs: add_comment,noop
+      max-outputs: "1"
+      comment-target: ${{ inputs.item }}
+      notify: none
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      fake-profile: comment
+      # Nothing counts model requests without an inference proxy, and a
+      # cap that nothing counts is refused. For claude or opencode, the
+      # proxy and how the run proves itself, without fake-profile:
+      #   agent: claude
+      #   inference-url: ${{ vars.INFERENCE_URL }}
+      #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      #   max-requests: "150"
+      max-requests: "0"
+      artifact-prefix: compose-
+
+  agent:
+    needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    # Read only, for the token the agent may get for GitHub reads; the
+    # identity token is for the run's registration at the inference proxy,
+    # and `sandbox setup` keeps it from the agent's user.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    outputs:
+      exit: ${{ steps.run.outputs.exit }}
+      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.policy.outputs.ref }}
+          persist-credentials: false
+      - name: The policy call's source repository and commit
+        env:
+          SOURCE_REPOSITORY: ${{ needs.policy.outputs.source-repository }}
+          SOURCE_SHA: ${{ needs.policy.outputs.source-sha }}
+        run: |
+          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
+          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      - uses: ./.agentic-job-source/prepare
+        with:
+          binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
+          policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      # ---- Your privileged steps go here: joining the proxy's network, ----
+      # packages, services. They run as the runner's user with sudo, before
+      # anything of the agent's is on the machine; they must not write
+      # .agentic-job, .agentic-job-source or /usr/local/bin/agentic-job, and
+      # must leave no credential where secure-host does not close it
+      # (specs/run-contract-spec.md, section 3.4). This example writes a
+      # file only root can.
+      - name: A caller's privileged step (example)
+        run: sudo install -m 0600 -o root -g root /dev/null /var/lib/compose-caller-step
+      # ---- End of your privileged steps. ----
+      - uses: ./.agentic-job-source/secure-host
+        with:
+          binary: /usr/local/bin/agentic-job
+          config: .agentic-job/config.toml
+      - id: run
+        timeout-minutes: 340
+        uses: ./.agentic-job-source/run
+        with:
+          # Without the secret, the job's own read token.
+          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
+      # ---- Your later steps go here. They run as the runner's user outside ----
+      # the sandbox, with no sudo, after the agent's outputs are uploaded;
+      # nothing of the agent's machine is trusted by check or apply. Treat
+      # what the agent left as hostile data too: never execute it (no build,
+      # script, hook or test from the checkout) and never hand it to a step
+      # that holds a credential. This job's runner user can still request
+      # the job's `id-token: write` OIDC token, so running agent files here
+      # could spend inference (specs/run-contract-spec.md, RC-017). This
+      # example shows the step before had root and this one has none.
+      - name: A caller's later step (example)
+        run: |
+          test "$(stat -c '%U %a' /var/lib/compose-caller-step)" = 'root 600'
+          if sudo -n true 2> /dev/null; then echo '::error::a step after run has sudo'; exit 1; fi
+
+  check:
+    needs: [policy, agent]
+    # Also for a run that failed and still handed something back.
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+
+  apply:
+    needs: [policy, agent, check]
+    if: ${{ always() && needs.policy.result == 'success' }}
+    uses: ./.github/workflows/apply.yml
+    # The explicit name is forwarded even when its value is available
+    # only in apply's environment.
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    # A comment on an issue of this repository is all it writes; it
+    # executes no agent-produced code.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      agent: ${{ toJSON(needs.agent) }}
+      check: ${{ toJSON(needs.check) }}

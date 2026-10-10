@@ -4,7 +4,7 @@
 # has to run before it.
 #
 # It is the last step of the job that has root. Everything that needs
-# root (packages, services, a tailnet) comes before it; from here on the
+# root (packages, services, joining a network) comes before it; from here on the
 # job's steps are the runner's user's without sudo, and a step that runs
 # code the job does not trust runs it as the sandbox user:
 #
@@ -134,6 +134,19 @@ runs:
           --string sandbox.runner-user="$RUNNER_USER" --string setup.script="$SCRIPT" \
           > "$RUNNER_TEMP/secure-host/config.toml"
         cat "$RUNNER_TEMP/secure-host/config.toml"
+    # Where the configuration names an inference proxy: a TCP connection
+    # to it as the runner's user, before setup, so that a runner off the
+    # proxy's network fails here and says so rather than in a probe of
+    # setup's rules. It sends no HTTP request, identity token or model
+    # credential, and the scripted agent is not checked. A configuration
+    # without the table, a deterministic job's, needs no Python 3.11 here.
+    - name: Check inference proxy reachability
+      shell: bash
+      env:
+        ACTION: ${{ github.action_path }}
+      run: |
+        grep -qx '\[inference\]' "$RUNNER_TEMP/secure-host/config.toml" || exit 0
+        python3 "$ACTION/../workflow/inference-preflight.py" "$RUNNER_TEMP/secure-host/config.toml"
     # The last thing in the job that has root, unless `lock` is off.
     - name: Secure the host
       shell: bash

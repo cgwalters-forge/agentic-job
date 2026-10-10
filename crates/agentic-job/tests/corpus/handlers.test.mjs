@@ -14,7 +14,7 @@ const root = resolve(here, '../../../..');
 const js = resolve(process.env.GH_AW_JS);
 const binary = resolve(process.env.AGENTIC_JOB);
 const require = createRequire(import.meta.url);
-const workflow = readFileSync(join(root, '.github/workflows/agentic-job.yml'), 'utf8');
+const workflow = readFileSync(join(root, '.github/workflows/apply.yml'), 'utf8');
 const configStep = workflow.split('- name: Write the handlers\' configuration\n')[1]
   .split('        run: |\n')[1].split(/\n        [^ ]/)[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');

@@ -1,5 +1,7 @@
 name: Prepare a sandboxed agent run
-description: Install trusted policy binaries and prepare runner-private inputs before secure-host
+description: >-
+  Install the trusted binary and write the runner-private inputs of an agent run, from policy.yml's
+  uploads, before the caller's own privileged steps and secure-host
 inputs:
   binary-artifact-id:
     description: Immutable binary upload ID directly from the trusted policy job in this run
@@ -7,12 +9,9 @@ inputs:
   policy-artifact-id:
     description: Immutable policy upload ID directly from the trusted policy job in this run
     required: true
-  agent:
-    description: Agent name; fake also installs the scripted agent
-    default: fake
   job-dir:
     description: Runner-private working directory, outside the sandbox user's home
-    required: true
+    default: ${{ github.workspace }}/.agentic-job
 outputs:
   job-dir:
     description: Prepared runner-private working directory
@@ -35,12 +34,39 @@ runs:
         artifact-ids: ${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}
         path: ${{ inputs.job-dir }}
         merge-multiple: true
+    # The policy job's commit must be this action's: a caller that names
+    # another commit for an action would run one version's binary and
+    # settings with another's steps. Pinned remotely, the ref is the
+    # commit; checked out (.agentic-job-source), the checkout's HEAD is.
+    - name: The policy call is this action's commit
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        want=$(jq -r '.source_sha | select(type == "string" and test("\\A[0-9a-f]{40}\\z")) // ""' "$JOB_DIR/run.json") have=$ACTION_REF
+        [[ "$have" =~ ^[0-9a-f]{40}$ ]] || have=$(git -c safe.directory="*" -C "$GITHUB_ACTION_PATH" rev-parse HEAD 2> /dev/null) || have=
+        [[ "$want" =~ ^[0-9a-f]{40}$ && "$have" == "$want" ]] ||
+          { echo "::error::policy.yml ran at ${want:-no commit}, this action at ${have:-no commit}: pin all pieces to one commit"; exit 1; }
+    # The scripted agent too, where the policy job's run.json names it.
     - name: Install the binary
       shell: bash
       env:
         JOB_DIR: ${{ inputs.job-dir }}
-        AGENT: ${{ inputs.agent }}
       run: |
+        agent=$(jq -er .agent "$JOB_DIR/run.json")
         sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job
-        [ "$AGENT" != fake ] || sudo install -m 0755 "$JOB_DIR/fake-agent" /usr/local/bin/fake-agent
+        [ "$agent" != fake ] || sudo install -m 0755 "$JOB_DIR/fake-agent" /usr/local/bin/fake-agent
         agentic-job --version
+    # The task is the policy job's, and what the run is called is this
+    # job's: its machine's cores, and the run it belongs to.
+    - name: Write what the run is called
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        [ -s "$JOB_DIR/task.md" ] || { echo '::error::the policy job left no task'; exit 1; }
+        item=$(jq -er .id "$JOB_DIR/run.json")
+        jq -n --arg item "$item" --arg url "$RUN_URL" --argjson id "$GITHUB_RUN_ID" --argjson attempt "$GITHUB_RUN_ATTEMPT" \
+          --argjson cores "$(nproc)" '{run_id: $id, run_attempt: $attempt, run_url: $url, item: $item, cores: $cores}' > "$JOB_DIR/meta.json"

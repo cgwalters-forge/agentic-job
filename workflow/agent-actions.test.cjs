@@ -9,6 +9,8 @@ const { test } = require('node:test');
 const prepare = readFileSync(join(__dirname, '../prepare/action.yml'), 'utf8');
 const run = readFileSync(join(__dirname, '../run/action.yml'), 'utf8');
 const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const compose = readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8');
+const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
 
 function step(source, name) {
   const section = source.split(`- name: ${name}\n`)[1];
@@ -33,6 +35,36 @@ test('prepare rejects missing and nonnumeric trusted artifact IDs before downloa
   }
   assert.match(prepare, /artifact-ids: \$\{\{ inputs.binary-artifact-id \}\},\$\{\{ inputs.policy-artifact-id \}\}/);
   assert.doesNotMatch(prepare, /name: \$\{\{ inputs\./);
+});
+
+test('prepare and run refuse a policy call of another commit before using its upload', (t) => {
+  const directory = mkdtempSync(join(homedir(), 'agent-actions-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const git = (...args) => spawnSync('git', ['-C', directory, ...args], { encoding: 'utf8' });
+  git('init', '-q');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'source');
+  const head = git('rev-parse', 'HEAD').stdout.trim();
+  const other = 'b'.repeat(40);
+  const plain = join(directory, 'plain');
+  require('node:fs').mkdirSync(plain);
+  // [source_sha in run.json, the action's ref, the action's directory, status]
+  for (const [sha, ref, path, expected] of [
+    [head, '', directory, 0], [other, '', directory, 1], [head, head, plain, 0],
+    [other, head, plain, 1], [head, other, directory, 1], [head, '', plain, 1],
+    [head, 'main', plain, 1], [undefined, '', directory, 1], ['', '', plain, 1],
+    [head.toUpperCase(), '', directory, 1], [`${head}\n`, '', directory, 1],
+  ]) {
+    require('node:fs').writeFileSync(join(directory, 'run.json'), JSON.stringify(sha === undefined ? {} : { source_sha: sha }));
+    for (const source of [prepare, run]) {
+      const result = shell(step(source, "The policy call is this action's commit"),
+        { JOB_DIR: directory, ACTION_REF: ref, GITHUB_ACTION_PATH: path, GIT_CEILING_DIRECTORIES: directory });
+      assert.equal(result.status, expected, `${sha} ${ref} ${path}: ${result.stdout}${result.stderr}`);
+    }
+  }
+  assert.ok(prepare.indexOf("this action's commit") < prepare.indexOf('name: Install the binary'));
+  assert.ok(run.indexOf("this action's commit") < run.indexOf("name: Read the run's settings"));
+  assert.match(policy, /--arg source_sha "\$SOURCE_SHA" '\$ARGS.named'/);
+  assert.match(policy, /SOURCE_SHA: \$\{\{ job.workflow_sha \}\}\n {8}run: \|\n {10}if \[ -n "\$PROFILE" \]/);
 });
 
 test('run rejects unlocked configuration before probing and probes before agent execution', () => {
@@ -70,7 +102,7 @@ test('agent exit is captured before uploads and partial result gate is unchanged
     }
   }
   assert.ok(run.indexOf('id: safe-outputs') < run.indexOf("name: The run's result"));
-  assert.match(run, /inputs.apply-partial == 'true' && steps.safe-outputs.outputs.artifact-id != ''/);
+  assert.match(run, /steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != ''/);
 });
 
 test('public visibility refusal blocks publication and repository names are data', () => {
@@ -87,31 +119,93 @@ test('public visibility refusal blocks publication and repository names are data
   assert.ok(run.indexOf('Check again that') < run.indexOf('uses: actions/upload-artifact'));
 });
 
-test('wrapper uses the same pinned-source producer and keeps trusted edges off agent outputs', () => {
-  const agent = wrapper.split('\n  agent:\n')[1].split('\n  notify:\n')[0];
-  assert.match(agent, /uses: \.\/\.agentic-job-source\/prepare/);
-  assert.match(agent, /uses: \.\/\.agentic-job-source\/run/);
-  assert.match(agent, /safe-outputs-artifact-id: \$\{\{ steps.run.outputs.safe-outputs-artifact-id \}\}/);
-  for (const input of ['binary-artifact-id', 'policy-artifact-id']) {
-    assert.ok(agent.includes(`${input}: \${{ needs.policy.outputs.${input} }}`));
-  }
-  assert.match(agent, /repository: \$\{\{ job.workflow_repository \}\}/);
-  assert.match(agent, /ref: \$\{\{ job.workflow_sha \}\}/);
+// The wrapper's agent job and the example's caller-owned one are the same
+// steps: the caller's repository, the actions of policy's own commit,
+// then prepare, secure-host and run, in that order.
+for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose]]) {
+  test(`${file} composes the pinned-source agent job and keeps trusted edges off agent outputs`, () => {
+    const agent = source.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+    assert.match(agent, /^    needs: policy$/m);
+    assert.match(agent, /safe-outputs-artifact-id: \$\{\{ steps.run.outputs.safe-outputs-artifact-id \}\}/);
+    for (const input of ['binary-artifact-id', 'policy-artifact-id']) {
+      assert.ok(agent.includes(`${input}: \${{ needs.policy.outputs.${input} }}`));
+    }
+    assert.match(agent, /repository: \$\{\{ needs.policy.outputs.source-repository \}\}\n {10}ref: \$\{\{ needs.policy.outputs.source-sha \}\}\n {10}path: .agentic-job-source\n/);
+    assert.match(agent, /^ {10}ref: \$\{\{ needs.policy.outputs.ref \}\}$/m);
+    const uses = [...agent.matchAll(/^ {6}(?:- |  )uses: ([^\n]+)/gm)].map(([, use]) => use.split(' ')[0]);
+    assert.deepEqual(uses.filter(use => !use.startsWith('actions/checkout@')), [
+      './.agentic-job-source/prepare', './.agentic-job-source/secure-host', './.agentic-job-source/run']);
+    for (const use of uses) assert.match(use, /^(\.\/\.agentic-job-source\/[-\w]+|actions\/checkout@[0-9a-f]{40})$/);
+    assert.ok(agent.indexOf('source/prepare') < agent.indexOf('source/secure-host'));
+    assert.ok(agent.indexOf('source/secure-host') < agent.indexOf('source/run'));
+    assert.doesNotMatch(agent, /SAFE_OUTPUTS_PAT|tailscale/i);
+    // An empty source would make the checkout take the caller's own.
+    const sourced = agent.split("- name: The policy call's source repository and commit\n")[1];
+    assert.ok(sourced.indexOf('[[ "$SOURCE_REPOSITORY"') < sourced.indexOf('path: .agentic-job-source'));
+    const script = sourced.split('        run: |\n')[1].split('\n      - ')[0].replace(/^ {10}/gm, '');
+    for (const [repo, sha, status] of [['o/r', 'a'.repeat(40), 0], ['', 'a'.repeat(40), 1], ['o/r', '', 1], ['o/r', 'main', 1]]) {
+      const result = spawnSync('bash', ['-e', '-c', script], { encoding: 'utf8', env: { ...process.env, SOURCE_REPOSITORY: repo, SOURCE_SHA: sha } });
+      assert.equal(result.status, status, `${repo} ${sha}`);
+    }
+    // Check and apply take the policy call's outputs as they are, and of
+    // this job only what run hands on.
+    const call = name => source.split(`\n  ${name}:\n`)[1].split(/\n  (?=[-\w]+:\n)/)[0].split('    with:\n')[1]
+      .replace(/^ *#.*$/gm, '').trimEnd();
+    assert.equal(call('check'), [
+      '      policy: ${{ toJSON(needs.policy.outputs) }}',
+      '      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}'].join('\n'));
+    assert.equal(call('apply'), [
+      '      policy: ${{ toJSON(needs.policy.outputs) }}',
+      '      agent: ${{ toJSON(needs.agent) }}',
+      '      check: ${{ toJSON(needs.check) }}'].join('\n'));
+  });
+}
+
+test('apply applies only what check accepted, whatever the caller\'s gate', () => {
+  const applier = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
+  const gate = applier.split('\n  apply:\n')[1].split('    runs-on:')[0];
+  assert.match(gate, /\$\{\{ !cancelled\(\) && fromJSON\(inputs.check\).result == 'success' && /);
+  assert.doesNotMatch(gate, /always\(\)/);
+});
+
+test('the source an agent job takes its actions from is the policy call\'s own', () => {
+  const job = policy.split('\n  policy:\n')[1].split('\n    steps:\n')[0];
+  assert.match(job, /^ {6}source-repository: \$\{\{ job.workflow_repository \}\}$/m);
+  assert.match(job, /^ {6}source-sha: \$\{\{ job.workflow_sha \}\}$/m);
   for (const action of [prepare, run]) {
     assert.doesNotMatch(action, /secrets\.|SAFE_OUTPUTS_PAT/);
     for (const use of action.matchAll(/uses: ([^\n]+)/g)) {
       assert.match(use[1], /^actions\/[\w-]+@[0-9a-f]{40} /);
     }
   }
-  assert.ok(agent.indexOf('/prepare') < agent.indexOf('/secure-host'));
-  assert.ok(agent.indexOf('/secure-host') < agent.indexOf('/run'));
+});
+
+// example-compose.yml is what a caller copies, with steps of its own in
+// two marked places. Its example steps, which CI's e2e-compose runs, show
+// where those run: the one before secure-host has root, the one after run
+// has none.
+test('the composed example marks where a caller\'s own steps go, and its examples prove their privileges', () => {
+  const agent = compose.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+  const at = text => { const index = agent.indexOf(text); assert.ok(index >= 0, text); return index; };
+  const order = [
+    'uses: ./.agentic-job-source/prepare', 'Your privileged steps go here', "name: A caller's privileged step",
+    'End of your privileged steps', 'uses: ./.agentic-job-source/secure-host', 'uses: ./.agentic-job-source/run',
+    'Your later steps go here', "name: A caller's later step",
+  ].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  const before = agent.split("- name: A caller's privileged step (example)\n")[1].split('\n      #')[0];
+  assert.match(before, /sudo install -m 0600 -o root -g root \/dev\/null (\/var\/lib\/[-\w]+)/);
+  const file = before.match(/\/dev\/null (\S+)/)[1];
+  const after = agent.split("- name: A caller's later step (example)\n")[1];
+  assert.ok(after.includes(`stat -c '%U %a' ${file})" = 'root 600'`));
+  assert.match(after, /if sudo -n true .*exit 1; fi/);
 });
 
 // The agent holds its GitHub token and can leak it: every permission of
 // the job that makes it is a read, but the run's own OIDC token.
 test('the agent job token reads and only apply holds a write credential', () => {
   const jobs = wrapper.split('\njobs:\n')[1];
-  const agent = jobs.split('\n  agent:\n')[1].split('\n  notify:\n')[0];
+  const agent = jobs.split('\n  agent:\n')[1].split('\n  check:\n')[0];
   const permissions = agent.split('    permissions:\n')[1].split('    outputs:\n')[0];
   // Every line is a permission, a comment, or a permission with one.
   const lines = permissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean);
@@ -129,18 +223,28 @@ test('the agent job token reads and only apply holds a write credential', () => 
       { 'github-reads': reads }, { GH_READ_TOKEN: supplied }, { token: 'job-token' }), expected);
   }
   assert.match(wrapper, /^      github-reads:\n[\s\S]*?type: boolean\n        default: true$/m);
-  const named = [...jobs.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
-  for (const [, name, job] of named) {
-    assert.equal(job.includes('secrets.GH_READ_TOKEN'), name === 'agent', name);
-    assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), name === 'apply', name);
+  // So in the example whose agent job a caller owns, and in the pieces.
+  for (const [file, source] of [['agentic-job.yml', wrapper], ['example-compose.yml', compose], ['policy.yml', policy],
+    ['check.yml', readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8')],
+    ['apply.yml', readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8')]]) {
+    const named = [...source.split('\njobs:\n')[1].matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
+    assert.ok(named.length > 0, file);
+    for (const [, name, job] of named) {
+      assert.equal(job.includes('secrets.GH_READ_TOKEN'), ['agentic-job.yml', 'example-compose.yml'].includes(file) && name === 'agent', `${file} ${name}`);
+      assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), name === 'apply', `${file} ${name}`);
+    }
   }
+  const owned = compose.split('\n  agent:\n')[1].split('\n  check:\n')[0];
+  const ownedPermissions = owned.split('    permissions:\n')[1].split('    outputs:\n')[0];
+  assert.deepEqual(ownedPermissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean).sort(),
+    ['actions: read', 'contents: read', 'id-token: write', 'issues: read', 'pull-requests: read']);
   // GitHub refuses a whole called workflow whose job asks for more than
   // the call was granted, the skipped agent job's included.
   const workflows = join(__dirname, '../.github/workflows');
   for (const file of readdirSync(workflows)) {
     const source = readFileSync(join(workflows, file), 'utf8');
     for (const [, name, job] of source.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)) {
-      if (!/^    uses: \.\/\.github\/workflows\/(agentic-job|dispatch)\.yml/m.test(job)) continue;
+      if (!/^    uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/m.test(job)) continue;
       const granted = job.split('    permissions:')[1]?.split(/\n    [^ ]/)[0] ?? '';
       const anchor = granted.match(/^ \*([-\w]+)/);
       const block = anchor ? source.split(`&${anchor[1]}\n`)[1].split(/\n    [^ ]/)[0] : granted;
@@ -179,5 +283,28 @@ test('the agent gets its GitHub token, and a classic token that can write is ref
       { GH_TOKEN: token, HEADERS: headers, STATUS: String(status) });
     assert.equal(result.status, expected, `${headers}: ${result.stdout}${result.stderr}`);
     assert.doesNotMatch(result.stdout + result.stderr, /ghs_job|gho_classic/);
+  }
+});
+
+// agentic-job.yml is the pieces composed: every setting it takes but the
+// agent job's own goes to the policy call as it is, so the two cannot
+// drift apart.
+test('the wrapper forwards every setting to the policy call as it is', () => {
+  const names = source => [...source.split('    inputs:\n')[1].split(/^    (?:outputs|secrets):\n/m)[0]
+    .matchAll(/^      ([-\w]+):$/gm)].map(([, name]) => name);
+  const own = ['agent-runner', 'github-reads'];
+  assert.deepEqual(names(wrapper).filter(name => !own.includes(name)), names(policy));
+  const call = wrapper.split('\n  policy:\n')[1].split('\n  agent:\n')[0].split('    with:\n')[1].trimEnd();
+  assert.equal(call, names(policy).map(name => `      ${name}: \${{ inputs.${name} }}`).join('\n'));
+});
+
+// A network to join is the caller's own step (docs/workflow.md): no
+// workflow or action here joins one or takes its credentials.
+test('no workflow or action of this repository joins a network itself', () => {
+  const root = join(__dirname, '..');
+  const files = [...readdirSync(join(root, '.github/workflows')).map(file => `.github/workflows/${file}`),
+    'prepare/action.yml', 'run/action.yml', 'secure-host/action.yml', 'workflow/inference-preflight.py'];
+  for (const file of files) {
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /tailscale|join(?:s|ing)? (?:a|the) tailnet/i, file);
   }
 });

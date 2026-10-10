@@ -1,0 +1,738 @@
+# The first piece of an agent run: the request against the caller's
+# bounds, before a machine is spent on the agent. Its jobs hold no write
+# token but activate's and notify's, which act on the event that started
+# the run and on nothing the agent wrote.
+#
+#   policy    the bounds, the binary, the configuration and the task;
+#             contents: read
+#   activate  consumes a command label (event-triggered runs)
+#   notify    an eyes reaction and a status comment (event-triggered runs)
+#
+# The caller's own agent job comes next (prepare, the caller's steps,
+# secure-host, run), then check.yml and apply.yml, each given this call's
+# outputs; agentic-job.yml is that composition with no steps of the
+# caller's. docs/workflow.md says how to put the pieces together.
+#
+# Every input reaches a step through its environment and is never pasted
+# into a script, and the agent's configuration is written by `agentic-job
+# config`, which takes each as a value and nothing else.
+name: agentic-job policy
+
+on:
+  workflow_call:
+    inputs:
+      id:
+        description: The caller's name for this run (an issue, a board item); in summary.json as `item`
+        type: string
+        required: true
+      task:
+        description: >-
+          The task given to the agent. Public, like everything about a run. With `event`, the
+          standing instruction the event's text follows, 64 KiB at most
+        type: string
+        default: ""
+      proposals-artifact:
+        description: Artifact from a caller job containing outputs.jsonl (and optional base.json and patch); skips the agent
+        type: string
+        default: ""
+      review:
+        description: Enforce an analysis-only pull request review with a pinned head and verdict comment
+        type: boolean
+        default: false
+      review-task:
+        description: Review task file in the trusted base checkout, never the review head
+        type: string
+        default: ""
+      review-item:
+        description: Positive pull request number for an operator-dispatched review (not an event run)
+        type: string
+        default: ""
+      repo:
+        description: The repository the agent works on, OWNER/NAME on github.com; it must be public
+        type: string
+        required: true
+      base:
+        description: The branch of it the agent starts from
+        type: string
+        default: main
+      kind:
+        description: "`branch` for a run that may propose a change, `analysis` for one that may not"
+        type: string
+        default: branch
+      outputs:
+        description: The output types the run may hand back, comma separated, or `all` for what the bounds allow
+        type: string
+        default: create_pull_request,noop,missing_tool
+      max-outputs:
+        description: The most outputs the run may hand back in all, or `max` for the bounds' own ceiling
+        type: string
+        default: "3"
+      allow:
+        description: The caller's bounds file, a path in the calling repository (`agentic-job policy --allow`)
+        type: string
+        required: true
+      config:
+        description: >-
+          A configuration file in the calling repository (TOML) for what the inputs below do not
+          cover: the services to stop on the runner, the sockets it may keep, the egress rules,
+          the commit's author. The inputs below go over it
+        type: string
+        default: ""
+      agent:
+        description: "The agent: `claude`, `opencode`, or `fake`, a scripted one that needs no inference"
+        type: string
+        default: fake
+      fake-profile:
+        description: Built-in scripted trial, implement, comment or review; only with agent fake and no setup
+        type: string
+        default: ""
+      model:
+        description: The model, as the agent names it (empty for the agent's own default)
+        type: string
+        default: ""
+      agent-config-repo:
+        description: A public repository, OWNER/NAME, holding the agent's configuration
+        type: string
+        default: ""
+      agent-config-ref:
+        description: The branch or tag of it (empty for its default branch)
+        type: string
+        default: ""
+      agent-config-path:
+        description: The directory of it the configuration is in (empty for its root)
+        type: string
+        default: ""
+      runner:
+        description: The runner of the policy, check and apply jobs, as JSON (a label or a list of labels). It needs rustup, apt and Node
+        type: string
+        default: '"ubuntu-24.04"'
+      build-binary:
+        description: >-
+          Build the binary from this workflow's source on every run, also where a release fits its
+          commit and would be fetched by its checksum
+        type: boolean
+        default: false
+      inference-url:
+        description: The inference proxy, as http://ADDRESS:PORT; empty for an agent that needs none
+        type: string
+        default: ""
+      inference-register:
+        description: "How the run announces itself to the proxy named by `inference-url`: `github-oidc`, `plain` or `token-file`"
+        type: string
+        default: github-oidc
+      inference-audience:
+        description: For `github-oidc`, the audience of the identity token
+        type: string
+        default: ""
+      inference-token-file:
+        description: For `token-file`, where on the agent's runner the token is
+        type: string
+        default: ""
+      timeout:
+        description: Minutes the agent may run
+        type: string
+        default: "75"
+      max-requests:
+        description: The most model requests, as the proxy counts them (0 for no such cap)
+        type: string
+        default: "150"
+      max-tasks:
+        description: The most subagent tasks the agent may start (0 for no such cap)
+        type: string
+        default: "4"
+      budget:
+        description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
+        type: string
+        default: "500"
+      packages:
+        description: Packages the task needs, installed by the runner's package manager; names with spaces between them
+        type: string
+        default: ""
+      npm:
+        description: The agent's programs, each NAME@VERSION with an exact version, installed with npm
+        type: string
+        default: ""
+      setup:
+        description: A script in the calling repository that runs as the sandbox user before the agent, for toolchains
+        type: string
+        default: ""
+      output-repo:
+        description: Where the outputs are applied, OWNER/NAME (empty for the calling repository). For a patch, a fork of `repo` has its base branch brought up to date first; comments need no checkout
+        type: string
+        default: ""
+      apply-environment:
+        description: >-
+          An environment of the calling repository gating apply. Explicitly pass SAFE_OUTPUTS_PAT;
+          an empty secret falls back to the job token. Empty skips environment
+          gates; with no passed secret apply uses the calling repository's job token
+        type: string
+        default: ""
+      apply-partial:
+        description: Apply what a run stopped at a limit handed back, as a draft that says it is partial
+        type: boolean
+        default: false
+      refused-pull-request:
+        description: >-
+          What the apply job does when the branch is pushed and the forge then refuses to open
+          the pull request because Actions may not: `fail`, or `branch` to end well with the
+          branch and say so
+        type: string
+        default: fail
+      expect-check-refusal:
+        description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
+        type: boolean
+        default: false
+      comment-target:
+        description: >-
+          The issue or pull request of the output repository an `add_comment` goes to, or `*` for
+          the one each comment names. Empty for the issue or pull request that started an
+          event-triggered run, and `*` where no event did
+        type: string
+        default: ""
+      event:
+        description: >-
+          Decide the run from the event that started the calling workflow (`agentic-job event`,
+          docs/events.md): the `[trigger]` table of the bounds file says who may start one and from
+          which events; the event's text joins `task` behind a fence; a pull request's base becomes
+          the run's; comments go to the triggering item; and a refused event ends the run in the
+          policy job, with its reason in the job summary and the other jobs skipped
+        type: boolean
+        default: false
+      notify:
+        description: >-
+          How whoever started an event-triggered run is told it started and how it ended, by jobs
+          that run nothing from the agent's machine: `comment` (an eyes reaction on what started it,
+          and a comment edited when the run ends), `reaction` (eyes, then rocket or confused), or
+          `none`. These write with the call's own token, which then needs `issues: write` or
+          `pull-requests: write`
+        type: string
+        default: comment
+      title-prefix:
+        description: Put before the title of a pull request or an issue the run opens
+        type: string
+        default: ""
+      branch-prefix:
+        description: Put before the name of the branch a pull request is pushed as (`agent-run-RUNID`)
+        type: string
+        default: ""
+      artifact-prefix:
+        description: Put before the name of every artifact, for a caller that calls this more than once in a run
+        type: string
+        default: ""
+    # The whole set goes to check.yml and apply.yml as `toJSON(needs.policy.outputs)`,
+    # so that what they check and apply is what this call decided, and the
+    # caller's agent job finds its trusted inputs here by upload ID.
+    outputs:
+      admitted:
+        description: "`true` unless an event was refused; the agent job runs only then"
+        value: ${{ jobs.policy.outputs.admitted }}
+      reason:
+        description: Why, in the binary's words, for an event-triggered run
+        value: ${{ jobs.policy.outputs.reason }}
+      binary-artifact-id:
+        description: The upload holding the binary, for prepare and check
+        value: ${{ jobs.policy.outputs.binary-artifact-id }}
+      policy-artifact-id:
+        description: The upload holding policy.json, task.md, config.toml and run.json, for prepare and check
+        value: ${{ jobs.policy.outputs.policy-artifact-id }}
+      source-repository:
+        description: This workflow's own repository, whose prepare, secure-host and run actions the agent job checks out
+        value: ${{ jobs.policy.outputs.source-repository }}
+      source-sha:
+        description: This workflow's own commit, the one the binary was built from or matches
+        value: ${{ jobs.policy.outputs.source-sha }}
+      ref:
+        description: The calling repository's commit the configuration and setup script were read at; the agent job checks it out
+        value: ${{ jobs.policy.outputs.ref }}
+      base:
+        description: The branch the run starts from (the input, or an event's pull request's base)
+        value: ${{ jobs.policy.outputs.base }}
+      comment-target:
+        description: Where an `add_comment` goes, as decided here
+        value: ${{ jobs.policy.outputs.comment-target }}
+      review-head:
+        description: The exact review head resolved by the read-only policy job
+        value: ${{ jobs.policy.outputs.review-head }}
+      runner:
+        description: The `runner` input, for check and apply
+        value: ${{ jobs.policy.outputs.runner }}
+      repo:
+        description: The `repo` input
+        value: ${{ jobs.policy.outputs.repo }}
+      output-repo:
+        description: The `output-repo` input
+        value: ${{ jobs.policy.outputs.output-repo }}
+      review:
+        description: The `review` input, `true` or `false`
+        value: ${{ jobs.policy.outputs.review }}
+      expect-check-refusal:
+        description: The `expect-check-refusal` input, `true` or `false`
+        value: ${{ jobs.policy.outputs.expect-check-refusal }}
+      proposals-artifact:
+        description: The `proposals-artifact` input
+        value: ${{ jobs.policy.outputs.proposals-artifact }}
+      apply-environment:
+        description: The `apply-environment` input
+        value: ${{ jobs.policy.outputs.apply-environment }}
+      apply-partial:
+        description: The `apply-partial` input, `true` or `false`
+        value: ${{ jobs.policy.outputs.apply-partial }}
+      refused-pull-request:
+        description: The `refused-pull-request` input
+        value: ${{ jobs.policy.outputs.refused-pull-request }}
+      title-prefix:
+        description: The `title-prefix` input
+        value: ${{ jobs.policy.outputs.title-prefix }}
+      branch-prefix:
+        description: The `branch-prefix` input
+        value: ${{ jobs.policy.outputs.branch-prefix }}
+      artifact-prefix:
+        description: The `artifact-prefix` input
+        value: ${{ jobs.policy.outputs.artifact-prefix }}
+      event:
+        description: The `event` input, `true` or `false`
+        value: ${{ jobs.policy.outputs.event }}
+      notify:
+        description: The `notify` input
+        value: ${{ jobs.policy.outputs.notify }}
+      notified:
+        description: "`true` when the notify job reacted (and commented) on what started the run"
+        value: ${{ jobs.notify.result == 'success' }}
+      notify-kind:
+        description: What the notify job reacted to
+        value: ${{ jobs.notify.outputs.kind }}
+      notify-id:
+        description: Its number
+        value: ${{ jobs.notify.outputs.id }}
+      notify-item:
+        description: The issue or pull request the notify job comments on
+        value: ${{ jobs.notify.outputs.item }}
+      notify-comment-id:
+        description: The status comment the notify job posted, which apply.yml's conclude job edits
+        value: ${{ jobs.notify.outputs.comment-id }}
+
+# No `permissions` here: a job that names none keeps what the caller
+# granted the call; activation and notification also use that token.
+
+# With `pipefail`, which the default shell of a step does without: a check
+# whose output is piped must still fail its step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # github/gh-aw's fixed place for a run's files (its constants.cjs).
+  GH_AW_TMP: /tmp/gh-aw
+  # Where a job keeps the binary, the policy and what it downloads.
+  JOB_DIR: ${{ github.workspace }}/.agentic-job
+  # This repository at this file's commit, where a job needs its source.
+  SOURCE_DIR: ${{ github.workspace }}/.agentic-job-source
+
+jobs:
+  policy:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}
+      policy-artifact-id: ${{ steps.policy.outputs.artifact-id }}
+      # Whether the run goes on: `true` unless an event was refused.
+      admitted: ${{ steps.event.outputs.admitted || 'true' }}
+      reason: ${{ steps.event.outputs.reason }}
+      # The number of the issue or pull request the event was about, for the notify job; empty for a schedule or a dispatch.
+      item: ${{ steps.event.outputs.item }}
+      # The branch the run starts from, and where its comments go, as
+      # decided here: the inputs, or the event's pull request and item.
+      base: ${{ steps.request.outputs.base }}
+      comment-target: ${{ steps.request.outputs.comment-target }}
+      review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
+      source-repository: ${{ job.workflow_repository }}
+      source-sha: ${{ job.workflow_sha }}
+      # Event review policy/task come from the base, never the PR head.
+      # Dispatch uses the operator's trusted caller commit, not target code.
+      ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+      # The caller's settings for check and apply, as given to this call.
+      runner: ${{ inputs.runner }}
+      repo: ${{ inputs.repo }}
+      output-repo: ${{ inputs.output-repo }}
+      review: ${{ inputs.review }}
+      expect-check-refusal: ${{ inputs.expect-check-refusal }}
+      proposals-artifact: ${{ inputs.proposals-artifact }}
+      apply-environment: ${{ inputs.apply-environment }}
+      apply-partial: ${{ inputs.apply-partial }}
+      refused-pull-request: ${{ inputs.refused-pull-request }}
+      title-prefix: ${{ inputs.title-prefix }}
+      branch-prefix: ${{ inputs.branch-prefix }}
+      artifact-prefix: ${{ inputs.artifact-prefix }}
+      event: ${{ inputs.event }}
+      notify: ${{ inputs.notify }}
+    steps:
+      - name: Check the proposals mode
+        env:
+          PROPOSALS: ${{ inputs.proposals-artifact }}
+          EVENT: ${{ inputs.event }}
+          REVIEW: ${{ inputs.review }}
+          PARTIAL: ${{ inputs.apply-partial }}
+          TASK: ${{ inputs.task }}
+        run: |
+          if [ -n "$PROPOSALS" ]; then
+            [ "$EVENT/$REVIEW/$PARTIAL" = false/false/false ] || { echo '::error::proposals mode cannot use event, review or apply-partial'; exit 1; }
+          elif [ "$EVENT/$REVIEW" = false/false ]; then
+            [ -n "$TASK" ] || { echo '::error::an agent run needs a task'; exit 1; }
+          fi
+      # The calling repository, for its bounds file.
+      # The agent job checks out the same commit (the `ref` output), for
+      # the setup script the configuration names.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Event review policy/task come from the base, never the PR head.
+          # Dispatch uses the operator's trusted caller commit, not target code.
+          ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}
+      # Logs, transcripts and patches are published, so nothing is run for
+      # a repository that cannot be shown to be public. An answer that is
+      # an error counts as not public.
+      - name: Check that the repositories are public
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }}
+        run: |
+          set -f
+          for repo in $REPOS; do
+            [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::not a repository name: $repo"; exit 1; }
+            gh api "repos/$repo" --jq '.private == false and .visibility == "public"' | grep -qx true ||
+              { echo "::error::$repo cannot be confirmed to be public, and everything about a run is published"; exit 1; }
+          done
+      # Which repository and commit this file is running from. Without
+      # them the checkout below would quietly take the caller's.
+      - name: This workflow's own repository and commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          echo "$WORKFLOW_REPOSITORY at $WORKFLOW_SHA"
+          [[ "$WORKFLOW_REPOSITORY" == */* && "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      # A release's binaries, by its attested source-matching checksums
+      # at this commit, when that release was built from this commit's
+      # source; a build of that source otherwise, or when the caller says
+      # so. The action that secures a host gets its binary the same way,
+      # with the same script, which says why no cache is used.
+      - name: Get the binary
+        env:
+          BUILD: ${{ inputs.build-binary }}
+        run: |
+          [ "$BUILD" != true ] || set -- --build
+          node "$SOURCE_DIR/secure-host/binary.mjs" get --out "$JOB_DIR/bin" "$@"
+      # An event-triggered run (docs/events.md). What the decision needs
+      # of the forge comes from the API with the job's token, which can
+      # read and no more; the binary makes no request. The actor's
+      # permission: a bot has none to fetch, since the bounds admit one by
+      # name or not at all, and a person whose permission cannot be
+      # fetched is refused by the binary for want of it. For a comment on
+      # a pull request, the pull request itself, so that the fork rule
+      # applies to its head; its number is the one thing of the event
+      # read here, as a number. Both are written outside the checkout, so
+      # that nothing committed there can stand in for them.
+      - name: Fetch the actor's permission, and the pull request a comment is on
+        if: ${{ inputs.event }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          PULL: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.number || '' }}
+        run: |
+          [[ "$ACTOR" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || { echo "::error::the actor is not a login"; exit 1; }
+          [[ "$ACTOR" == *'[bot]' ]] || gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" > "$RUNNER_TEMP/permission.json" ||
+            { rm -f "$RUNNER_TEMP/permission.json"; echo "::notice::the permission of $ACTOR could not be fetched"; }
+          [[ -z "$PULL" ]] || { [[ "$PULL" =~ ^[0-9]+$ ]] && gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL" > "$RUNNER_TEMP/pull.json"; }
+      # The payload is read by the binary from the file GitHub wrote, and
+      # the caller's task reaches it by path: no text of either is in a
+      # script. A refusal is exit state 1 and no task, and ends the run
+      # here: the jobs after this one are skipped, and the reason is in
+      # the summary. Exit state 2 is a bounds file or payload that could
+      # not be read, which fails the job.
+      - name: Decide whether the event may start a run, and write the task
+        id: decision
+        if: ${{ inputs.event || (inputs.review && !inputs.review-item) }}
+        env:
+          ALLOW: ${{ inputs.allow }}
+          TASK: ${{ inputs.task }}
+          ACTOR: ${{ github.actor }}
+          REVIEW: ${{ inputs.review }}
+          REVIEW_TASK: ${{ inputs.review-task }}
+          EVENT: ${{ inputs.event }}
+          KIND: ${{ inputs.kind }}
+          OUTPUTS: ${{ inputs.outputs }}
+          MAX_OUTPUTS: ${{ inputs.max-outputs }}
+          NOTIFY: ${{ inputs.notify }}
+          TARGET: ${{ inputs.comment-target }}
+          REPO: ${{ inputs.repo }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
+          APPLY_ENVIRONMENT: ${{ inputs.apply-environment }}
+          APPLY_PARTIAL: ${{ inputs.apply-partial }}
+          AGENT: ${{ inputs.agent }}
+        run: |
+          printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"
+          if [ "$REVIEW" = true ]; then node "$SOURCE_DIR/workflow/review.cjs" task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
+          [ ! -e "$RUNNER_TEMP/permission.json" ] || set -- "$@" --actor-permission "$RUNNER_TEMP/permission.json"
+          [ ! -e "$RUNNER_TEMP/pull.json" ] || set -- "$@" --pull-request "$RUNNER_TEMP/pull.json"
+          state=0
+          "$JOB_DIR/bin/agentic-job" event --allow "$ALLOW" --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" \
+            --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --task "$RUNNER_TEMP/task.md" --out "$JOB_DIR" "$@" || state=$?
+          case "$state" in 0 | 1) ;; *) echo "::error::agentic-job event ended with exit state $state"; exit "$state" ;; esac
+      - name: Refuse unsupported routing before any item number is consumed
+        id: event
+        if: ${{ inputs.event }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW: ${{ inputs.review }}
+          BASE: ${{ inputs.base }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { admit } = require(process.env.SOURCE_DIR + '/workflow/activation.cjs');
+            const path = process.env.JOB_DIR + '/event.json';
+            let decision = admit(JSON.parse(fs.readFileSync(path, 'utf8')));
+            if (process.env.REVIEW === 'true') {
+              decision = require(process.env.SOURCE_DIR + '/workflow/review.cjs').admit(decision, process.env.BASE);
+            }
+            fs.writeFileSync(path, JSON.stringify(decision));
+            if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
+            core.setOutput('admitted', String(decision.admitted));
+            core.setOutput('reason', decision.reason);
+            core.setOutput('item', decision.admitted ? decision.item?.number ?? '' : '');
+            core.setOutput('review-head', process.env.REVIEW === 'true' && decision.admitted ? decision.head.sha : '');
+            await core.summary.addRaw(`agentic-job event: ${decision.admitted ? 'admitted' : 'refused'}, ${decision.reason}`).write();
+      # Operator dispatch has no event admission; resolve the head here with
+      # read-only API access, never from agent text or the caller's task.
+      - name: Resolve a dispatched review
+        id: dispatch-review
+        if: ${{ inputs.review-item != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW: ${{ inputs.review }}
+          EVENT: ${{ inputs.event }}
+          KIND: ${{ inputs.kind }}
+          OUTPUTS: ${{ inputs.outputs }}
+          MAX_OUTPUTS: ${{ inputs.max-outputs }}
+          NOTIFY: ${{ inputs.notify }}
+          TARGET: ${{ inputs.comment-target }}
+          ITEM: ${{ inputs.review-item }}
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
+          APPLY_PARTIAL: ${{ inputs.apply-partial }}
+        with:
+          script: |
+            const { resolveDispatch } = require(process.env.SOURCE_DIR + '/workflow/review.cjs');
+            core.setOutput('review-head', await resolveDispatch(process.env, github));
+      # The base is the pull request's where an event named one, and the
+      # bounds have to cover it like any other. Comments go to the item
+      # the event was about unless the caller named a target.
+      - name: Check the request against the caller's bounds
+        id: request
+        if: ${{ steps.event.outputs.admitted != 'false' }}
+        env:
+          ALLOW: ${{ inputs.allow }}
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          KIND: ${{ inputs.kind }}
+          OUTPUTS: ${{ inputs.outputs }}
+          MAX_OUTPUTS: ${{ inputs.max-outputs }}
+          TARGET: ${{ inputs.comment-target }}
+        run: |
+          base=$BASE target=${TARGET:-*}
+          if [ -e "$JOB_DIR/event.json" ]; then
+            base=$(jq -r --arg base "$BASE" '.base // $base' "$JOB_DIR/event.json")
+            [ -n "$TARGET" ] || target=$(jq -r '.item.number // "*"' "$JOB_DIR/event.json")
+          fi
+          node "$SOURCE_DIR/workflow/policy-command.cjs" "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" \
+            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" > "$JOB_DIR/policy.json"
+          jq . "$JOB_DIR/policy.json"
+          printf '%s\n' "base=$base" "comment-target=$target" | tee -a "$GITHUB_OUTPUT"
+      - id: binary
+        if: ${{ steps.event.outputs.admitted != 'false' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}agentic-job-binary
+          path: .agentic-job/bin/
+          retention-days: 1
+          if-no-files-found: error
+      # The agent job's configuration, written and validated here before an
+      # agent runner is spent, and handed to it with the policy. An input
+      # that was left empty sets nothing, so the caller's file stands;
+      # `register` means nothing without a proxy. No network probe here:
+      # this machine need not be on the proxy's network (secure-host makes
+      # one on the agent's). Proposals mode runs no agent and needs no
+      # inference configuration.
+      - name: Write the configuration
+        if: ${{ inputs.proposals-artifact == '' && steps.event.outputs.admitted != 'false' }}
+        env:
+          CONFIG: ${{ inputs.config }}
+          AGENT: ${{ inputs.agent }}
+          MODEL: ${{ inputs.model }}
+          CONFIG_REPO: ${{ inputs.agent-config-repo != '' && format('https://github.com/{0}', inputs.agent-config-repo) || '' }}
+          CONFIG_REF: ${{ inputs.agent-config-ref }}
+          CONFIG_PATH: ${{ inputs.agent-config-path }}
+          URL: ${{ inputs.inference-url }}
+          REGISTER: ${{ inputs.inference-url != '' && inputs.inference-register || '' }}
+          AUDIENCE: ${{ inputs.inference-audience }}
+          TOKEN_FILE: ${{ inputs.inference-token-file }}
+          TIMEOUT: ${{ inputs.timeout }}
+          MAX_REQUESTS: ${{ inputs.max-requests }}
+          MAX_TASKS: ${{ inputs.max-tasks }}
+          BUDGET: ${{ inputs.budget }}
+          PACKAGES: ${{ inputs.packages }}
+          NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') }}
+          SETUP: ${{ inputs.setup }}
+        run: |
+          "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} \
+            --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
+            --string agent.config-ref="$CONFIG_REF" --string agent.config-path="$CONFIG_PATH" \
+            --string inference.url="$URL" --string inference.register="$REGISTER" \
+            --string inference.audience="$AUDIENCE" --string inference.token-file="$TOKEN_FILE" \
+            --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
+            --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
+            --list setup.packages="$PACKAGES" --list setup.npm="$NPM" --string setup.script="$SETUP" \
+            > "$JOB_DIR/config.toml"
+          cat "$JOB_DIR/config.toml"
+      # What the agent job's actions read of this call, so that its job
+      # passes them nothing but the upload IDs: the task (for an
+      # event-triggered run the one the decision wrote, the caller's task
+      # and then the event's text, fenced) and run.json. The built-in
+      # scripted session comes from this workflow's source and runs only
+      # as the sandbox user; it is for the scripted agent alone.
+      - name: Write the task and the run's settings
+        if: ${{ inputs.proposals-artifact == '' && steps.event.outputs.admitted != 'false' }}
+        env:
+          EVENT: ${{ inputs.event }}
+          TASK: ${{ inputs.task }}
+          ID: ${{ inputs.id }}
+          REPO: ${{ inputs.repo }}
+          AGENT: ${{ inputs.agent }}
+          SETUP: ${{ inputs.setup }}
+          PROFILE: ${{ inputs.fake-profile }}
+          CONFIG_REPO: ${{ inputs.agent-config-repo }}
+          REVIEW_HEAD: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+          APPLY_PARTIAL: ${{ inputs.apply-partial }}
+          SOURCE_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -n "$PROFILE" ]; then
+            [ "$AGENT" = fake ] && [ -z "$SETUP" ] || { echo '::error::fake-profile requires agent fake and no setup'; exit 1; }
+            case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
+          fi
+          if [ "$EVENT" = true ]; then [ -s "$JOB_DIR/task.md" ] || { echo "::error::the decision left no task for an event-triggered run"; exit 1; }
+          else printf '%s\n' "$TASK" > "$JOB_DIR/task.md"; fi
+          jq -n --arg id "$ID" --arg repo "$REPO" --arg agent "$AGENT" --arg fake_profile "$PROFILE" \
+            --arg agent_config_repo "$CONFIG_REPO" --arg review_head "$REVIEW_HEAD" --arg artifact_prefix "$ARTIFACT_PREFIX" \
+            --arg apply_partial "$APPLY_PARTIAL" --arg source_sha "$SOURCE_SHA" '$ARGS.named' | tee "$JOB_DIR/run.json"
+      # With the event's decision and the task, when there was one; a
+      # refused event leaves its decision and nothing else.
+      - id: policy
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-prefix }}agentic-job-policy
+          path: |
+            .agentic-job/policy.json
+            .agentic-job/event.json
+            .agentic-job/task.md
+            .agentic-job/config.toml
+            .agentic-job/run.json
+          retention-days: 30
+          if-no-files-found: error
+
+  # Only this trusted machine consumes command labels. No write token is
+  # passed to policy, agent or check; failed removal blocks execution.
+  activate:
+    needs: policy
+    if: ${{ inputs.proposals-artifact == '' && needs.policy.outputs.admitted == 'true' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: activation-source
+          persist-credentials: false
+          sparse-checkout: workflow
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ inputs.event }}
+        with:
+          artifact-ids: ${{ needs.policy.outputs.policy-artifact-id }}
+          path: .agentic-job
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        if: ${{ inputs.event }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { activate } = require('./activation-source/workflow/activation.cjs');
+            const decision = JSON.parse(fs.readFileSync('.agentic-job/event.json', 'utf8'));
+            await activate(decision, github, context.repo);
+
+  # For an event-triggered run: an eyes reaction on what started it, and a
+  # comment that says a run started, which `conclude` edits when the run
+  # ends, so that whoever started it sees that it did and how it went.
+  # Like the apply job this names no permissions and writes with what the
+  # caller granted the call; the agent's machine never holds a token that
+  # can comment. Nothing of the event reaches these steps but numbers,
+  # from event.json: the item's and the comment's.
+  notify:
+    needs: [policy, activate]
+    if: ${{ inputs.event && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && needs.policy.outputs.item != '' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.target.outputs.kind }}
+      id: ${{ steps.target.outputs.id }}
+      item: ${{ steps.target.outputs.item }}
+      comment-id: ${{ steps.comment.outputs.id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      WORKFLOW: ${{ github.workflow }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.policy.outputs.policy-artifact-id }}
+          path: .agentic-job
+      - name: What to react to, and where to comment
+        id: target
+        run: |
+          kind=$(jq -r '.react_to.kind' "$JOB_DIR/event.json") id=$(jq -r '.react_to.id // .react_to.number' "$JOB_DIR/event.json")
+          item=$(jq -r '.item.number' "$JOB_DIR/event.json") what=$(jq -r '.item.kind' "$JOB_DIR/event.json")
+          [[ "$kind" =~ ^(issue|comment|review_comment)$ && "$id" =~ ^[0-9]+$ && "$item" =~ ^[0-9]+$ && "$what" =~ ^(issue|pull_request)$ ]] ||
+            { echo "::error::event.json names nothing to react to"; exit 1; }
+          printf '%s\n' "kind=$kind" "id=$id" "item=$item" "what=${what/_/ }" | tee -a "$GITHUB_OUTPUT"
+      # The two posts below don't gate the run: a forge hiccup here would
+      # otherwise stop it before the agent with nothing said, as conclude
+      # would not run. conclude posts a status comment when this left none.
+      - name: An eyes reaction on what started the run
+        continue-on-error: true
+        env:
+          KIND: ${{ steps.target.outputs.kind }}
+          ID: ${{ steps.target.outputs.id }}
+        run: |
+          case "$KIND" in
+            issue) path="issues/$ID/reactions" ;;
+            comment) path="issues/comments/$ID/reactions" ;;
+            review_comment) path="pulls/comments/$ID/reactions" ;;
+          esac
+          gh api -X POST "repos/$GITHUB_REPOSITORY/$path" -f content=eyes --jq .content
+      - name: A comment that says the run started
+        id: comment
+        if: ${{ inputs.notify == 'comment' }}
+        continue-on-error: true
+        env:
+          ITEM: ${{ steps.target.outputs.item }}
+          WHAT: ${{ steps.target.outputs.what }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ITEM/comments" \
+            -f body="⏳ [$WORKFLOW]($RUN_URL) started a run for this $WHAT." --jq '"id=\(.id)"' | tee -a "$GITHUB_OUTPUT"

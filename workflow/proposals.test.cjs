@@ -6,8 +6,10 @@ const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 
 const workflow = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+const applier = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
 const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
-const gate = workflow.split('- name: Check the proposals mode\n')[1]
+const gate = policy.split('- name: Check the proposals mode\n')[1]
   .split('        run: |\n')[1].split('      #')[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
 
@@ -71,18 +73,18 @@ test('proposals route retains check and token separation', () => {
   assert.match(check, /permissions:\n      contents: read/);
   assert.match(check, /uses: \.\/\.github\/workflows\/check.yml/);
   assert.match(check, /safe-outputs-artifact-id: \$\{\{ needs.agent.outputs.safe-outputs-artifact-id \}\}/);
-  assert.match(checker, /name: \$\{\{ inputs.proposals-artifact \}\}/);
+  assert.match(checker, /name: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact \}\}/);
   assert.match(checker, /artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}/);
   assert.match(checker, /agentic-job" check --policy/);
   assert.doesNotMatch(check, /secrets\./);
   assert.doesNotMatch(checker, /secrets\./);
-  const apply = workflow.split('\n  apply:\n')[1];
-  assert.match(apply, /needs.check.result == 'success' && \(inputs.proposals-artifact != ''/);
-  assert.match(apply, /inputs.proposals-artifact == '' && needs.agent.outputs.exit != '0'/);
+  const apply = applier.split('\n  apply:\n')[1];
+  assert.match(apply, /fromJSON\(inputs.check\).result == 'success' && \(fromJSON\(inputs.policy\).proposals-artifact != ''/);
+  assert.match(apply, /fromJSON\(inputs.policy\).proposals-artifact == '' && format\('\{0\}', fromJSON\(inputs.agent\).outputs.exit\) != '0'/);
   assert.match(apply.split('- name: Write applied.json')[1],
-    /EXIT: \$\{\{ inputs.proposals-artifact != '' && '0' \|\| needs.agent.outputs.exit \}\}/);
-  for (const job of ['activate', 'agent']) {
-    assert.match(workflow.split(`\n  ${job}:\n`)[1].split('    steps:')[0],
+    /EXIT: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact != '' && '0' \|\| fromJSON\(inputs.agent\).outputs.exit \}\}/);
+  for (const [source, job] of [[policy, 'activate'], [workflow, 'agent']]) {
+    assert.match(source.split(`\n  ${job}:\n`)[1].split('    steps:')[0],
       /inputs.proposals-artifact == ''/);
   }
 });
@@ -111,8 +113,10 @@ test('checker requires explicit trusted IDs and one proposal selector', () => {
 
 test('wrapper passes trusted checker inputs directly and exports all checker outputs', () => {
   const check = workflow.split('\n  check:\n')[1].split('\n  apply:\n')[0];
+  // The policy call's outputs, as they are: none of the agent's.
+  assert.ok(check.includes('policy: ${{ toJSON(needs.policy.outputs) }}'));
   for (const input of ['binary-artifact-id', 'policy-artifact-id', 'comment-target']) {
-    assert.ok(check.includes(`${input}: \${{ needs.policy.outputs.${input} }}`));
+    assert.ok(checker.includes(`\${{ fromJSON(inputs.policy).${input} }}`), input);
   }
   for (const output of ['artifact-id', 'refusal', 'has-patch']) {
     assert.ok(checker.includes(`value: \${{ jobs.check.outputs.${output} }}`));
@@ -121,6 +125,9 @@ test('wrapper passes trusted checker inputs directly and exports all checker out
   assert.match(checker, /repository: \$\{\{ job.workflow_repository \}\}/);
   assert.match(checker, /ref: \$\{\{ job.workflow_sha \}\}/);
   assert.doesNotMatch(check, /secrets:|needs.agent.outputs.(binary|policy|comment)/);
+  // Only the proposals' upload ID is not the policy call's.
+  const inputs = checker.split('    inputs:\n')[1].split('    outputs:\n')[0];
+  assert.deepEqual([...inputs.matchAll(/^ {6}([-\w]+):$/gm)].map(([, name]) => name), ['policy', 'safe-outputs-artifact-id']);
 });
 
 test('documented proposals caller matches the CI trial and shipped bounds', () => {
@@ -183,6 +190,6 @@ test('policy errors preserve the exit status and escape annotation data', () => 
     assert.doesNotMatch(result.stderr, /##\[/);
     assert.match(result.stderr, /policy: embedded # #\[set-output name=hostile\]hostile/);
   }
-  const step = workflow.split('- name: Check the request against')[1].split('- id: binary')[0];
+  const step = policy.split('- name: Check the request against')[1].split('- id: binary')[0];
   assert.match(step, /node "\$SOURCE_DIR\/workflow\/policy-command.cjs"/);
 });

@@ -64,7 +64,11 @@ Preflight names **all** missing model, runner, URL and audience variables at
 once, before policy/build or agent startup. It rejects unknown agents.
 Real agents have a 150-request cap; scripted sessions have no inference and
 `max-requests: 0`. Real agents do not install scripted sessions.
-Hosted Ubuntu alone cannot reach a private broker. Provide disposable runners
+Hosted Ubuntu alone cannot reach a private broker. Joining its network in a
+step of your own needs an agent job of your own
+([example-compose.yml](../.github/workflows/example-compose.yml)), which
+changes what the broker has to admit
+([inference admission](inference.md#which-workflows-a-broker-admits)). Or provide disposable runners
 with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
 see [runner requirements](workflow.md#what-a-caller-provides).
 

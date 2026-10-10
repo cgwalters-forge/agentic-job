@@ -641,6 +641,23 @@ jobs:
       item: ${{ matrix.profile == 'review' && format('{0}', github.event.pull_request.number) || '64' }}
       kind: ${{ matrix.profile }}
 
+  # The composed example: a caller-owned agent job with a privileged step
+  # before secure-host and a later one without sudo. Gated like
+  # e2e-dispatch, whose verifier counts this job's comment too.
+  e2e-compose:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads
+      id-token: write
+    uses: ./.github/workflows/example-compose.yml
+    with:
+      task: Exercise the composed example caller; no model is needed.
+      item: '64'
+
   e2e-review:
     needs: [changes, review-base]
     if: ${{ needs.changes.outputs.e2e == 'true' && needs.review-base.outputs.installed == 'true' }}
@@ -676,7 +693,7 @@ jobs:
   # waits for this job even when verification fails.
   e2e-dispatch-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [changes, e2e-dispatch, e2e-full]
+    needs: [changes, e2e-dispatch, e2e-compose, e2e-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -694,6 +711,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN: actions/runs/${{ github.run_id }}
           RESULT: ${{ needs.e2e-dispatch.result }}
+          COMPOSE_RESULT: ${{ needs.e2e-compose.result }}
           PR: ${{ github.event.pull_request.number }}
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
         run: node workflow/dispatch-verify.cjs
@@ -733,7 +751,7 @@ jobs:
           ARTIFACT_PREFIX: full-
         with:
           script: |
-            const workflow = require('node:fs').readFileSync('.github/workflows/agentic-job.yml', 'utf8');
+            const workflow = require('node:fs').readFileSync('.github/workflows/apply.yml', 'utf8');
             const section = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
             const guard = section.split('script: |\n')[1].split('\n')
               .filter(line => line.startsWith(' '.repeat(12))).map(line => line.slice(12)).join('\n');
@@ -757,7 +775,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-dispatch-verify]
+    needs: [changes, e2e-full, e2e-limit, e2e-event, e2e-analysis, e2e-analysis-refused, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -975,7 +993,7 @@ jobs:
 
   ci:
     if: ${{ always() }}
-    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-dispatch, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, docs, rust, corpus, egress, release-pin, session-sandbox, static, safe-outputs, sandbox, secure-host, secure-host-options, proposals, e2e-proposals, e2e-full, e2e-limit, e2e-event, review-base, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -989,6 +1007,6 @@ jobs:
           jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork "$FORK"
           'all(to_entries[]; .value.result == "success" or
           (.value.result == "skipped" and $e2e == "false" and
-            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-dispatch", "e2e-dispatch-verify", "e2e-verify"))) or
+            (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
            (.key == "e2e-review" and .value.result == "skipped" and $installed == "false") or
-            ((.key | IN("e2e-dispatch", "e2e-dispatch-verify")) and .value.result == "skipped" and $fork == "true"))' <<<"$NEEDS"
+            ((.key | IN("e2e-dispatch", "e2e-compose", "e2e-dispatch-verify")) and .value.result == "skipped" and $fork == "true"))' <<<"$NEEDS"

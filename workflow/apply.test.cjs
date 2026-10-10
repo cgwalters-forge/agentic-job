@@ -6,7 +6,8 @@ const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { test } = require('node:test');
 
-const workflow = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const workflow = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
+const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
 
 function step(name) {
   const section = workflow.split(`- name: ${name}\n`)[1];
@@ -33,11 +34,15 @@ test('apply alone consumes the optional safe outputs PAT with job-token fallback
   assert.match(workflow.split('    secrets:\n')[1].split('    outputs:\n')[0], /required: false/);
   assert.ok(!before.includes('secrets.SAFE_OUTPUTS_PAT'));
   assert.ok(!after.includes('secrets.SAFE_OUTPUTS_PAT'));
+  // The wrapper hands the PAT to the apply call, and to nothing else.
+  const wrapperJobs = wrapper.split('\njobs:\n')[1].split(/\n  (?=[-\w]+:\n)/);
+  assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['apply']);
+  assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml\n/);
   const selection = 'secrets.SAFE_OUTPUTS_PAT';
   for (const key of ['token', 'github-token']) {
     assert.ok(apply.includes(`${key}: \${{ ${selection} || github.token }}`));
   }
-  assert.ok(apply.includes('environment: ${{ inputs.apply-environment }}'));
+  assert.ok(apply.includes('environment: ${{ fromJSON(inputs.policy).apply-environment }}'));
   assert.doesNotMatch(apply, /HAS_TOKEN|no passed .* secret/);
 });
 
@@ -65,16 +70,16 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
   const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   const jobs = [...ci.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
   const callers = jobs.filter(([, , job]) =>
-    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch)\.yml/.test(job));
+    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-dispatch', 'e2e-review',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-dispatch', 'e2e-compose', 'e2e-review',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
     assert.doesNotMatch(caller, /^      apply-environment:/m, name);
   }
-  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-review']) {
+  for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-compose', 'e2e-review']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];
     assert.match(caller, /^      contents: read$/m, name);
     assert.doesNotMatch(caller, /^      contents: write$/m, name);
@@ -107,9 +112,69 @@ test('issue actions keep checked repository and caps, not output-repo or event t
   }
 });
 
+// The pieces take their settings from the policy call's JSON, which the
+// caller composes: check and apply refuse it from another commit, and
+// apply an empty ID, before anything is downloaded.
+test('check and apply refuse a policy call of another commit, and apply an empty checked ID', () => {
+  const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  const sha = 'a'.repeat(40);
+  const pinned = "The policy call is this workflow's commit";
+  const jobs = [['check', checker.split('\n  check:\n')[1]],
+    ['apply', workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0]], ['conclude', workflow.split('\n  conclude:\n')[1]]];
+  for (const [name, job] of jobs) {
+    // The job's first step, before any checkout or download.
+    assert.ok(job.split('    steps:\n')[1].startsWith('      # The pieces must be one commit'), name);
+    assert.ok(job.indexOf(`- name: ${pinned}\n`) < job.search(/uses: actions\/(checkout|download-artifact)@|- name: How the run ended/), name);
+    assert.match(job, /SOURCE_REPOSITORY: \$\{\{ fromJSON\(inputs.policy\).source-repository \}\}\n {10}SOURCE_SHA: \$\{\{ fromJSON\(inputs.policy\).source-sha \}\}\n {10}REPOSITORY: \$\{\{ job.workflow_repository \}\}\n {10}SHA: \$\{\{ job.workflow_sha \}\}\n/, name);
+  }
+  const guard = step(pinned);
+  const body = source => source.split(`- name: ${pinned}\n`)[1].split(/\n      [-#]/)[0];
+  assert.equal(body(checker), body(workflow));
+  assert.equal(body(jobs[2][1]), body(workflow));
+  for (const [repository, source, expected] of [
+    ['o/r', sha, 0], ['o/other', sha, 1], ['o/r', 'b'.repeat(40), 1], ['o/r', '', 1], ['', '', 1],
+  ]) {
+    const result = command(homedir(), 'bash', ['-euo', 'pipefail', '-c', guard],
+      { SOURCE_REPOSITORY: repository, SOURCE_SHA: source, REPOSITORY: 'o/r', SHA: repository === '' ? '' : sha });
+    assert.equal(result.status, expected, `${repository} ${source}`);
+  }
+  const apply = jobs[1][1];
+  assert.ok(apply.indexOf("- name: Require the checked outputs' artifact ID\n") < apply.indexOf('uses: actions/download-artifact@'));
+  for (const [id, expected] of [['42', 0], ['', 1], ['0', 1], ['01', 1], ['1,2', 1], ['1\n2', 1]]) {
+    const result = command(homedir(), 'bash', ['-euo', 'pipefail', '-c', step("Require the checked outputs' artifact ID")], { CHECKED: id });
+    assert.equal(result.status, expected, JSON.stringify(id));
+  }
+});
+
+test('a failed status post does not stop the run, and conclude still reports it', () => {
+  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
+  const notify = policy.split('\n  notify:\n')[1];
+  for (const name of ['An eyes reaction on what started the run', 'A comment that says the run started']) {
+    const posted = notify.split(`- name: ${name}\n`)[1].split('\n      - ')[0];
+    assert.match(posted, /^ {8}continue-on-error: true$/m, name);
+  }
+  // What names the target is still checked, and fails the job.
+  assert.doesNotMatch(notify.split('- name: What to react to, and where to comment\n')[1].split('\n      - ')[0], /continue-on-error/);
+  assert.match(notify, /^ {6}item: \$\{\{ steps.target.outputs.item \}\}$/m);
+  assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \}\}/);
+  const conclude = workflow.split('\n  conclude:\n')[1];
+  assert.match(conclude, /- name: Edit the status comment\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true' \}\}/);
+  assert.match(conclude, /fromJSON\(inputs.policy\).comment-target != '\*' && !\(fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true'\) \}\}/);
+  // [comment id, item, status, the API call]
+  for (const [id, item, expected, call] of [
+    ['42', '7', 0, 'PATCH repos/o/r/issues/comments/42'], ['', '7', 0, 'POST repos/o/r/issues/7/comments'],
+    ['', '', 1, ''], ['', '$(exit 9)', 1, ''], ['4 2', '7', 0, 'POST repos/o/r/issues/7/comments'],
+  ]) {
+    const result = command(__dirname, 'bash', ['-eo', 'pipefail', '-c', 'gh() { echo "$3 $4"; };\n' + step('Edit the status comment')],
+      { ID: id, ITEM: item, TEXT: 'done', GITHUB_REPOSITORY: 'o/r' });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+    if (expected === 0) assert.equal(result.stdout.trim(), call);
+  }
+});
+
 test('comment-only apply skips every repository step, including checkout', () => {
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
-  const gate = "if: ${{ needs.check.outputs.has-patch == 'true' }}";
+  const gate = "if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}";
   assert.match(apply, new RegExp(`uses: actions/checkout@[^\\n]+\\n        ${gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   for (const name of ['Configure git', "Fetch the target's base branch, and bring a fork's up to it",
     'Apply the patch on its own base, and compare what changed with what was checked']) {

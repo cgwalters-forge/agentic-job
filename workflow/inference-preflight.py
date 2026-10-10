@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 def check(config, connect=socket.create_connection):
     url = config.get("inference", {}).get("url")
-    if not url:
+    if not url or config.get("agent", {}).get("name") == "fake":
         return
     endpoint = urlsplit(url)
     if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
@@ -20,7 +20,7 @@ def check(config, connect=socket.create_connection):
     except OSError as error:
         raise RuntimeError(
             f"control failed: the runner cannot reach the inference proxy at {url}: "
-            "join its network (tailscale-* inputs) or use a runner on it"
+            "join its network in a step before secure-host, or use a runner on it"
         ) from error
 
 

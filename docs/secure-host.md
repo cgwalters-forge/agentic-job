@@ -152,7 +152,7 @@ with the container daemon. After it:
 | `setup-node`, `setup-python`, `setup-go` and the like | work where they install into the runner's tool cache; one that calls `sudo` does not |
 | `sudo` anything, `apt-get`, writing under `/etc` or `/usr` | refused |
 | `docker`, Docker container actions, `services:` and `container:` on the job | gone: the daemon is stopped, since its group is root by another name. A job that needs them is not a job for this step; rootless podman, installed before it, is the container tool the sandbox user has |
-| A post step that calls `sudo` | fails or warns, as that action decides. `tailscale/github-action`'s logout only warns, and its ephemeral node expires |
+| A post step that calls `sudo` | fails or warns, as that action decides: a network join's logout has to only warn, and leave a node that expires by itself |
 
 CI exercises the rows it can: the checkout, a Rust cache saved by its
 post step, an artifact upload, `sudo` and `docker` refused. The rest
@@ -277,6 +277,9 @@ these releases automatically, without a pin PR. See
 [the workflow's binary trust model](workflow.md#things-a-caller-should-know)
 for the verification and publishing boundaries. Fetching needs Node and
 `gh` with attestation support, but no token; building needs rustup.
+A configuration with an `[inference]` table is first checked for a
+TCP connection to the proxy, which needs Python 3.11 or newer
+(`tomllib`); one without it, a deterministic job's, skips that check.
 Pass `build: true` to build even when a prebuilt exists.
 
 ## Without the action

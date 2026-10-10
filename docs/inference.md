@@ -113,6 +113,18 @@ agentic-job fixes none of it. The broker supports two admission forms:
   pinning a commit the entry is the sha form, and has to be updated
   whenever the pin moves.
 
+A caller that writes the agent job itself
+([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own)),
+as [example-compose.yml](../.github/workflows/example-compose.yml)
+does, runs it in its own workflow, not a called one: the token's
+`job_workflow_ref` names the caller's file, so only the first form,
+narrowed to that repository's id, admits it. That entry is the
+permissive one below: any workflow of the repository that can ask for
+an identity token can register a run. The shipped `dispatch.yml` and
+the other examples call `agentic-job.yml`, which `called_workflows`
+admits; composing the agent job is an opt-in that widens admission
+until the broker can name a caller's own workflow file.
+
 Under a permissive entry, an agent that holds a GitHub credential able
 to push a workflow to an admitted repository could start a job of its
 own that registers a run. What an operator turns on for this workflow
