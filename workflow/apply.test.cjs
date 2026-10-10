@@ -127,7 +127,7 @@ test("a push is applied to the policy pull request from apply's fork, never as a
     const name = "Write the handlers' configuration";
     const handlers = fork => {
       const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
-        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo',
+        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'Owner/Repo', OUTPUT_REPO: 'Owner/Repo',
         BASE: 'dispatch/implement/agent-run-12', BRANCH_PREFIX: 'dispatch/fix/', PARTIAL: '', TITLE_PREFIX: '[bot] ', COMMENT_TARGET: '42',
         PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'), FORK: fork,
       });
@@ -136,8 +136,11 @@ test("a push is applied to the policy pull request from apply's fork, never as a
     };
     // The handler refuses a pull request whose head repository is not `head-repo`.
     assert.deepEqual(handlers('bot/repo').push_to_pull_request_branch, {
-      ...push, signed_commits: false, fallback_as_pull_request: false, if_no_changes: 'error', 'target-repo': 'owner/repo',
+      ...push, signed_commits: false, fallback_as_pull_request: false, if_no_changes: 'error', 'target-repo': 'Owner/Repo',
       'head-repo': 'bot/repo', allowed_repos: ['bot/repo'],
+      // Where the handler finds the output repository's checkout when the
+      // caller is another repository: it looks the name up in lower case.
+      checkout_mapping: { 'owner/repo': '.' },
     });
     // Without a fork there is no handler that could push to the output repository.
     assert.deepEqual(handlers(''), {});
