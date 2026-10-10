@@ -999,13 +999,15 @@ commit. Whoever may start the caller's workflow on that branch can have
 the token used, through checked outputs only. And everything the token
 can do is within reach of that one job, so give it no more than forking
 the output repository, pushing to its own fork, and opening pull requests
-and comments in the output repository (and pushing its base branch, for an
-`output-repo` that is a fork of the target).
+and comments in the output repository. It needs no push access to the
+output repository for a pull request.
 
 For a patch, when `output-repo` is not the target, it is taken to be a fork of
-it: the job fast-forwards its base branch to the target's and pushes it
-before the handlers run. One whose base branch has commits of its own
-stops the job there. The pull request's own branch still goes to the
+it: its base branch must already contain the patch's base commit, or apply
+stops with an error asking the operator to sync it independently. Apply
+fetches the target's base but never pushes it to the output repository;
+that would start its push workflows on unreviewed target code. The pull
+request's own branch still goes to the
 applying account's fork of `output-repo`, so that account must not own
 `output-repo`.
 

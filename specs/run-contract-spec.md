@@ -229,7 +229,9 @@ apply's guard and not its handlers; and `AtMostOnce` and
 **RC-019 — Finding the result from the issue.** For a caller-named `issue`
 (a number of the output repository, checked by policy), apply MUST end a pull
 request's body with `Refs OWNER/NAME#N` in its own words, never a closing
-keyword nor agent text, before the guard names it. Apply MUST give the URL of
+keyword nor agent text, before the guard names it. The pull request handler
+MUST have `auto_close_issue: false`, including for issue-triggered events.
+Apply MUST give the URL of
 what it made (the pull request, else the first comment or issue, an earlier
 attempt's before this one's) as the `result-url` output of `apply.yml`,
 `agentic-job.yml` and `dispatch.yml`, and in the run summary. Unless that
@@ -239,7 +241,8 @@ for a comment, so that a re-run does not post it again. Failing to post the link
 MUST NOT fail the run. A pull request title made from the agent's summary
 MUST be cut at a word boundary within its limit.
 Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request
-refers to the issue the caller named, and closes nothing`, the `the result of
+refers to the issue the caller named, and closes nothing`, `a pull request's
+handler pushes only to the fork, and there is none without one`, the `the result of
 ...` cases and `the issue is linked to what a run made once, by the token that
 posts`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary` and `the URL of what apply made is an output
@@ -286,14 +289,17 @@ push goes on the pinned head, is not pushed twice, and a moved branch stops
 it`, `a push is verified on the branch it went to: one commit on the pinned
 head, with the checked tree`, `a push's pull request is read again before
 the handlers: open, from its branch, at the pinned head`, `a partial run's
-push is not applied, whatever else it posts` and `a push to another output
-repository stops apply before a fork is brought up to date`;
+push is not applied, whatever else it posts` and `target base fetching never
+advances the output repository and a stale base is refused`;
 [proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
 policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary`.
 
 **RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
-to a branch of the output repository. It MUST push a pull request's branch to
+to a branch of the output repository. It MUST NOT push target base commits
+there either; its base must already contain the patch's base commit, or apply
+MUST stop and ask the operator to sync it independently.
+It MUST push a pull request's branch to
 a fork of the output repository owned by the user `GET /user` names for its
 credential, making the fork when there is none, and open the pull request
 with that fork's owner and branch as its head, so that the output
@@ -316,14 +322,19 @@ pull request's handler pushes only to the fork, and there is none without
 one`, `the pull request is looked for from the branch gh-aw names in the fork,
 prefix normalized`, `a pull request without a fork to open it from stops the
 guard` and `the job fails unless every output was applied and a pull request
-asked for was opened`; [policy.rs](../crates/agentic-job/src/policy.rs), test
+asked for was opened`, and `target base fetching never advances the output
+repository and a stale base is refused`; [policy.rs](../crates/agentic-job/src/policy.rs), test
 `what_the_job_token_cannot_apply_is_refused` (RC-018);
 [dispatch.test.cjs](../workflow/dispatch.test.cjs), `real agent preflight
 names all missing deployment variables together`;
-[ci-paths.test.cjs](../workflow/ci-paths.test.cjs), `a fork's pull request
-skips E2E, and is held back when its paths need it`, `required ci check
-permits only explicitly gated skips` and `CI gives a fork's pull request no
-trigger, secret or OIDC token`.
+[ci.yml](../.github/workflows/ci.yml), the inline `changes` path classifier
+and required `ci` gate (workflow enforcement, not a live forge test).
+[ci.test.cjs](../workflow/ci.test.cjs) executes the inline classifier against
+local Git histories, including hostile script edits, renames and missing history.
+It also tests privileged job gating and the required check's acceptance/refusal
+matrix for skipped, failed and cancelled jobs.
+Classification does not execute a script from the pull request's tree;
+human edits to the proposed workflow still require review.
 
 ### 3.4 The caller's own agent job
 
@@ -421,8 +432,7 @@ These limitations are not additional guarantees:
 - RC-019 posts no link when the pull request was not opened (the job then
   fails): there is no result URL. Its link comment has RC-013's
   limits for a comment, and a re-run that makes another result is not linked
-  again. An event-triggered run on an issue still gets gh-aw's own `Fixes #N`
-  in a pull request's body (its `auto_close_issue` default), as before.
+  again.
 - RC-020 leaves a window between apply's last read of the pull request and
   gh-aw's handler pushing to it. A commit added on top of `head` then makes
   the push fail: the handler re-anchors on the patch's base commit and

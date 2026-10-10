@@ -173,8 +173,7 @@ jobs:
       # with is the user's repository in the output repository's network,
       # which can be the network's root or the caller's repository: it has
       # to be a fork, the user's, and neither of those, with Actions turned
-      # off. This comes before anything is pushed, the fast-forward of a
-      # fork's base included.
+      # off. This comes before anything is pushed.
       - name: Fork the output repository for the pull request
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
@@ -218,17 +217,19 @@ jobs:
             }
             core.setOutput('repo', name);
       # The target's base branch as this job fetched it, not as anything
-      # that was handed back says. A fork that is behind is fast-forwarded
-      # and one that has diverged stops here. A push goes only to the
-      # repository the run worked on (policy refuses any other): checked
+      # that was handed back says. Never push the target's commits to an
+      # output repository: its push workflows could run with privileges.
+      # A push goes only to the repository the run worked on (policy
+      # refuses any other): checked
       # again before anything here pushes to `OUTPUT_REPO`.
-      - name: Fetch the target's base branch, and bring a fork's up to it
+      - name: Fetch the target's base branch
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         run: |
           jq -e '.push_to_pull_request_branch == null' "$GH_AW_TMP/config.json" > /dev/null || [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] ||
             { echo "::error::a push goes to $REPO, the repository the run worked on, not to $OUTPUT_REPO"; exit 1; }
           git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
-          [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || { git merge --ff-only refs/agentic-job/target-base && git push origin "HEAD:refs/heads/$BASE"; }
+          [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || git merge-base --is-ancestor "$(jq -er '.patch.base_commit' "$REPORT")" HEAD ||
+            { echo "::error::sync $OUTPUT_REPO's $BASE to contain the patch's base commit before applying"; exit 1; }
       # The branch a pull request is pushed as is named in the hand-back,
       # and the handlers push that name as it is: it has to be this
       # run's, whatever the agent's machine wrote there. A push's names
@@ -310,7 +311,7 @@ jobs:
                 || fromJSON(inputs.agent).outputs.exit == '3' && '[partial: stopped at a limit] ' || '' }}
           TITLE_PREFIX: ${{ fromJSON(inputs.policy).title-prefix }}
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
-          PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true}'
+          PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true, "auto_close_issue": false}'
           # A push that fails is not to become a pull request, and an
           # empty one fails; `allow_workflows` is never set, so a change
           # under .github/workflows/ is refused here as well as by check.

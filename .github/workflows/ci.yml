@@ -25,8 +25,9 @@ jobs:
     timeout-minutes: 5
     # A fork's pull request, as apply opens every agent's, gets a read-only
     # token and no OIDC token: the end-to-end jobs, which write here, cannot
-    # run for it. Whether this is one is decided here and not in
-    # ci-paths.cjs, which runs from the pull request's own tree. `e2e` says
+    # run for it. Path classification lives here, not in PR-owned scripts.
+    # Agent patches cannot edit workflows; human workflow edits still need
+    # review because pull_request runs the proposed workflow. `e2e` says
     # whether the jobs run; `fork-e2e` that the paths need them (or do not
     # say) and they cannot, which fails the required ci check.
     outputs:
@@ -38,7 +39,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: paths
-        run: node workflow/ci-paths.cjs
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.after }}
+        shell: bash
+        run: |
+          e2e=true
+          range="$BASE..$HEAD"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then range="$BASE...$HEAD"; fi
+          if [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]] && git diff --no-ext-diff --no-renames --name-only -z "$range" -- > "$RUNNER_TEMP/changed-paths"; then
+            while IFS= read -r -d '' name; do
+              if [[ "$name" != README.md && ! "$name" =~ ^docs/([^/$'\r\n']+/)*[^/$'\r\n']+\.md$ ]]; then e2e=true; break; fi
+              e2e=false
+            done < "$RUNNER_TEMP/changed-paths"
+          fi
+          echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
 
   docs:
     runs-on: ubuntu-24.04
@@ -82,7 +97,7 @@ jobs:
       - run: node --test workflow/agent-actions.test.cjs
       # Read-only contract tests; no forge token or agent-produced code.
       - run: node --test workflow/dispatch.test.cjs
-      - run: node --test workflow/ci-paths.test.cjs
+      - run: node --test workflow/ci.test.cjs
 
   # The session with its agent as another user, entered with run0 as a
   # real run enters the sandbox: that nothing of that user's is left
