@@ -48,7 +48,7 @@ agent. The pieces are:
 | Piece | What it is | Its credential |
 | --- | --- | --- |
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
-| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the agent gets the optional GitHub read token, never this job's |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, on a machine the agent never touched | `contents: read`, no secrets |
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
@@ -136,7 +136,7 @@ jobs:
         timeout-minutes: 340
         uses: ./.agentic-job-source/run
         with:
-          github-token: ${{ secrets.GH_READ_TOKEN }}
+          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
       # Your later steps: the runner's user, without root.
       - env:
           EXIT: ${{ steps.run.outputs.exit }}
@@ -183,11 +183,11 @@ takes no `agent`.
 
 **Your agent job's permissions** are yours to keep read only: grant
 it `contents`, `issues`, `pull-requests` and `actions` read and
-`id-token: write`, as above, and nothing more. `run` cannot see what
-your job's token was granted, so it refuses to hand that token to the
-agent: only `agentic-job.yml`'s own agent job, whose permissions that
-file fixes, may. Pass `run` a read-only `GH_READ_TOKEN` for the
-agent's GitHub reads, or nothing
+`id-token: write`, as above, and nothing more. This is your
+obligation: declare that `permissions` block on the job. `run` gives
+the agent the token you pass, your job's included, and cannot see
+what a job token was granted; a job that can write gives the agent a
+token that can write, and no check catches it
 ([RC-017](../specs/run-contract-spec.md#34-the-callers-own-agent-job)).
 Give the `apply` call `actions: read` too: apply looks up the checked
 outputs' upload ID it is given, and takes it only if it is check's
@@ -749,11 +749,7 @@ expires when the job ends. The agent can leak it, and that is accepted:
 whoever gets it can read what the agent could, until the job ends, and
 write nothing. The workflow passes no credential that can write to the
 agent job, unless a caller's `GH_READ_TOKEN` (below) can; `SAFE_OUTPUTS_PAT`
-is passed only to apply. `run` hands the agent a job token only in this
-workflow's agent job, as GitHub's `job.workflow_file_path` and
-`job.workflow_sha` name it: an agent job of
-[your own](#the-pieces-and-an-agent-job-of-your-own) has permissions `run`
-cannot see, so its agent gets `GH_READ_TOKEN` or nothing.
+is passed only to apply.
 
 To give the agent another token, store a read-only one as a secret and
 pass it explicitly as `GH_READ_TOKEN: ${{ secrets.NAME }}` under the

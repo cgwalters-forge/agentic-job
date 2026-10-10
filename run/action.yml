@@ -9,8 +9,7 @@ inputs:
   github-token:
     description: >-
       Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
-      The agent can leak it: give a read-only token. The job token is refused but in agentic-job.yml's
-      agent job, whose permissions are reads
+      The agent can leak it: give a job token with read permissions only, or a read-only token
     default: ""
 outputs:
   exit:
@@ -68,27 +67,14 @@ runs:
         agentic-job sandbox exec --stdin "$ACTION/../workflow/dispatch-$PROFILE.sh" -- sh -s
     # The agent holds the token and could leak it, so it must not write.
     # A classic personal access token names its scopes, and one with any
-    # but read scopes is refused here. App and fine-grained tokens name
-    # none: their permissions are the caller's to keep to reads. Nor does
-    # the job token, so it goes to the agent only from agentic-job.yml's
-    # own agent job, whose permissions that file fixes to reads; a caller's
-    # job, whose permissions this cannot see, passes a read token or none.
-    # The job context is GitHub's, not the caller's, and a commit names the
-    # file's contents, in this repository or a fork of it.
+    # but read scopes is refused here. Job, App and fine-grained tokens
+    # name none: their permissions are the caller's to keep to reads.
     - name: Refuse a GitHub token that can write
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
-        JOB_TOKEN: ${{ github.token }}
-        SOURCE_SHA: ${{ steps.settings.outputs.source_sha }}
-        WORKFLOW_FILE: ${{ job.workflow_file_path }}
-        WORKFLOW_SHA: ${{ job.workflow_sha }}
       run: |
         [ -n "$GH_TOKEN" ] || exit 0
-        if [ "$GH_TOKEN" = "$JOB_TOKEN" ]; then
-          [[ "$WORKFLOW_FILE" == .github/workflows/agentic-job.yml && -n "$SOURCE_SHA" && "$WORKFLOW_SHA" == "$SOURCE_SHA" ]] ||
-            { echo "::error::the agent gets the job token only in agentic-job.yml's agent job: run cannot see what this job's was granted, so pass a read-only token, or none"; exit 1; }
-        fi
         # The header is read from stdin, to keep the token out of curl's arguments.
         headers=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS --max-time 60 -o /dev/null -D - -H @- https://api.github.com/rate_limit) ||
           { echo '::error::GitHub did not take the token for the agent'; exit 1; }
