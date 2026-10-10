@@ -1,7 +1,8 @@
 ----------------------------- MODULE Pipeline -----------------------------
 EXTENDS Naturals, Sequences, FiniteSets
 \* Constants select negative controls, NOT alternative production designs.
-CONSTANTS ByName, RunUntrusted, OverwriteBranch, NoGuard, ForgeableMarker
+CONSTANTS ByName, RunUntrusted, OverwriteBranch, NoGuard, ForgeableMarker,
+          TrustWiring
 VARIABLES uploads, latest, accepted, phase, history, branch, credential, executes,
           skipped
 vars == <<uploads, latest, accepted, phase, history, branch, credential, executes,
@@ -35,7 +36,11 @@ Check == \E i \in Ids:
 
 \* apply downloads check's immutable ID, not the current name. The broken
 \* variant resolves that name again: the classic check/use substitution.
-Selected == IF ByName THEN latest ELSE accepted
+\* The caller wires that ID, and may wire a producer upload's instead.
+\* apply looks the ID up itself and takes only check's upload of this run
+\* (`accepted`); the broken variant trusts the wiring.
+Wired == IF TrustWiring THEN {i \in Ids: uploads[i] # "absent"} ELSE {accepted}
+Selected(w) == IF ByName THEN latest ELSE w
 \* apply's guard looks on the forge for the name of proposal i, hidden in
 \* what it posted. Only the bot's posts count, so what was posted for i is
 \* the evidence, and so is a posted proposal that held a name: it is the
@@ -43,7 +48,7 @@ Selected == IF ByName THEN latest ELSE accepted
 Evidence(i) == \E n \in 1..Len(history):
                history[n].used = i \/ history[n].kind = "marked"
 Apply == /\ phase = "apply" /\ accepted # 0 /\ Len(history) < 2
-         /\ LET i == Selected IN
+         /\ \E w \in Wired: LET i == Selected(w) IN
             IF ~NoGuard /\ Evidence(i)
             THEN /\ skipped' = skipped \cup {i}
                  /\ UNCHANGED <<history, branch>>

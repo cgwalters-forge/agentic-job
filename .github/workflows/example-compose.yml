@@ -177,10 +177,12 @@ jobs:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     # A comment on an issue of this repository is all it writes; it
     # executes no agent-produced code.
+    # `actions: read` lets it confirm the checked outputs are check's.
     permissions:
       contents: read
       issues: write
       pull-requests: read
+      actions: read
     with:
       policy: ${{ toJSON(needs.policy.outputs) }}
       agent: ${{ toJSON(needs.agent) }}

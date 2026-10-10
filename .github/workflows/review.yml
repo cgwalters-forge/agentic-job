@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: read
       issues: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
       pull-requests: write
     with:

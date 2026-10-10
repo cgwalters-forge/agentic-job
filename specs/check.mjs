@@ -24,6 +24,7 @@ const cases = [
   ['BrokenGuard', 'AtMostOnce'],
   ['BrokenMarker', 'NoFalseSkip'],
   ['BrokenName', 'AcceptedOnly'],
+  ['BrokenWiring', 'AcceptedOnly'],
   ['BrokenCredential', 'CredentialIsolation'],
   ['BrokenBranch', 'BranchOnce'],
 ];

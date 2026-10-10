@@ -50,7 +50,7 @@ agent. The pieces are:
 | [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
 | the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token |
 | [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, on a machine the agent never touched | `contents: read`, no secrets |
-| [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token |
+| [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read` |
 
 Every setting is an input of `policy.yml` (the same inputs as
 `agentic-job.yml`, without `agent-runner` and `github-reads`, which
@@ -160,6 +160,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      actions: read
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     with:
@@ -170,9 +171,9 @@ jobs:
 
 Keep the `if:` lines as they are. The agent job runs only for an
 admitted request, and only after the whole policy call succeeded,
-activate and notify included. Notify's reaction and comment do not
-gate it: when posting them fails the run goes on, and `conclude` posts
-the status in a new comment on the item if there is no comment to edit. Check also runs after a failed agent run
+activate included. Notify does not gate it: when any of its steps
+fails the run goes on, and `conclude` posts the status in a new comment
+on the item if there is no comment to edit. Check also runs after a failed agent run
 that handed something back. Apply always runs once policy succeeded,
 and decides from check's result and the agent's exit state whether
 anything is applied and how the run is reported. For a
@@ -187,6 +188,9 @@ token to the agent unless you pass another, and it cannot see what
 that token was granted; a job that can write gives the agent a token
 that can write, and no check catches it
 ([RC-017](../specs/run-contract-spec.md#34-the-callers-own-agent-job)).
+Give the `apply` call `actions: read` too: apply looks up the checked
+outputs' upload ID it is given, and takes it only if it is check's
+`checked-outputs` of this run, whatever the `needs` it was wired from.
 
 **Your privileged steps** go between `prepare` and `secure-host`. They
 run as the runner's user with sudo. They come before anything of the
@@ -385,7 +389,7 @@ jobs:
       contents: read
       issues: write # apply may post the allowed comments
       pull-requests: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # GitHub validates the skipped agent job's permission too
     with:
       id: board

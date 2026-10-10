@@ -230,7 +230,9 @@ convenience workflow MUST be built from these same pieces, forward every
 setting to the policy call unchanged, and neither it nor any action here
 joins a network itself. Check and apply MUST refuse, before they download
 anything, a policy call whose `source-repository` and `source-sha` are not
-their own workflow's, and apply an empty or non-numeric checked artifact ID.
+their own workflow's, and apply an empty or non-numeric checked artifact ID,
+or one the read API does not name as this run's upload of check's
+`checked-outputs` under the policy call's artifact prefix.
 `prepare` and `run` MUST refuse, before they install or run anything from
 the policy upload, a `run.json` whose `source_sha` is not their own commit.
 Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
@@ -241,7 +243,9 @@ off agent outputs` and its `example-compose.yml` twin,
 `the wrapper forwards every setting to the policy call as it is` and
 `no workflow or action of this repository joins a network itself`;
 [apply.test.cjs](../workflow/apply.test.cjs), `check and apply refuse a
-policy call of another commit, and apply an empty checked ID`;
+policy call of another commit, and apply an empty checked ID` and `apply
+takes only this run's check output, whatever the caller wired`;
+[specs](../specs/README.md), `BrokenWiring`;
 [test_inference_preflight.py](../workflow/test_inference_preflight.py),
 `test_workflow_order_and_trusted_binary`;
 [dispatch.test.cjs](../workflow/dispatch.test.cjs),
@@ -301,7 +305,9 @@ These limitations are not additional guarantees:
   on the forge, not a ledger, so deleting what was posted lets a re-run post
   it again.
 - Whether a supplied job, App or fine-grained token can write is not
-  detectable before the run: GitHub reports scopes only for classic tokens.
+  detectable before the run: GitHub reports scopes only for classic tokens,
+  and validates an empty write's body before it authorizes it (422, not
+  403, to the read-only job token), so no harmless write tells them apart.
   The agent job's own token is bounded by its `permissions` block, which is
   tested in source; only `e2e-full` sees GitHub refuse it a write.
 - The separate-job design runs pinned handlers, not producer scripts, in apply.
