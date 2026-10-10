@@ -36,12 +36,18 @@ test('activation gates execution and consumes each admitted label application', 
 });
 
 test('workflow refuses discussions before routing and gates agent and notification on activation', () => {
-  const workflow = fs.readFileSync('.github/workflows/agentic-job.yml', 'utf8');
+  const workflow = fs.readFileSync('.github/workflows/policy.yml', 'utf8');
   assert.ok(workflow.indexOf('const decision = admit(') < workflow.indexOf('base=$BASE target='));
-  assert.match(workflow, /agent:\n    needs: \[policy, activate\]/);
   assert.match(workflow, /notify:\n    needs: \[policy, activate\]/);
   assert.match(workflow, /await activate\(decision, github, context.repo\)/);
   assert.match(workflow, /ref: \$\{\{ job.workflow_sha \}\}\n          path: activation-source/);
+  // An agent job needs the whole policy call, which ends after activate
+  // and notify, and goes on only if that call succeeded.
+  for (const file of ['agentic-job.yml', 'example-compose.yml']) {
+    const agent = fs.readFileSync(`.github/workflows/${file}`, 'utf8').split('\n  agent:\n')[1].split('\n    steps:\n')[0];
+    assert.match(agent, /^    needs: policy\n    (#[^\n]*\n    )*if: \$\{\{ [^\n]*needs.policy.outputs.admitted == 'true' \}\}$/m, file);
+    assert.doesNotMatch(agent, /always\(\)|cancelled\(\)/, file);
+  }
 });
 
 test('discussion boundary cannot write to an issue with the same number', async () => {

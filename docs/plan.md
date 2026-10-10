@@ -62,3 +62,8 @@ access belong to the operator. Per-run App tokens are deferred
 ([tracker#403](https://github.com/cgwalters-forge/tracker/issues/403)); an
 applier off GitHub is separate work
 ([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)).
+A caller's own agent job ([the pieces](workflow.md#the-pieces-and-an-agent-job-of-your-own))
+can be admitted by the broker only by repository, not by its workflow
+file, which widens admission ([inference admission](inference.md#which-workflows-a-broker-admits));
+naming a caller's own workflow file needs broker support, with the
+narrowing tracked in [tracker#452](https://github.com/cgwalters-forge/tracker/issues/452).

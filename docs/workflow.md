@@ -38,62 +38,207 @@ None of these write-capable jobs executes code produced by the agent.
 repository write permissions, and hands its token to the agent for
 [GitHub reads](#github-reads-from-the-agent).
 
-## Reusable checker contract
+## The pieces, and an agent job of your own
 
-The whole workflow calls [check.yml](../.github/workflows/check.yml) at its
-own source commit. This is an extracted piece of the composition
-migration; policy and apply remain in the wrapper.
-Existing callers need no changes, including proposals-only callers.
+`agentic-job.yml` is four pieces, and a caller can put them together
+itself when its agent job needs steps of its own: joining the inference
+proxy's network, packages, a service, or something to do after the
+agent. The pieces are:
 
-The checker takes `binary-artifact-id` and `policy-artifact-id` directly from
-the trusted policy job in the **same workflow run**, never from the proposal
-producer. It takes untrusted proposals by `safe-outputs-artifact-id`, or by
-the legacy `proposals-artifact` name, exclusively. Missing IDs fail before
-downloads: an empty artifact selector must not download every upload and let
-producer data stand in for trusted policy or executable code. IDs identify
-immutable uploads, not proof that the producer secured its host.
+| Piece | What it is | Its credential |
+| --- | --- | --- |
+| [`policy.yml`](../.github/workflows/policy.yml) | the `policy`, `activate` and `notify` jobs: the request against the bounds, the binary, the configuration and the task | `contents: read`; activate and notify write with what the call was granted |
+| the agent job | the caller's: a checkout, [`prepare`](../prepare/action.yml), the caller's privileged steps, [`secure-host`](../secure-host/action.yml), [`run`](../run/action.yml), the caller's later steps | the caller's to keep read only: `contents`, `issues`, `pull-requests` and `actions` read, `id-token: write`; the optional GitHub read token |
+| [`check.yml`](../.github/workflows/check.yml) | the outputs held to the policy, on a machine the agent never touched | `contents: read`, no secrets |
+| [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token |
 
-Pass the policy's effective `comment-target`, the caller's fixed `output-repo`
-and review/refusal settings unchanged. The checker returns `artifact-id`,
-`refusal` and `has-patch`; only its checked artifact goes to apply. Expected
-refusal returns diagnostics but no applicable artifact. Its paths remain
-`.agentic-job` for downloaded policy/binary, `.agentic-job/safe-outputs` for
-proposals and `/tmp/gh-aw` for collector/checker results.
+Every setting is an input of `policy.yml` (the same inputs as
+`agentic-job.yml`, without `agent-runner` and `github-reads`, which
+are the agent job's), and check and apply take the policy call's
+outputs as they are, with `toJSON(needs.policy.outputs)`: what is
+checked and applied is what that call decided. The agent job passes
+`prepare` only the policy call's two upload IDs, and check and apply
+take nothing from it but its proposals' upload ID, its result and its
+exit state. Its actions come from the commit of the policy call, by
+the call's `source-repository` and `source-sha` outputs, so that one
+pin covers the binary, the actions and the three workflows: name all
+three by the same commit. Check and apply refuse, as their first step,
+a policy call whose `source-repository` and `source-sha` are not their
+own workflow's. `prepare` and `run` refuse, before they use the policy
+upload, one whose commit is not their own: their ref when it is pinned
+by a full commit, otherwise the HEAD of the checkout they run from.
 
-The extraction preserves the ten-minute read-only job, all action pins and
-checkout source selection. No secrets are passed to the nested workflow;
-apply alone retains the apply token. The wrapper's admission, failed-run check,
-partial-apply, activation and notification gates are unchanged. Patch ancestry
-semantics are unchanged. Tailscale inputs and setup/cleanup are not changed.
+A complete caller, with a network join before the agent and a step
+after it. `example-org/network-join` stands in for whichever action
+joins your proxy's network, pinned by commit:
 
-## Agent step extraction (not yet a complete composed pipeline)
+```yaml
+jobs:
+  policy:
+    uses: cgwalters-forge/agentic-job/.github/workflows/policy.yml@COMMIT
+    permissions:
+      contents: read
+    with:
+      id: ${{ inputs.item }}
+      task: ${{ inputs.task }}
+      repo: ${{ inputs.repo }}
+      allow: .github/agentic-job/allow.toml
+      config: .github/agentic-job/runner.toml
+      agent: claude
+      inference-url: ${{ vars.INFERENCE_URL }}
+      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
 
-The wrapper now uses [prepare](../prepare/action.yml) to download policy and
-binary uploads by their trusted IDs and install the binary before hardening.
-It uses [run](../run/action.yml) after `secure-host` to run the agent, hand back,
-re-check repository visibility and upload proposals. Both actions come from
-the wrapper's own source commit, just like `secure-host`; all third-party
-action pins and agent job permissions are unchanged. The run action rejects
-an unlocked root-owned configuration and repeats `sandbox check` before
-execution. No apply credential is accepted by either action.
+  agent:
+    needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    outputs:
+      exit: ${{ steps.run.outputs.exit }}
+      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.policy.outputs.ref }}
+          persist-credentials: false
+      - name: The policy call's source repository and commit
+        env:
+          SOURCE_REPOSITORY: ${{ needs.policy.outputs.source-repository }}
+          SOURCE_SHA: ${{ needs.policy.outputs.source-sha }}
+        run: |
+          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
+          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      - uses: ./.agentic-job-source/prepare
+        with:
+          binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
+          policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      # Your privileged steps: they have root.
+      - uses: example-org/network-join@0123456789abcdef0123456789abcdef01234567
+        with:
+          audience: ${{ vars.NETWORK_AUDIENCE }}
+      - uses: ./.agentic-job-source/secure-host
+        with:
+          binary: /usr/local/bin/agentic-job
+          config: .agentic-job/config.toml
+      - id: run
+        timeout-minutes: 340
+        uses: ./.agentic-job-source/run
+        with:
+          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
+      # Your later steps: the runner's user, without root.
+      - env:
+          EXIT: ${{ steps.run.outputs.exit }}
+        run: echo "the agent's exit state was $EXIT"
 
-Preparation still needs the wrapper's configuration, preflight, task and
-metadata steps. The run action takes their runner-private `job-dir`, the
-public target `repo`, optional `agent-config-repo`, policy-resolved
-`review-head`, `artifact-prefix` and `apply-partial`. It returns `exit` and
-`safe-outputs-artifact-id`; the latter selects **untrusted proposals only**.
-Its uploads and exit/partial gate retain the wrapper's retention and failure
-behaviour. A step after a successful run runs as the runner user without
-sudo, not as the sandbox user. Do not execute agent-produced code there;
-use `sandbox exec` for untrusted commands.
+  check:
+    needs: [policy, agent]
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    permissions:
+      contents: read
+    uses: cgwalters-forge/agentic-job/.github/workflows/check.yml@COMMIT
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
 
-This is groundwork, not the caller-owned-job interface yet: reusable policy
-and apply workflows, complete configuration/task preparation and a composed
-hosted end-to-end case remain to be extracted. Existing callers keep working
-without changing inputs. In particular, the Tailscale inputs have **not** been
-removed and dispatch has not been migrated; keep the old form until the full
-composed replacement is available. External privileged setup belongs before
-`secure-host`, and its cleanup must work without sudo after hardening.
+  apply:
+    needs: [policy, agent, check]
+    if: ${{ always() && needs.policy.result == 'success' }}
+    uses: cgwalters-forge/agentic-job/.github/workflows/apply.yml@COMMIT
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      agent: ${{ toJSON(needs.agent) }}
+      check: ${{ toJSON(needs.check) }}
+```
+
+Keep the `if:` lines as they are. The agent job runs only for an
+admitted request, and only after the whole policy call succeeded,
+activate and notify included. Notify's reaction and comment do not
+gate it: when posting them fails the run goes on, and `conclude` posts
+the status in a new comment on the item if there is no comment to edit. Check also runs after a failed agent run
+that handed something back. Apply always runs once policy succeeded,
+and decides from check's result and the agent's exit state whether
+anything is applied and how the run is reported. For a
+[proposals-only caller](#proposals-from-a-non-agent-job) there is no
+agent job: check runs on `needs.policy.result == 'success'`, and apply
+takes no `agent`.
+
+**Your agent job's permissions** are yours to keep read only: grant
+it `contents`, `issues`, `pull-requests` and `actions` read and
+`id-token: write`, as above, and nothing more. `run` hands the job
+token to the agent unless you pass another, and it cannot see what
+that token was granted; a job that can write gives the agent a token
+that can write, and no check catches it
+([RC-017](../specs/run-contract-spec.md#34-the-callers-own-agent-job)).
+
+**Your privileged steps** go between `prepare` and `secure-host`. They
+run as the runner's user with sudo. They come before anything of the
+agent's is on the machine, and before `secure-host` takes root away.
+Leave alone what `prepare` wrote: `.agentic-job`, `.agentic-job-source`
+and `/usr/local/bin/agentic-job`. Leave no credential where the
+sandbox user can read it: `secure-host` closes the places
+[it lists](secure-host.md), and nothing else. A step that has to undo
+itself at the end of the job can do so only without sudo
+([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
+
+**Your later steps** go after `run`. They run as the runner's user
+without sudo, outside the sandbox, after the agent's outputs were
+uploaded. They can read what the agent left on the machine. Treat it
+as hostile: don't execute it, and run untrusted commands with
+`agentic-job sandbox exec`. Check and apply never read anything these
+steps make. [specs/run-contract-spec.md](../specs/run-contract-spec.md#34-the-callers-own-agent-job)
+is the contract and names the tests that hold it.
+
+[example-compose.yml](../.github/workflows/example-compose.yml) is this
+form, with the two places marked; CI's `e2e-compose` runs it with an
+example step in each. The shipped [dispatch.yml](../.github/workflows/dispatch.yml)
+still calls `agentic-job.yml`, so that its agent job stays a called
+workflow's for the broker.
+
+### Migrating from the Tailscale inputs
+
+`tailscale-oauth-client-id`, `tailscale-audience` and `tailscale-tags`
+are gone, and so is the workflow's own `tailscale/github-action` step.
+A caller that joined a tailnet with them now writes its agent job as
+above and joins with an action of its own choosing, pinned by commit,
+as its privileged step. A copy of `agentic-job.yml` kept for such a step is no longer needed,
+nor a variable set in place of `job.workflow_*`: the policy call's
+`source-repository` and `source-sha` outputs name the source. A caller
+that set none of them changes nothing. Join without the network's DNS;
+`sandbox setup` refuses a resolver on the tailnet.
+
+A caller-owned agent job is the caller's workflow file, so its identity
+token's `job_workflow_ref` names that file, not `agentic-job.yml`. A
+`called_workflows` entry for `agentic-job.yml` no longer matches it, and
+the broker has to admit the calling repository's own workflows instead
+([inference admission](inference.md#which-workflows-a-broker-admits)).
+
+### Migrating a direct call of check.yml
+
+`check.yml`'s separate inputs are gone: it takes `policy`, the
+`toJSON(needs.policy.outputs)` of a `policy.yml` call of the same
+commit, and `safe-outputs-artifact-id`. A caller that called it
+directly calls `policy.yml` first, as [above](#the-pieces-and-an-agent-job-of-your-own),
+and `apply.yml` after it. A caller of `agentic-job.yml` changes nothing
+but dropping the `tailscale-*` inputs: a call that still passes them is
+refused when the workflow starts.
 
 ## What has run, and what has not
 
@@ -131,8 +276,8 @@ Read this before relying on it.
   live here with the scripted agent.
 - Fork pull requests do not run CI's write end-to-end jobs.
 - Not tried at all: `apply-environment`, an `output-repo` other than the
-  calling repository, bringing a fork's base branch up to date, the
-  tailnet login,
+  calling repository, bringing a fork's base branch up to date, a
+  network join in a caller's own agent job,
   `agent-config-repo`, `kind: analysis`, and applying a `create_issue`:
   that type is checked through gh-aw's collector and `check` in CI
   (the `corpus` job), and its handler has not run from this workflow.
@@ -334,17 +479,17 @@ the following. Hosted Ubuntu alone cannot reach a private proxy.
   Keep `inference-register: github-oidc`: no repository secret or provider
   API key is needed for inference in this mode.
 - **A network route:** either a disposable self-hosted `agent-runner` on
-  the proxy's network, or `tailscale-oauth-client-id`, `tailscale-audience`
-  and `tailscale-tags`. The tailnet administrator must create an OAuth
-  client configured to trust GitHub's OIDC issuer and the requested audience,
-  authorize this workflow's identity to mint ephemeral tagged nodes, and
-  grant those tags access to the proxy's TCP port in the tailnet policy.
-  The client id is not a client secret; do not supply an OAuth secret.
+  the proxy's network, or an agent job of your own that joins the
+  network in a step before `secure-host`
+  ([above](#the-pieces-and-an-agent-job-of-your-own)), with whatever that
+  network's operator issues for it. Prefer a credential the job mints
+  from its identity token to a stored secret.
 - **Broker admission:** the broker operator must enable a `called_workflows`
   policy entry for `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml`,
   the exact commit pinned by the caller (`job_workflow_sha`), and the calling
   repository's numeric id (not just its name). Update that entry when the
-  workflow pin changes. See [inference admission](inference.md#which-workflows-a-broker-admits).
+  workflow pin changes. An agent job of your own is your workflow's, not
+  a called one: the broker admits it by your repository instead. See [inference admission](inference.md#which-workflows-a-broker-admits).
 - **Agent programs and limits:** `agent: claude` defaults to
   `@agentclientprotocol/claude-agent-acp@0.88.0` (the ACP adapter, which brings
   the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
@@ -353,9 +498,9 @@ the following. Hosted Ubuntu alone cannot reach a private proxy.
   These package pins do not pin every transitive dependency.
 
 The policy job validates the effective configuration, including overrides
-of the caller's `config`, before starting the agent machine. After joining
-the tailnet, the agent job makes a TCP connection to the effective proxy URL
-as the runner user, before sandbox setup. This control sends no credentials
+of the caller's `config`, before starting the agent machine. After the
+caller's own steps, `secure-host` makes a TCP connection to the effective
+proxy URL as the runner user, before sandbox setup. This control sends no credentials
 and proves only reachability, not broker admission or model availability.
 A failure names the missing network route rather than blaming sandbox rules.
 
@@ -415,7 +560,7 @@ in the calling repository.
 **Permissions.** The call needs `contents`, `issues`, `pull-requests`
 and `actions` read, and `id-token: write`: the agent job asks for the
 reads [for the agent](#github-reads-from-the-agent), and for the identity
-token, for the proxy and the tailnet, whether or not the run uses either.
+token, for the proxy, whether or not the run uses one.
 GitHub refuses the whole call when any of them is missing, even with
 `github-reads: false`. The policy, agent and check jobs take no more than
 that. Activate, notify, conclude and apply name no
@@ -438,9 +583,8 @@ identity token, for the audience `inference-audience`, which the agent's
 user cannot obtain. `plain` sends the run's name and no proof, and
 `token-file` reads a token from `inference-token-file` on the runner;
 both have to be chosen by name. The proxy speaks
-praxis-credential-broker's run API. A proxy on a tailnet is reached by
-joining it (`tailscale-oauth-client-id`, `tailscale-audience`,
-`tailscale-tags`). When the inference URL is an HTTP(S) IPv4 literal in
+praxis-credential-broker's run API. A proxy on a private network is
+reached by joining it in a step of your own agent job. When the inference URL is an HTTP(S) IPv4 literal in
 100.64.0.0/10, `agentic-job config` defaults `[egress] direct` to that URL
 so that the run token never crosses the egress proxy. An explicit `direct`
 list in the configuration file (even an empty one), or supplied with
@@ -972,11 +1116,9 @@ opened, pushed to or labeled it) lacks a listed role.
 **What the pinned actions bring.** The workflow names every action by
 commit: `actions/checkout`, `actions/upload-artifact`,
 `actions/download-artifact`, `actions/github-script`, gh-aw's
-`actions/setup` and `tailscale/github-action`. The first five run only
-what is in the pinned commit. The Tailscale action downloads the
-Tailscale release its pinned commit names as the default version, from
-Tailscale's package server, and checks it against a checksum it fetches
-from the same place. The build fetches crates as `Cargo.lock` pins them,
+`actions/setup`. They run only what is in the pinned commit. An action
+of the caller's own agent job is the caller's to pin and to read. The
+build fetches crates as `Cargo.lock` pins them,
 and `sandbox setup` installs the caller's packages with the image's
 package manager.
 
@@ -1024,8 +1166,9 @@ their trust model is described below.
 user: the second check that the repositories are public, the uploads,
 the step that turns the run's exit state into the job's result, and the
 post-steps of `actions/checkout` (it removes the credential
-settings of a checkout that kept none) and of the Tailscale action (it
-logs the machine out). None of them reads the sandbox user's files; the
+settings of a checkout that kept none), then the caller's own later
+steps and their post-steps, [above](#the-pieces-and-an-agent-job-of-your-own).
+None of them reads the sandbox user's files; the
 uploads take only what `run` put under its own directory after the gate.
 
 **Where the binary comes from.**

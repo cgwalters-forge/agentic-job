@@ -162,15 +162,14 @@ run0 ... --`. On a host where setup never ran (the tests), the same
 operations go through sudo directly (`sandbox::root`).
 
 **The steps after setup.** In the reusable workflow every step of the
-agent job after setup is this repository's: `sandbox check`, the
-task's files, `run`, the public-repository check, three uploads and the
+agent job after setup is this repository's (in an agent job of the
+caller's own, its later steps follow): `sandbox check`, `run`, the public-repository check, three uploads and the
 result. None needs root; the uploads read only what `run` moved out
 ([the upload gate](layout.md#run)). Of the actions' post steps, `actions/checkout`'s cleans
 its own credentials as the runner's user, the artifact actions have
-none, and `tailscale/github-action`'s runs `sudo tailscale logout`,
-which now fails: the action logs a warning and goes on ("your ephemeral
-node will eventually be cleaned up by Tailscale"), which is what
-happens, since the node is ephemeral. The hosted runner's own
+none, and a caller's network-join action whose post step logs out with
+`sudo` now fails there: it has to warn and go on, and its node has to
+be one that expires by itself. The hosted runner's own
 completion needs no root. A self-hosted runner that is not ephemeral
 would keep a locked machine: `agent-runner` must be thrown away after
 the job, as [workflow.md](workflow.md) requires. A caller who does not want this

@@ -1,48 +1,20 @@
 # Read-only validation on a machine the proposal producer never touched.
-# Trusted artifacts must come directly from policy, never through the producer.
+# Trusted artifacts must come directly from policy, never through the producer:
+# their upload IDs and every setting are policy.yml's outputs, and only the
+# proposals' upload ID comes from the producer.
 name: Check agentic-job proposals
 
 on:
   workflow_call:
     inputs:
-      runner:
-        description: Checker runner labels as JSON
-        type: string
-        default: '"ubuntu-24.04"'
-      binary-artifact-id:
-        description: Immutable binary upload ID from the trusted policy job in this run
-        type: string
-        required: true
-      policy-artifact-id:
-        description: Immutable policy upload ID from the trusted policy job in this run
+      policy:
+        description: >-
+          `toJSON(needs.policy.outputs)` of the policy.yml call in this run: the trusted binary and
+          policy upload IDs, the comment target, and the caller's settings as that call took them
         type: string
         required: true
       safe-outputs-artifact-id:
-        description: Immutable untrusted proposal upload ID; required unless proposals-artifact is set
-        type: string
-        default: ""
-      proposals-artifact:
-        description: Legacy untrusted proposals artifact name; never selects trusted code or policy
-        type: string
-        default: ""
-      review:
-        description: Validate an analysis-only review verdict
-        type: boolean
-        default: false
-      comment-target:
-        description: Trusted policy's effective comment destination
-        type: string
-        required: true
-      output-repo:
-        description: Fixed output repository, empty for the calling repository
-        type: string
-        default: ""
-      expect-check-refusal:
-        description: Require a policy refusal and publish no applicable outputs
-        type: boolean
-        default: false
-      artifact-prefix:
-        description: Caller namespace for artifact names within this run
+        description: Immutable untrusted proposal upload ID; required unless the policy names a proposals artifact
         type: string
         default: ""
     outputs:
@@ -70,20 +42,32 @@ env:
 
 jobs:
   check:
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
     timeout-minutes: 10
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       refusal: ${{ steps.refusal.outputs.reason }}
       has-patch: ${{ steps.checked.outputs.has-patch }}
     steps:
+      # The pieces must be one commit's: a policy call pinned elsewhere
+      # would have this commit's code check (or apply) the settings,
+      # binary and policy of another, possibly an older, weaker one.
+      - name: The policy call is this workflow's commit
+        env:
+          SOURCE_REPOSITORY: ${{ fromJSON(inputs.policy).source-repository }}
+          SOURCE_SHA: ${{ fromJSON(inputs.policy).source-sha }}
+          REPOSITORY: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_REPOSITORY" == "$REPOSITORY" && "$SOURCE_SHA" == "$SHA" ]] ||
+            { echo "::error::policy.yml ran at $SOURCE_REPOSITORY@$SOURCE_SHA, this workflow at $REPOSITORY@$SHA: pin all pieces to one commit"; exit 1; }
       # Empty IDs must not turn download-artifact into a download of all uploads.
       - name: Require explicit artifact contracts
         env:
-          BINARY: ${{ inputs.binary-artifact-id }}
-          POLICY: ${{ inputs.policy-artifact-id }}
+          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          POLICY: ${{ fromJSON(inputs.policy).policy-artifact-id }}
           PROPOSALS: ${{ inputs.safe-outputs-artifact-id }}
-          NAME: ${{ inputs.proposals-artifact }}
+          NAME: ${{ fromJSON(inputs.policy).proposals-artifact }}
         run: |
           [[ "$BINARY" =~ ^[0-9]+$ && "$POLICY" =~ ^[0-9]+$ ]] || { echo '::error::trusted artifact IDs are required'; exit 1; }
           if [ -z "$NAME" ]; then
@@ -107,18 +91,18 @@ jobs:
           destination: ${{ runner.temp }}/gh-aw/actions
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}
+          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }},${{ fromJSON(inputs.policy).policy-artifact-id }}
           path: .agentic-job
           merge-multiple: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ inputs.proposals-artifact == '' }}
+        if: ${{ fromJSON(inputs.policy).proposals-artifact == '' }}
         with:
           artifact-ids: ${{ inputs.safe-outputs-artifact-id }}
           path: .agentic-job/safe-outputs
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: ${{ inputs.proposals-artifact != '' }}
+        if: ${{ fromJSON(inputs.policy).proposals-artifact != '' }}
         with:
-          name: ${{ inputs.proposals-artifact }}
+          name: ${{ fromJSON(inputs.policy).proposals-artifact }}
           path: .agentic-job/safe-outputs
       - name: Write the collector's configuration
         run: |
@@ -138,10 +122,10 @@ jobs:
       - name: The collector refused nothing
         run: jq -e '.errors == []' "$GH_AW_TMP/agent_output.json"
       - name: Validate the review verdict
-        if: ${{ inputs.review }}
+        if: ${{ fromJSON(inputs.policy).review == 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          TARGET: ${{ inputs.comment-target }}
+          TARGET: ${{ fromJSON(inputs.policy).comment-target }}
         with:
           script: |
             const fs = require('node:fs');
@@ -155,9 +139,9 @@ jobs:
       - name: Check the outputs against the policy
         id: checked
         env:
-          COMMENT_REPO: ${{ inputs.output-repo || github.repository }}
-          COMMENT_TARGET: ${{ inputs.comment-target }}
-          EXPECT_REFUSAL: ${{ inputs.expect-check-refusal }}
+          COMMENT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
+          COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
+          EXPECT_REFUSAL: ${{ fromJSON(inputs.policy).expect-check-refusal }}
         run: |
           destination=()
           case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
@@ -187,13 +171,13 @@ jobs:
             for (const reason of reasons) core.error(`Refused by check: ${reason}`);
             core.setOutput('reason', reasons.join('; ').slice(0, 4000));
       - name: Put the patch beside the ingested outputs
-        if: ${{ success() && !inputs.expect-check-refusal }}
+        if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         run: find "$JOB_DIR/safe-outputs" -maxdepth 1 -name 'aw-*.patch' -exec cp -t "$GH_AW_TMP" {} +
       - id: upload
-        if: ${{ success() && !inputs.expect-check-refusal }}
+        if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.artifact-prefix }}checked-outputs
+          name: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
           path: |
             ${{ env.GH_AW_TMP }}/agent_output.json
             ${{ env.GH_AW_TMP }}/config.json

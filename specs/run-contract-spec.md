@@ -210,6 +210,70 @@ comment is there once` in [ci.yml](../.github/workflows/ci.yml), which re-runs
 apply's guard and not its handlers; and `AtMostOnce` and
 `NoFalseSkip` in the [TLA+ model](README.md).
 
+### 3.4 The caller's own agent job
+
+A caller MAY write the agent job itself, between the policy, check and apply
+pieces, as [the pieces](../docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
+describes. The pieces keep the boundaries of 3.1 to 3.3; this section is what
+the job's steps hold.
+
+**RC-015 — Composition.** An agent job MUST run, in order: the target
+checkout, the source checkout at the policy call's `source-repository` and
+`source-sha`, refused before the checkout unless they name a repository and
+a full commit, `prepare`, then the caller's privileged steps, `secure-host`
+and `run`. `secure-host` MUST check the inference proxy before it secures the
+host. The job MUST take the binary, policy and configuration only from the
+policy call's upload IDs, and hand on only `run`'s outputs: check takes the
+proposals' upload ID, apply the job's result and exit status. Check and
+apply MUST NOT read anything else the job makes. The
+convenience workflow MUST be built from these same pieces, forward every
+setting to the policy call unchanged, and neither it nor any action here
+joins a network itself. Check and apply MUST refuse, before they download
+anything, a policy call whose `source-repository` and `source-sha` are not
+their own workflow's, and apply an empty or non-numeric checked artifact ID.
+`prepare` and `run` MUST refuse, before they install or run anything from
+the policy upload, a `run.json` whose `source_sha` is not their own commit.
+Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
+`agentic-job.yml composes the pinned-source agent job and keeps trusted edges
+off agent outputs` and its `example-compose.yml` twin,
+`the source an agent job takes its actions from is the policy call's own`,
+`apply applies only what check accepted, whatever the caller's gate`,
+`the wrapper forwards every setting to the policy call as it is` and
+`no workflow or action of this repository joins a network itself`;
+[apply.test.cjs](../workflow/apply.test.cjs), `check and apply refuse a
+policy call of another commit, and apply an empty checked ID`;
+[test_inference_preflight.py](../workflow/test_inference_preflight.py),
+`test_workflow_order_and_trusted_binary`;
+[dispatch.test.cjs](../workflow/dispatch.test.cjs),
+`caller fixes capabilities and token boundary`.
+
+**RC-016 — Steps before `secure-host`.** A caller's steps between `prepare`
+and `secure-host` run as the runner user with sudo, and MAY join a network,
+install software or fetch a credential for the runner. They MUST NOT change
+`.agentic-job`, `.agentic-job-source` or `/usr/local/bin/agentic-job`, and
+MUST NOT leave a credential, process or socket that `secure-host`'s setup
+does not close to the sandbox user: setup removes the runner's sudo and the
+sandbox's routes to the host, not what a step chose to share.
+Enforcement: CI's `e2e-compose` runs [example-compose.yml](../.github/workflows/example-compose.yml)
+with an example privileged step that creates a root-owned file;
+[agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
+`the composed example marks where a caller's own steps go, and its examples
+prove their privileges`, holds that it sits between `prepare` and `secure-host`. What a
+caller's step itself does is not tested here (section 4).
+
+**RC-017 — Steps after `run`.** A caller's steps after `run` execute as the
+runner user, outside the sandbox and without sudo, after the hand-back was
+uploaded. They MAY read what the agent left on the machine and MUST treat it
+as hostile: not execute it, nor hand it to a credentialed step. A caller's
+own agent job MUST grant only `contents`, `issues`, `pull-requests` and
+`actions` read, plus `id-token: write`, as RC-014 requires of the reusable
+workflow's: `run` passes the job token to the agent unless given another,
+and cannot see what that token was granted.
+Enforcement: CI's `e2e-compose` example later step finds the earlier step's
+root-owned file and fails if `sudo -n true` succeeds; the same
+`agent-actions.test.cjs` test holds that it follows `run`. Only
+example-compose.yml's `permissions` block is tested (section 4).
+
 ## 4. Not yet enforced
 
 These limitations are not additional guarantees:
@@ -243,6 +307,16 @@ These limitations are not additional guarantees:
 - The separate-job design runs pinned handlers, not producer scripts, in apply.
   There is no comprehensive test proving that every future workflow step with
   a credential avoids executing producer code. Source review remains necessary.
+- RC-016 and RC-017 bind the steps a caller adds to its own agent job, which
+  this repository cannot see. Only the order of the pieces and example-compose.yml's
+  example steps are tested; a caller's step that shares a credential with the
+  sandbox, or runs the agent's files after `run`, is not caught.
+- RC-017's permissions are not enforced for a caller's own agent job. Its
+  `permissions` block is the caller's, and `run` refuses only a classic
+  token that names a write scope (RC-014): a job token cannot be inspected.
+  A caller job granted `contents: write` that passes `github.token` to
+  `run` hands the agent a token that can write, and no check fails. `agentic-job.yml` fixes its agent
+  job's permissions itself, so only a composed job is exposed.
 
 ## 5. Conformance evidence
 

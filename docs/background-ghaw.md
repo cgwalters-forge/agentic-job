@@ -259,7 +259,8 @@ Public git HTTPS reads need no credential.
 
 The agent job must request only repository read permissions; a source
 test, not a runtime check, holds it to them. Its separate `id-token: write` permission
-is for trusted inference registration and tailnet login; the
+is for trusted inference registration, and for a caller's own step that
+joins a network with it; the
 `ACTIONS_ID_TOKEN_REQUEST_*` variables must stay outside the sandbox.
 An optional override reaches the agent too and may leak (it is named
 `GH_READ_TOKEN`, since GitHub reserves the `GITHUB_` prefix);

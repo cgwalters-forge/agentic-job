@@ -6,7 +6,7 @@ const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { test } = require('node:test');
 
-const workflow = fs.readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
+const workflow = fs.readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
 const checker = fs.readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
 
 function script(name, key) {
@@ -55,8 +55,8 @@ for (const phase of ['collector', 'policy', 'review']) {
 
 test('conclusion excludes wildcard targets and retains output-repository routing', () => {
   const conclude = workflow.split('\n  conclude:')[1];
-  assert.equal((conclude.match(/needs.policy.outputs.comment-target != '\*'/g) ?? []).length, 2);
-  assert.match(conclude, /REPO: \$\{\{ inputs.output-repo \|\| github.repository \}\}/);
+  assert.equal((conclude.match(/fromJSON\(inputs.policy\).comment-target != '\*'/g) ?? []).length, 2);
+  assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).output-repo \|\| github.repository \}\}/);
   assert.match(conclude, /\[\[ "\$TARGET" =~ \^\[0-9\]\+\$/);
   assert.doesNotMatch(conclude, /SAFE_OUTPUTS_PAT/);
 });
@@ -97,9 +97,9 @@ test('expected refusal never uploads applicable outputs or starts apply', async 
   assert.match(checker, /failure\(\) \|\| steps.checked.outputs.refused == 'true'/);
   for (const marker of ['- name: Put the patch beside the ingested outputs', '- id: upload']) {
     const check = checker.split('\n  check:')[1];
-    assert.match(check.split(marker)[1], /^\n        if: \$\{\{ success\(\) && !inputs.expect-check-refusal \}\}/);
+    assert.match(check.split(marker)[1], /^\n        if: \$\{\{ success\(\) && fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}/);
   }
-  assert.match(workflow.split('\n  apply:')[1], /&& !inputs.expect-check-refusal \}\}/);
+  assert.match(workflow.split('\n  apply:')[1], /&& fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}/);
   const ci = fs.readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   assert.match(ci, /expect-check-refusal: true/);
   assert.match(ci, /test "\$REFUSED" = success/);

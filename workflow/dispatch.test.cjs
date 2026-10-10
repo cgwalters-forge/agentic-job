@@ -156,7 +156,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(verifier, /persist-credentials: false/);
   assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);
   assert.match(verifier, /GH_TOKEN: \$\{\{ github.token \}\}/);
-  assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-full\]/);
+  assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-compose, e2e-full\]/);
   assert.match(verifier, /if: .*always\(\).*outputs.e2e == 'true'.*head.repo.full_name == github.repository/);
   assert.match(cleanup, /needs: \[.*e2e-dispatch-verify\]/);
   assert.match(cleanup, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
@@ -170,19 +170,19 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   }
   const aggregate = job('ci');
   assert.match(aggregate, /needs: \[.*e2e-dispatch-verify.*\]/);
-  assert.match(aggregate, /IN\("e2e-dispatch", "e2e-dispatch-verify"\).*result == "skipped" and \$fork == "true"/);
+  assert.match(aggregate, /IN\("e2e-dispatch", "e2e-compose", "e2e-dispatch-verify"\).*result == "skipped" and \$fork == "true"/);
 });
 
 test('CI verifies actual dispatch comments, pinned SHA and patch, not only job success', () => {
   const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
   const head = 'a'.repeat(40);
+  const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
   const verify = (change = {}) => {
     const env = { GH_REPO: 'owner/repo', RUN: 'actions/runs/1', PR: '147',
-      REVIEW_HEAD: head, GITHUB_RUN_ID: '1', RESULT: 'success', ...change.env };
-    const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
+      REVIEW_HEAD: head, GITHUB_RUN_ID: '1', RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
     const responses = {
       'repos/owner/repo/issues/64/comments': change.comments ?? [
-        comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')],
+        comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')],
       'repos/owner/repo/issues/147/comments': [comment(
         'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head))],
       'repos/owner/repo/commits/dispatch/implement/agent-run-1': {
@@ -201,7 +201,8 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
   };
   verify();
   for (const change of [{ head: 'b'.repeat(40) }, { file: 'README.md' }, { comments: [] },
-    { draft: false }, { env: { RESULT: 'failure' } }, { env: { REVIEW_HEAD: '' } }]) {
+    { draft: false }, { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
+    { comments: [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')] }]) {
     assert.throws(() => verify(change));
   }
 });

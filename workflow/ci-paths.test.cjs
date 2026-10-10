@@ -137,7 +137,7 @@ test('required ci check permits only explicitly gated skips', () => {
   // Exercise the actual workflow expression, not a second implementation.
   const command = ci.slice(ci.indexOf('        run: >-\n', ci.indexOf('\n  ci:')))
     .replace('        run: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
-  const skipped = ['e2e-full', 'e2e-limit', 'e2e-event', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-dispatch-verify', 'e2e-verify'];
+  const skipped = ['e2e-full', 'e2e-limit', 'e2e-event', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'];
   const normal = ['changes', 'docs', 'rust', 'sandbox'];
   const needs = Object.fromEntries([...normal, ...skipped].map(key => [key, { result: 'success' }]));
   const run = (state, e2e, installed = 'true', fork = 'false') => spawnSync('bash', ['-c', command], {
@@ -156,14 +156,14 @@ test('required ci check permits only explicitly gated skips', () => {
   for (const key of normal) assert.notEqual(run({ ...docsOnly, [key]: { result: 'skipped' } }, 'false'), 0);
   assert.equal(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true', 'false'), 0);
   assert.notEqual(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true'), 0);
-  for (const key of ['e2e-dispatch', 'e2e-dispatch-verify']) {
+  for (const key of ['e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify']) {
     assert.equal(run({ ...needs, [key]: { result: 'skipped' } }, 'true', 'true', 'true'), 0);
     assert.notEqual(run({ ...needs, [key]: { result: 'skipped' } }, 'true'), 0);
   }
 });
 
 test('all E2E callers and verifier are gated, not workflow triggers', () => {
-  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-dispatch-verify', 'e2e-verify']) {
+  for (const job of ['e2e-full', 'e2e-limit', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify']) {
     const block = ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z-]*:\n/)[0];
     assert.match(block, /needs:.*changes/);
     assert.match(block, /if:.*needs\.changes\.outputs\.e2e == 'true'/);
