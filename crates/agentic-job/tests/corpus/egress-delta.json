@@ -1,0 +1,37 @@
+{
+  "policy.toml": [
+    {
+      "old": [
+        "[[write]]",
+        "name = \"npm audit\""
+      ],
+      "new": [
+        "[[write]]",
+        "name = \"GitHub GraphQL reads\"",
+        "why = \"gh reads issues and pull requests with GraphQL queries, which are POSTs. Mutations pass too: GitHub refuses them because the agent's GitHub token is read-only (#112). REST writes stay refused here.\"",
+        "hosts = [\"api.github.com\"]",
+        "methods = [\"POST\"]",
+        "paths = [\"/graphql\"]",
+        "",
+        "[[write]]",
+        "name = \"npm audit\""
+      ]
+    }
+  ],
+  "test_policy.py": [
+    {
+      "old": [
+        "            (\"POST\", \"api.github.com\", \"/graphql\", {}, False),"
+      ],
+      "new": [
+        "            # gh's reads; the read-only token is what refuses a mutation",
+        "            (\"POST\", \"api.github.com\", \"/graphql\", {}, True),",
+        "            (\"POST\", \"api.github.com\", \"/graphql/x\", {}, False),",
+        "            (\"POST\", \"github.com\", \"/graphql\", {}, False),",
+        "            (\"POST\", \"api.github.com\", \"/repos/a/b/issues/1/comments\", {}, False),",
+        "            (\"PATCH\", \"api.github.com\", \"/repos/a/b/issues/1\", {}, False),",
+        "            (\"PUT\", \"api.github.com\", \"/graphql\", {}, False),"
+      ]
+    }
+  ]
+}

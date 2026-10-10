@@ -33,8 +33,9 @@ need review against the base, file-list and rename checks already implemented.
 [Setup performance (#108)](https://github.com/cgwalters-forge/agentic-job/issues/108)
 still tracks the host-wide walk, feed-pin maintenance and source-attested releases.
 
-The remaining gh-aw gaps have separate issues: authenticated read tools
-([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)), more output
+The agent reads GitHub with a read-only token
+([#112](https://github.com/cgwalters-forge/agentic-job/issues/112)).
+The remaining gh-aw gaps have separate issues: more output
 types and bounds ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)),
 threat detection ([#114](https://github.com/cgwalters-forge/agentic-job/issues/114)),
 private repositories ([#115](https://github.com/cgwalters-forge/agentic-job/issues/115)),

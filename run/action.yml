@@ -19,6 +19,11 @@ inputs:
   apply-partial:
     description: Accept a limit exit only when proposals were handed back
     default: "false"
+  github-token:
+    description: >-
+      Read-only GitHub token the agent gets as GH_TOKEN, for gh and the API; empty gives it none.
+      The agent can leak it: give a job token with read permissions only, or a read-only token
+    default: ""
 outputs:
   exit:
     description: Exit state of agentic-job run
@@ -37,12 +42,36 @@ runs:
       run: |
         python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
         agentic-job sandbox check
+    # The agent holds the token and could leak it, so it must not write.
+    # A classic personal access token names its scopes, and one with any
+    # but read scopes is refused here. Job, App and fine-grained tokens
+    # name none: their permissions are the caller's to keep to reads.
+    - name: Refuse a GitHub token that can write
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        [ -n "$GH_TOKEN" ] || exit 0
+        # The header is read from stdin, to keep the token out of curl's arguments.
+        headers=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS --max-time 60 -o /dev/null -D - -H @- https://api.github.com/rate_limit) ||
+          { echo '::error::GitHub did not take the token for the agent'; exit 1; }
+        scopes=$(printf '%s\n' "$headers" | tr -d '\r' | sed -n 's/^x-oauth-scopes:[[:space:]]*//Ip')
+        set -f
+        for scope in ${scopes//,/ }; do
+          case "$scope" in
+            read:* | user:email) ;;
+            *) echo "::error::the token for the agent has the scope $scope, which can write: give it read scopes only"; exit 1 ;;
+          esac
+        done
     - name: Run the agent
       id: run
       shell: bash
       env:
         JOB_DIR: ${{ inputs.job-dir }}
         REVIEW_HEAD: ${{ inputs.review-head }}
+        # `agentic-job run` writes it to a file of the sandbox user's and
+        # redacts it wherever the run logs or publishes.
+        GH_TOKEN: ${{ inputs.github-token }}
       run: |
         echo '::group::agent (condensed)'
         state=0

@@ -1,6 +1,6 @@
 // Exercise the extracted actions' actual shell without changing this host.
 const assert = require('node:assert/strict');
-const { readFileSync, mkdtempSync, rmSync } = require('node:fs');
+const { readFileSync, readdirSync, mkdtempSync, rmSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { join } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -97,7 +97,6 @@ test('wrapper uses the same pinned-source producer and keeps trusted edges off a
   }
   assert.match(agent, /repository: \$\{\{ job.workflow_repository \}\}/);
   assert.match(agent, /ref: \$\{\{ job.workflow_sha \}\}/);
-  assert.match(agent, /contents: read[\s\S]*id-token: write/);
   for (const action of [prepare, run]) {
     assert.doesNotMatch(action, /secrets\.|SAFE_OUTPUTS_PAT/);
     for (const use of action.matchAll(/uses: ([^\n]+)/g)) {
@@ -106,4 +105,79 @@ test('wrapper uses the same pinned-source producer and keeps trusted edges off a
   }
   assert.ok(agent.indexOf('/prepare') < agent.indexOf('/secure-host'));
   assert.ok(agent.indexOf('/secure-host') < agent.indexOf('/run'));
+});
+
+// The agent holds its GitHub token and can leak it: every permission of
+// the job that makes it is a read, but the run's own OIDC token.
+test('the agent job token reads and only apply holds a write credential', () => {
+  const jobs = wrapper.split('\njobs:\n')[1];
+  const agent = jobs.split('\n  agent:\n')[1].split('\n  notify:\n')[0];
+  const permissions = agent.split('    permissions:\n')[1].split('    outputs:\n')[0];
+  // Every line is a permission, a comment, or a permission with one.
+  const lines = permissions.split('\n').map(line => line.replace(/#.*/, '').trim()).filter(Boolean);
+  assert.deepEqual(Object.fromEntries(lines.map(line => line.match(/^([-\w]+): (\w+)$/).slice(1))), {
+    contents: 'read', issues: 'read', 'pull-requests': 'read', actions: 'read', 'id-token': 'write',
+  });
+  const line = "github-token: ${{ inputs.github-reads && (secrets.GH_READ_TOKEN || github.token) || '' }}";
+  assert.ok(agent.includes(line));
+  // Actions expressions allow a hyphen in a property name; JavaScript does not.
+  const expression = line.match(/\$\{\{ (.+) \}\}/)[1].replace('inputs.github-reads', "inputs['github-reads']");
+  for (const [reads, supplied, expected] of [
+    [true, '', 'job-token'], [true, 'read-token', 'read-token'], [false, 'read-token', ''], [false, '', ''],
+  ]) {
+    assert.equal(Function('inputs', 'secrets', 'github', `return ${expression}`)(
+      { 'github-reads': reads }, { GH_READ_TOKEN: supplied }, { token: 'job-token' }), expected);
+  }
+  assert.match(wrapper, /^      github-reads:\n[\s\S]*?type: boolean\n        default: true$/m);
+  const named = [...jobs.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
+  for (const [, name, job] of named) {
+    assert.equal(job.includes('secrets.GH_READ_TOKEN'), name === 'agent', name);
+    assert.equal(job.includes('secrets.SAFE_OUTPUTS_PAT'), name === 'apply', name);
+  }
+  // GitHub refuses a whole called workflow whose job asks for more than
+  // the call was granted, the skipped agent job's included.
+  const workflows = join(__dirname, '../.github/workflows');
+  for (const file of readdirSync(workflows)) {
+    const source = readFileSync(join(workflows, file), 'utf8');
+    for (const [, name, job] of source.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)) {
+      if (!/^    uses: \.\/\.github\/workflows\/(agentic-job|dispatch)\.yml/m.test(job)) continue;
+      const granted = job.split('    permissions:')[1]?.split(/\n    [^ ]/)[0] ?? '';
+      const anchor = granted.match(/^ \*([-\w]+)/);
+      const block = anchor ? source.split(`&${anchor[1]}\n`)[1].split(/\n    [^ ]/)[0] : granted;
+      for (const scope of ['contents', 'issues', 'pull-requests', 'actions']) {
+        assert.match(block, new RegExp(`^      ${scope}: (read|write)\\b`, 'm'), `${file} ${name} ${scope}`);
+      }
+      assert.match(block, /^      id-token: write\b/m, `${file} ${name}`);
+    }
+  }
+});
+
+test('the agent gets its GitHub token, and a classic token that can write is refused first', () => {
+  const runStep = run.split('- name: Run the agent\n')[1].split('      run: |\n')[0];
+  assert.match(runStep, /^        GH_TOKEN: \$\{\{ inputs.github-token \}\}$/m);
+  assert.match(run, /^  github-token:\n[\s\S]*?default: ""$/m);
+  assert.ok(run.indexOf('name: Refuse a GitHub token that can write') < run.indexOf('name: Run the agent'));
+  const probe = step(run, 'Refuse a GitHub token that can write');
+  for (const [token, headers, status, expected] of [
+    ['', '', 0, 0],
+    // A job, App or fine-grained token names no scopes.
+    ['ghs_job', 'HTTP/2 200\r\nx-ratelimit-limit: 5000\r\n', 0, 0],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: \r\n', 0, 0],
+    ['gho_classic', 'HTTP/2 200\r\nX-OAuth-Scopes: read:org, read:user, user:email\r\n', 0, 0],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: public_repo\r\n', 0, 1],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: read:org, repo\r\n', 0, 1],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: read:packages,write:packages\r\n', 0, 1],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: gist\r\n', 0, 1],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: *\r\n', 0, 1],
+    ['gho_classic', 'HTTP/2 200\r\nx-oauth-scopes: $(exit 0)\r\n', 0, 1],
+    // GitHub did not take it: refused, not waved through.
+    ['gho_classic', '', 22, 1],
+  ]) {
+    // The token is sent on stdin, never as an argument others can see.
+    const result = shell('curl() { case "$*" in *"$GH_TOKEN"*) return 9 ;; esac\n' +
+      '[ "$(cat)" = "Authorization: Bearer $GH_TOKEN" ] || return 8; printf "%s" "$HEADERS"; return "$STATUS"; };\n' + probe,
+      { GH_TOKEN: token, HEADERS: headers, STATUS: String(status) });
+    assert.equal(result.status, expected, `${headers}: ${result.stdout}${result.stderr}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /ghs_job|gho_classic/);
+  }
 });

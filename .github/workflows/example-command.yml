@@ -39,6 +39,7 @@ jobs:
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
+      actions: read # the agent job's GitHub reads
       id-token: write
       # For the job's own token to apply the outputs here and to post the
       # status comment: the branch of a pull request, the comments.

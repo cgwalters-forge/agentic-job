@@ -6,9 +6,12 @@
 // loads), so its constants and its two functions are cut out of its
 // source and loaded as a module of their own. And egress/ here must be
 // agent/egress/ there, byte for byte: the proxy was moved, not changed.
-// Its pin is the exception: the old tree's requirements.txt, which names
-// mitmproxy alone, is requirements.in here, and requirements.txt is
-// generated from it with every dependency and the hashes of its files.
+// The changes made since are the exceptions, recorded in egress-delta.json
+// as text replaced in the old tree's file (#112 lets gh's GraphQL reads
+// through, and tests that); any other difference fails. Its pin is
+// another: the old tree's requirements.txt, which names mitmproxy alone,
+// is requirements.in here, and requirements.txt is generated from it
+// with every dependency and the hashes of its files.
 //
 //   OLD_TREE=... AGENTIC_JOB=.../agentic-job node --test nft.test.mjs
 import assert from "node:assert/strict";
@@ -28,6 +31,7 @@ const AGENTIC_JOB = env("AGENTIC_JOB");
 const EGRESS = join(dirname(fileURLToPath(import.meta.url)), "../../../../egress");
 const PINS = "requirements.txt";
 const PINS_SOURCE = "requirements.in";
+const DELTA = JSON.parse(readFileSync(new URL("egress-delta.json", import.meta.url), "utf8"));
 
 // From the first constant to the end of sandboxRules.
 const source = readFileSync(join(OLD_TREE, "scripts/setup-runner-sandbox.mjs"), "utf8");
@@ -92,12 +96,23 @@ test("both refuse what is not a tailnet endpoint", () => {
   }
 });
 
-test("egress/ is the old tree's agent/egress/, unchanged", () => {
+// The old tree's file with each recorded replacement made, each of
+// whose old text must occur in it exactly once.
+const withDelta = (text, name) => (DELTA[name] ?? []).reduce((text, { old, new: replacement }) => {
+  const [from, to] = [old.join("\n"), replacement.join("\n")];
+  assert.equal(text.split(from).length, 2, `${name}: the delta's old text must occur once:\n${from}`);
+  return text.replace(from, () => to);
+}, text);
+
+test("egress/ is the old tree's agent/egress/ plus only the recorded delta", () => {
   const theirs = join(OLD_TREE, "agent/egress");
   const names = readdirSync(theirs).sort();
   assert.deepEqual(readdirSync(EGRESS).filter((name) => name !== PINS_SOURCE).sort(), names);
+  for (const name of Object.keys(DELTA)) assert.ok(names.includes(name), `${name}: delta for no file`);
   for (const name of names.filter((name) => name !== PINS)) {
-    assert.ok(readFileSync(join(EGRESS, name)).equals(readFileSync(join(theirs, name))), `${name} differs`);
+    const ours = readFileSync(join(EGRESS, name));
+    const expected = withDelta(readFileSync(join(theirs, name), "utf8"), name);
+    assert.ok(ours.equals(Buffer.from(expected)), `${name} differs from the old tree's plus the recorded delta`);
   }
   const pinned = (file) => readFileSync(file, "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
   assert.deepEqual(pinned(join(EGRESS, PINS_SOURCE)), pinned(join(theirs, PINS)));

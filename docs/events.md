@@ -202,6 +202,7 @@ jobs:
       id-token: write
       issues: write
       pull-requests: write
+      actions: read
     with:
       id: label-${{ github.event.issue.number || github.event.pull_request.number }}
       repo: ${{ github.repository }}

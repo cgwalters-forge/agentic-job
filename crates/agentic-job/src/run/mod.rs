@@ -473,13 +473,25 @@ impl Plan {
                 inference::RECORD_SCHEMA
             );
         }
-        let configuration = agent::generate(
+        let mut configuration = agent::generate(
             self.kind,
             self.endpoint.as_ref(),
             run.as_deref().map(Run::token),
             self.agent.model.as_deref(),
             &source,
         )?;
+        // Its value is a literal of the redaction, as every *_TOKEN of
+        // this process is (`own_tokens`).
+        let github = match std::env::var(agent::GITHUB_TOKEN_VAR) {
+            Ok(token) => Some(token),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                bail!("{} is not a token", agent::GITHUB_TOKEN_VAR)
+            }
+        };
+        configuration
+            .files
+            .push(agent::github_token(github.as_deref())?);
         agent::install(sandbox, &configuration)?;
         if let (Some(run), Some(file)) = (&run, self.kind.token_file()) {
             let given = match self.endpoint.as_ref().map(|endpoint| &endpoint.mode) {

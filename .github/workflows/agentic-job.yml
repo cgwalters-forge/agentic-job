@@ -240,12 +240,26 @@ on:
         description: Put before the name of every artifact, for a caller that calls this more than once in a run
         type: string
         default: ""
+      github-reads:
+        description: >-
+          Give the agent a read-only GitHub token as GH_TOKEN, for gh and the API: the secret GH_READ_TOKEN,
+          or else the agent job's own, which can only read. False gives it none
+        type: boolean
+        default: true
     secrets:
       # Explicit optional credential, consumed only by apply. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
       SAFE_OUTPUTS_PAT:
         description: Optional credential for applying safe outputs; defaults to the job token when empty
+        required: false
+      # Optional read-only token the agent gets as GH_TOKEN, in place of the
+      # agent job's own read-only token. The agent holds it and could leak
+      # it, so it must not be able to write: a classic token with any scope
+      # but reads is refused, other kinds are the caller's to make read-only
+      # (docs/workflow.md). Not GITHUB_*: GitHub reserves that prefix.
+      GH_READ_TOKEN:
+        description: Optional read-only GitHub token for the agent; defaults to the agent job's read-only token
         required: false
     outputs:
       review-head:
@@ -586,8 +600,14 @@ jobs:
     if: ${{ inputs.proposals-artifact == '' && needs.policy.outputs.admitted == 'true' }}
     runs-on: ${{ fromJSON(inputs.agent-runner) }}
     timeout-minutes: 360
+    # The job token the agent gets for GitHub reads (`gh`, the API): read
+    # only, so that one it leaks cannot write. A caller must grant at least
+    # these to the call, or GitHub refuses the whole workflow.
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
+      actions: read
       # For the run's registration at the inference proxy and for the
       # tailnet login. The agent cannot ask for this token: `sandbox setup`
       # keeps the request's address and credential from its user, and
@@ -708,6 +728,7 @@ jobs:
           review-head: ${{ needs.policy.outputs.review-head }}
           artifact-prefix: ${{ inputs.artifact-prefix }}
           apply-partial: ${{ inputs.apply-partial }}
+          github-token: ${{ inputs.github-reads && (secrets.GH_READ_TOKEN || github.token) || '' }}
 
   # For an event-triggered run: an eyes reaction on what started it, and a
   # comment that says a run started, which `conclude` edits when the run

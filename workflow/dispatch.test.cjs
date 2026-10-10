@@ -80,14 +80,18 @@ test('caller fixes capabilities and token boundary', () => {
   const target = workflow.split('\n  target:\n')[1].split('\n  run:\n')[0];
   assert.doesNotMatch(target, /secrets(?:[.:]|\[)/);
   const forwarded = workflow.split('\n  run:\n')[1].split('    secrets:\n')[1].split('    permissions:\n')[0];
-  assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), ['SAFE_OUTPUTS_PAT']);
-  assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n        required: false'));
-  assert.ok(forwarded.includes("SAFE_OUTPUTS_PAT: ${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}"));
-  const expression = forwarded.match(/\$\{\{ (.+) \}\}/)[1];
-  for (const scripted of [false, true]) {
-    for (const pat of ['', 'test-pat']) {
-      assert.equal(Function('inputs', 'secrets', `return ${expression}`)(
-        { scripted }, { SAFE_OUTPUTS_PAT: pat }), scripted ? '' : pat);
+  const names = ['SAFE_OUTPUTS_PAT', 'GH_READ_TOKEN'];
+  assert.deepEqual([...forwarded.matchAll(/^      ([-\w]+):/gm)].map(m => m[1]), names);
+  for (const name of names) {
+    assert.ok(workflow.includes(`      ${name}:\n        required: false`), name);
+    const line = `${name}: \${{ !inputs.scripted && secrets.${name} || '' }}`;
+    assert.ok(forwarded.includes(line), name);
+    const expression = line.match(/\$\{\{ (.+) \}\}/)[1];
+    for (const scripted of [false, true]) {
+      for (const value of ['', 'test-value']) {
+        assert.equal(Function('inputs', 'secrets', `return ${expression}`)(
+          { scripted }, { [name]: value }), scripted ? '' : value);
+      }
     }
   }
   assert.match(bounds, /^repos = \["cgwalters-forge\/agentic-job"\]$/m);

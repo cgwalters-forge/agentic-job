@@ -134,7 +134,7 @@ test('documented proposals caller matches the CI trial and shipped bounds', () =
   assert.equal(snippet.split('    steps:\n')[1].split('  apply:\n')[0],
     producer.split('    steps:\n')[1].trimEnd() + '\n');
   for (const block of [snippet.split('  apply:\n')[1], caller]) {
-    assert.match(block, /contents: read\n      issues: write[^\n]*\n      id-token: write/);
+    assert.match(block, /contents: read\n      issues: write[^\n]*\n      pull-requests: read[^\n]*\n      actions: read[^\n]*\n      id-token: write/);
     assert.match(block, /allow: \.github\/agentic-job\/allow.toml/);
     assert.match(block, /outputs: add_comment,noop/);
     assert.match(block, /max-outputs: '2'/);

@@ -53,6 +53,10 @@ const PUBLISHED: [&str; 3] = ["out/run", "out/transcript.tar.zst", "out/safe-out
 const SCRIPT_PATH: &str = ".config/fake-agent/demo.json";
 /// The patch of a run of these tests.
 const PATCH: &str = "out/safe-outputs/aw-agent-run-4242.patch";
+/// The variable `run` takes the agent's GitHub token from, and the file
+/// of the sandbox user's it puts it in.
+const GITHUB_TOKEN_VAR: &str = "GH_TOKEN";
+const GITHUB_TOKEN_FILE: &str = ".config/agentic-job/github-token";
 
 /// The sandbox user is one, and ending a run kills every process of it:
 /// the tests that use it take turns.
@@ -154,6 +158,8 @@ impl Job {
             // run token or the identity token: with one that answers
             // nothing, as here, every registration would fail.
             .envs(PROXY_VARS.map(|name| (name, DEAD_PROXY)))
+            // The agent gets a GitHub token only where a test gives one.
+            .env_remove(GITHUB_TOKEN_VAR)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -615,6 +621,8 @@ fn a_run_from_clone_to_the_end_of_its_run() {
     assert_eq!(processes_of(&user), "");
     // The fake agent has no model: the token was handed to nobody.
     assert!(!got.all().contains("praxis-run-"), "{}", got.all());
+    // Nor has this run a GitHub token: an earlier run's is gone.
+    assert_eq!(sandbox_file(&user, GITHUB_TOKEN_FILE), None);
 
     // What is left to upload, in the old tree's names.
     let summary = job.json("out/run/summary.json");
@@ -737,6 +745,12 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
         &json!([
             {"say": "Adding a greeting."},
             canary(),
+            // The run's GitHub token, as the agent has it: in its
+            // environment and in a file only it can read.
+            {"execute": {"title": "Bash", "command": format!(
+                "test \"${GITHUB_TOKEN_VAR}\" = \"$(cat ~/{GITHUB_TOKEN_FILE})\" && \
+                 stat -c 'github token file %a' ~/{GITHUB_TOKEN_FILE} && \
+                 printf 'github token: %s\\n' \"${GITHUB_TOKEN_VAR}\"")}},
             {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
             {"execute": {"title": "Bash", "command": "mkdir docs && echo more > docs/more.txt"}},
             {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
@@ -753,8 +767,32 @@ fn a_change_is_handed_back_and_the_check_accepts_it() {
     job.allow(pull_requests());
     let commit =
         "[commit]\nauthor = \"A Bot <bot@example.com>\"\ntrailers = [\"Generated-by: AI\"]\n";
-    let got = job.run(&format!("{}{commit}", config(&user, &plain(&proxy))));
+    // Shaped like no credential: only its registration redacts it.
+    let github_token = format!("read-only-{}", std::process::id());
+    let mut command = job.command(&format!("{}{commit}", config(&user, &plain(&proxy))));
+    let got = Finished::of(
+        command
+            .env(GITHUB_TOKEN_VAR, &github_token)
+            .output()
+            .unwrap(),
+    );
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    // The agent had it, and nothing the run wrote or said has it.
+    let acp = job
+        .transcript()
+        .into_iter()
+        .find(|(name, _)| name == "acp.jsonl")
+        .map(|(_, content)| String::from_utf8_lossy(&content).into_owned())
+        .unwrap();
+    assert!(acp.contains("github token file 600"), "{acp}");
+    assert!(acp.contains("github token: [REDACTED]"), "{acp}");
+    assert!(!got.all().contains(&github_token), "{}", got.all());
+    for (path, content) in job.written() {
+        assert!(
+            path.contains("/out/work/harness/") || !contains(&content, &github_token),
+            "{path}"
+        );
+    }
 
     let mut names: Vec<String> = std::fs::read_dir(job.path("out/safe-outputs"))
         .unwrap()

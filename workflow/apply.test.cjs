@@ -134,8 +134,12 @@ for (const filename of ['full', 'limit', 'event']) {
   test(`scripted ${filename} comments inherit the caller's fixed destination`, () => {
     const setup = readFileSync(join(__dirname, `../.github/agentic-job/e2e/${filename}.sh`), 'utf8');
     const fixture = JSON.parse(setup.split("<<'JSON'\n")[1].split('\nJSON')[0]);
+    // full's comment is appended by its GitHub probe, once the probe passed.
+    const appended = [...setup.matchAll(/^printf '%s\\n' '(\{.*\})' >> "\$HOME\/out\/safe-outputs\.jsonl"$/gm)]
+      .map(([, line]) => JSON.parse(line));
     const comments = fixture.filter(step => step.write?.path.endsWith('safe-outputs.jsonl'))
       .flatMap(step => step.write.content.trim().split('\n').map(line => JSON.parse(line)))
+      .concat(appended)
       .filter(output => output.type === 'add_comment');
     assert.equal(comments.length, 1);
     assert.deepEqual(Object.keys(comments[0]).sort(), ['body', 'type']);

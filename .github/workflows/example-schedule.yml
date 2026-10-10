@@ -24,6 +24,7 @@ jobs:
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
     permissions:
+      actions: read # the agent job's GitHub reads
       id-token: write
       contents: write
       issues: write

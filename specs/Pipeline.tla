@@ -68,6 +68,8 @@ Next == Upload \/ Check \/ Apply \/ Retry
 Spec == Init /\ [][Next]_vars
 
 \* Invariants are predicates TLC evaluates in EVERY reachable state.
+\* credential is apply's write credential. The producer's GitHub token is
+\* not one: it can only read (run-contract RC-014), so it is not modeled.
 AcceptedOnly == \A n \in 1..Len(history): history[n].used = history[n].checked
 CredentialIsolation == ~(credential /\ executes)
 \* Existing run-named branches block another patch push, not another comment.

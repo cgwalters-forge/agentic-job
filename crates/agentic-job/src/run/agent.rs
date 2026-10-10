@@ -59,6 +59,13 @@ pub const OPENCODE_CONFIG_DIR: &str = ".config/opencode";
 pub const OPENCODE_CONFIG_FILE: &str = ".config/opencode/opencode.json";
 pub const OPENCODE_INSTRUCTIONS_FILE: &str = ".config/opencode/AGENTS.md";
 pub const OPENCODE_PROFILE_FILE: &str = ".config/opencode/opencode-runner.json";
+/// The run's read-only GitHub token, for `gh` and the GitHub API: the
+/// launcher and the fake agent give it to the agent as
+/// [`GITHUB_TOKEN_VAR`].
+pub const GITHUB_TOKEN_FILE: &str = ".config/agentic-job/github-token";
+/// The variable that holds that token, in `agentic-job run`'s
+/// environment and in the agent's: the one `gh` reads.
+pub const GITHUB_TOKEN_VAR: &str = "GH_TOKEN";
 /// Where the agent's configuration repository is cloned, in that home.
 const CONFIG_CHECKOUT: &str = ".cache/agentic-job/agent-config";
 /// Root's: Claude Code reads its managed settings only from here.
@@ -622,6 +629,29 @@ pub fn generate(
     })
 }
 
+/// The file that holds TOKEN, the run's read-only GitHub token, or that
+/// removes an earlier run's where this one has none.
+///
+/// The token is the workflow's to make read-only (docs/workflow.md,
+/// "GitHub reads from the agent"); this only keeps it to one line.
+pub fn github_token(token: Option<&str>) -> Result<HomeFile> {
+    let content = token
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            // Never the value: it is a credential.
+            ensure!(
+                token.bytes().all(|b| b.is_ascii_graphic()),
+                "{GITHUB_TOKEN_VAR} holds something other than a token"
+            );
+            Ok(format!("{token}\n"))
+        })
+        .transpose()?;
+    Ok(HomeFile {
+        path: GITHUB_TOKEN_FILE,
+        content,
+    })
+}
+
 /// Writes CONFIGURATION's files of the sandbox user's, as that user,
 /// with their content on standard input and never on a command line.
 /// The managed settings are root's and `sandbox setup` wrote them from
@@ -965,6 +995,26 @@ mod tests {
             &Source::default(),
         );
         assert_eq!(claude.unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn github_tokens() {
+        let file = |content: Option<&str>| HomeFile {
+            path: GITHUB_TOKEN_FILE,
+            content: content.map(str::to_owned),
+        };
+        for (token, want) in [
+            (None, Some(file(None))),
+            (Some(""), Some(file(None))),
+            (Some("ghs_abc"), Some(file(Some("ghs_abc\n")))),
+            (Some("ghs_abc\nEVIL=1"), None),
+            (Some("ghs abc"), None),
+            (Some("ghs_ä"), None),
+        ] {
+            assert_eq!(github_token(token).ok(), want, "{token:?}");
+        }
+        let err = format!("{:#}", github_token(Some("secret value")).unwrap_err());
+        assert!(!err.contains("secret"), "{err}");
     }
 
     #[test]

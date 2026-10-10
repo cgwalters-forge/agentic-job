@@ -67,6 +67,32 @@ Enforcement: [run_token.rs](../crates/agentic-job/src/sandbox/check/run_token.rs
 runtime checks `token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
 `token-files` and `token-processes`.
 
+**RC-014 — Forge read credential.** A sandboxed producer MAY hold one GitHub
+token, as `GH_TOKEN`, and it MUST NOT be able to write: the producer can leak
+it. The reusable workflow's agent job MUST request only `contents`, `issues`,
+`pull-requests` and `actions` read, plus `id-token: write` for inference
+registration, and pass that job token unless the caller supplies
+`GH_READ_TOKEN` or turns reads off. A supplied classic token naming any scope
+but `read:*` and `user:email` MUST be refused before the agent starts; job,
+App and fine-grained tokens name no scopes and are the caller's to keep
+read-only. The launcher MUST pass only the run's token and drop inherited
+GitHub token variables, a run without one MUST remove an earlier run's, and
+its value MUST be redacted wherever the run logs or publishes. The egress
+proxy MAY pass `POST api.github.com/graphql` for reads; other GitHub writes
+MUST stay refused at the proxy. That allowance admits mutations too, so on that
+path only GitHub's enforcement of the token's permissions stops a write.
+Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
+`the agent job token reads and only apply holds a write credential` and
+`the agent gets its GitHub token, and a classic token that can write is refused first`;
+[launch.rs](../crates/agentic-job/src/run/launch.rs), `agents_get_only_the_runs_github_token`;
+[agent.rs](../crates/agentic-job/src/run/agent.rs), `github_tokens`;
+[tests/run.rs](../crates/agentic-job/tests/run.rs),
+`a_change_is_handed_back_and_the_check_accepts_it` and
+`a_run_from_clone_to_the_end_of_its_run` (with a sandbox user);
+[test_policy.py](../egress/test_policy.py), `test_requests`; and CI's
+`e2e-full`, whose scripted agent asks for its comment only after a read with
+the token succeeded and GitHub refused it a GraphQL write.
+
 ### 3.2 Proposals and refusals
 
 With `run`, the producer leaves `out/safe-outputs.jsonl` under its home and
@@ -124,7 +150,8 @@ Enforcement: [refusal.test.cjs](../workflow/refusal.test.cjs),
 ### 3.3 Apply
 
 **RC-009 — Token placement.** Check MUST remain read-only and receive no
-secrets. Only apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
+secrets. Only the agent job MAY consume `GH_READ_TOKEN` (RC-014), and only
+apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
 API steps MUST select that explicitly passed secret when nonempty, otherwise
 `github.token`, independently of the optional apply environment. Event status
 jobs can also write, but are not proposal appliers.
@@ -209,6 +236,10 @@ These limitations are not additional guarantees:
   back anew, and what differs is applied as new. The hidden name is checked
   on the forge, not a ledger, so deleting what was posted lets a re-run post
   it again.
+- Whether a supplied job, App or fine-grained token can write is not
+  detectable before the run: GitHub reports scopes only for classic tokens.
+  The agent job's own token is bounded by its `permissions` block, which is
+  tested in source; only `e2e-full` sees GitHub refuse it a write.
 - The separate-job design runs pinned handlers, not producer scripts, in apply.
   There is no comprehensive test proving that every future workflow step with
   a credential avoids executing producer code. Source review remains necessary.

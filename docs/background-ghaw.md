@@ -59,12 +59,13 @@ Caller concurrency is not an atomic quota or a FIFO queue.
 
 gh-aw has a read-only GitHub MCP gateway with its own credential and
 per-tool limits. It also has a non-MCP `tools.github.mode: gh-proxy` path
-for the ordinary `gh` CLI. agentic-job has neither authenticated read
-path; the agent can use the public API unauthenticated through the egress
-proxy. Reusing the CLI proxy, rather than building a new MCP bridge, was
-investigated for [#112](https://github.com/cgwalters-forge/agentic-job/issues/112);
-the [host-user decision below](#host-user-integration-decision) now calls
-for a read-only token directly in the agent's environment instead.
+for the ordinary `gh` CLI. agentic-job has neither: the agent gets a
+read-only GitHub token directly, as `GH_TOKEN`
+([docs/workflow.md](workflow.md#github-reads-from-the-agent)). Reusing the
+CLI proxy, rather than building a new MCP bridge, was investigated for
+[#112](https://github.com/cgwalters-forge/agentic-job/issues/112), and
+the [host-user decision below](#host-user-integration-decision) chose the
+token instead.
 The [pinned-source investigation below](#github-cli-proxy-reuse) describes
 the reusable artifacts and what still needs verification.
 Other MCP integrations and browser tooling are
@@ -215,27 +216,8 @@ but an upstream refusal is not proof that the gateway refused the operation.
 The separate `issues-read-v1` enclave profile is fail-closed but explicitly
 does not support GraphQL or `gh issue view`; it is not a drop-in replacement.
 
-`workflow/github-read-probe.mjs` supplies a credential-free acceptance probe
-for a future gateway setup with a loopback mock GitHub upstream. Configure its
-policy for `owner/repo`; the independent mock observer must expose
-`GET /observed` as an append-only array of `{method, path}` records, recording
-upstream calls before responding. Run:
-
-```sh
-node workflow/github-read-probe.mjs http://127.0.0.1:18443 http://127.0.0.1:18080
-node --test workflow/github-read-probe.test.mjs
-```
-
-The probe requires successful REST and GraphQL reads, local 403 refusals for
-REST/GraphQL writes and out-of-bounds reads, and no upstream request for a
-refusal. Its unit tests demonstrate detection of write forwarding, upstream
-403s masquerading as local enforcement, unmapped reads and fake read success.
-It does not start or provision the gateway, exercise `gh`, or prove sandbox
-token isolation. Do not point it at GitHub or a credential-bearing service:
-its mutation fixtures are intended only for the mock upstream.
-
-Issue #112 remains open. Authenticated sandbox access stays disabled. The
-following decision replaces the earlier gateway integration recommendation.
+The following decision replaces the earlier gateway integration
+recommendation, and the gateway acceptance probe written for it is gone.
 
 ### Host-user integration decision
 
@@ -243,9 +225,7 @@ For the narrow opt-in read design, the gateway's REST write passthrough is
 **not itself a blocker**: a job token minted with read permissions only can
 bound upstream authority, and the existing egress proxy can refuse REST
 write methods before forwarding. The gateway need not be a third read-only
-boundary. The mock probe above tests a stronger gateway contract than this
-design needs; its refusal expectations are not an acceptance test for the
-two-boundary design.
+boundary.
 
 However, reusing the supplied CLI stack is not a few dozen lines of host
 configuration. The pinned
@@ -264,7 +244,7 @@ Two transport details prevent simply setting a proxy environment variable:
 the gateway's [handler](https://github.com/github/gh-aw-mcpg/blob/03c6ca59170fe9179226d8d0a35bb01fd9327643/internal/proxy/handler.go)
 strips `/api/v3` and forwards API paths; this is not a general CONNECT proxy
 for `git https://github.com/...`. Also, `gh issue view` uses GraphQL POSTs.
-Our [default policy](../egress/policy.toml) permits only git-upload-pack and
+Our [default policy](../egress/policy.toml) then permitted only git-upload-pack and
 npm audit POSTs, so routing that CLI through the existing filter would refuse
 the required read. Allowing direct access to the credential holder instead
 would bypass the filter's REST write refusal. A read-only token does not
@@ -277,33 +257,33 @@ The intended promise is nothing that can write, not no forge credential:
 the job token can leak, but it can only read and expires with the job.
 Public git HTTPS reads need no credential.
 
-The agent job must request only repository read permissions and verify them
-before handing the token over. Its separate `id-token: write` permission
+The agent job must request only repository read permissions; a source
+test, not a runtime check, holds it to them. Its separate `id-token: write` permission
 is for trusted inference registration and tailnet login; the
 `ACTIONS_ID_TOKEN_REQUEST_*` variables must stay outside the sandbox.
-An optional `GITHUB_READ_TOKEN` override reaches the agent too and may leak;
+An optional override reaches the agent too and may leak (it is named
+`GH_READ_TOKEN`, since GitHub reserves the `GITHUB_` prefix);
 it must be read-only and should be short-lived. Authenticated reads should
 default on, with an input to turn them off.
 
-The planned exception is POST to `https://api.github.com/graphql` for `gh`
+The exception is POST to `https://api.github.com/graphql` for `gh`
 reads; GitHub refuses mutations because the token is read-only.
 Other write methods remain refused by the egress proxy. No GraphQL parser
 is needed. The concrete threat stopped by read-only permissions is a forge
 write, which destroying the runner cannot undo.
 
-Fresh-runner proof must show `gh issue view` and `gh pr view` on this
-repository and a public read in another organization succeeding from inside
-the sandbox. `gh issue comment`, a REST POST and a GraphQL mutation must
-fail, with a mutation refused by GitHub rather than only by the proxy.
-The OIDC request credentials, apply/write credentials and inference
-registration must remain inaccessible. Opting out must leave no GitHub token.
-Shape redaction already covers GitHub Actions job tokens; regression tests
-exercise text logs, the summary and outcome files without token literals.
-
-This decision is not implemented yet: no workflow input, permission, action
-pin, proxy exception or token-placement change is made here. #112 remains
-open; ordinary credential-free tests cannot prove job-token permissions or
-fresh-runner isolation.
+This is implemented. The agent job asks for `contents`, `issues`,
+`pull-requests` and `actions` read, and a source test holds it there; a
+supplied classic token with a scope that can write is refused before the
+run, and other supplied tokens are documented as the caller's to keep
+read-only, since GitHub reports no permissions for them. The launcher
+passes the run's token alone, the run redacts it, and the egress policy
+passes GraphQL POSTs, mutations included, and nothing else that writes
+to GitHub; a supplied token that can write could write through them. CI's
+`e2e-full` scripted agent reads its repository with `gh api` and must see
+GitHub refuse it a GraphQL comment. The fuller fresh-runner proof first
+planned here, `gh issue view` and a read in another organization, is not
+run.
 
 ## Related gh-aw deployments
 
