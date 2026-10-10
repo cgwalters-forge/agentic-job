@@ -19,6 +19,7 @@ pub mod local;
 pub mod network;
 pub mod root;
 pub mod setup;
+mod view;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

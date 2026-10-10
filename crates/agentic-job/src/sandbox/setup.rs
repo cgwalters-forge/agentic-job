@@ -48,6 +48,10 @@ pub const CONFIG_DIR: &str = "/etc/agentic-job";
 /// made from is in the runner's home, which is closed.
 pub const SELF_COPY: &str = "/usr/local/libexec/agentic-job";
 
+/// Root-owned, writable by the sandbox group, but not by the runner after
+/// hardening. The view must deny the sandbox's otherwise permitted writes.
+pub const VIEW_PROBE_DIR: &str = "/etc/agentic-job/write-probe";
+
 /// `[setup] script`, where the sandbox user can read it.
 const SCRIPT_COPY: &str = "/etc/agentic-job/setup-script";
 
@@ -292,6 +296,9 @@ pub fn run(args: &Args) -> Result<Exit> {
         .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
 
     let sandbox = create_user(&config, &runner, existing)?;
+    if !config.sandbox.world_write_walk {
+        timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
+    }
     let subuids = subuid_ranges(
         &sandbox,
         &fs::read_to_string(SUBUID).with_context(|| format!("reading {SUBUID}"))?,
@@ -314,6 +321,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         make_roots_alone(Path::new(path))?;
     }
     timed_setup("packages", || install_packages(&config.setup.packages))?;
+    timed_setup("privileged-binary-allowlist", privileged_binaries::check)?;
     timed_setup("npm", || install_npm(&config.setup.npm))?;
     // After the packages: one of them may be what a rule is for (polkit,
     // at), and a rule is written only for what is there. The runner's
@@ -347,9 +355,14 @@ pub fn run(args: &Args) -> Result<Exit> {
             sandbox.name
         ),
     }
-    // After the installs, which are the last things to write as root.
-    timed_setup("world-write-and-setuid-walk", strip_world_write)?;
-    timed_setup("setuid-package-ownership", strip_unowned_setuid)?;
+    // In view mode this stays writable by DAC, so probes prove mount confinement.
+    // Walk mode removes world write access, including for the runner.
+    fs::create_dir(VIEW_PROBE_DIR).context("creating filesystem-view probe directory")?;
+    host::run(Command::new("chown").args([&format!("root:{}", sandbox.gid), VIEW_PROBE_DIR]))?;
+    fs::set_permissions(VIEW_PROBE_DIR, fs::Permissions::from_mode(0o777))?;
+    optional_hardening_walk(config.sandbox.world_write_walk, |stage, operation| {
+        timed_setup(stage, operation)
+    })?;
     fix_ssh_crypto_policy()?;
     restrict_ptrace()?;
     println!(
@@ -400,6 +413,24 @@ fn write_managed_settings(config: &Config) -> Result<()> {
         }
         install_file(path, content.as_bytes(), MODE_FILE, None)?;
     }
+    Ok(())
+}
+
+/// The manager is a system service: its children, including socket-activated
+/// user units, inherit this view even when they reset their own properties.
+/// Preflight already refuses any process of this uid, so no old children can
+/// keep an unrestricted namespace alive.
+fn install_filesystem_view(user: &User) -> Result<()> {
+    let text = super::view::manager_drop_in(user)?;
+    let dir = PathBuf::from(format!("/etc/systemd/system/user@{}.service.d", user.uid));
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    install_file(
+        &dir.join("agentic-job-view.conf"),
+        text.as_bytes(),
+        MODE_FILE,
+        None,
+    )?;
+    host::run(Command::new("systemctl").arg("daemon-reload"))?;
     Ok(())
 }
 
@@ -498,6 +529,14 @@ fn preflight(config: &Config, runner: &User) -> Result<Option<User>> {
         "processes of {name} are already running"
     );
     ensure_distinct(&user, runner)?;
+    if !config.sandbox.world_write_walk {
+        super::view::properties(&user)?;
+        ensure!(
+            fs::canonicalize(&user.home).is_ok_and(|path| path == user.home),
+            "sandbox home {} must be a real directory, with no symlink components",
+            user.home.display()
+        );
+    }
     Ok(Some(user))
 }
 
@@ -737,6 +776,18 @@ fn close_private_dirs(config: &Config, runner: &User) -> Result<()> {
     Ok(())
 }
 
+fn optional_hardening_walk(
+    enabled: bool,
+    mut run: impl FnMut(&str, fn() -> Result<()>) -> Result<()>,
+) -> Result<()> {
+    // Both stages share the walk's single traversal; the view has none.
+    if enabled {
+        run("world-write-and-setuid-walk", strip_world_write)?;
+        run("setuid-package-ownership", strip_unowned_setuid)?;
+    }
+    Ok(())
+}
+
 /// Log monotonic wall time even when a stage fails, without changing its result.
 fn timed_setup<T>(stage: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = Instant::now();
@@ -774,6 +825,8 @@ pub fn setuid_root_find(root: &str) -> Vec<String> {
     .map(str::to_owned)
     .to_vec()
 }
+
+mod privileged_binaries;
 
 /// World-writable system files include ones root loads code from (a
 /// polkit rule, a unit): any user could make itself root through them.
@@ -1445,6 +1498,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn traversal_stages_follow_the_selected_mode() {
+        for (enabled, expected) in [
+            (false, &[][..]),
+            (
+                true,
+                &["world-write-and-setuid-walk", "setuid-package-ownership"][..],
+            ),
+        ] {
+            let mut stages = Vec::new();
+            super::optional_hardening_walk(enabled, |stage, _operation| {
+                stages.push(stage.to_owned());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(stages, expected);
+        }
+    }
+
+    #[test]
     fn subordinate_uid_ranges() {
         let agent = |name: &str| User {
             name: name.to_owned(),
@@ -1700,52 +1772,70 @@ mod tests {
         // An owner from a subordinate range can reopen its private directory.
         // setpriv exercises those same kernel owner rights without depending
         // on the runner's container storage or user-namespace configuration.
+        // The setuid inventory covers the shared temporary trees, but world
+        // write is deliberately left alone there, so each tree is a case.
         let subordinate = 200000;
-        let temp = tempfile::tempdir_in("/var/tmp").unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let private = temp.path().join("private");
-        fs::create_dir(&private).unwrap();
-        std::os::unix::fs::chown(&private, Some(subordinate), None).unwrap();
-        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
-        let program = private.join("setuid");
-        fs::copy("/bin/true", &program).unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o4755)).unwrap();
-        let list = temp.path().join("inventory");
-        let args = hardening_find(temp.path().to_str().unwrap(), &[]);
-        let status = Command::new("find")
-            .args(args)
-            .args(["-fprint", list.to_str().unwrap(), ")", ")"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert!(
-            fs::read_to_string(&list)
-                .unwrap()
-                .contains(program.to_str().unwrap())
-        );
-        strip_unowned_setuid_list(&list).unwrap();
-        let status = Command::new("setpriv")
-            .args([
-                "--reuid=200000",
-                "--regid=200000",
-                "--clear-groups",
-                "chmod",
-                "755",
-            ])
-            .arg(&private)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert_eq!(fs::metadata(&private).unwrap().mode() & 0o777, 0o755);
-        assert_eq!(fs::metadata(&program).unwrap().mode() & 0o4000, 0);
-        assert!(
-            Command::new("setpriv")
-                .args(["--reuid=1001", "--regid=1001", "--clear-groups"])
-                .arg(&program)
+        for (base, world_write_removed) in [("/var/lib", true), ("/var/tmp", false)] {
+            let temp = tempfile::tempdir_in(base).unwrap();
+            fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            let private = temp.path().join("private");
+            fs::create_dir(&private).unwrap();
+            std::os::unix::fs::chown(&private, Some(subordinate), None).unwrap();
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+            let program = private.join("setuid");
+            fs::copy("/bin/true", &program).unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o4755)).unwrap();
+            let open = private.join("world-write");
+            fs::write(&open, b"fixture").unwrap();
+            fs::set_permissions(&open, fs::Permissions::from_mode(0o666)).unwrap();
+            let list = temp.path().join("inventory");
+            let args = hardening_find(temp.path().to_str().unwrap(), &[]);
+            let status = Command::new("find")
+                .args(args)
+                .args(["-fprint", list.to_str().unwrap(), ")", ")"])
                 .status()
-                .unwrap()
-                .success()
-        );
+                .unwrap();
+            assert!(status.success(), "{base}");
+            assert!(
+                fs::read_to_string(&list)
+                    .unwrap()
+                    .contains(program.to_str().unwrap()),
+                "{base}"
+            );
+            strip_unowned_setuid_list(&list).unwrap();
+            let status = Command::new("setpriv")
+                .args([
+                    "--reuid=200000",
+                    "--regid=200000",
+                    "--clear-groups",
+                    "chmod",
+                    "755",
+                ])
+                .arg(&private)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{base}");
+            assert_eq!(
+                fs::metadata(&private).unwrap().mode() & 0o777,
+                0o755,
+                "{base}"
+            );
+            assert_eq!(fs::metadata(&program).unwrap().mode() & 0o4000, 0, "{base}");
+            assert_eq!(
+                fs::metadata(&open).unwrap().mode() & 0o002 == 0,
+                world_write_removed,
+                "{base}"
+            );
+            assert!(
+                Command::new("setpriv")
+                    .args(["--reuid=1001", "--regid=1001", "--clear-groups"])
+                    .arg(&program)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{base}"
+            );
+        }
     }
 
     #[test]

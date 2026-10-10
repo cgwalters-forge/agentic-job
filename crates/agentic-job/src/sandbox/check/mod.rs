@@ -212,6 +212,19 @@ impl Checker<'_> {
         Ok(self.sandbox(argv, b"")?.success())
     }
 
+    /// Diagnostics for positive controls only: expected refusals are not errors.
+    fn sandbox_diagnosed(&self, id: &str, argv: &[&str], input: &[u8]) -> Result<bool> {
+        let output = self.sandbox(argv, input)?;
+        if !output.success() {
+            self.report.note(&format!(
+                "{id}: command {argv:?} exited {}; stderr: {}",
+                output.status,
+                bounded_stderr(&output.stderr),
+            ));
+        }
+        Ok(output.success())
+    }
+
     fn has_podman(&self) -> bool {
         host::has_program("podman")
     }
@@ -265,6 +278,43 @@ impl Checker<'_> {
                 self.runner.name
             ));
         }
+    }
+}
+
+const DIAGNOSTIC_BYTES: usize = 4096;
+
+fn bounded_stderr(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&stderr[..stderr.len().min(DIAGNOSTIC_BYTES)]);
+    // Escape terminal/control characters, including newlines, so a subprocess
+    // cannot forge another probe result or a workflow command in the log.
+    let mut shown: String = text.chars().flat_map(char::escape_default).collect();
+    if stderr.len() > DIAGNOSTIC_BYTES {
+        shown.push_str(" [truncated]");
+    }
+    shown
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_is_bounded_and_escaped() {
+        for (input, expected) in [
+            (b"".as_slice(), ""),
+            (b"denied\n\x1b".as_slice(), "denied\\n\\u{1b}"),
+            (b"\xff".as_slice(), "\\u{fffd}"),
+        ] {
+            assert_eq!(bounded_stderr(input), expected);
+        }
+        assert_eq!(
+            bounded_stderr(&vec![b'x'; DIAGNOSTIC_BYTES]),
+            "x".repeat(DIAGNOSTIC_BYTES)
+        );
+        assert_eq!(
+            bounded_stderr(&vec![b'x'; DIAGNOSTIC_BYTES + 1]),
+            format!("{} [truncated]", "x".repeat(DIAGNOSTIC_BYTES))
+        );
     }
 }
 

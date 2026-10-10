@@ -64,6 +64,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: node --test workflow/activation.test.cjs
+      - run: node --test workflow/setup-timing.test.mjs
       # Loopback-only TCP preflight tests; no OIDC credential or external proxy.
       - run: python3 -m unittest discover -s workflow -p 'test_*.py' -v
       - run: node --test workflow/apply.test.cjs
@@ -257,6 +258,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
+        legacy-walk: [false]
+        include:
+          # One fresh host disables the view to prove the underlying layers
+          # independently and provide a same-run timing baseline.
+          - shard: baseline
+            legacy-walk: true
     env:
       CONFIG: crates/agentic-job/tests/data/sandbox/ci.toml
     steps:
@@ -274,7 +281,8 @@ jobs:
       - name: Setup refuses a machine that is not fresh
         run: cargo test --locked --test sandbox_fresh -- --ignored --nocapture
       # Root-only fixture: a subordinate owner can reopen a closed directory,
-      # but setup's inventory must already have stripped its unowned setuid file.
+      # but setup's walk must already have stripped its unowned setuid file and,
+      # outside the shared temporary trees, removed world write inside it.
       - name: Hardening inventories subordinate-owned private directories
         run: cargo test --locked --lib hardening_walk_subordinate_owner -- --ignored --nocapture
       # For whoever has to say why a local-sockets probe failed, and what
@@ -300,8 +308,15 @@ jobs:
       # Setup only warns when the threat feed cannot be fetched, and a pin
       # that names a commit no longer served would have every run warn:
       # here the feed has to load.
-      - shell: bash
-        run: sudo target/debug/agentic-job sandbox setup --config "$CONFIG" | tee /dev/stderr | grep -F 'Threat feed:'
+      - name: Setup timing (host-wide walk = ${{ matrix.legacy-walk }})
+        shell: bash
+        env:
+          LEGACY_WALK: ${{ matrix.legacy-walk }}
+        run: |
+          target/debug/agentic-job config --host --from "$CONFIG" --boolean "sandbox.world-write-walk=$LEGACY_WALK" > "$RUNNER_TEMP/sandbox-ci.toml"
+          sudo target/debug/agentic-job sandbox setup --config "$RUNNER_TEMP/sandbox-ci.toml" 2>&1 | tee "$RUNNER_TEMP/sandbox-setup.log"
+          grep -F 'Threat feed:' "$RUNNER_TEMP/sandbox-setup.log"
+          node workflow/setup-timing.mjs "$RUNNER_TEMP/sandbox-setup.log" "$LEGACY_WALK"
       # From here on this job's user has no sudo: root is the test's
       # service, or the helper.
       - name: The runner's user has no root after setup
@@ -317,9 +332,8 @@ jobs:
         env:
           ACTIONS_ID_TOKEN_REQUEST_URL: https://oidc.invalid/stand-in
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: stand-in-request-token-0123456789abcdef
-          # This job's place among the matrix's, and how many there are:
-          # a shard added to or taken from the list above is counted here.
-          AGENTIC_JOB_TEST_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
+          # Four view shards; baseline runs layered policy and walk-only cases.
+          AGENTIC_JOB_TEST_SHARD: ${{ matrix.shard == 'baseline' && '0/1' || format('{0}/4', matrix.shard) }}
         run: cargo test --locked --test sandbox_host -- --ignored --nocapture
 
   # The step that secures a host, in a job that runs no agent: the

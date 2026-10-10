@@ -57,8 +57,9 @@ machine that is thrown away after the job:
   resolver sockets can carry DNS out;
 - last, takes root away from the runner's user too: a sudo rule read
   last denies it everything, polkit denies it, the daemons of its
-  root-equivalent groups are stopped, and setuid-root programs no
-  package owns lose the bit
+   root-equivalent groups are stopped. Known privileged binary paths are
+   checked against the image metadata allowlist, and the default walk takes
+   the setuid bit off setuid-root programs no package owns
   ([sandbox-check.md](sandbox-check.md#after-setup-nothing-has-root)).
 
 The check probes these restrictions as the runner's user and as the
@@ -67,8 +68,9 @@ sandbox user, with a positive control for every probe
 not hold.
 
 Setup logs monotonic wall times for service shutdown, package and npm
-installation, proxy startup, the combined world-write/setuid traversal,
-setuid package-ownership checks and the optional sandbox script. Each
+installation, proxy startup, the privileged-binary allowlist, the filesystem
+view (with `sandbox.world-write-walk = false`), world-write and setuid traversal and
+package ownership (the default), and the optional sandbox script. Each
 `Sandbox setup stage NAME: SECONDSs (ok|failed)` line measures only that
 stage, including its subprocesses; a failed stage still reports its time
 and returns its original error. These are not timings for the whole

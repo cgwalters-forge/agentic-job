@@ -43,6 +43,10 @@ const NPM_PACKAGE: &str = "is-number";
 
 const EGRESS_WORK: &str = "egress-check";
 
+// The helper's stdin cannot necessarily be reopened through /dev/stdin by
+// Podman. Materialize it before invoking the builder instead.
+const BUILD_SCRIPT: &str = "d=$(mktemp -d) || exit; trap 'rm -rf -- \"$d\"' EXIT; cat > \"$d/Containerfile\" || exit; podman build --network=none --pull=never -q -t \"$1\" -f \"$d/Containerfile\" \"$d\"";
+
 /// Where a container sees the proxy's certificate authority, and the
 /// mount that puts it there.
 const CONTAINER_CA: &str = "/run/egress-ca.pem";
@@ -100,6 +104,49 @@ impl Checker<'_> {
                 "container-pull",
                 format!("{user} pulls {image}"),
                 got,
+            );
+            let tag = format!("localhost/agentic-job-view:{}", self.canary);
+            let recipe = format!("FROM {image}\nRUN true\n");
+            let built = self.sandbox_diagnosed(
+                "container-build",
+                &["sh", "-c", BUILD_SCRIPT, "sh", &tag],
+                recipe.as_bytes(),
+            )?;
+            let ran = if built {
+                self.sandbox_diagnosed(
+                    "container-built-run",
+                    &[
+                        "podman",
+                        "run",
+                        "--pull=never",
+                        "--rm",
+                        "--network=none",
+                        &tag,
+                        "true",
+                    ],
+                    b"",
+                )?
+            } else {
+                self.report
+                    .note("container-built-run: not run because container-build failed");
+                false
+            };
+            let _ = self.sandbox(&["podman", "rmi", "-f", &tag], b"");
+            self.report.expect(
+                Want::Succeed,
+                "container-build",
+                "rootless Podman builds in the sandbox",
+                built,
+            );
+            self.report.expect(
+                Want::Succeed,
+                "container-built-run",
+                if built {
+                    "rootless Podman runs the built image"
+                } else {
+                    "build prerequisite failed; built image cannot be tested"
+                },
+                ran,
             );
             // The control shows the container and its curl work, so the
             // refusal after it is the filter on subordinate uids.
@@ -603,6 +650,32 @@ fn self_peerapi(status: &serde_json::Value) -> Vec<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_materializes_recipe_and_propagates_builder_status() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        for status in [0, 42] {
+            // A shell function stands in for Podman without an executable
+            // fixture. It verifies the recipe is a real file, not stdin.
+            let mock = format!(
+                "podman() {{ test \"$1\" = build || return 90; shift; while test \"$1\" != -f; do shift; done; shift; test -f \"$1\" || return 91; test \"$(cat \"$1\")\" = 'FROM test-image\nRUN true' || return 92; test \"$1\" = \"$2/Containerfile\" || return 93; return {status}; }}; {BUILD_SCRIPT}"
+            );
+            let mut child = Command::new("sh")
+                .args(["-c", &mock, "sh", "localhost/test"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"FROM test-image\nRUN true\n")
+                .unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(status));
+        }
+    }
 
     #[test]
     fn the_proxys_refusal_and_an_origins() {

@@ -1,0 +1,54 @@
+# OS VERSION PATH UID GROUP MODE (octal); no discovery or package ownership query.
+# PATH is stat'ed through links; one absent on an image is skipped, a present
+# one with another owner, group or mode refuses setup. GROUP is a gid, or the
+# name of a group whose id the image's packages allocate.
+# Ubuntu entries stat-checked in a fresh ubuntu:26.04 (26.04.1) container with
+# sudo, uidmap, openssh, dbus, polkit, fuse3, cron, at and podman installed.
+# /usr/bin/sudo is an alternatives link to sudo-rs there.
+ubuntu 26.04 /usr/bin/sudo 0 0 4755
+ubuntu 26.04 /usr/bin/sudo.ws 0 0 4755
+ubuntu 26.04 /usr/lib/cargo/bin/sudo 0 0 4755
+ubuntu 26.04 /usr/lib/cargo/bin/su 0 0 4755
+ubuntu 26.04 /usr/bin/su 0 0 4755
+ubuntu 26.04 /usr/bin/passwd 0 0 4755
+ubuntu 26.04 /usr/bin/chfn 0 0 4755
+ubuntu 26.04 /usr/bin/chsh 0 0 4755
+ubuntu 26.04 /usr/bin/gpasswd 0 0 4755
+ubuntu 26.04 /usr/bin/newgrp 0 0 4755
+ubuntu 26.04 /usr/bin/mount 0 0 4755
+ubuntu 26.04 /usr/bin/umount 0 0 4755
+ubuntu 26.04 /usr/bin/newuidmap 0 0 4755
+ubuntu 26.04 /usr/bin/newgidmap 0 0 4755
+ubuntu 26.04 /usr/bin/pkexec 0 0 4755
+ubuntu 26.04 /usr/bin/fusermount3 0 0 4755
+ubuntu 26.04 /usr/bin/ntfs-3g 0 0 4755
+ubuntu 26.04 /usr/lib/openssh/ssh-keysign 0 0 4755
+ubuntu 26.04 /usr/lib/dbus-1.0/dbus-daemon-launch-helper 0 messagebus 4754
+ubuntu 26.04 /usr/bin/at 1 1 6755
+ubuntu 26.04 /usr/bin/chage 0 42 2755
+ubuntu 26.04 /usr/bin/expiry 0 42 2755
+ubuntu 26.04 /usr/sbin/unix_chkpwd 0 42 2755
+ubuntu 26.04 /usr/sbin/pam_extrausers_chkpwd 0 42 2755
+ubuntu 26.04 /usr/bin/crontab 0 crontab 2755
+ubuntu 26.04 /usr/bin/ssh-agent 0 _ssh 2755
+# RHEL entries stat-checked on a RHEL 10.2 devspace, not a stock host.
+rhel 10 /usr/bin/sudo 0 0 4111
+rhel 10 /usr/bin/su 0 0 4755
+rhel 10 /usr/bin/passwd 0 0 4755
+rhel 10 /usr/bin/chfn 0 0 4711
+rhel 10 /usr/bin/chsh 0 0 4711
+rhel 10 /usr/bin/gpasswd 0 0 4755
+rhel 10 /usr/bin/newgrp 0 0 4755
+rhel 10 /usr/bin/mount 0 0 4755
+rhel 10 /usr/bin/umount 0 0 4755
+rhel 10 /usr/bin/chage 0 0 4755
+rhel 10 /usr/bin/pkexec 0 0 4755
+rhel 10 /usr/bin/crontab 0 0 4755
+rhel 10 /usr/bin/at 0 0 4755
+rhel 10 /usr/lib/polkit-1/polkit-agent-helper-1 0 0 4755
+rhel 10 /usr/sbin/grub2-set-bootflag 0 0 4755
+rhel 10 /usr/sbin/unix_chkpwd 0 0 4755
+rhel 10 /usr/sbin/pam_timestamp_check 0 0 4755
+rhel 10 /usr/bin/write 0 tty 2755
+rhel 10 /usr/libexec/utempter/utempter 0 utmp 2711
+rhel 10 /usr/bin/plocate 0 plocate 2755

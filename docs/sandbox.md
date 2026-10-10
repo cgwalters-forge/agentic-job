@@ -63,42 +63,78 @@ order, it:
 - denies the sandbox user sudo, every polkit action, cron, at and
   lingering;
 - starts the egress proxy and loads the network rules (below);
-- removes world-write from files and directories on the root filesystem
-  outside `/tmp` and `/var/tmp`, and raises `ptrace_scope` from 0 to 1;
+- removes world-write permissions by default, or installs the explicitly
+  selected read-only view on the user's manager and every `run0` command;
+  raises `ptrace_scope` from 0 to 1;
 - runs `setup.script` as the sandbox user, never as root;
 - installs the root-owned helper and configuration under `/etc/agentic-job/`;
 - by default, locks the runner's user out of general sudo and polkit,
-  closes root-equivalent group access and strips unowned setuid-root
-  programs. [The lock and its probes](sandbox-check.md#after-setup-nothing-has-root)
+  closes root-equivalent group access. [The lock and its probes](sandbox-check.md#after-setup-nothing-has-root)
   describe the remaining privileged operations.
 
-The world-write and setuid inventory use one GNU `find -O3` invocation,
-not a Rust metadata walk or a command per path. It stays on the root
-filesystem (`-xdev`), with additional starting points for `/tmp` and
-`/var/tmp` only when those are separate filesystems. Temporary trees are
-still inventoried for setuid programs, but never lose world-write.
-Both actions are inside the pruning branch, so neither revisits a
-pruned tree. Busy temporary trees tolerate disappearing directory entries.
+The default retains host-wide world-write hardening and the runner-write refusal
+probe. The view is opt-in: `sandbox.world-write-walk = false` explicitly selects it.
+The view confines the sandbox user's processes, not the runner's subsequent
+steps, supervision or cleanup; it does not remove world-write permissions for
+the runner. Use the default when later runner steps need this protection.
+A root-owned drop-in on the **system** unit `user@UID.service`
+and properties on each transient `run0` service set `ProtectSystem=strict`
+and `ProtectHome=read-only`, with
+`ReadWritePaths=` for the user's home, `/run/user/UID`, `/tmp` and `/var/tmp`.
+User services inherit the manager's mount namespace: clearing their own path
+properties does not undo it. This is not a sandbox setting on a slice or scope.
+The kernel API trees `/proc`, `/sys` and `/dev` are exceptions, as defined by
+`ProtectSystem=strict`: making `/proc` read-only prevents writing uid/gid maps,
+and read-only cgroups prevent the delegated user manager and Podman managing
+their units. They remain governed by kernel and ordinary permissions, not
+an exception for arbitrary host storage. `/dev/shm` is shared temporary storage.
+Device access, including KVM, remains subject to ordinary permissions. The
+view does not grant permissions or make a read-only filesystem writable.
+No `PrivateUsers`, `PrivateDevices`, mount syscall filter or `NoNewPrivileges`
+is added: those would hide KVM or break Podman's subordinate-id helpers.
 
-The traversal no longer descends into procfs or sysfs, read-only **and
-nosuid** mounts with no writable or suid-capable mount at or below them.
-Closed directories are still walked regardless of ownership: a later setup
-or job step can reopen them, exposing paths that must already be hardened.
-The pruned filesystems cannot offer the sandbox a writable path or executable
-setuid program. Read-only alone is insufficient: a setuid program there
-could still execute, so read-only mounts without `nosuid` remain walked.
-The tool cache has no blanket exemption: it is walked even if closed.
-The final probes remain independent searches as the sandbox user.
+`sandbox.world-write-walk = true` (the default) uses a GNU `find -O3`
+world-write pass instead of the mount view. The same pass lists setuid-root
+programs, and one no package owns loses the bit, at no extra traversal. After
+package installation, both modes also stat the paths in
+`crates/agentic-job/src/sandbox/setup/privileged-binaries.tsv`, following
+links (Ubuntu's `/usr/bin/sudo` is an alternatives link to sudo-rs). A listed
+path absent from the image is skipped; one present as a non-regular file or
+with a different uid, gid or mode refuses setup. This is a metadata check of
+known binaries, not a content check or an inventory, and it does not search
+the filesystem. The view mode has no filesystem traversal, so this allowlist
+is its only setuid check: it neither finds nor strips unknown
+image-supplied setuid programs. Choosing it accepts that, as the
+operator decided for #188, and needs a trusted fresh image without arbitrary
+root-shell helpers. Distribution subordinate-id helpers remain available in
+both modes.
 
-To reproduce a small, nonprivileged local traversal benchmark (30,000 files
-in a private tree), run
-`cargo test --workspace --locked hardening_walk_local_benchmark -- --ignored --nocapture`.
-This fixture measures traversal only, not hosted-runner setup or image
-composition; the setup stage log is the authoritative hosted measurement.
-The earlier private-directory pruning speedup does not apply: this fixture
-now visits the private tree in both versions. The remaining optimizations
-are the single combined walk and pseudo-filesystem/read-only mount prunes;
-their hosted-runner savings still require fresh-runner measurement.
+The Ubuntu 26.04 entries were stat-checked in a fresh `ubuntu:26.04`
+container with the relevant packages installed, not on a GitHub-hosted runner
+image; the RHEL entries on a RHEL 10.2 devspace, not a stock host. Neither list
+proves stock-image completeness. Setup fails closed on deviations; do not
+silently accept them or add unknown paths by scanning the filesystem.
+Skipping the traversal alone does not establish the under-a-minute setup goal.
+
+There is one trusted exception: systemd 257 forks `(sd-pam)` before applying
+the mount namespace. It runs systemd/PAM code, not agent-supplied code. The
+probes require that another process of the sandbox uid cannot attach with
+ptrace, write its memory, open its memory file or use its `/proc/PID/root`.
+They test both run0 and manager handlers, with positive memory-write and
+ptrace controls and the separate host `ptrace_scope` check. A hosted test
+kills a sacrificial run0 handler and verifies that its surviving command
+still cannot write outside the view. Killing the handler does not necessarily
+end its parent session in systemd 257; it offers no new execution path.
+
+The read-only view is not a kernel boundary and does not block Unix socket
+IPC. The existing local-service/socket allowlist probes still apply. Trusted
+host code must not propagate new writable host mounts after setup: systemd's
+path restrictions do not make such later mounts read-only. The untrusted user
+has no privilege to create those mounts in the host namespace.
+
+Hosted setup logs remain the timing source, including the new
+`filesystem-view` stage. Local tests cannot supply this pull request's hosted
+before/after timings; those must be collected from its CI stage lines.
 
 Every command in the sandbox is then started through the root-owned
 helper, which invokes `run0 --pipe --user=…`. This creates a transient
