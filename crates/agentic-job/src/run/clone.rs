@@ -99,20 +99,7 @@ fn clone_args<'a>(
     depth: &'a str,
     dir: &'a str,
 ) -> Vec<&'a str> {
-    let mut argv = vec![
-        "timeout",
-        CLONE_TIMEOUT_S,
-        "git",
-        "-c",
-        "protocol.allow=never",
-    ];
-    argv.extend(TRANSPORTS.iter().flat_map(|transport| {
-        let allow: &'static str = match *transport {
-            "https" => "protocol.https.allow=always",
-            _ => "protocol.file.allow=always",
-        };
-        ["-c", allow]
-    }));
+    let mut argv = networked_git(None);
     argv.extend([
         "clone",
         "--quiet",
@@ -122,6 +109,39 @@ fn clone_args<'a>(
     ]);
     argv.extend(branch.iter().flat_map(|branch| ["--branch", branch]));
     argv.extend(["--", url, dir]);
+    argv
+}
+
+/// The arguments of a fetch of COMMIT from the clone in DIR's origin,
+/// with the clone's transports.
+fn fetch_args<'a>(dir: &'a str, commit: &'a str, depth: &'a str) -> Vec<&'a str> {
+    let mut argv = networked_git(Some(dir));
+    argv.extend([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--depth",
+        depth,
+        "--",
+        "origin",
+        commit,
+    ]);
+    argv
+}
+
+/// git, in DIR if one is given, with only the listed transports.
+fn networked_git(dir: Option<&str>) -> Vec<&str> {
+    let mut argv = vec!["timeout", CLONE_TIMEOUT_S, "git"];
+    argv.extend(dir.iter().flat_map(|dir| ["-C", dir]));
+    argv.extend(["-c", "protocol.allow=never"]);
+    argv.extend(TRANSPORTS.iter().flat_map(|transport| {
+        let allow: &'static str = match *transport {
+            "https" => "protocol.https.allow=always",
+            _ => "protocol.file.allow=always",
+        };
+        ["-c", allow]
+    }));
     argv
 }
 
@@ -162,10 +182,15 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     // A run that never started may be tried again on the same machine:
     // what an earlier try left is not the base of this one.
     sandbox.checked(&["rm", "-rf", "--", dir_text], b"", MAX_GIT_OUTPUT)?;
+    // A push's branch is in the fork apply opened its pull request from,
+    // not in the repository cloned, which serves the pinned head by its
+    // commit (as it serves the pull request's `refs/pull/N/head`): that
+    // is fetched and checked out, detached, on the default branch's clone.
+    let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
     git_clone(
         sandbox,
         &policy.clone_url,
-        Some(&policy.base),
+        push.is_none().then_some(policy.base.as_str()),
         DEPTH,
         dir_text,
     )?;
@@ -175,6 +200,21 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
         let argv = [&["timeout", GIT_TIMEOUT_S, "git", "-C", dir_text], args].concat();
         Ok(sandbox.checked(&argv, b"", MAX_GIT_OUTPUT)?.text())
     };
+    if let Some(push) = push {
+        sandbox
+            .checked(
+                &fetch_args(dir_text, &push.head, DEPTH),
+                b"",
+                MAX_GIT_OUTPUT,
+            )
+            .with_context(|| {
+                format!(
+                    "fetching pull request #{}'s head {}",
+                    push.target, push.head
+                )
+            })?;
+        git(&["checkout", "--quiet", "--detach", &push.head, "--"])?;
+    }
     let base_commit = git(&["rev-parse", "--verify", "HEAD"])?;
     ensure!(
         (40..=64).contains(&base_commit.len())
@@ -201,10 +241,10 @@ pub fn check_pinned_head(policy: &Policy, base_commit: &str) -> Result<()> {
     if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
         ensure!(
             base_commit == push.head,
-            "{} is at {base_commit}, not at {}, the head the run was asked for: the pull request \
-             changed since",
-            policy.base,
-            push.head
+            "the checkout is at {base_commit}, not at {}, the head of pull request #{} the run \
+             was asked for: the pull request changed since",
+            push.head,
+            push.target
         );
     }
     Ok(())
@@ -440,6 +480,34 @@ mod tests {
             argv[argv.len() - 5..],
             ["--depth", "1", "--", "file:///srv/r.git", "d"]
         );
+        // A push's head, fetched by its commit into the clone.
+        let head = crate::policy::tests::HEAD;
+        let argv = fetch_args("/home/agent/work/r", head, DEPTH);
+        assert_eq!(
+            argv,
+            [
+                "timeout",
+                CLONE_TIMEOUT_S,
+                "git",
+                "-C",
+                "/home/agent/work/r",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.https.allow=always",
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--depth",
+                "50",
+                "--",
+                "origin",
+                head,
+            ]
+        );
     }
 
     #[test]
@@ -452,6 +520,48 @@ mod tests {
         // Other runs pin nothing.
         let other = policy("o/r", "https://example.invalid/o/r", "main");
         check_pinned_head(&other, &"3".repeat(40)).unwrap();
+    }
+
+    /// The clone and fetch as `clone` runs them, against a repository
+    /// whose default branch does not hold the head: the forge serves a
+    /// fork's commit only under the pull request's ref.
+    #[test]
+    fn a_push_head_is_fetched_by_its_commit_onto_the_default_branch() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, dir) = (temp.path().join("repo"), temp.path().join("r"));
+        let (repo_text, dir_text) = (utf8(&repo).unwrap(), utf8(&dir).unwrap());
+        let run = |argv: &[&str]| {
+            let out = Command::new(argv[0]).args(&argv[1..]).output().unwrap();
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            (out.status.success(), stdout.trim().to_owned())
+        };
+        let ok = |argv: &[&str]| {
+            let (success, stdout) = run(argv);
+            assert!(success, "{argv:?}");
+            stdout
+        };
+        let in_repo = |args: &[&str]| ok(&[&["git", "-C", repo_text], args].concat());
+        std::fs::create_dir(&repo).unwrap();
+        in_repo(&["init", "-q", "-b", "main"]);
+        in_repo(&["config", "user.name", "Test"]);
+        in_repo(&["config", "user.email", "test@example.invalid"]);
+        in_repo(&["commit", "-q", "--allow-empty", "-m", "Base"]);
+        in_repo(&["checkout", "-qb", "fork"]);
+        in_repo(&["commit", "-q", "--allow-empty", "-m", "Pull request"]);
+        let head = in_repo(&["rev-parse", "HEAD"]);
+        in_repo(&["update-ref", "refs/pull/1/head", &head]);
+        in_repo(&["checkout", "-q", "main"]);
+        in_repo(&["branch", "-qD", "fork"]);
+        let url = format!("file://{repo_text}");
+        ok(&clone_args(&url, None, DEPTH, dir_text));
+        ok(&fetch_args(dir_text, &head, DEPTH));
+        let in_clone = |args: &[&str]| ok(&[&["git", "-C", dir_text], args].concat());
+        in_clone(&["checkout", "--quiet", "--detach", &head, "--"]);
+        assert_eq!(in_clone(&["rev-parse", "--verify", "HEAD"]), head);
+        // A commit the repository does not have is not there to fetch.
+        assert!(!run(&fetch_args(dir_text, &"3".repeat(40), DEPTH)).0);
     }
 
     #[test]

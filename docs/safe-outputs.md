@@ -118,78 +118,70 @@ pull-request write access). No producer or check token gains write access.
 
 `push_to_pull_request_branch` lets a follow-up run fix an open pull request:
 its change goes onto that pull request's branch as one commit, not into a new
-pull request. It is off unless a bounds file lists it, with globs of the
-branches a push may go to and the repositories it may go to, each named
-exactly (no globs, as in `unprotected_files.repos`), so that it is turned on
-one repository at a time:
+pull request. It goes only to a pull request apply opened itself, from the
+fork of the identity it applies as
+([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)):
+never to a branch of the target repository, whose `pull_request` workflows
+would run the agent's commit with whatever write token and OIDC access they
+hold ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
+[#430](https://github.com/cgwalters-forge/agentic-job/issues/430)), and never
+to anyone else's fork. The target's CI runs the pushed commit as it ran the
+pull request's first one: as a fork's, with a read-only token, no secrets and
+no OIDC token. It is off unless a bounds file lists it, with globs of the
+branches a push may go to:
 
 ```toml
 [outputs.push_to_pull_request_branch]
 max = 1
 branches = ["agent-run-*", "dispatch/**"]
-repos = ["OWNER/NAME"]
 ```
 
 Unlike `bases`, the `branches` globs match case exactly: `dispatch/**` does
-not admit `DISPATCH/x`, since a forge keeps a branch name's case.
-
-It has the exposure of
-[#340](https://github.com/cgwalters-forge/agentic-job/issues/340): a branch of
-the repository itself runs that repository's `pull_request` workflows on code
-the agent wrote, with whatever token and OIDC access those workflows hold.
-Enable it only for a target repository whose CI does not give a pull request
-from its own branches write or OIDC access, as for `create_pull_request`.
+not admit `DISPATCH/x`, since a forge keeps a branch name's case. The branch
+of a pull request apply opened is the caller's `branch-prefix` followed by
+`agent-run-RUNID`.
 
 The caller names the pull request by number (`push-item`, the `fix` profile of
 [dispatch](dispatch.md)); the agent never does. The policy job reads that pull
-request with its read-only token and refuses it unless it is open and both its
-head and base are in the run's repository: a fork's branch is not one apply
-can push to. The repository must be in `repos`, and the outputs must be
-applied there (`output-repo` empty or that repository): policy refuses
-anything else before the agent runs. Its branch must match `branches`
-(`bases` does not apply), and `policy.json` records the number as the push's `target` and the head commit
-the branch was at as its `head`. A run with a push has no
-`create_pull_request`: it hands back one patch.
+request with its read-only token and refuses it unless it is open, its base is
+in the run's repository and its head in a fork of it. The outputs must be
+applied there (`output-repo` empty or that repository), and apply must hold
+`SAFE_OUTPUTS_PAT` from an `apply-environment`: the job token has no fork.
+Policy refuses anything else before the agent runs. Its branch must match
+`branches` (`bases` does not apply), and `policy.json` records the number as
+the push's `target` and the head commit the branch was at as its `head`. A
+run with a push has no `create_pull_request`: it hands back one patch.
 
-The run starts from that head, and each step holds it there:
+The run clones the target's default branch, fetches `head` by its commit (the
+forge serves a fork pull request's head from the target too) and starts there:
 
-- the run refuses to start when the clone's branch is no longer at `head`;
+- the run refuses to start when the checkout is not at `head`;
 - check refuses a hand-back whose base is not `head`, a push line naming any
   branch but the pull request's, and the same patch rules as a pull request
   (protected files, every top-level dot-folder, size and file count);
-- apply refuses when the branch has moved since `head`, so a pull request
-  that changed under the run has to be run again. gh-aw's handler pushes one
-  commit without force (so the forge refuses anything that is not a
-  fast-forward), with no fallback to a new pull request and never with
-  `allow_workflows`, and apply then fetches the branch back and refuses unless
-  it is that one commit on `head` with the checked tree.
-
-Running apply again does not push twice: a branch that is already one commit
-on `head` with the checked tree is the push done, and apply skips it.
+- apply makes or finds its fork as for a pull request, and refuses unless the
+  pull request is open and its head is that fork and the policy's branch; a
+  pull request from someone else's repository is refused before anything is
+  forked, fetched or pushed; gh-aw's handler is given the fork as the only head
+  repository it may push to, and refuses a pull request from any other;
+- the handler applies the patch on `head` and pushes one commit without force,
+  with no fallback to a new pull request and never with `allow_workflows`. A
+  branch that moved since `head` was read, by an earlier attempt's push too,
+  makes the push not a fast-forward, which the forge refuses: the pull request
+  has to be run again. Apply then fetches the branch back from the fork and
+  refuses unless it is that one commit on `head` with the checked tree.
 
 A partial run (one stopped at a limit, applied under `apply-partial`) is not
 pushed: nothing on a pushed commit would say the work was cut short, so
 apply fails instead.
 
-As the last step before gh-aw's handlers, apply reads the pull request again
-with the token it pushes with, and refuses unless it is still open, from the
-same branch, and that branch is still at `head`. gh-aw's handler checks
-neither the pull request's state nor its head, so this is what keeps a push
-off a pull request closed or changed since policy read it. The branch can
-still move between that read and the handler's push, and apply detects
-that; it cannot prevent it. What happens then depends on the move. The
-handler resets to the patch's recorded base commit (`head`) only if
-`git merge-base --is-ancestor` finds that commit in the branch: then a
-commit added on top makes the push not a fast-forward, which the forge
-refuses, and with no force and no fallback to a pull request the push
-fails. If the branch was force-pushed or rebased so that `head` is no longer
-in it, the handler logs a warning and applies the patch with `git am --3way`
-on the branch as it finds it; that push is a plain fast-forward and
-succeeds, and apply's last step then fails, reporting the branch as not
-holding the checked change on `head`, after the commit is on the branch.
-
-The push needs `contents: write` in apply; see
-[the apply job and its token](workflow.md#the-apply-job-and-its-token).
+Only the fork's owner, the identity apply holds, and maintainers of the target
+the pull request lets edit it can move its branch. One of them rewriting it so
+that `head` is no longer in it is the case the handler does not refuse: it
+logs a warning and applies the patch with `git am --3way` on the branch as it
+finds it, that push succeeds, and apply's last step fails after the commit is
+on the branch. The handler does not check the pull request's state; apply's
+fork step does, so a pull request closed before apply runs is not pushed to.
 
 ## The bounds and the policy
 

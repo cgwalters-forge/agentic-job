@@ -647,7 +647,7 @@ jobs:
       matrix:
         profile: ${{ fromJSON(github.event_name == 'pull_request' && '["triage","research","review"]' || '["triage","research"]') }}
     permissions:
-      contents: write # what dispatch.yml asks for; no profile here pushes or opens a pull request
+      contents: read # what dispatch.yml asks for: no profile pushes with the job token
       issues: write
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload

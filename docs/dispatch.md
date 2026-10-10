@@ -39,21 +39,24 @@ posts a clearly scripted verdict naming the pinned head. This is not an
 approval or permission to merge. Delete trial comments, and branches in the
 applying account's fork, when finished.
 
-`fix` also takes an open, same-repository pull request number. Its run starts
-from that pull request's branch at the head it had when dispatched, and its
-change is pushed there as one commit on top, never force-pushed; a pull
-request that moved meanwhile is refused, and the run has to be dispatched
-again. It is **off** in the shipped bounds: a push runs the target's
-`pull_request` workflows on agent-written code, the exposure described in
-[#340](https://github.com/cgwalters-forge/agentic-job/issues/340). To enable it
-for a target, add to `dispatch.toml`
+`fix` takes the number of an open pull request that implement opened, from
+the applying account's fork. Its run starts from that pull request's branch
+at the head it had when dispatched, and its change is pushed there, to the
+fork, as one commit on top, never force-pushed; a pull request that moved
+meanwhile is refused, and the run has to be dispatched again. A
+same-repository pull request, or one from anyone else's fork, is refused: a
+push to it would run the target's `pull_request` workflows on agent-written
+code with their write token and OIDC
+([#340](https://github.com/cgwalters-forge/agentic-job/issues/340),
+[#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). Like
+implement it needs `APPLY_ENVIRONMENT`. It is **off** in the shipped bounds;
+to enable it for a target, add to `dispatch.toml`
 
 ```toml
-push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"], repos = ["OWNER/NAME"] }
+push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"] }
 ```
 
-with globs of the branches a fix may push to and each repository it may push
-in, named exactly; see
+with globs of the branches a fix may push to; see
 [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
 The scripted session is implement's.
 

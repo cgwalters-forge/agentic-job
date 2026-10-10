@@ -98,8 +98,8 @@ the token succeeded and GitHub refused it a GraphQL write.
 agent runs, an output type that the credential apply will hold cannot apply,
 naming the type and the credential it needs. Without an `apply-environment`
 apply holds the job token, which cannot write a Project nor fork (RC-021):
-`update_project` and `create_pull_request` are refused then, and `all`
-leaves them out. Every other shipped type the job token can apply in the
+`update_project`, `create_pull_request` and `push_to_pull_request_branch`
+(RC-020) are refused then, and `all` leaves them out. Every other shipped type the job token can apply in the
 calling repository; where the outputs go is the caller's to bound
 (`docs/dispatch.md` requires an apply environment for another repository
 and for `implement`).
@@ -253,44 +253,47 @@ token`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
 
 **RC-020 — Pushing to a pull request.** `push_to_pull_request_branch` MUST
 be refused unless the caller's bounds list it with globs of the `branches` it
-may go to, matched with case, and the `repos` it may go to, each named
-exactly (no globs), and the caller names the pull request by number
+may go to, matched with case, and the caller names the pull request by number
 (`push-item`); no part of its routing may come from agent or pull request
-text. Policy MUST refuse a repository not in those `repos`, outputs applied
-anywhere but that repository (`output-repo`), a pull request that is not
-open, or whose head or base is not in the run's repository, and a branch
-outside those globs; it MUST record the number as the push's `target`, the
-head commit as its `head`, and `max` as 1, MUST NOT allow
-`create_pull_request` beside it, and MUST refuse two bounds files whose
-policies pin different pushes. The run MUST start from that
-head and stop if the clone is elsewhere. Check MUST refuse a push to any
+text. It MUST go only to the head branch of a pull request whose head
+repository is the fork of the identity apply holds, a pull request apply
+opened from it (RC-021), and never to a branch of the output repository nor
+to anyone else's fork: the target's CI then runs the commit as a fork's.
+Policy MUST refuse outputs applied anywhere but the run's repository
+(`output-repo`), a pull request that is not open, whose base is not in the
+run's repository or whose head is not in a fork of it, a branch outside
+those globs, and a call whose apply holds only the job token; it MUST record
+the number as the push's `target`, the head commit as its `head`, and `max`
+as 1, MUST NOT allow `create_pull_request` beside it, and MUST refuse two
+bounds files whose policies pin different pushes. The run MUST start from
+that head and stop if the clone is elsewhere. Check MUST refuse a push to any
 branch but that pull request's, and a patch whose base is not that head,
-under the patch rules of RC-007. Apply MUST refuse when the branch is no
-longer at that head, and MUST read the pull request again as its last step
-before the handlers, refusing one that is no longer open, from that branch,
-at that head. It MUST NOT push a partial run's change. It MUST push without
-force, with no fallback to a new pull request and without
-`allow_workflows`, and fail unless the branch then holds the checked tree
-as one commit on that head: a branch rewritten after that last read is
-detected after the push, not prevented. A re-run of apply MUST NOT push
-again when the branch already does.
+under the patch rules of RC-007. Apply MUST refuse a pull request that is
+not open, whose head repository is not its own fork, or whose branch is not
+the policy's, before it fetches or pushes anything for it, and one from a
+repository its identity does not own before it forks; it MUST give gh-aw's handler that
+fork as the only head repository it may push to. It MUST NOT push a partial
+run's change. It MUST push without force, with no fallback to a new pull
+request and without `allow_workflows`, and fail unless the branch then holds
+the checked tree as one commit on that head.
 Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 `push_requests_against_the_bounds`, `a_push_policy_names_its_pull_request_and_always_a_max`,
-`push_bounds_must_name_branches_repos_and_one_push` and `push_bounds_intersect`;
-[push.test.cjs](../workflow/push.test.cjs), `a push resolves an open
-same-repository branch and refuses hostile routing`;
-[clone.rs](../crates/agentic-job/src/run/clone.rs), `a_push_starts_from_its_pinned_head`;
+`push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect` and
+`what_the_job_token_cannot_apply_is_refused`;
+[push.test.cjs](../workflow/push.test.cjs), `a push resolves an open pull
+request from a fork's branch and refuses hostile routing`;
+[clone.rs](../crates/agentic-job/src/run/clone.rs), `a_push_starts_from_its_pinned_head`
+and `a_push_head_is_fetched_by_its_commit_onto_the_default_branch`;
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `a_push_on_the_pinned_head_is_accepted`
 and `what_is_refused_of_a_push`; [handback.rs](../crates/agentic-job/src/run/handback.rs),
 `a_push_is_handed_back_as_a_patch_the_check_accepts`;
 [apply.test.cjs](../workflow/apply.test.cjs), `a push is applied to the
-policy pull request, never as a pull request, never with workflows` and `a
-push goes on the pinned head, is not pushed twice, and a moved branch stops
-it`, `a push is verified on the branch it went to: one commit on the pinned
-head, with the checked tree`, `a push's pull request is read again before
-the handlers: open, from its branch, at the pinned head`, `a partial run's
-push is not applied, whatever else it posts` and `target base fetching never
-advances the output repository and a stale base is refused`;
+policy pull request from apply's fork, never as a pull request, never with
+workflows`, `a push goes only to a pull request apply opened from its own
+fork`, `a push is verified on the branch it went to: one commit on the pinned
+head, with the checked tree`, `a partial run's push is not applied, whatever
+else it posts` and `target base fetching never advances the
+output repository and a stale base is refused`;
 [proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
 policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary`.
@@ -310,7 +313,7 @@ answers is not that user's own fork and neither the caller's nor the output
 repository, when the fork has no branch git can reach, or when Actions
 cannot be turned off on the fork, as a push with a user's token would start
 its workflows with its secrets; without a fork,
-no pull request handler is configured. There
+no pull request or push handler is configured. There
 is no same-repository mode. This repository's CI MUST give a fork's pull
 request nothing privileged: no `pull_request_target` or `workflow_run`
 trigger, no secret, and no job that writes or asks for an OIDC token runs
@@ -433,18 +436,19 @@ These limitations are not additional guarantees:
   fails): there is no result URL. Its link comment has RC-013's
   limits for a comment, and a re-run that makes another result is not linked
   again.
-- RC-020 leaves a window between apply's last read of the pull request and
-  gh-aw's handler pushing to it. A commit added on top of `head` then makes
-  the push fail: the handler re-anchors on the patch's base commit and
-  pushes without force, so the forge refuses it as not a fast-forward. A
-  branch force-pushed or rebased so that `head` is no longer in it is
-  different: the handler then applies the patch on the new tip, that push
-  succeeds, and apply's last step fails only after it. A pull request closed
-  in the window is pushed to as well; the handler does not check its state. A push runs the target's `pull_request`
-  workflows on agent-written code, which RC-020 does not bound; see
-  [issue 340](https://github.com/cgwalters-forge/agentic-job/issues/340). No
-  CI run pushes to a live pull request: RC-020's evidence is unit tests and
-  apply's steps run against a local repository.
+- RC-020 does not hold the branch at `head` before the push: gh-aw's handler
+  re-anchors on the patch's base commit and pushes without force, so a
+  commit added on top of `head` (an earlier attempt's push too) makes the
+  forge refuse it as not a fast-forward. A branch force-pushed or rebased so
+  that `head` is no longer in it is different: the handler then applies the
+  patch on the new tip, that push succeeds, and apply's last step fails only
+  after it. Only the fork's owner, the identity apply holds, and maintainers
+  of the output repository the pull request lets edit it can move the
+  branch. Apply checks that the pull request is open, the handler does not:
+  one closed in between is pushed to, on the fork's branch. A re-run of apply
+  after a push fails rather than pushing again. No CI run pushes to a live
+  pull request: RC-020's evidence is unit tests and apply's steps run
+  against a local repository.
 - RC-021 has run against a stand-in for the forge only: no live run has made
   a fork, pushed to it or opened a pull request from it. What it guarantees
   of the output repository's CI is what GitHub gives a fork's pull request

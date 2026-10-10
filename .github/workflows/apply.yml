@@ -132,11 +132,14 @@ jobs:
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials. Only check's accepted
       # patch report enables it; comment-only outputs need no repository/base.
+      # A push's base is a branch of the fork its pull request is from, not
+      # of the output repository: the checkout's own default is taken, and
+      # the fork's branch fetched below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         with:
           repository: ${{ env.OUTPUT_REPO }}
-          ref: ${{ fromJSON(inputs.policy).base }}
+          ref: ${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}
           fetch-depth: 0
           # Same selection as the handlers; only apply gets this PAT.
           token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
@@ -174,6 +177,13 @@ jobs:
       # which can be the network's root or the caller's repository: it has
       # to be a fork, the user's, and neither of those, with Actions turned
       # off. This comes before anything is pushed.
+      #
+      # A push goes to the same fork, and only to the branch of a pull
+      # request apply opened from it: never to a branch of the output
+      # repository, whose CI would run the agent's commit with a write
+      # token and OIDC, nor to anyone else's fork. The handler pushes to the
+      # pull request's head repository only if it is this fork (`head-repo`
+      # below); it is checked here too, before anything is fetched from it.
       - name: Fork the output repository for the pull request
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
@@ -181,13 +191,29 @@ jobs:
         with:
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           script: |
-            const output = JSON.parse(require('node:fs').readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
-            if (!output.items.some(item => item.type === 'create_pull_request')) return;
+            const fs = require('node:fs');
+            const output = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
+            const push = output.items.some(item => item.type === 'push_to_pull_request_branch');
+            if (!push && !output.items.some(item => item.type === 'create_pull_request')) return;
             const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null);
             if (!me) throw new Error("a pull request is opened from a fork of the identity apply holds, and GET /user names none: SAFE_OUTPUTS_PAT must be a user's token");
             const [owner, repo] = process.env.OUTPUT_REPO.split('/');
             if (owner.toLowerCase() === me.toLowerCase()) {
               throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: apply as an account that does not own it`);
+            }
+            // A push's pull request is checked before anything is forked:
+            // open, from the branch the policy names, of a fork of `me`'s.
+            let from = null, target = null;
+            if (push) {
+              ({ target } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch ?? {});
+              if (!/^[1-9][0-9]*$/.test(String(target))) throw new Error('a push is to be applied, and the policy names no pull request for it');
+              const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: Number(target) });
+              from = String(pull.head?.repo?.full_name);
+              if (pull.state !== 'open' || pull.head?.repo?.fork !== true || String(pull.head?.repo?.owner?.login).toLowerCase() !== me.toLowerCase() ||
+                  pull.head?.ref !== process.env.BASE) {
+                throw new Error(`pull request ${target} of ${process.env.OUTPUT_REPO} is ${pull.state}, from ${from}:${pull.head?.ref}, not open from ${me}'s fork:${process.env.BASE}: ` +
+                  `a push goes only to the branch of a pull request apply opened from ${me}'s fork`);
+              }
             }
             const { data: fork } = await github.rest.repos.createFork({ owner, repo, default_branch_only: true });
             const name = String(fork.full_name);
@@ -215,18 +241,29 @@ jobs:
               throw new Error(`Actions could not be turned off on the fork ${name}, which a push with ${me}'s token would run workflows in: ` +
                 "turn them off there, and give SAFE_OUTPUTS_PAT the repo scope (or a fine-grained token Administration: write on the fork)");
             }
+            if (from !== null && from.toLowerCase() !== name.toLowerCase()) {
+              throw new Error(`pull request ${target} of ${process.env.OUTPUT_REPO} is from ${from}:${process.env.BASE}, not from ${name}: ` +
+                `a push goes only to the branch of a pull request apply opened from ${me}'s fork`);
+            }
             core.setOutput('repo', name);
       # The target's base branch as this job fetched it, not as anything
       # that was handed back says. Never push the target's commits to an
       # output repository: its push workflows could run with privileges.
-      # A push goes only to the repository the run worked on (policy
-      # refuses any other): checked
-      # again before anything here pushes to `OUTPUT_REPO`.
+      # A push's pull request is in the repository the run worked on (policy
+      # refuses any other): checked again here. Its base is the pull
+      # request's branch, in the fork the step above checked, and nothing
+      # here pushes for it.
       - name: Fetch the target's base branch
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        env:
+          FORK: ${{ steps.fork.outputs.repo }}
         run: |
           jq -e '.push_to_pull_request_branch == null' "$GH_AW_TMP/config.json" > /dev/null || [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] ||
-            { echo "::error::a push goes to $REPO, the repository the run worked on, not to $OUTPUT_REPO"; exit 1; }
+            { echo "::error::a push goes to a pull request of $REPO, the repository the run worked on, not of $OUTPUT_REPO"; exit 1; }
+          if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null; then
+            git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/target-base"
+            exit 0
+          fi
           git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
           [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || git merge-base --is-ancestor "$(jq -er '.patch.base_commit' "$REPORT")" HEAD ||
             { echo "::error::sync $OUTPUT_REPO's $BASE to contain the patch's base commit before applying"; exit 1; }
@@ -258,7 +295,7 @@ jobs:
           [ "$patch" != null ] || exit 0
           base=$(jq -er '.patch.base_commit' "$REPORT")
           git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
-            { echo "::error::the patch starts from $base, which is not a commit of $REPO's $BASE"; exit 1; }
+            { echo "::error::the patch starts from $base, which is not a commit of the $BASE fetched above"; exit 1; }
           git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
           git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP"/aw-*.patch
           git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
@@ -266,42 +303,22 @@ jobs:
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
           echo "tree=$(git -C "$RUNNER_TEMP/trial" rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
           git worktree remove --force "$RUNNER_TEMP/trial"
-      # A push to a pull request goes on the head the run started from,
-      # which policy pinned and check held the patch to: a branch that
-      # moved since would have gh-aw's handler apply the patch on whatever
-      # it is at now, on code nobody gave the agent. One commit on that
-      # head with the tree the patch makes is this push, applied by an
-      # earlier attempt, and is not pushed again. The branch is the one
-      # fetched above; it is read again as the last step before the
-      # handlers, which narrows, but cannot close, the window in which it
-      # may move (docs/safe-outputs.md).
-      - name: A push goes on the head the run started from, and only once
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
-        env:
-          TREE: ${{ steps.trial.outputs.tree }}
-        run: |
-          head=$(jq -r '.push_to_pull_request_branch.head // ""' "$GH_AW_TMP/config.json")
-          [ -n "$head" ] || exit 0
-          tip=$(git rev-parse --verify refs/agentic-job/target-base)
-          [ "$tip" != "$head" ] || exit 0
-          if [ -n "$TREE" ] && [ "$(git rev-parse --verify --quiet "$tip^")" = "$head" ] && [ "$(git rev-parse "$tip^{tree}")" = "$TREE" ]; then
-            target=$(jq -r '.push_to_pull_request_branch.target' "$GH_AW_TMP/config.json")
-            jq '.items |= map(select(.type != "push_to_pull_request_branch"))' "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/unpushed.json"
-            mv "$RUNNER_TEMP/unpushed.json" "$GH_AW_TMP/agent_output.json"
-            jq -n --arg url "$GITHUB_SERVER_URL/$OUTPUT_REPO/pull/$target" --arg tip "$tip" \
-              '[{type: "push_to_pull_request_branch", name: $tip, url: $url}]' > "$GH_AW_TMP/skipped.json"
-            echo "::notice::$BASE is at $tip, this push applied by an earlier attempt; it is not pushed again"
-            exit 0
-          fi
-          echo "::error::$BASE is at $tip, not at $head, the head the run started from: the pull request changed since, and the run has to be made again"
-          exit 1
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
       # token's owner), a pull request that fails is not to become an
       # issue, and the branch goes to the fork, which only it may name.
-      # Without a fork there is no pull request to open, and no handler for
-      # one: a pull request's handler without its `head-repo` would push to
-      # the output repository. Each input is one string of the result.
+      # Without a fork there is no pull request to open or push to, and no
+      # handler for either: one without its `head-repo` would push to the
+      # output repository. Each input is one string of the result.
+      #
+      # The push handler takes the pull request only if its head repository
+      # is `head-repo`, applies the patch on the head the run started from
+      # (the patch's base, which check held to the policy's), and pushes
+      # without force: a branch that moved on since, by an earlier attempt's
+      # push too, refuses it. One rewritten since the trial above fetched it,
+      # so that the head is no longer in it, the handler applies the patch
+      # on instead, as only the fork's owner or a maintainer of the output
+      # repository can do; the last step then fails the job.
       - name: Write the handlers' configuration
         env:
           FORK: ${{ steps.fork.outputs.repo }}
@@ -321,11 +338,12 @@ jobs:
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
-            (if $fork == "" then del(.create_pull_request) else . end)
+            (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
             | (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
                  "head-repo": $fork, allowed_repos: [$fork]}
-            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push + {"target-repo": $repo}
+            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push
+              + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork]}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
@@ -337,8 +355,8 @@ jobs:
       # in this file's words, chosen by the exit state. A partial run with
       # neither a pull request, an issue nor a comment would leave nothing
       # that says it was stopped, so it is not applied. Nor is a partial
-      # run's push: its commit would land on someone else's pull request
-      # with nothing on it to say the work was cut short.
+      # run's push: its commit would land on an open pull request with
+      # nothing on it to say the work was cut short.
       - name: Mark what a partial run opens or posts
         if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
         env:
@@ -415,9 +433,8 @@ jobs:
               if (!report.patch?.file) throw new Error('a pull request is to be opened, and check accepted no patch');
               return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
             };
-            // What the step before found applied already: a push.
             const skippedFile = `${process.env.GH_AW_TMP}/skipped.json`;
-            const kept = [], skipped = fs.existsSync(skippedFile) ? JSON.parse(fs.readFileSync(skippedFile, 'utf8')) : [];
+            const kept = [], skipped = [];
             for (const [index, item] of output.items.entries()) {
               if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
               // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
@@ -470,27 +487,6 @@ jobs:
       # than the run's create_issue outputs allow, none for a run without
       # that type. A handler that failed fails this step, and the last step
       # says what that means for the job.
-      #
-      # Just before that, a push's pull request is read again, as the
-      # handler will read it, with the token it pushes with: it must still
-      # be open, from the policy's branch, and that branch still at the
-      # head the run started from. The handler checks neither the state nor
-      # the head: on a branch rewritten so that `head` is no longer in it,
-      # it applies the patch on whatever the branch holds, and that push
-      # succeeds. What moves the branch after this read is caught only by
-      # the last step, after the push (docs/safe-outputs.md).
-      - name: A push's pull request is still open and at its head
-        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
-        run: |
-          jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null || exit 0
-          target=$(jq -er '.push_to_pull_request_branch.target' "$GH_AW_TMP/config.json")
-          head=$(jq -er '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
-          gh api "repos/$OUTPUT_REPO/pulls/$target" | jq -e --arg base "$BASE" '.state == "open" and .head.ref == $base' > /dev/null ||
-            { echo "::error::pull request $target of $OUTPUT_REPO is no longer open from $BASE: nothing is pushed"; exit 1; }
-          tip=$(git ls-remote --exit-code origin "refs/heads/$BASE" | cut -f1)
-          [ "$tip" = "$head" ] || { echo "::error::$BASE is at $tip, not at $head, the head the run started from: the pull request changed since, and the run has to be made again"; exit 1; }
       - name: Apply the outputs with gh-aw's handlers
         id: apply
         continue-on-error: true
@@ -700,15 +696,17 @@ jobs:
           FAILED: ${{ steps.apply.outputs.items_failed }}
           PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
           TREE: ${{ steps.trial.outputs.tree }}
+          FORK: ${{ steps.fork.outputs.repo }}
         run: |
           [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
           # gh-aw counts a push its handler skipped as no failure: the
-          # branch itself has to hold the commit, on the head it was for.
+          # branch itself, in the fork, has to hold the commit, on the head
+          # it was for.
           if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null; then
             head=$(jq -r '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
-            git fetch --no-tags origin "+refs/heads/$BASE:refs/agentic-job/pushed"
+            git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/pushed"
             [ "$(git rev-parse --verify --quiet 'refs/agentic-job/pushed^')" = "$head" ] && [ "$(git rev-parse 'refs/agentic-job/pushed^{tree}')" = "$TREE" ] ||
-              { echo "::error::$BASE of $OUTPUT_REPO does not hold the checked change as one commit on $head"; exit 1; }
+              { echo "::error::$BASE of $FORK does not hold the checked change as one commit on $head"; exit 1; }
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json")
