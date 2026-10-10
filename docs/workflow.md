@@ -546,6 +546,8 @@ empty `[sandbox]` and read what `sandbox check` fails on: it names each
 listener that is left. The inputs for the agent, the proxy, the limits
 and the packages are written over this file by `agentic-job config`,
 which takes each as the value of one key and never reads it as TOML.
+It also adds the file's `[setup.repo-packages]` list for the target
+repository ([a target's toolchain](dispatch.md#giving-runs-a-toolchain)).
 
 **Runners.** `agent-runner` is the machine the agent works on: thrown
 away after the job, with passwordless sudo for the runner's user,

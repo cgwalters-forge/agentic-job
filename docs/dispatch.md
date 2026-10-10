@@ -98,6 +98,75 @@ still gate apply, and the environment's same-name secret takes precedence.
 Never use `secrets: inherit`. For same-repository trials the apply job uses
 its job token instead; no environment is needed.
 
+## Giving runs a toolchain
+
+A sandbox has only what the runner image and the runner configuration
+(`AGENT_CONFIG`, by default [hosted.toml](../.github/agentic-job/hosted.toml))
+put there. `[setup] packages` is installed for every run;
+`[setup.repo-packages]` adds a list for the target repository, or the
+`default` list for a target with none:
+
+```toml
+[setup.repo-packages]
+default = []
+"OWNER/REPO" = ["cargo"]
+"OWNER/OTHER" = ["cargo", "golang-go"]
+```
+
+The policy job picks the entry (`agentic-job config --repo`) and prints
+the resulting `setup.packages`, held to the same checks as every package
+name; `sandbox setup` installs them with apt or dnf, as root and from the
+distribution's signed archive, before it locks the host. Names ignore
+case, as in the bounds. The list applies to every profile of a run on
+that target, so triage and research pay its install time too, and so do
+this repository's own end-to-end jobs, which share `hosted.toml`. The
+[secure-host action](secure-host.md) has no target and gets only the
+`default` list.
+
+The list comes only from the caller's file, never from the target
+repository: its contents, a pull request's head included, are untrusted,
+and a package list read from them would let anyone who can open a pull
+request choose what is installed as root. For the same reason
+`rust-toolchain.toml`, `.tool-versions` and the like are not read. A
+toolchain the distribution lacks needs a `setup` script of the caller's
+(the reusable workflow's input; the shipped dispatch caller passes none),
+which runs as the sandbox user, never as root.
+
+**Rust.** The shipped configuration gives this repository Ubuntu 26.04's
+`cargo` (1.93.1, pulling in `rustc` and `gcc` as its linker), which is
+newer than its `rust-version` of 1.88. That is preferred to rustup:
+nothing is fetched by a script, the packages are signed, and the run
+starts with the toolchain installed. A target that pins a newer Rust in
+its own `rust-toolchain` file can be given rustup from a caller `setup`
+script instead. rustup then follows the target's file, but as the
+sandbox user: the target picks a toolchain version, not what root
+installs.
+
+A `cargo build --locked` needs no egress rule: the proxy lets every
+`GET` through, and Cargo only reads, from `index.crates.io` (the sparse
+index), `static.crates.io` (the crates) and, for git dependencies, a
+forge whose `git fetch` is already allowed. The shipped configuration
+lists those hosts in a comment; no write is opened for them. Allowing
+crates.io means the run executes code from it: every crate is checked
+against the checksum in `Cargo.lock`, but build scripts and procedural
+macros of the target's dependencies run as the sandbox user, as the
+target's own tests do. That is the same reach as the agent's own: the
+sandbox user's read-only GitHub token and inference access, not the
+host's root, the runner's user or a write credential.
+
+In a container on Ubuntu 26.04 through the same egress proxy, installing
+`cargo` took 24 seconds (70 packages, most of them `gcc` and LLVM, which
+the hosted image partly has already), and a cold `cargo test --workspace
+--locked --no-run` of this repository 68 seconds. The hosted runner's
+`Sandbox setup stage packages` line in the agent job's log is the
+authoritative figure.
+
+The scripted review session checks it: when the checkout has a
+`Cargo.lock`, it runs `cargo --version` and `cargo metadata --locked`
+(which downloads every dependency) and names the version on a
+`Toolchain:` line of its verdict, or `none`. CI's dispatch verifier
+requires a cargo version there for this repository.
+
 ## Sessions and boundaries
 
 The built-in [patch](../workflow/dispatch-implement.sh),

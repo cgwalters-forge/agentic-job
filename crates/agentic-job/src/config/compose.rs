@@ -15,7 +15,14 @@
 //! machine is set up for it. With `--host` it is held only to what
 //! `sandbox setup` checks: the file of a job that secures its host and
 //! runs no agent names none, and no limits.
+//!
+//! `setup.repo-packages` in the caller's file is a package list per
+//! target repository, `OWNER/NAME = [...]`, with `default` for any other:
+//! the entry for `--repo` (or `default`) is added to `setup.packages` and
+//! the table left out of what is written. It is the caller's choice of a
+//! target's toolchain; nothing is read from the target's own contents.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -46,6 +53,71 @@ pub struct Args {
     /// Check only what `sandbox setup` reads: for a job that runs no agent
     #[arg(long)]
     pub host: bool,
+    /// The repository the run works on, OWNER/NAME: chooses its entry of
+    /// `setup.repo-packages`
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+}
+
+/// The key of `setup.repo-packages` for a repository that has none.
+const DEFAULT_PACKAGES: &str = "default";
+
+/// Whether NAME is `OWNER/NAME` in the characters GitHub allows.
+fn is_repo(name: &str) -> bool {
+    let part = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    name.split_once('/')
+        .is_some_and(|(owner, repo)| part(owner) && part(repo))
+}
+
+/// Takes `setup.repo-packages` out of TABLE and adds the list of REPO, or
+/// else of `default`, to `setup.packages`. The names are checked with
+/// the rest of `setup.packages` when the result is parsed.
+fn repo_packages(table: &mut Table, repo: Option<&str>) -> Result<()> {
+    if let Some(repo) = repo {
+        ensure!(is_repo(repo), "--repo: {repo:?} is not OWNER/NAME");
+    }
+    let Some(setup) = table.get_mut("setup").and_then(Value::as_table_mut) else {
+        return Ok(());
+    };
+    let Some(sets) = setup.remove("repo-packages") else {
+        return Ok(());
+    };
+    let sets: BTreeMap<String, Vec<String>> = sets
+        .try_into()
+        .context("setup.repo-packages: expected OWNER/NAME = [package, ...]")?;
+    let mut seen = std::collections::BTreeSet::new();
+    for key in sets.keys() {
+        ensure!(
+            key == DEFAULT_PACKAGES || is_repo(key),
+            "setup.repo-packages: {key:?} is neither OWNER/NAME nor {DEFAULT_PACKAGES}"
+        );
+        ensure!(
+            seen.insert(key.to_ascii_lowercase()),
+            "setup.repo-packages: {key:?} is named twice"
+        );
+    }
+    // GitHub's names, and so the bounds, ignore case.
+    let chosen = repo
+        .and_then(|repo| {
+            sets.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(repo))
+                .map(|(_, list)| list)
+        })
+        .or_else(|| sets.get(DEFAULT_PACKAGES));
+    if let Some(chosen) = chosen {
+        setup
+            .entry("packages")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("setup.packages is not a list")?
+            .extend(chosen.iter().cloned().map(Value::String));
+    }
+    Ok(())
 }
 
 /// One `KEY=VALUE` of the command line: the tables down to the key, and
@@ -168,6 +240,7 @@ fn compose(args: &Args) -> Result<String> {
             }
         }
     }
+    repo_packages(&mut table, args.repo.as_deref())?;
     // Default only an absent key: an explicit list (even an empty one)
     // is the caller's network policy, not ours to expand.
     let direct_is_set = table
@@ -228,6 +301,7 @@ mod tests {
             list: settings(list),
             boolean: Vec::new(),
             host: false,
+            repo: None,
         }
     }
 
@@ -381,6 +455,109 @@ mod tests {
             (5, 100)
         );
         assert_eq!(config.setup.packages, ["jq"]);
+    }
+
+    /// A target's own list, or else `default`'s, goes after the file's
+    /// packages and any setting; the table itself is not written.
+    #[test]
+    fn repo_packages_follow_the_target() {
+        let file_text = "[setup]\npackages = [\"jq\"]\n[setup.repo-packages]\n\
+                         default = [\"make\"]\n\"o/rust\" = [\"cargo\", \"gcc\"]\n\"o/none\" = []\n";
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "{file_text}").unwrap();
+        let mut bare = tempfile::NamedTempFile::new().unwrap();
+        write!(bare, "[setup.repo-packages]\n\"o/rust\" = [\"cargo\"]\n").unwrap();
+        let cases: &[(&tempfile::NamedTempFile, Option<&str>, &str, &[&str])] = &[
+            (
+                &file,
+                Some("o/rust"),
+                "setup.packages=",
+                &["jq", "cargo", "gcc"],
+            ),
+            (&file, Some("o/none"), "setup.packages=", &["jq"]),
+            (&file, Some("o/other"), "setup.packages=", &["jq", "make"]),
+            // Names ignore case, as in the bounds.
+            (
+                &file,
+                Some("O/Rust"),
+                "setup.packages=",
+                &["jq", "cargo", "gcc"],
+            ),
+            (&file, None, "setup.packages=", &["jq", "make"]),
+            (
+                &file,
+                Some("o/rust"),
+                "setup.packages=just",
+                &["just", "cargo", "gcc"],
+            ),
+            (&bare, Some("o/rust"), "setup.packages=", &["cargo"]),
+            (&bare, Some("o/other"), "setup.packages=", &[]),
+        ];
+        for (from, repo, list, packages) in cases {
+            let args = Args {
+                repo: repo.map(str::to_owned),
+                ..args(from.path().to_str(), RUN, LIMITS, &[list])
+            };
+            let text = compose(&args).unwrap();
+            assert!(!text.contains("repo-packages"), "{args:?}: {text}");
+            assert_eq!(
+                Config::parse(&text).unwrap().setup.packages,
+                *packages,
+                "{args:?}"
+            );
+        }
+        let refused = [
+            (
+                "\"o/r\" = [\"--installroot=/\"]",
+                "o/r",
+                "is not a package name",
+            ),
+            (
+                "\"o/r\" = \"cargo\"",
+                "o/r",
+                "expected OWNER/NAME = [package, ...]",
+            ),
+            ("\"o/r/x\" = []", "o/r", "is neither OWNER/NAME nor default"),
+            ("\"*\" = []", "o/r", "is neither OWNER/NAME nor default"),
+            ("default = []", "o/r --x", "is not OWNER/NAME"),
+            ("\"o/r\" = []\n\"O/r\" = []", "o/r", "is named twice"),
+        ];
+        for (table, repo, names) in refused {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            write!(file, "[setup.repo-packages]\n{table}\n").unwrap();
+            let args = Args {
+                repo: Some(repo.to_owned()),
+                ..args(file.path().to_str(), RUN, LIMITS, &[])
+            };
+            let err = compose(&args).expect_err("a bad table was taken");
+            assert!(format!("{err:#}").contains(names), "{table}: {err:#}");
+        }
+    }
+
+    /// The shipped runner configuration gives this repository cargo,
+    /// which the scripted dispatch review relies on, and others nothing.
+    #[test]
+    fn shipped_hosted_config_gives_this_repository_cargo() {
+        let hosted = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/agentic-job/hosted.toml"
+        );
+        for (repo, cargo) in [("cgwalters-forge/agentic-job", true), ("o/other", false)] {
+            let args = Args {
+                repo: Some(repo.to_owned()),
+                ..args(Some(hosted), RUN, LIMITS, &[])
+            };
+            let packages = composed(&args).setup.packages;
+            assert_eq!(
+                packages.contains(&"cargo".to_owned()),
+                cargo,
+                "{repo}: {packages:?}"
+            );
+            assert!(
+                packages.contains(&"nftables".to_owned()),
+                "{repo}: {packages:?}"
+            );
+        }
     }
 
     /// A host's file needs no agent and no limits, which a run's does;

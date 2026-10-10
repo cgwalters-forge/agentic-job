@@ -178,16 +178,18 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
   const head = 'a'.repeat(40);
   const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
   const verify = (change = {}) => {
-    const env = { GH_REPO: 'owner/repo', RUN: 'actions/runs/1', PR: '147',
+    const repo = change.repo ?? 'owner/repo';
+    const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147',
       REVIEW_HEAD: head, GITHUB_RUN_ID: '1', RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
     const responses = {
-      'repos/owner/repo/issues/64/comments': change.comments ?? [
+      [`repos/${repo}/issues/64/comments`]: change.comments ?? [
         comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')],
-      'repos/owner/repo/issues/147/comments': [comment(
-        'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head))],
-      'repos/owner/repo/commits/dispatch/implement/agent-run-1': {
+      [`repos/${repo}/issues/147/comments`]: [comment(
+        'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head) +
+        '\nToolchain: ' + (change.toolchain ?? 'cargo 1.93.1'))],
+      [`repos/${repo}/commits/dispatch/implement/agent-run-1`]: {
         files: [{ filename: change.file ?? 'DISPATCH-TRIAL.md' }], parents: [{}] },
-      'repos/owner/repo/pulls?head=owner%3Adispatch%2Fimplement%2Fagent-run-1&state=all': [{ draft: change.draft ?? true }],
+      [`repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':')}dispatch%2Fimplement%2Fagent-run-1&state=all`]: [{ draft: change.draft ?? true }],
     };
     vm.runInNewContext(source, {
       process: { env },
@@ -200,7 +202,9 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
     });
   };
   verify();
-  for (const change of [{ head: 'b'.repeat(40) }, { file: 'README.md' }, { comments: [] },
+  verify({ toolchain: 'none' });
+  verify({ repo: 'cgwalters-forge/agentic-job' });
+  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'cgwalters-forge/agentic-job', toolchain: 'none' }, { file: 'README.md' }, { comments: [] },
     { draft: false }, { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
     { comments: [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')] }]) {
     assert.throws(() => verify(change));
@@ -211,12 +215,21 @@ for (const profile of ['implement', 'comment', 'review']) {
   test(`shipped ${profile} setup produces a working session and hand-back`, () => {
     const home = fs.mkdtempSync(path.join(os.homedir(), 'dispatch-test-'));
     const cwd = path.join(home, 'work');
-    const env = { ...process.env, HOME: home };
+    // A rustup cargo finds its toolchains from the real home.
+    const env = { ...process.env, HOME: home, RUSTUP_HOME: process.env.RUSTUP_HOME ?? path.join(os.homedir(), '.rustup') };
     try {
       fs.mkdirSync(cwd);
       fs.mkdirSync(path.join(home, 'out'));
       execFileSync('sh', [path.join(root, `workflow/dispatch-${profile}.sh`)], { env });
       execFileSync('git', ['init', '-q', cwd]);
+      if (profile === 'review') {
+        // A Rust target, which the review session runs cargo on: cargo must be on PATH.
+        fs.mkdirSync(path.join(cwd, 'src'));
+        fs.writeFileSync(path.join(cwd, 'src/lib.rs'), '');
+        fs.writeFileSync(path.join(cwd, 'Cargo.toml'), '[package]\nname = "trial"\nversion = "0.1.0"\nedition = "2021"\n');
+        fs.writeFileSync(path.join(cwd, 'Cargo.lock'), 'version = 4\n\n[[package]]\nname = "trial"\nversion = "0.1.0"\n');
+        execFileSync('git', ['add', '.'], { cwd });
+      }
       execFileSync('git', ['-c', 'user.name=Trial', '-c', 'user.email=trial@example.org',
         'commit', '--allow-empty', '-qm', 'Fixture'], { cwd });
       const steps = JSON.parse(fs.readFileSync(path.join(home, '.config/fake-agent/demo.json'), 'utf8'));
@@ -240,6 +253,8 @@ for (const profile of ['implement', 'comment', 'review']) {
         if (profile === 'review') {
           checkOutputs({ items: [output] }, 171);
           assert.ok(output.body.includes(execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()));
+          assert.match(output.body, /\nToolchain: cargo \d/);
+          assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' }), '');
         }
       }
     } finally {

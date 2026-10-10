@@ -46,6 +46,20 @@ allow-sockets = [
 # nftables rules; podman is what an agent builds containers with.
 packages = ["python3-venv", "nftables", "podman", "uidmap"]
 
+# The toolchain of each target repository, added to the packages above
+# for a run on it (`default` for any other). It is the caller's choice:
+# nothing is read from the target's own, untrusted, contents
+# (docs/dispatch.md#giving-runs-a-toolchain).
+[setup.repo-packages]
+# Ubuntu 26.04's Rust 1.93 (this repository needs 1.88) and gcc.
+# No egress rule is added: the proxy lets any GET through, and a
+# `cargo build --locked` only reads, from
+#   index.crates.io   the sparse index
+#   static.crates.io  the crates, checked against Cargo.lock
+#   github.com        git dependencies (git fetch is already allowed)
+# Their build scripts and proc macros run as the sandbox user.
+"cgwalters-forge/agentic-job" = ["cargo"]
+
 [commit]
 author = "agentic-job <agentic-job@users.noreply.github.com>"
 trailers = ["Generated-by: AI"]
