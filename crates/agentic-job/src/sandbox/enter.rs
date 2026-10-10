@@ -64,6 +64,7 @@ pub struct Entry {
     user: User,
     env: BTreeMap<String, String>,
     root: Root,
+    filesystem_view: bool,
 }
 
 impl Entry {
@@ -99,7 +100,12 @@ impl Entry {
             .chain(proxy)
             .chain(sandbox.env.clone())
             .collect();
-        Self { user, env, root }
+        Self {
+            user,
+            env,
+            root,
+            filesystem_view: !sandbox.world_write_walk,
+        }
     }
 
     pub fn user(&self) -> &User {
@@ -152,8 +158,18 @@ impl Entry {
             .iter()
             .chain(OIDC_REQUEST_VARS)
             .flat_map(|name| ["-u".to_owned(), (*name).to_owned()]);
+        let properties = if self.filesystem_view {
+            super::view::properties(&self.user)?
+        } else {
+            Vec::new()
+        };
         Ok(head
             .into_iter()
+            .chain(
+                properties
+                    .into_iter()
+                    .map(|property| format!("--property={property}")),
+            )
             .chain(setenv)
             .chain(["--".to_owned(), "env".to_owned()])
             .chain(unset)
@@ -323,6 +339,26 @@ mod tests {
                 "status",
             ])
         );
+    }
+
+    #[test]
+    fn the_view_is_an_explicit_alternative_to_default_host_hardening() {
+        for (text, walk) in [("", true), ("[sandbox]\nworld-write-walk = false", false)] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.sandbox.world_write_walk, walk);
+            let entry = Entry::for_user(
+                entry(&[]).user,
+                &config.sandbox,
+                BTreeMap::new(),
+                Root::Sudo,
+            );
+            let argv = entry.run0_argv(&strings(&["true"]), entry.home()).unwrap();
+            assert_eq!(
+                argv.iter()
+                    .any(|arg| arg == "--property=ProtectSystem=strict"),
+                !walk
+            );
+        }
     }
 
     /// A configuration that validation should have refused, carrying one

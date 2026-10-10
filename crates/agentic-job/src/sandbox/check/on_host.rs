@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -428,47 +428,77 @@ impl Checker<'_> {
             );
         }
 
-        // The control is a directory of ours that any user may write,
-        // found by the same search the probe makes.
-        let open_dir = PathBuf::from(format!("/tmp/agentic-job-{}", self.canary));
-        std::fs::DirBuilder::new()
-            .mode(MODE_PRIVATE)
-            .create(&open_dir)
-            .with_context(|| format!("creating {}", open_dir.display()))?;
-        std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(MODE_OPEN_DIR))?;
-        let find = |root: &str| -> Result<String> {
-            let mut argv = vec!["find".to_owned()];
-            argv.extend(setup::world_writable_find(root));
-            // Not its own: what it made world-writable itself, in its
-            // home, gives it nothing.
-            argv.extend(["!", "-user", user.as_str(), "-print", "-quit"].map(str::to_owned));
-            let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-            // find also fails for what it may not read; what it printed counts.
-            let output = self.sandbox(&argv, b"")?;
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        };
-        let control = find(&open_dir.display().to_string());
-        let found = find("/");
-        let _ = std::fs::remove_dir(&open_dir);
-        let (control, found) = (control?, found?);
-        self.report.expect(
-            Want::Succeed,
-            "world-writable-control",
-            format!("{user} finds a world-writable directory made for it (control)"),
-            !control.is_empty(),
-        );
-        self.report.expect(
-            Want::Fail,
-            "world-writable",
-            if found.is_empty() {
-                format!("{user} finds nothing world-writable on the root filesystem outside the temporary directories")
-            } else {
-                format!("{user} finds {found} world-writable")
-            },
-            !found.is_empty(),
-        );
-
-        self.setuid_programs()?;
+        // Run on both paths: this is host-policy evidence, not a compatibility
+        // requirement. Ubuntu AppArmor can deny util-linux's uid_map write
+        // while permitting the profiled Podman user namespace entry point.
+        let diagnostic = self.sandbox_diagnosed(
+            "util-linux-userns-diagnostic",
+            &["unshare", "--user", "--map-root-user", "--mount", "true"],
+            b"",
+        )?;
+        self.report.note(&format!(
+            "util-linux-userns-diagnostic: success={diagnostic}; world_write_walk={}",
+            self.config.sandbox.world_write_walk
+        ));
+        if !self.config.sandbox.world_write_walk {
+            self.filesystem_view()?;
+        }
+        if self.config.sandbox.world_write_walk {
+            self.runner_filesystem_write()?;
+            // The control is a directory of ours that any user may write,
+            // found by the same search the probe makes.
+            let open_dir = PathBuf::from(format!("/tmp/agentic-job-{}", self.canary));
+            std::fs::DirBuilder::new()
+                .mode(MODE_PRIVATE)
+                .create(&open_dir)
+                .with_context(|| format!("creating {}", open_dir.display()))?;
+            std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(MODE_OPEN_DIR))?;
+            let find = |root: &str| -> Result<String> {
+                let mut argv = vec!["find".to_owned()];
+                argv.extend(setup::world_writable_find(root));
+                // Not its own: what it made world-writable itself, in its
+                // home, gives it nothing.
+                argv.extend(
+                    [
+                        "!",
+                        "-user",
+                        user.as_str(),
+                        "!",
+                        "-path",
+                        setup::VIEW_PROBE_DIR,
+                        "-print",
+                        "-quit",
+                    ]
+                    .map(str::to_owned),
+                );
+                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+                // find also fails for what it may not read; what it printed counts.
+                let output = self.sandbox(&argv, b"")?;
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            };
+            let control = find(&open_dir.display().to_string());
+            let found = find("/");
+            let _ = std::fs::remove_dir(&open_dir);
+            let (control, found) = (control?, found?);
+            self.report.expect(
+                Want::Succeed,
+                "world-writable-control",
+                format!("{user} finds a world-writable directory made for it (control)"),
+                !control.is_empty(),
+            );
+            self.report.expect(
+                Want::Fail,
+                "world-writable",
+                if found.is_empty() {
+                    format!("{user} finds nothing world-writable on the root filesystem outside the temporary directories")
+                } else {
+                    format!("{user} finds {found} world-writable")
+                },
+                !found.is_empty(),
+            );
+            // The walk's own inventory removed these; the view has no walk.
+            self.setuid_programs()?;
+        }
 
         let scope = std::fs::read_to_string(PTRACE_SCOPE).unwrap_or_default();
         self.report.expect(
@@ -528,6 +558,177 @@ impl Checker<'_> {
             },
             !unowned.is_empty(),
         );
+        Ok(())
+    }
+
+    /// The runner has no mount view: setup must have removed its write access.
+    fn runner_filesystem_write(&mut self) -> Result<()> {
+        let outside = format!("{}/{}", setup::VIEW_PROBE_DIR, self.canary);
+        let control = self.runner.home.join(&self.canary);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&control);
+        let home_writable = file.is_ok();
+        drop(file);
+        if home_writable {
+            std::fs::remove_file(&control).context("removing runner home write control")?;
+        }
+        self.report.expect(
+            Want::Succeed,
+            "runner-world-write-control",
+            "runner can write its own home",
+            home_writable,
+        );
+        let host_control = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&outside);
+        let writable = host_control.is_ok();
+        drop(host_control);
+        if writable {
+            std::fs::remove_file(&outside).context("removing host filesystem-view control")?;
+        }
+        self.report.expect(
+            Want::Fail,
+            "runner-world-write",
+            "runner cannot write the host directory planted before hardening",
+            writable,
+        );
+        Ok(())
+    }
+
+    /// Exercise the run0 session and the inherited manager view independently.
+    /// Merely finding ReadOnlyPaths in a unit's properties is not enforcement.
+    fn filesystem_view(&mut self) -> Result<()> {
+        let outside = format!("{}/{}", setup::VIEW_PROBE_DIR, self.canary);
+        for (id, manager) in [
+            ("filesystem-view", false),
+            ("filesystem-view-manager", true),
+        ] {
+            let attempt = |path: &str| -> Result<bool> {
+                let script = "f=$1; : > \"$f\" && rm -f -- \"$f\"";
+                if manager {
+                    self.sandbox_succeeds(&[
+                        "systemd-run",
+                        "--user",
+                        "--pipe",
+                        "--wait",
+                        "--collect",
+                        "--property=ProtectSystem=no",
+                        "--property=ProtectHome=no",
+                        "--property=ReadOnlyPaths=",
+                        "--property=ReadWritePaths=",
+                        "sh",
+                        "-c",
+                        script,
+                        "sh",
+                        path,
+                    ])
+                } else {
+                    self.sandbox_succeeds(&["sh", "-c", script, "sh", path])
+                }
+            };
+            let control = self.entry.home().join(&self.canary);
+            let control = attempt(&control.display().to_string())?;
+            let wrote = attempt(&outside)?;
+            self.report.expect(
+                Want::Succeed,
+                &format!("{id}-control"),
+                "can write inside sandbox home",
+                control,
+            );
+            self.report.expect(
+                Want::Fail,
+                id,
+                "cannot write planted group-writable host directory",
+                wrote,
+            );
+        }
+        let nested = "mount -o remount,rw / 2>/dev/null || :; f=$1; : > \"$f\" && rm -f -- \"$f\"";
+        let control = self.entry.home().join(&self.canary);
+        let works = self.sandbox_diagnosed(
+            "filesystem-view-nested-control",
+            &[
+                "podman",
+                "unshare",
+                "unshare",
+                "--mount",
+                "sh",
+                "-c",
+                nested,
+                "sh",
+                &control.display().to_string(),
+            ],
+            b"",
+        )?;
+        let escaped = self.sandbox_succeeds(&[
+            "podman", "unshare", "unshare", "--mount", "sh", "-c", nested, "sh", &outside,
+        ])?;
+        self.report.expect(
+            Want::Succeed,
+            "filesystem-view-nested-control",
+            "nested namespace can write home",
+            works,
+        );
+        self.report.expect(
+            Want::Fail,
+            "filesystem-view-nested",
+            "nested namespace cannot remount host writable",
+            escaped,
+        );
+        let socket_script = include_str!("socket-view.py");
+        let socket_control = self.sandbox_succeeds(&[
+            "python3",
+            "-I",
+            "-c",
+            socket_script,
+            &control.display().to_string(),
+        ])?;
+        let socket_escape =
+            self.sandbox_succeeds(&["python3", "-I", "-c", socket_script, &outside])?;
+        self.report.expect(
+            Want::Succeed,
+            "filesystem-view-socket-control",
+            "socket-activated user service can write home",
+            socket_control,
+        );
+        self.report.expect(
+            Want::Fail,
+            "filesystem-view-socket",
+            "socket-activated user service cannot write outside view",
+            socket_escape,
+        );
+        let namespaces = self.sandbox_diagnosed(
+            "filesystem-view-userns",
+            &["podman", "unshare", "unshare", "--mount", "true"],
+            b"",
+        )?;
+        self.report.expect(
+            Want::Succeed,
+            "filesystem-view-userns",
+            "Podman's nested user and mount namespaces still work",
+            namespaces,
+        );
+        let pam = self.sandbox_succeeds(&["python3", "-I", "-c", include_str!("pam.py")])?;
+        self.report.expect(
+            Want::Succeed,
+            "filesystem-view-pam",
+            "same-uid processes cannot trace, write memory or use the root of sd-pam",
+            pam,
+        );
+        if Path::new("/dev/kvm").exists() {
+            let kvm = self.sandbox_succeeds(&["python3", "-I", "-c", "import os,fcntl; fd=os.open('/dev/kvm',os.O_RDWR); assert fcntl.ioctl(fd,0xAE00,0)==12; os.close(fd)"])?;
+            self.report.expect(
+                Want::Succeed,
+                "filesystem-view-kvm",
+                "KVM opens and reports its API version",
+                kvm,
+            );
+        } else {
+            self.report
+                .note("no /dev/kvm on this host; KVM compatibility not tested");
+        }
         Ok(())
     }
 

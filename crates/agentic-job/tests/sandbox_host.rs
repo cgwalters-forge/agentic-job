@@ -94,6 +94,73 @@ const REQUEST_TOKEN_VAR: &str = "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
 /// Which of the cases this machine runs: `I/N`, see the top of the file.
 const SHARD_VAR: &str = "AGENTIC_JOB_TEST_SHARD";
 
+fn scheduler_failures(id: &str, view_masks_cron: bool) -> &'static [&'static str] {
+    match (id, view_masks_cron) {
+        ("cron", true) => &[],
+        ("cron", false) => &["cron"],
+        ("at", false) => &["at"],
+        _ => panic!("unsupported scheduler case: {id}, masked={view_masks_cron}"),
+    }
+}
+
+fn baseline_case(name: &str) -> bool {
+    matches!(
+        name,
+        "cron"
+            | "at"
+            | "a world-writable file in /etc"
+            | "the runner's world-write hardening"
+            | "a setuid-root program no package owns"
+    )
+}
+
+fn removal_case_enabled(name: &str, walk: bool) -> bool {
+    if walk {
+        baseline_case(name)
+    } else {
+        !matches!(
+            name,
+            "a world-writable file in /etc"
+                | "the runner's world-write hardening"
+                | "a setuid-root program no package owns"
+        )
+    }
+}
+
+#[test]
+fn layered_removal_cases_are_observable() {
+    for (id, masked, expected) in [
+        ("cron", false, vec!["cron"]),
+        ("cron", true, vec![]),
+        ("at", false, vec!["at"]),
+    ] {
+        assert_eq!(scheduler_failures(id, masked), expected);
+        assert!(baseline_case(id));
+    }
+    for (name, expected) in [
+        ("a world-writable file in /etc", true),
+        ("a setuid-root program no package owns", true),
+        ("the runner's world-write hardening", true),
+        ("the runner's home open", false),
+        ("the user manager's filesystem view", false),
+    ] {
+        assert_eq!(baseline_case(name), expected);
+    }
+    for (name, view, walk) in [
+        ("cron", true, true),
+        ("at", true, true),
+        ("a world-writable file in /etc", false, true),
+        ("a setuid-root program no package owns", false, true),
+        ("the runner's world-write hardening", false, true),
+        ("the runner's home open", true, false),
+        ("the user manager's filesystem view", true, false),
+    ] {
+        for (enabled, expected) in [(false, view), (true, walk)] {
+            assert_eq!(removal_case_enabled(name, enabled), expected, "{name}");
+        }
+    }
+}
+
 /// The shard `AGENTIC_JOB_TEST_SHARD` names, as (index, count); every
 /// case when it is not set. A value that is not `I/N` with I below N is
 /// a mistake in the job, and running nothing for it would pass.
@@ -537,14 +604,6 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             },
         ));
     }
-    cases.push(Case::new(
-        "a setuid-root program no package owns",
-        &["setuid-unowned"],
-        || {
-            root(&["install", "-m", "4755", "/bin/true", UNOWNED_SETUID]);
-            Removed::by(&[], &[&["rm", "-f", UNOWNED_SETUID]])
-        },
-    ));
     {
         let user = user.clone();
         cases.push(Case::new(
@@ -647,12 +706,38 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
         ("at", "at", "/etc/at.deny"),
     ] {
         let user = user.clone();
-        cases.push(Case::new(name, &[id], move || {
-            let delete = format!("/^{user}$/d");
-            let append = format!("echo {user} >> {file}");
-            Removed::by(&[&["sed", "-i", &delete, file]], &[&["sh", "-c", &append]])
-        }));
+        let entry = entry.clone();
+        let view_masks_cron = !config.sandbox.world_write_walk && id == "cron";
+        cases.push(Case::new(
+            name,
+            scheduler_failures(id, view_masks_cron),
+            move || {
+                let delete = format!("/^{user}$/d");
+                let append = format!("echo {user} >> {file}");
+                let removed =
+                    Removed::by(&[&["sed", "-i", &delete, file]], &[&["sh", "-c", &append]]);
+                if view_masks_cron {
+                    // With the deny entry gone, prove the first layer still holds,
+                    // not merely that crontab failed for an unrelated reason.
+                    let output = entry
+                        .run(&["crontab", "-"], b"# view layer control\n")
+                        .unwrap();
+                    assert!(!output.success());
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(stderr.contains("Read-only file system"), "{stderr}");
+                }
+                removed
+            },
+        ));
     }
+    cases.push(Case::new(
+        "a setuid-root program no package owns",
+        &["setuid-unowned"],
+        || {
+            root(&["install", "-m", "4755", "/bin/true", UNOWNED_SETUID]);
+            Removed::by(&[], &[&["rm", "-f", UNOWNED_SETUID]])
+        },
+    ));
     cases.push(Case::new(
         "a world-writable file in /etc",
         &["world-writable"],
@@ -661,6 +746,40 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             Removed::by(&[], &[&["rm", "-f", WORLD_WRITABLE]])
         },
     ));
+    cases.push(Case::new(
+        "the runner's world-write hardening",
+        &["runner-world-write"],
+        || {
+            Removed::by(
+                &[&["chmod", "o+w", setup::VIEW_PROBE_DIR]],
+                &[&["chmod", "o-w", setup::VIEW_PROBE_DIR]],
+            )
+        },
+    ));
+    if !config.sandbox.world_write_walk {
+        let uid = entry.user().uid;
+        cases.push(Case::new(
+            "the user manager's filesystem view",
+            &["filesystem-view-manager", "filesystem-view-socket"],
+            move || {
+                let unit = format!("user@{uid}.service");
+                let drop_in = format!("/etc/systemd/system/{unit}.d/agentic-job-view.conf");
+                let aside = format!("{drop_in}.aside");
+                Removed::by(
+                    &[
+                        &["mv", &drop_in, &aside],
+                        &["systemctl", "daemon-reload"],
+                        &["systemctl", "stop", &unit],
+                    ],
+                    &[
+                        &["mv", &aside, &drop_in],
+                        &["systemctl", "daemon-reload"],
+                        &["systemctl", "stop", &unit],
+                    ],
+                )
+            },
+        ));
+    }
     cases.push(Case::new(
         "ptrace of any process of one's uid",
         &["ptrace-scope"],
@@ -913,7 +1032,111 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
 
 fn failed(config: &Config, token: Option<RunToken<'_>>) -> BTreeSet<String> {
     let report = check::probes(config, token).expect("the probes could not run");
+    for id in [
+        "runner-world-write-control",
+        "runner-world-write",
+        "world-writable-control",
+        "world-writable",
+    ] {
+        assert_eq!(
+            report.outcomes().iter().any(|outcome| outcome.id == id),
+            config.sandbox.world_write_walk,
+            "unexpected walk probe selection: {id}"
+        );
+    }
+    for id in ["filesystem-view", "filesystem-view-manager"] {
+        assert_eq!(
+            report.outcomes().iter().any(|outcome| outcome.id == id),
+            !config.sandbox.world_write_walk,
+            "unexpected view probe selection: {id}"
+        );
+    }
     report.failures().into_iter().map(str::to_owned).collect()
+}
+
+/// Use the actual session wrapper, not just a separate run0 command. The
+/// scripted agent's tool process must inherit the same view as the agent.
+fn session_view(config: &Config, entry: &Entry) {
+    use agentic_job::session::{self, Clients, Launch, Limits, Options, Policy};
+
+    let sandbox = agentic_job::run::enter::Sandbox::new(config).unwrap();
+    let work = entry.home().join("view-session");
+    assert!(
+        entry
+            .succeeds(&["mkdir", "-p", &work.display().to_string()])
+            .unwrap()
+    );
+    let fake = "/tmp/agentic-job-view-fake-agent";
+    root(&[
+        "install",
+        "-m",
+        "0755",
+        env!("CARGO_BIN_EXE_fake-agent"),
+        fake,
+    ]);
+    let script = work.join("script.json").display().to_string();
+    let command = format!(
+        "echo home-control > control; if touch {}/session; then echo escaped > verdict; else echo held > verdict; fi",
+        setup::VIEW_PROBE_DIR
+    );
+    root_write(
+        &script,
+        &serde_json::json!([{"execute": {"title": "Bash", "command": command}}]).to_string(),
+        "0644",
+    );
+    let _cleanup = Removed::by(
+        &[],
+        &[
+            &["rm", "-rf", &work.display().to_string(), fake],
+            &["rm", "-f", &format!("{}/session", setup::VIEW_PROBE_DIR)],
+        ],
+    );
+    let out = tempfile::tempdir().unwrap();
+    let registry = format!(
+        "[fake]\ncommand = {}\n",
+        serde_json::json!([fake, "script", script])
+    );
+    let options = Options {
+        name: "fake".into(),
+        agent: session::agents::parse(&registry, "fake").unwrap(),
+        model: None,
+        cwd: work.clone(),
+        prompt: "Probe the filesystem view".into(),
+        out: out.path().join("out"),
+        permissions: Policy::allow_all(),
+        limits: Limits {
+            timeout_s: 60,
+            ..Limits::default()
+        },
+        requests: None,
+        launch: Launch::Sandbox {
+            user: sandbox.user.clone(),
+            wrapper: sandbox.wrapper(&work).unwrap(),
+        },
+        clients: Clients::none(),
+        log: Box::new(std::io::sink()),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let returned = runtime.block_on(session::run(options)).unwrap();
+    assert_eq!(returned.result.exit().code(), 0);
+    let result = entry
+        .run(
+            &[
+                "cat",
+                &work.join("verdict").display().to_string(),
+                &work.join("control").display().to_string(),
+            ],
+            b"",
+        )
+        .unwrap();
+    assert!(result.success());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "held\nhome-control\n"
+    );
 }
 
 #[test]
@@ -926,6 +1149,71 @@ fn each_probe_fails_when_its_protection_is_removed() {
     let none = BTreeSet::new();
 
     assert_eq!(failed(&config, None), none, "before anything is removed");
+    if !config.sandbox.world_write_walk {
+        for path in [
+            entry.home().join("exec-view-control"),
+            PathBuf::from(format!("{}/exec-view", setup::VIEW_PROBE_DIR)),
+        ] {
+            let output = Command::new(BIN)
+                .args([
+                    "sandbox",
+                    "exec",
+                    "--",
+                    "sh",
+                    "-c",
+                    "f=$1; : > \"$f\" && rm -f -- \"$f\"",
+                    "sh",
+                    &path.display().to_string(),
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                path.starts_with(entry.home()),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        session_view(&config, &entry);
+    }
+    // Kill only a sacrificial run0 PAM handler, never the manager's. Killing
+    // it need not terminate its parent on systemd 257; no surviving command
+    // may acquire the handler's unrestricted mount view.
+    if !config.sandbox.world_write_walk {
+        let killed = entry.run(&["python3", "-I", "-c", r#"
+import os, pathlib, subprocess, time
+helpers = []
+for directory in pathlib.Path('/proc').iterdir():
+    if not directory.name.isdecimal():
+        continue
+    try:
+        comm = (directory / 'comm').read_text().strip()
+        status = dict(line.split(':', 1) for line in (directory / 'status').read_text().splitlines() if ':' in line)
+        if comm == '(sd-pam)' and int(status['PPid']) == os.getpid():
+            helpers.append(int(directory.name))
+    except FileNotFoundError:
+        pass
+assert len(helpers) == 1, helpers
+subprocess.run(['kill', '-TERM', str(helpers[0])], check=True)
+time.sleep(0.2)
+assert not pathlib.Path('/proc', str(helpers[0])).exists() or (pathlib.Path('/proc') / str(helpers[0]) / 'stat').read_text().split(') ')[1].startswith('Z')
+try:
+    fd = os.open('/etc/agentic-job/write-probe/after-pam-kill', os.O_WRONLY | os.O_CREAT, 0o600)
+except PermissionError:
+    pass
+except OSError as error:
+    import errno
+    assert error.errno == errno.EROFS, error
+else:
+    os.close(fd)
+    raise AssertionError('PAM handler death opened host filesystem')
+"#], b"").unwrap();
+        assert!(
+            killed.success(),
+            "{}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+    }
 
     // A machine is set up once: a second job must not inherit the first's
     // sandbox user.
@@ -944,6 +1232,10 @@ fn each_probe_fails_when_its_protection_is_removed() {
     let (index, count) = shard();
     let mine = cases(&config, &runner, &entry, &fixture)
         .into_iter()
+        // The baseline proves the layers masked by the view, without repeating
+        // all four shards on a fifth host. at -l and private-dir probes are
+        // reads/traversals, so read-only mounts do not mask their removal.
+        .filter(|case| removal_case_enabled(case.name, config.sandbox.world_write_walk))
         .skip(index)
         .step_by(count);
     let mut wrong = Vec::new();
