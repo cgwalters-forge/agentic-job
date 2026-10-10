@@ -17,16 +17,29 @@ spec.loader.exec_module(preflight)
 
 class PreflightTests(unittest.TestCase):
     def test_workflow_order_and_trusted_binary(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/agentic-job.yml").read_text()
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/agentic-job.yml").read_text()
+        prepare = (root / "prepare/action.yml").read_text()
+        run = (root / "run/action.yml").read_text()
         policy, agent = workflow.split("\n  agent:\n", 1)
+        agent = agent.split("\n  notify:\n", 1)[0]
         self.assertIn('"$JOB_DIR/bin/agentic-job" config', policy)
         self.assertNotIn("CONFIG_BINARY", workflow)
-        self.assertIn('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job', agent)
+        self.assertIn('sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job', prepare)
+        self.assertLess(prepare.index("artifact-ids:"), prepare.index("- name: Install the binary"))
+        self.assertIn("uses: ./.agentic-job-source/prepare", agent)
+        self.assertIn("uses: ./.agentic-job-source/run", agent)
+        # Follow the composite calls in place: installation must precede
+        # configuration/preflight, and execution must follow host hardening.
+        expanded = agent.replace("uses: ./.agentic-job-source/prepare", prepare)
+        expanded = expanded.replace("uses: ./.agentic-job-source/run", run)
         self.assertIn("env: *configuration-env", agent)
         self.assertIn('agentic-job config ${CONFIG:+--from "$CONFIG"}', agent)
         self.assertNotIn('"$JOB_DIR/agentic-job" config', agent)
-        names = ["Install the binary", "Join the tailnet", "Write the configuration", "Check inference proxy reachability", "Secure the host"]
-        positions = [agent.index(f"- name: {name}") for name in names]
+        names = ["Install the binary", "Join the tailnet", "Write the configuration", "Check inference proxy reachability", "Secure the host", "Prove the host is secured", "Run the agent"]
+        # The wrapper and composite both name their run step; use the inner
+        # step, after the composite's sandbox check.
+        positions = [expanded.rindex(f"- name: {name}") for name in names]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("@agentclientprotocol/claude-agent-acp@0.88.0", policy)
 

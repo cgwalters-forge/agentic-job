@@ -1,0 +1,46 @@
+name: Prepare a sandboxed agent run
+description: Install trusted policy binaries and prepare runner-private inputs before secure-host
+inputs:
+  binary-artifact-id:
+    description: Immutable binary upload ID directly from the trusted policy job in this run
+    required: true
+  policy-artifact-id:
+    description: Immutable policy upload ID directly from the trusted policy job in this run
+    required: true
+  agent:
+    description: Agent name; fake also installs the scripted agent
+    default: fake
+  job-dir:
+    description: Runner-private working directory, outside the sandbox user's home
+    required: true
+outputs:
+  job-dir:
+    description: Prepared runner-private working directory
+    value: ${{ inputs.job-dir }}
+runs:
+  using: composite
+  steps:
+    # Empty artifact IDs otherwise select all uploads, including attacker
+    # proposals. Never fall back to artifact names for these trusted inputs.
+    - name: Require trusted upload IDs
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary-artifact-id }}
+        POLICY: ${{ inputs.policy-artifact-id }}
+      run: |
+        [[ "$BINARY" =~ ^[1-9][0-9]*$ && "$POLICY" =~ ^[1-9][0-9]*$ ]] ||
+          { echo '::error::prepare requires binary and policy upload IDs from policy'; exit 1; }
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        artifact-ids: ${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}
+        path: ${{ inputs.job-dir }}
+        merge-multiple: true
+    - name: Install the binary
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        AGENT: ${{ inputs.agent }}
+      run: |
+        sudo install -m 0755 "$JOB_DIR/agentic-job" /usr/local/bin/agentic-job
+        [ "$AGENT" != fake ] || sudo install -m 0755 "$JOB_DIR/fake-agent" /usr/local/bin/fake-agent
+        agentic-job --version

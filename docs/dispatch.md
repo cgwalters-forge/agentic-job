@@ -55,6 +55,10 @@ Set operator-controlled repository variables (not dispatch inputs):
 - `AGENT_CONFIG`: the caller's runner configuration path if not using hosted
   Ubuntu 26.04. The default is `.github/agentic-job/hosted.toml`; verify sandbox
   probes on your own image rather than copying hosted-image socket exceptions.
+- `AGENT_CONFIG_REPO`: optional public `OWNER/NAME` repository holding opencode's
+  configuration; `AGENT_CONFIG_PATH` selects its directory (empty for the root).
+  These are used only with `AGENT=opencode`, not in the scripted trial. They
+  select agent configuration, not the runner TOML named by `AGENT_CONFIG`.
 
 Preflight names **all** missing model, runner, URL and audience variables at
 once, before policy/build or agent startup. It rejects unknown agents.
