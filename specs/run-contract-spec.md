@@ -73,11 +73,12 @@ it. The reusable workflow's agent job MUST request only `contents`, `issues`,
 `pull-requests` and `actions` read, plus `id-token: write` for inference
 registration, and pass that job token unless the caller supplies
 `GH_READ_TOKEN` or turns reads off. A supplied classic token naming any scope
-but `read:*` and `user:email` MUST be refused before the agent starts; job,
-App and fine-grained tokens name no scopes and are the caller's to keep
-read-only. The launcher MUST pass only the run's token and drop inherited
-GitHub token variables, a run without one MUST remove an earlier run's, and
-its value MUST be redacted wherever the run logs or publishes. The egress
+but `read:*` and `user:email` MUST be refused before the agent starts; App
+and fine-grained tokens name no scopes and are the caller's to keep
+read-only, and the job token is held to RC-017. The launcher MUST pass only
+the run's token and drop inherited GitHub token variables, a run without one
+MUST remove an earlier run's, and its value MUST be redacted wherever the run
+logs or publishes. The egress
 proxy MAY pass `POST api.github.com/graphql` for reads; other GitHub writes
 MUST stay refused at the proxy. That allowance admits mutations too, so on that
 path only GitHub's enforcement of the token's permissions stops a write.
@@ -385,12 +386,19 @@ uploaded. They MAY read what the agent left on the machine and MUST treat it
 as hostile: not execute it, nor hand it to a credentialed step. A caller's
 own agent job MUST grant only `contents`, `issues`, `pull-requests` and
 `actions` read, plus `id-token: write`, as RC-014 requires of the reusable
-workflow's: `run` passes the job token to the agent unless given another,
-and cannot see what that token was granted.
+workflow's. `run` cannot see what a job token was granted, so it MUST
+refuse, before the agent starts, to give the agent the job token unless
+GitHub's job context names `.github/workflows/agentic-job.yml` at the policy
+call's `source-sha` as the file that defines the job: a caller's job gives
+the agent a supplied read token (RC-014) or none.
 Enforcement: CI's `e2e-compose` example later step finds the earlier step's
 root-owned file and fails if `sudo -n true` succeeds; the same
-`agent-actions.test.cjs` test holds that it follows `run`. Only
-example-compose.yml's `permissions` block is tested (section 4).
+`agent-actions.test.cjs` test holds that it follows `run`;
+[agent-actions.test.cjs](../workflow/agent-actions.test.cjs), `the agent
+gets its GitHub token, and a classic token that can write is refused first`,
+runs the refusal for the job token from other files, commits and an empty
+job context. CI's `e2e-full` passes the job token from `agentic-job.yml`
+and `e2e-compose` passes none.
 
 ## 4. Not yet enforced
 
@@ -461,7 +469,8 @@ These limitations are not additional guarantees:
   and validates an empty write's body before it authorizes it (422, not
   403, to the read-only job token), so no harmless write tells them apart.
   The agent job's own token is bounded by its `permissions` block, which is
-  tested in source; only `e2e-full` sees GitHub refuse it a write.
+  tested in source; only `e2e-full` sees GitHub refuse it a write. RC-017
+  therefore decides by which file defines the job, not by the token.
 - The separate-job design runs pinned handlers, not producer scripts, in apply.
   There is no comprehensive test proving that every future workflow step with
   a credential avoids executing producer code. Source review remains necessary.
@@ -469,12 +478,11 @@ These limitations are not additional guarantees:
   this repository cannot see. Only the order of the pieces and example-compose.yml's
   example steps are tested; a caller's step that shares a credential with the
   sandbox, or runs the agent's files after `run`, is not caught.
-- RC-017's permissions are not enforced for a caller's own agent job. Its
-  `permissions` block is the caller's, and `run` refuses only a classic
-  token that names a write scope (RC-014): a job token cannot be inspected.
-  A caller job granted `contents: write` that passes `github.token` to
-  `run` hands the agent a token that can write, and no check fails. `agentic-job.yml` fixes its agent
-  job's permissions itself, so only a composed job is exposed.
+- RC-017 keeps a caller's job token from the agent, but its `permissions`
+  are not enforced: they are the caller's, and steps of the caller's that
+  hold that token are not checked. An App or fine-grained token
+  a caller passes as its read token is, as under RC-014, the caller's to
+  keep read-only.
 
 ## 5. Conformance evidence
 

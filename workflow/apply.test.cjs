@@ -449,6 +449,14 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   // Nor does any other failure of notify's, its download or its target:
   // conclude then reports on the policy's item.
   assert.match(notify.split('    steps:\n')[0], /^ {4}continue-on-error: true$/m);
+  // So the policy call succeeds, and every agent job, a composed caller's
+  // included, waits on that call and its admission alone, never on notify.
+  for (const [file, source] of [['agentic-job.yml', wrapper],
+    ['example-compose.yml', readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8')],
+    ['workflow.md', readFileSync(join(__dirname, '../docs/workflow.md'), 'utf8')]]) {
+    const agent = source.split('\n  agent:\n')[1].split('\n    runs-on:')[0];
+    assert.match(agent, /^ {4}needs: policy\n {4}(?:#.*\n {4})*if: \$\{\{ (?:inputs.proposals-artifact == '' && )?needs.policy.outputs.admitted == 'true' \}\}$/, file);
+  }
   assert.match(policy, /notified:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.result != 'skipped' \}\}/);
   for (const name of ['An eyes reaction on what started the run', 'A comment that says the run started']) {
     const posted = notify.split(`- name: ${name}\n`)[1].split('\n      - ')[0];

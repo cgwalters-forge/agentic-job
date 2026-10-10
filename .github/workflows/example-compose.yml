@@ -88,9 +88,10 @@ jobs:
     if: ${{ needs.policy.outputs.admitted == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Read only, for the token the agent may get for GitHub reads; the
-    # identity token is for the run's registration at the inference proxy,
-    # and `sandbox setup` keeps it from the agent's user.
+    # Read only: `run` refuses to give the agent this job's token, but the
+    # steps here use it. The identity token is for the run's registration
+    # at the inference proxy, and `sandbox setup` keeps it from the agent's
+    # user.
     permissions:
       contents: read
       issues: read
@@ -140,8 +141,9 @@ jobs:
         timeout-minutes: 340
         uses: ./.agentic-job-source/run
         with:
-          # Without the secret, the job's own read token.
-          github-token: ${{ secrets.GH_READ_TOKEN || github.token }}
+          # Without the secret, no token: run gives the agent this job's
+          # token only in agentic-job.yml, whose permissions it knows.
+          github-token: ${{ secrets.GH_READ_TOKEN }}
       # ---- Your later steps go here. They run as the runner's user outside ----
       # the sandbox, with no sudo, after the agent's outputs are uploaded;
       # nothing of the agent's machine is trusted by check or apply. Treat
