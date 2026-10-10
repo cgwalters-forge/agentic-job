@@ -37,6 +37,24 @@ same-repository pull request number targeting main**, not an issue number. It
 posts a clearly scripted verdict naming the pinned head. This is not an
 approval or permission to merge. Delete trial branches/comments when finished.
 
+`fix` also takes an open, same-repository pull request number. Its run starts
+from that pull request's branch at the head it had when dispatched, and its
+change is pushed there as one commit on top, never force-pushed; a pull
+request that moved meanwhile is refused, and the run has to be dispatched
+again. It is **off** in the shipped bounds: a push runs the target's
+`pull_request` workflows on agent-written code, the exposure described in
+[#340](https://github.com/cgwalters-forge/agentic-job/issues/340). To enable it
+for a target, add to `dispatch.toml`
+
+```toml
+push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"], repos = ["OWNER/NAME"] }
+```
+
+with globs of the branches a fix may push to and each repository it may push
+in, named exactly; see
+[pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
+The scripted session is implement's.
+
 Every run's result can be found from the issue it was dispatched for. A draft
 PR ends its body with `Refs OWNER/REPO#N`, which apply writes from the `repo`
 and `item` inputs, not from agent text; `Refs` closes nothing on merge. Its
@@ -217,7 +235,8 @@ the open PR's exact head through the read-only policy API, refuses forks and
 wrong bases, and enforces one verdict comment or noop in the clean check job.
 Real reviewers start in the base checkout with the pinned head beside it.
 Other profiles allow one each of noop, missing_tool and missing_data, three
-outputs total; implement permits one draft PR, triage/research one comment.
+outputs total; implement permits one draft PR, fix one push to the dispatched
+pull request's branch, triage/research one comment.
 Comment routing is fixed to the dispatched item, not agent-supplied fields.
 
 ## Verification

@@ -96,7 +96,7 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source',
       OUTPUT_REPO: 'owner/other', BASE: 'main', BRANCH_PREFIX: '',
-      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}',
+      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}', PUSH: '{}',
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
@@ -109,6 +109,270 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The settings a push is applied with, as the workflow states them.
+function stepEnv(name, key) {
+  const section = workflow.split(`- name: ${name}\n`)[1].split('        run: |\n')[0];
+  return section.match(new RegExp(`^          ${key}: '(.*)'$`, 'm'))[1];
+}
+
+test('a push is applied to the policy pull request, never as a pull request, never with workflows', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    const push = { max: 1, target: '42', head: '2'.repeat(40), protected_files: [], protect_top_level_dot_folders: true,
+      protected_files_policy: 'blocked', max_patch_size: 1024, max_patch_files: 100 };
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ push_to_pull_request_branch: push }));
+    const name = "Write the handlers' configuration";
+    const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+      GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo',
+      BASE: 'agent-run-12', BRANCH_PREFIX: 'dispatch/fix/', PARTIAL: '', TITLE_PREFIX: '[bot] ', COMMENT_TARGET: '42',
+      PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+    assert.deepEqual(config.push_to_pull_request_branch, {
+      ...push, signed_commits: false, fallback_as_pull_request: false, if_no_changes: 'error', 'target-repo': 'owner/repo',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The branch as fetched: at the pinned head, one commit with the checked
+// change on it (an earlier attempt's push), or anything else.
+test('a push goes on the pinned head, is not pushed twice, and a moved branch stops it', () => {
+  const name = 'A push goes on the head the run started from, and only once';
+  const pushItem = { type: 'push_to_pull_request_branch', message: 'm', branch: 'agent-run-12' };
+  const run = (tip, { tree, outputRepo = 'owner/repo', config } = {}) => {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      git(root, 'init', '-q');
+      git(root, 'config', 'user.name', 'Test');
+      git(root, 'config', 'user.email', 'test@example.invalid');
+      writeFileSync(join(root, 'file.txt'), 'before\n');
+      git(root, 'add', '.');
+      git(root, 'commit', '-qm', 'base');
+      const head = git(root, 'rev-parse', 'HEAD');
+      writeFileSync(join(root, 'file.txt'), 'after\n');
+      git(root, 'commit', '-qam', 'the change');
+      const changed = { commit: git(root, 'rev-parse', 'HEAD'), tree: git(root, 'rev-parse', 'HEAD^{tree}') };
+      git(root, 'reset', '-q', '--hard', head);
+      writeFileSync(join(root, 'file.txt'), 'other\n');
+      git(root, 'commit', '-qam', 'another change');
+      const other = git(root, 'rev-parse', 'HEAD');
+      git(root, 'update-ref', 'refs/agentic-job/target-base', { head, changed: changed.commit, other }[tip]);
+      const tmp = join(root, 'tmp');
+      mkdirSync(tmp);
+      writeFileSync(join(tmp, 'config.json'), JSON.stringify(config ?? { push_to_pull_request_branch: { target: '42', head } }));
+      writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: [pushItem, { type: 'noop', message: 'n' }], errors: [] }));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+        GH_AW_TMP: tmp, RUNNER_TEMP: root, REPO: 'owner/repo', OUTPUT_REPO: outputRepo, BASE: 'agent-run-12',
+        TREE: tree ?? changed.tree, GITHUB_SERVER_URL: 'https://github.com',
+      });
+      const items = JSON.parse(readFileSync(join(tmp, 'agent_output.json'), 'utf8')).items.map(item => item.type);
+      let skipped = null;
+      try { skipped = JSON.parse(readFileSync(join(tmp, 'skipped.json'), 'utf8')); } catch { /* none */ }
+      return { status: result.status, stderr: result.stdout + result.stderr, items, skipped, changed };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const both = ['push_to_pull_request_branch', 'noop'];
+  // At the pinned head: pushed.
+  let got = run('head');
+  assert.deepEqual([got.status, got.items, got.skipped], [0, both, null], got.stderr);
+  // Pushed already: left out, and said where.
+  got = run('changed');
+  assert.deepEqual([got.status, got.items], [0, ['noop']], got.stderr);
+  assert.deepEqual(got.skipped, [{ type: 'push_to_pull_request_branch', name: got.changed.commit, url: 'https://github.com/owner/repo/pull/42' }]);
+  // A commit on the head with another change, or a change other than this one: stale.
+  for (const [tip, options] of [['other', {}], ['changed', { tree: '0'.repeat(40) }], ['changed', { tree: '' }]]) {
+    got = run(tip, options);
+    assert.equal(got.status, 1, `${tip} ${JSON.stringify(options)}`);
+    assert.match(got.stderr, /the pull request changed since/);
+    assert.deepEqual(got.items, both);
+  }
+  // No push in the policy: nothing to hold.
+  got = run('other', { config: { create_pull_request: { max: 1 } } });
+  assert.deepEqual([got.status, got.items], [0, both], got.stderr);
+});
+
+// After the handlers ran: the branch fetched back has to be one commit
+// on the pinned head with the checked tree, whatever gh-aw counted.
+test('a push is verified on the branch it went to: one commit on the pinned head, with the checked tree', () => {
+  const name = 'Every output was applied, or only the pull request was refused';
+  const run = tip => {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      const origin = join(root, 'origin.git');
+      const work = join(root, 'work');
+      git(root, 'init', '-q', '--bare', origin);
+      git(root, 'init', '-q', work);
+      git(work, 'config', 'user.name', 'Test');
+      git(work, 'config', 'user.email', 'test@example.invalid');
+      git(work, 'remote', 'add', 'origin', origin);
+      const commit = text => {
+        writeFileSync(join(work, 'file.txt'), text);
+        git(work, 'commit', '-qam', text);
+        return git(work, 'rev-parse', 'HEAD');
+      };
+      writeFileSync(join(work, 'file.txt'), 'before\n');
+      git(work, 'add', '.');
+      git(work, 'commit', '-qm', 'base');
+      const head = git(work, 'rev-parse', 'HEAD');
+      const pushed = commit('after\n');
+      const tree = git(work, 'rev-parse', 'HEAD^{tree}');
+      git(work, 'reset', '-q', '--hard', head);
+      // One commit on the head, with another change.
+      const other = commit('other\n');
+      // The branch moved: the checked change on top of someone else's.
+      const moved = commit('after\n');
+      git(work, 'push', '-q', 'origin', `${{ pushed, other, moved }[tip]}:refs/heads/agent-run-12`);
+      git(work, 'reset', '-q', '--hard', head);
+      const tmp = join(root, 'tmp');
+      mkdirSync(tmp);
+      writeFileSync(join(tmp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head } }));
+      writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: [{ type: 'push_to_pull_request_branch', branch: 'agent-run-12' }] }));
+      writeFileSync(join(tmp, 'applied.json'), JSON.stringify({ pull_request: null, refused: false }));
+      const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+        GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo', TREE: tree,
+        MODE: 'fail', OUTCOME: 'success', FAILED: '0', PUSHES_FAILED: '0', PROJECT_REFUSED: 'false',
+      });
+      return { status: result.status, out: result.stdout + result.stderr };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  // [the branch on the forge after the push, status]
+  for (const [tip, expected] of [['pushed', 0], ['other', 1], ['moved', 1]]) {
+    const got = run(tip);
+    assert.equal(got.status, expected, `${tip}: ${got.out}`);
+    if (expected) assert.match(got.out, /does not hold the checked change as one commit on/, tip);
+  }
+});
+
+// The last step before the handlers reads the pull request and its branch
+// again: gh-aw's handler would push to a closed one, and on a branch
+// rewritten past `head` it applies the patch on the new tip.
+test("a push's pull request is read again before the handlers: open, from its branch, at the pinned head", () => {
+  const name = "A push's pull request is still open and at its head";
+  const run = ({ tip = 'head', state = 'open', ref = 'agent-run-12', items = ['push_to_pull_request_branch'] } = {}) => {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      const origin = join(root, 'origin.git');
+      const work = join(root, 'work');
+      git(root, 'init', '-q', '--bare', origin);
+      git(root, 'init', '-q', work);
+      git(work, 'config', 'user.name', 'Test');
+      git(work, 'config', 'user.email', 'test@example.invalid');
+      git(work, 'remote', 'add', 'origin', origin);
+      writeFileSync(join(work, 'file.txt'), 'before\n');
+      git(work, 'add', '.');
+      git(work, 'commit', '-qm', 'base');
+      const head = git(work, 'rev-parse', 'HEAD');
+      // Someone else's commit on the head, or the head rewritten away.
+      writeFileSync(join(work, 'file.txt'), 'moved\n');
+      git(work, 'commit', '-qam', 'moved');
+      const moved = git(work, 'rev-parse', 'HEAD');
+      const rewritten = git(work, 'commit-tree', 'HEAD^{tree}', '-m', 'rewritten without the head');
+      if (tip !== 'gone') git(work, 'push', '-q', 'origin', `${{ head, moved, rewritten }[tip]}:refs/heads/agent-run-12`);
+      const tmp = join(root, 'tmp');
+      mkdirSync(tmp);
+      writeFileSync(join(tmp, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { target: '42', head } }));
+      writeFileSync(join(tmp, 'agent_output.json'), JSON.stringify({ items: items.map(type => ({ type })) }));
+      const pull = JSON.stringify({ state, head: { ref, sha: head } });
+      const stub = `gh() { [ "$*" = "api repos/owner/repo/pulls/42" ] || return 9; printf '%s' '${pull}'; }\n`;
+      const result = command(work, 'bash', ['-euo', 'pipefail', '-c', stub + step(name)], {
+        GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo',
+      });
+      return { status: result.status, out: result.stdout + result.stderr };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  // [case, status, what the error says]
+  for (const [options, status, said] of [
+    [{}, 0, null],
+    [{ items: ['noop'], state: 'closed', tip: 'moved' }, 0, null],
+    [{ state: 'closed' }, 1, /no longer open from agent-run-12/],
+    [{ ref: 'other' }, 1, /no longer open from agent-run-12/],
+    [{ tip: 'moved' }, 1, /the pull request changed since/],
+    [{ tip: 'rewritten' }, 1, /the pull request changed since/],
+    [{ tip: 'gone' }, 2, null],
+  ]) {
+    const got = run(options);
+    assert.equal(got.status, status, `${JSON.stringify(options)}: ${got.out}`);
+    if (said) assert.match(got.out, said, JSON.stringify(options));
+  }
+});
+
+// A partial run's push would land on someone else's pull request with
+// nothing on it to say the work was cut short.
+test("a partial run's push is not applied, whatever else it posts", () => {
+  const name = 'Mark what a partial run opens or posts';
+  for (const [types, status] of [
+    [['add_comment'], 0],
+    [['push_to_pull_request_branch'], 1],
+    [['push_to_pull_request_branch', 'add_comment'], 1],
+  ]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: types.map(type => ({ type, body: 'b' })) }));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+        GH_AW_TMP: root, RUNNER_TEMP: root, STOPPED: 'its timeout',
+      });
+      assert.equal(result.status, status, `${types}: ${result.stdout}${result.stderr}`);
+      if (status) assert.match(result.stdout, /a partial change is not pushed to a pull request's branch/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+// A push goes only to the repository the run worked on: apply checks so
+// before its first step that pushes anything to the output repository.
+test('a push to another output repository stops apply before a fork is brought up to date', () => {
+  const name = "Fetch the target's base branch, and bring a fork's up to it";
+  // [output repository, config, status, whether the fork's branch moved]
+  for (const [outputRepo, config, expected, synced] of [
+    ['owner/repo', { push_to_pull_request_branch: { target: '42' } }, 0, false],
+    ['Owner/Repo', { push_to_pull_request_branch: { target: '42' } }, 0, false],
+    ['owner/fork', { push_to_pull_request_branch: { target: '42' } }, 1, false],
+    ['owner/fork', { create_pull_request: { max: 1 } }, 0, true],
+  ]) {
+    const root = mkdtempSync(join(homedir(), 'apply-test-'));
+    try {
+      // The target on the forge is a local repository, and the work tree's
+      // origin, the output repository, a fork that is one commit behind.
+      const target = join(root, 'target');
+      const fork = join(root, 'fork.git');
+      const work = join(root, 'work');
+      git(root, 'init', '-q', target);
+      git(target, 'config', 'user.name', 'Test');
+      git(target, 'config', 'user.email', 'test@example.invalid');
+      writeFileSync(join(target, 'file.txt'), 'before\n');
+      git(target, 'add', '.');
+      git(target, 'commit', '-qm', 'base');
+      git(target, 'branch', '-M', 'main');
+      git(root, 'clone', '-q', '--bare', target, fork);
+      writeFileSync(join(target, 'file.txt'), 'after\n');
+      git(target, 'commit', '-qam', 'ahead');
+      const ahead = git(target, 'rev-parse', 'HEAD');
+      git(root, 'clone', '-q', fork, work);
+      writeFileSync(join(root, 'config.json'), JSON.stringify(config));
+      const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
+        GH_AW_TMP: root, REPO: 'owner/repo', OUTPUT_REPO: outputRepo, BASE: 'main',
+        GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${target}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/owner/repo',
+      });
+      const label = `${outputRepo} ${JSON.stringify(config)}`;
+      assert.equal(result.status, expected, `${label}: ${result.stdout}${result.stderr}`);
+      if (expected) assert.match(result.stdout, /a push goes to owner\/repo/, label);
+      assert.equal(git(fork, 'rev-parse', 'main') === ahead, synced, label);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -227,7 +491,8 @@ test('comment-only apply skips every repository step, including checkout', () =>
   const gate = "if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}";
   assert.match(apply, new RegExp(`uses: actions/checkout@[^\\n]+\\n        ${gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   for (const name of ['Configure git', "Fetch the target's base branch, and bring a fork's up to it",
-    'Apply the patch on its own base, and compare what changed with what was checked']) {
+    'Apply the patch on its own base, and compare what changed with what was checked',
+    'A push goes on the head the run started from, and only once']) {
     assert.ok(apply.split(`- name: ${name}\n`)[1].startsWith(`        ${gate}\n`), name);
   }
   const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
@@ -333,10 +598,12 @@ for (const [name, filename, files, unrelated, expected] of [
       assert.equal(git(repo, 'config', 'merge.renames'), 'false');
       assert.equal(git(repo, 'config', 'am.keepcr'), 'true');
       const result = command(repo, 'bash', ['-euo', 'pipefail', '-c', step('Apply the patch on its own base, and compare what changed with what was checked')], {
-        REPORT: report, RUNNER_TEMP: root, GH_AW_TMP: outputs, REPO: 'test/repo', BASE: 'main',
+        REPORT: report, RUNNER_TEMP: root, GH_AW_TMP: outputs, REPO: 'test/repo', BASE: 'main', GITHUB_OUTPUT: join(root, 'output'),
       });
       if (expected === 0) {
         assert.equal(result.status, 0, result.stderr + result.stdout);
+        // The tree the patch makes, for the push step to know it by.
+        assert.match(readFileSync(join(root, 'output'), 'utf8'), /^tree=[0-9a-f]{40}\n$/);
       } else {
         assert.notEqual(result.status, 0, result.stderr + result.stdout);
       }

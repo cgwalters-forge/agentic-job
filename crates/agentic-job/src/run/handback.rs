@@ -31,7 +31,7 @@ use super::clone::{self, Checkout};
 use super::enter::Runner;
 use crate::check::{BASE_COMMIT_HEADER, BASE_FILE, OUTPUTS_FILE, patch_file_name};
 use crate::config;
-use crate::policy::{CREATE_PULL_REQUEST, Kind, Policy};
+use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
 use crate::session::{Outcome, RunResult};
 
 /// Under the sandbox user's home: the agent's requests, and its own
@@ -320,10 +320,32 @@ pub struct Outputs {
     pub message: Option<(String, String)>,
 }
 
-/// The agent's lines, its `create_pull_request` given the run's branch,
-/// and a request made from its outcome when it changed files without
-/// asking for one. A line that is not a JSON object stays as it is, for
-/// the check to refuse.
+/// The type of request that carries a run's change, and the branch it
+/// goes to: a pull request from the run's own branch, or, for a run that
+/// fixes a pull request, a push to that pull request's branch, the
+/// policy's base.
+pub fn carrier(policy: &Policy, run_id: &str) -> (&'static str, String) {
+    if policy.safe_outputs.push_to_pull_request_branch.is_some() {
+        (PUSH_TO_PULL_REQUEST_BRANCH, policy.base.clone())
+    } else {
+        (CREATE_PULL_REQUEST, run_branch(run_id))
+    }
+}
+
+/// A push's `message` as the title and body of its commit.
+fn split_message(message: &str) -> (String, String) {
+    let message = message.trim();
+    let (title, body) = message.split_once('\n').unwrap_or((message, ""));
+    (
+        title.trim().to_owned(),
+        body.trim_start_matches('\n').to_owned(),
+    )
+}
+
+/// The agent's lines, its request for the change given the change's
+/// branch, and a request made from its outcome when it changed files
+/// without asking for one. A line that is not a JSON object stays as it
+/// is, for the check to refuse.
 pub fn build_outputs(
     agent_text: &str,
     policy: &Policy,
@@ -331,7 +353,8 @@ pub fn build_outputs(
     outcome: &Object,
     run_id: &str,
 ) -> Outputs {
-    let branch = run_branch(run_id);
+    let (kind, branch) = carrier(policy, run_id);
+    let push = kind == PUSH_TO_PULL_REQUEST_BRANCH;
     let fallback = default_pull_request(outcome, run_id);
     let mut message = None;
     let mut lines: Vec<String> = agent_text
@@ -348,7 +371,7 @@ pub fn build_outputs(
                 .text("type")
                 .map(|kind| kind.replace('-', "_"))
                 .as_deref()
-                != Some(CREATE_PULL_REQUEST)
+                != Some(kind)
             {
                 return line.to_owned();
             }
@@ -359,22 +382,29 @@ pub fn build_outputs(
                     .to_owned()
             };
             // Of several, which the check refuses, the first.
-            message.get_or_insert_with(|| {
-                (text("title", &fallback.title), text("body", &fallback.body))
+            message.get_or_insert_with(|| match item.text("message") {
+                Some(text) if push && !text.trim().is_empty() => split_message(text),
+                _ if push => (fallback.title.clone(), fallback.body.clone()),
+                _ => (text("title", &fallback.title), text("body", &fallback.body)),
             });
             item.set("branch", json!(branch));
             serde_json::to_string(&item).unwrap_or_else(|_| line.to_owned())
         })
         .collect();
-    let allowed = policy.safe_outputs.create_pull_request.is_some();
+    let allowed = push || policy.safe_outputs.create_pull_request.is_some();
     if has_changes && message.is_none() && allowed {
-        let request = PullRequest {
-            branch: Some(branch),
-            ..fallback
+        let request = if push {
+            let PullRequest { title, body, .. } = &fallback;
+            json!({"type": kind, "message": format!("{title}\n\n{body}"), "branch": branch})
+        } else {
+            json!(PullRequest {
+                branch: Some(branch),
+                ..fallback.clone()
+            })
         };
         if let Ok(line) = serde_json::to_string(&request) {
             lines.push(line);
-            message = Some((request.title, request.body));
+            message = Some((fallback.title, fallback.body));
         }
     }
     Outputs {
@@ -847,7 +877,7 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
             Ok(None) => {}
             Ok(Some(patch)) => {
                 create_dir(request.safe_outputs)?;
-                let name = patch_file_name(&run_branch(run_id));
+                let name = patch_file_name(&carrier(policy, run_id).1);
                 write(&request.safe_outputs.join(name), &patch)?;
                 let base_file = Base {
                     repo: &policy.repo,
@@ -871,7 +901,10 @@ pub fn collect(request: &Request<'_>) -> Result<Change> {
     if has_changes && !outputs.wants_patch {
         change.drop_patch(
             base,
-            format!("changes dropped: {CREATE_PULL_REQUEST} is not an allowed output"),
+            format!(
+                "changes dropped: {} is not an allowed output",
+                carrier(policy, run_id).0
+            ),
         );
     }
     Ok(change)
@@ -1039,6 +1072,60 @@ mod tests {
         let many = "{\"type\":\"noop\"}\n".repeat(MAX_LINES + 5);
         let got = build_outputs(&many, &policy, false, &outcome, RUN_ID);
         assert_eq!(got.text.lines().count(), MAX_LINES);
+    }
+
+    /// A run that fixes a pull request asks for a push to its branch,
+    /// the policy's base, whatever branch the agent named.
+    #[test]
+    fn a_push_goes_to_the_pull_requests_branch() {
+        let outcome = object(json!({"summary": "Fix the parser.\nIt dropped the last line."}));
+        let policy = crate::policy::tests::push_policy();
+        // (the case, the agent's text, the text, the message)
+        let cases: &[(&str, &str, &str, (&str, &str))] = &[
+            (
+                "made up from the outcome",
+                "",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+            (
+                "the agent's own, with the branch put right",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"T\\n\\nB\\nC\",\"branch\":\"main\"}",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"T\\n\\nB\\nC\",\"branch\":\"agent-run-12\"}\n",
+                ("T", "B\nC"),
+            ),
+            (
+                "an empty message is the outcome's",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \"}",
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \",\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+            (
+                "a pull request is left for the check to refuse",
+                "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":\"B\"}",
+                "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":\"B\"}\n{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
+                (
+                    "Fix the parser.",
+                    "Fix the parser.\nIt dropped the last line.",
+                ),
+            ),
+        ];
+        for (name, agent_text, text, (title, body)) in cases {
+            let got = build_outputs(agent_text, &policy, true, &outcome, RUN_ID);
+            assert_eq!(got.text, *text, "{name}");
+            assert!(got.wants_patch, "{name}");
+            assert_eq!(
+                got.message,
+                Some(((*title).to_owned(), (*body).to_owned())),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1465,6 +1552,42 @@ mod tests {
             sh(&applied, "git diff --name-only HEAD~1"),
             "a.txt\nsub/new-file.txt\n"
         );
+    }
+
+    /// A push is handed back as a patch named for the pull request's
+    /// branch, against the head the policy pins, and the check takes it.
+    #[test]
+    fn a_push_is_handed_back_as_a_patch_the_check_accepts() {
+        let home = Home::new();
+        let mut policy = crate::policy::tests::push_policy();
+        policy.repo = "o/r".into();
+        if let Some(push) = policy.safe_outputs.push_to_pull_request_branch.as_mut() {
+            push.head.clone_from(&home.checkout.base_commit);
+        }
+        sh(&home.checkout.dir, "echo two >> a.txt");
+        std::fs::write(
+            home.path(AGENT_OUTPUTS),
+            "{\"type\":\"push_to_pull_request_branch\",\"message\":\"parser: Keep the last line\\n\\nWhy.\"}\n",
+        )
+        .unwrap();
+        let change = home.collect(&policy, &config::Commit::default());
+        assert_eq!(change.dropped, None);
+        let patch =
+            std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-12.patch")).unwrap();
+        assert!(
+            patch.contains("Subject: [PATCH] parser: Keep the last line\n"),
+            "{patch}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path("safe-outputs/base.json")).unwrap(),
+            format!(
+                "{{\"repo\":\"o/r\",\"ref\":\"agent-run-12\",\"commit\":\"{}\"}}\n",
+                home.checkout.base_commit
+            )
+        );
+        let verdict = home.verdict(&policy);
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
     }
 
     #[test]

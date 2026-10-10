@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::policy::PullRequest;
+use crate::policy::PatchRules;
 
 /// The header `run` adds, naming the commit the patch is against (gh-aw's
 /// name for it).
@@ -491,7 +491,7 @@ impl Reader {
 /// `create_pull_request` (`manifest_file_helpers.cjs`): a listed name at
 /// any depth, and anything under a top-level directory whose name starts
 /// with a dot.
-fn protected<'p>(paths: &'p BTreeSet<String>, rules: &PullRequest) -> Vec<&'p str> {
+fn protected<'p>(paths: &'p BTreeSet<String>, rules: &PatchRules<'_>) -> Vec<&'p str> {
     let listed = |path: &str| {
         let name = path.rsplit('/').next().unwrap_or(path);
         rules.protected_files.iter().any(|file| file == name)
@@ -519,7 +519,7 @@ pub struct PatchReading {
 }
 
 /// Reads a patch against `base_commit` under `rules`.
-pub fn read_patch(patch: &str, rules: &PullRequest, base_commit: &str) -> PatchReading {
+pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> PatchReading {
     let mut reader = Reader::default();
     let mut lines = patch.strip_suffix('\n').unwrap_or(patch).split('\n');
 
@@ -592,12 +592,13 @@ pub fn read_patch(patch: &str, rules: &PullRequest, base_commit: &str) -> PatchR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::PullRequest;
     use crate::policy::tests::policy;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
 
     fn patch_problems(patch: &str, rules: &PullRequest, base_commit: &str) -> Vec<String> {
-        read_patch(patch, rules, base_commit).problems
+        read_patch(patch, &rules.rules(), base_commit).problems
     }
 
     /// The mail headers and message of a patch against `BASE`.

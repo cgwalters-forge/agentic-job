@@ -245,6 +245,50 @@ the issue cases of `the policy command is told when apply holds only the job
 token`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
 `titles_are_cut_between_words` and `made_up_pull_requests`.
 
+**RC-020 — Pushing to a pull request.** `push_to_pull_request_branch` MUST
+be refused unless the caller's bounds list it with globs of the `branches` it
+may go to, matched with case, and the `repos` it may go to, each named
+exactly (no globs), and the caller names the pull request by number
+(`push-item`); no part of its routing may come from agent or pull request
+text. Policy MUST refuse a repository not in those `repos`, outputs applied
+anywhere but that repository (`output-repo`), a pull request that is not
+open, or whose head or base is not in the run's repository, and a branch
+outside those globs; it MUST record the number as the push's `target`, the
+head commit as its `head`, and `max` as 1, MUST NOT allow
+`create_pull_request` beside it, and MUST refuse two bounds files whose
+policies pin different pushes. The run MUST start from that
+head and stop if the clone is elsewhere. Check MUST refuse a push to any
+branch but that pull request's, and a patch whose base is not that head,
+under the patch rules of RC-007. Apply MUST refuse when the branch is no
+longer at that head, and MUST read the pull request again as its last step
+before the handlers, refusing one that is no longer open, from that branch,
+at that head. It MUST NOT push a partial run's change. It MUST push without
+force, with no fallback to a new pull request and without
+`allow_workflows`, and fail unless the branch then holds the checked tree
+as one commit on that head: a branch rewritten after that last read is
+detected after the push, not prevented. A re-run of apply MUST NOT push
+again when the branch already does.
+Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
+`push_requests_against_the_bounds`, `a_push_policy_names_its_pull_request_and_always_a_max`,
+`push_bounds_must_name_branches_repos_and_one_push` and `push_bounds_intersect`;
+[push.test.cjs](../workflow/push.test.cjs), `a push resolves an open
+same-repository branch and refuses hostile routing`;
+[clone.rs](../crates/agentic-job/src/run/clone.rs), `a_push_starts_from_its_pinned_head`;
+[check/mod.rs](../crates/agentic-job/src/check/mod.rs), `a_push_on_the_pinned_head_is_accepted`
+and `what_is_refused_of_a_push`; [handback.rs](../crates/agentic-job/src/run/handback.rs),
+`a_push_is_handed_back_as_a_patch_the_check_accepts`;
+[apply.test.cjs](../workflow/apply.test.cjs), `a push is applied to the
+policy pull request, never as a pull request, never with workflows` and `a
+push goes on the pinned head, is not pushed twice, and a moved branch stops
+it`, `a push is verified on the branch it went to: one commit on the pinned
+head, with the checked tree`, `a push's pull request is read again before
+the handlers: open, from its branch, at the pinned head`, `a partial run's
+push is not applied, whatever else it posts` and `a push to another output
+repository stops apply before a fork is brought up to date`;
+[proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
+policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
+capabilities and token boundary`.
+
 ### 3.4 The caller's own agent job
 
 A caller MAY write the agent job itself, between the policy, check and apply
@@ -336,6 +380,18 @@ These limitations are not additional guarantees:
   limits for a comment, and a re-run that makes another result is not linked
   again. An event-triggered run on an issue still gets gh-aw's own `Fixes #N`
   in a pull request's body (its `auto_close_issue` default), as before.
+- RC-020 leaves a window between apply's last read of the pull request and
+  gh-aw's handler pushing to it. A commit added on top of `head` then makes
+  the push fail: the handler re-anchors on the patch's base commit and
+  pushes without force, so the forge refuses it as not a fast-forward. A
+  branch force-pushed or rebased so that `head` is no longer in it is
+  different: the handler then applies the patch on the new tip, that push
+  succeeds, and apply's last step fails only after it. A pull request closed
+  in the window is pushed to as well; the handler does not check its state. A push runs the target's `pull_request`
+  workflows on agent-written code, which RC-020 does not bound; see
+  [issue 340](https://github.com/cgwalters-forge/agentic-job/issues/340). No
+  CI run pushes to a live pull request: RC-020's evidence is unit tests and
+  apply's steps run against a local repository.
 - Patch author identity is not bound to the producer or operator; see
   [issue 22](https://github.com/cgwalters-forge/agentic-job/issues/22).
 - Token selection has source and expression tests, not live tests of

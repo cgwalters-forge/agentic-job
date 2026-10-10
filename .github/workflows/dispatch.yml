@@ -47,13 +47,13 @@ on:
         type: string
         required: true
       item:
-        description: Positive issue number in the target repository
+        description: Positive issue number in the target repository (a pull request's for review and fix)
         type: string
         required: true
       kind:
-        description: Fixed profile (review takes a pull request number)
+        description: Fixed profile (review and fix take a pull request number; fix is off unless the bounds allow it)
         type: choice
-        options: [implement, triage, research, review]
+        options: [implement, triage, research, review, fix]
         required: true
 
 permissions: {}
@@ -91,7 +91,7 @@ jobs:
               throw new Error('Dispatch must run on the default branch');
             }
             const profile = process.env.PROFILE;
-            if (!['implement', 'triage', 'research', 'review'].includes(profile)) {
+            if (!['implement', 'triage', 'research', 'review', 'fix'].includes(profile)) {
               throw new Error('Unknown dispatch profile');
             }
             const agent = process.env.AGENT;
@@ -112,12 +112,14 @@ jobs:
             core.setOutput('agent', agent);
             const [owner, name] = repo.split('/');
             const { data } = await github.rest.issues.get({ owner, repo: name, issue_number: Number(item) });
-            if ((profile !== 'review' && data.pull_request) ||
-                (profile === 'review' && !data.pull_request) || data.number !== Number(item)) {
-              throw new Error(profile === 'review' ? 'Review requires a pull request' : 'This profile requires an issue, not a pull request');
+            const onPull = ['review', 'fix'].includes(profile);
+            if (onPull !== Boolean(data.pull_request) || data.number !== Number(item)) {
+              throw new Error(onPull ? `${profile} requires a pull request` : 'This profile requires an issue, not a pull request');
             }
             const instructions = profile === 'review'
               ? 'Review the pinned head supplied by the runner. Return one add_comment with VERDICT: APPROVE, CHANGES or REJECT on its first line and REASON: on its second line (at most 200 characters), or noop. A verdict is not merge authority.'
+              : profile === 'fix'
+              ? "Fix works in a checkout of the pull request's branch at its pinned head; the change is pushed to that branch as one commit. Use noop, missing_tool or missing_data when needed."
               : 'Implement proposes one draft pull request. Triage and research leave the tree clean and return one add_comment. Use noop, missing_tool or missing_data when needed.';
             const text = JSON.stringify({ repository: repo, number: data.number, title: data.title, body: data.body })
               .replaceAll('<', '\\u003c').replaceAll('>', '\\u003e');
@@ -151,8 +153,8 @@ jobs:
       id: ${{ inputs.repo }}#${{ inputs.item }}
       repo: ${{ inputs.repo }}
       task: ${{ needs.target.outputs.task }}
-      kind: ${{ inputs.kind == 'implement' && 'branch' || 'analysis' }}
-      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop' || (inputs.kind == 'implement' && 'create_pull_request,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data') }}
+      kind: ${{ (inputs.kind == 'implement' || inputs.kind == 'fix') && 'branch' || 'analysis' }}
+      outputs: ${{ inputs.kind == 'review' && 'add_comment,noop' || (inputs.kind == 'implement' && 'create_pull_request,noop,missing_tool,missing_data' || (inputs.kind == 'fix' && 'push_to_pull_request_branch,noop,missing_tool,missing_data' || 'add_comment,noop,missing_tool,missing_data')) }}
       max-outputs: ${{ inputs.kind == 'review' && '1' || '3' }}
       allow: .github/agentic-job/dispatch.toml
       agent: ${{ needs.target.outputs.agent }}
@@ -161,10 +163,13 @@ jobs:
       agent-config-path: ${{ needs.target.outputs.agent == 'opencode' && vars.AGENT_CONFIG_PATH || '' }}
       agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
       config: ${{ inputs.scripted && '.github/agentic-job/hosted.toml' || vars.AGENT_CONFIG || '.github/agentic-job/hosted.toml' }}
-      fake-profile: ${{ needs.target.outputs.agent == 'fake' && ((inputs.kind == 'triage' || inputs.kind == 'research') && 'comment' || inputs.kind) || '' }}
+      fake-profile: ${{ needs.target.outputs.agent == 'fake' && ((inputs.kind == 'triage' || inputs.kind == 'research') && 'comment' || (inputs.kind == 'fix' && 'implement' || inputs.kind)) || '' }}
       max-requests: ${{ needs.target.outputs.agent == 'fake' && '0' || '150' }}
       review: ${{ inputs.kind == 'review' }}
       review-item: ${{ inputs.kind == 'review' && inputs.item || '' }}
+      # The pull request a fix pushes to; its branch and head are read by
+      # policy, and the bounds must allow the push (off by default).
+      push-item: ${{ inputs.kind == 'fix' && inputs.item || '' }}
       inference-url: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_URL || '' }}
       inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}
       output-repo: ${{ inputs.repo }}

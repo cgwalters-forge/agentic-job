@@ -262,6 +262,29 @@
       }
     }
   },
+  "push_to_pull_request_branch": {
+    "defaultMax": 1,
+    "fields": {
+      "branch": {
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 256
+      },
+      "message": {
+        "required": true,
+        "type": "string",
+        "sanitize": true,
+        "maxLength": 65000
+      },
+      "pull_request_number": {
+        "issueOrPRNumber": true
+      },
+      "repo": {
+        "type": "string",
+        "maxLength": 256
+      }
+    }
+  },
   "noop": {
     "defaultMax": 2,
     "fields": {

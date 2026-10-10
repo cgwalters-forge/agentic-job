@@ -879,6 +879,20 @@ policy refuses `update_project` to a call without `apply-environment`, naming
 the token it needs, and `outputs: all` leaves it out. It cannot see whether a
 secret is passed, so a PAT passed without an environment is refused it too.
 
+For `push_to_pull_request_branch`, the caller passes the pull request's
+number as `push-item` on a `branch` run; it is off unless the bounds list it
+(see [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch),
+and [#340](https://github.com/cgwalters-forge/agentic-job/issues/340) for what
+enabling it exposes). The policy job reads the pull request's branch and head
+with its read-only token (`pull-requests: read`, which the call already
+grants), and the run starts from that branch. The push is apply's alone and
+needs `contents: write` there: with the job token, grant it to the call; with
+`SAFE_OUTPUTS_PAT`, give that token contents write on the repository. A push
+goes only to the run's own repository, so `output-repo` is left out or names
+it; policy refuses any other before the agent runs, and apply checks again
+before its first push to `output-repo`. No other job's permissions change, and no token reaches the agent, check
+or policy beyond the read-only ones they hold already.
+
 The project workflow changes leave permissions, action pins and token placement
 unchanged. Handler configuration fixes the issue repository to the checked run's
 `repo`, not `output-repo`. The apply-only GraphQL guard prevents gh-aw's implicit
