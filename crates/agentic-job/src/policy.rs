@@ -19,8 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::exit::Exit;
 
-/// The output type that carries a patch.
+/// The output type that carries a patch for a new pull request.
 pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
+
+/// The output type that carries a patch for an open pull request's
+/// branch: one commit on top of the head the run started from.
+pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
 
 /// The output types a bounds file may list. Each is one that gh-aw's
 /// collector validates with the configuration written here; another type
@@ -33,6 +37,7 @@ pub const OUTPUT_TYPES: &[&str] = &[
     "close_issue",
     "add_labels",
     "update_project",
+    PUSH_TO_PULL_REQUEST_BRANCH,
     "noop",
     "missing_tool",
     "missing_data",
@@ -47,7 +52,7 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[(
     "a token with project scope as SAFE_OUTPUTS_PAT, in an apply environment",
 )];
 
-/// A run hands back one patch, so at most one pull request.
+/// A run hands back one patch, so at most one pull request, or one push.
 const MAX_PULL_REQUESTS: u32 = 1;
 
 /// `--outputs all`: every type the bounds list.
@@ -114,6 +119,19 @@ static REPO_RE: LazyLock<Regex> =
 static BASE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$").expect("a valid pattern"));
 
+/// A pull request's branch that a push may go to: one that gh-aw's
+/// handler pushes by the same name (`normalize_branch_name.cjs` leaves it
+/// as it is) and whose patch has a name `check` takes.
+static PUSH_BRANCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[A-Za-z0-9]([A-Za-z0-9_./-]{0,98}[A-Za-z0-9_])?$").expect("a valid pattern")
+});
+
+static PULL_NUMBER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[1-9][0-9]{0,8}$").expect("a valid pattern"));
+
+static COMMIT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$").expect("a valid pattern"));
+
 /// The request's values may start with a dash: they are a stranger's text,
 /// and one that does is refused with a reason like any other.
 #[derive(Debug, clap::Args)]
@@ -145,6 +163,26 @@ pub struct Args {
     /// Apply will hold only the job token: refuse what it cannot apply
     #[arg(long)]
     pub job_token: bool,
+    /// The open pull request a push goes to; `--base` is then its branch
+    #[arg(
+        long,
+        value_name = "NUMBER",
+        allow_hyphen_values = true,
+        requires = "head"
+    )]
+    pub pull_request: Option<String>,
+    /// The commit that branch was at when the run was asked for
+    #[arg(
+        long,
+        value_name = "SHA",
+        allow_hyphen_values = true,
+        requires = "pull_request"
+    )]
+    pub head: Option<String>,
+    /// Where apply applies the outputs (OWNER/NAME); a push is refused
+    /// unless it is `--repo`
+    #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
+    pub output_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
@@ -212,6 +250,18 @@ pub struct OutputLimit {
     pub projects: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
+    /// Globs of the pull request branches a push may go to. In place of
+    /// `bases` for a push: those name what a run starts from to propose
+    /// a new pull request, these the branches it may add a commit to.
+    /// Unlike `bases`, case counts: a forge's branch names keep it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
+    /// The repositories a push may go to, named exactly (no globs), as
+    /// `unprotected_files.repos` are: a push runs the target's
+    /// `pull_request` workflows on code the agent wrote (#340), so a
+    /// bounds file turns it on one repository at a time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
 }
 
 impl OutputLimit {
@@ -250,6 +300,22 @@ impl OutputLimit {
                 );
             }
         }
+        let push = output == PUSH_TO_PULL_REQUEST_BRANCH;
+        for (name, list) in [("branches", &self.branches), ("repos", &self.repos)] {
+            ensure!(
+                push != list.is_empty(),
+                "outputs.{output}: `{name}` is required for {PUSH_TO_PULL_REQUEST_BRANCH}, and only for it"
+            );
+        }
+        for pattern in &self.branches {
+            glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
+        }
+        for repo in &self.repos {
+            ensure!(
+                REPO_RE.is_match(repo),
+                "outputs.{output}: {repo:?} is not one OWNER/NAME: a push is allowed per repository, named exactly"
+            );
+        }
         ensure!(
             matches!(output, "create_issue" | "add_labels")
                 || (self.allowed.is_none() && self.blocked.is_empty()),
@@ -280,6 +346,12 @@ pub struct Request<'a> {
     pub max_outputs: &'a str,
     /// Whether apply will hold only the job token.
     pub job_token: bool,
+    /// For a push: the pull request's number, and the commit its branch
+    /// (`base`) was at when the run was asked for.
+    pub pull_request: Option<(&'a str, &'a str)>,
+    /// Where apply applies the outputs; a push must name the run's own
+    /// repository here.
+    pub output_repo: Option<&'a str>,
 }
 
 /// What `policy.json` holds: the request, once it is within the bounds.
@@ -304,6 +376,8 @@ pub struct Policy {
 pub struct SafeOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_pull_request: Option<PullRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_to_pull_request_branch: Option<Push>,
     #[serde(flatten)]
     pub others: BTreeMap<String, OutputLimit>,
 }
@@ -325,6 +399,57 @@ pub struct PullRequest {
     pub max_patch_files: u32,
 }
 
+/// `push_to_pull_request_branch`'s configuration, in gh-aw's names but
+/// for `head`, which its handler does not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Push {
+    /// Always written: gh-aw takes a missing `max` for no limit.
+    pub max: u32,
+    /// The pull request's number, from the request and never the agent.
+    pub target: String,
+    /// The commit its branch was at when the run was asked for: what the
+    /// run starts from, the patch is against, and the branch must still
+    /// be at when the patch is applied.
+    pub head: String,
+    pub protected_files: Vec<String>,
+    pub protect_top_level_dot_folders: bool,
+    pub protected_files_policy: ProtectedFilesPolicy,
+    /// The largest patch, in KB.
+    pub max_patch_size: u64,
+    pub max_patch_files: u32,
+}
+
+/// What a patch may touch, whichever output carries it.
+#[derive(Debug, Clone, Copy)]
+pub struct PatchRules<'a> {
+    /// File names a patch may not touch, at any depth.
+    pub protected_files: &'a [String],
+    /// Whether everything under a top-level dot-folder is protected too.
+    pub protect_top_level_dot_folders: bool,
+    pub max_patch_files: u32,
+}
+
+impl PullRequest {
+    pub fn rules(&self) -> PatchRules<'_> {
+        PatchRules {
+            protected_files: &self.protected_files,
+            protect_top_level_dot_folders: self.protect_top_level_dot_folders,
+            max_patch_files: self.max_patch_files,
+        }
+    }
+}
+
+impl Push {
+    pub fn rules(&self) -> PatchRules<'_> {
+        PatchRules {
+            protected_files: &self.protected_files,
+            protect_top_level_dot_folders: self.protect_top_level_dot_folders,
+            max_patch_files: self.max_patch_files,
+        }
+    }
+}
+
 /// What gh-aw does with a patch that touches a protected file. Only
 /// refusing it can be written here, so a policy that says anything else
 /// does not parse.
@@ -337,10 +462,10 @@ pub enum ProtectedFilesPolicy {
 impl SafeOutputs {
     /// The ceiling of an output type, if the run may hand it back.
     pub fn max_of(&self, output: &str) -> Option<u32> {
-        if output == CREATE_PULL_REQUEST {
-            self.create_pull_request.as_ref().map(|pr| pr.max)
-        } else {
-            self.others.get(output).map(|limit| limit.max)
+        match output {
+            CREATE_PULL_REQUEST => self.create_pull_request.as_ref().map(|pr| pr.max),
+            PUSH_TO_PULL_REQUEST_BRANCH => self.push_to_pull_request_branch.as_ref().map(|p| p.max),
+            _ => self.others.get(output).map(|limit| limit.max),
         }
     }
 
@@ -349,7 +474,25 @@ impl SafeOutputs {
         self.create_pull_request
             .iter()
             .map(|_| CREATE_PULL_REQUEST)
+            .chain(
+                self.push_to_pull_request_branch
+                    .iter()
+                    .map(|_| PUSH_TO_PULL_REQUEST_BRANCH),
+            )
             .chain(self.others.keys().map(String::as_str))
+    }
+
+    /// The output that carries the run's patch, and the patch's rules: a
+    /// policy allows at most one of the two.
+    pub fn patch_carrier(&self) -> Option<(&'static str, PatchRules<'_>)> {
+        self.create_pull_request
+            .as_ref()
+            .map(|pr| (CREATE_PULL_REQUEST, pr.rules()))
+            .or_else(|| {
+                self.push_to_pull_request_branch
+                    .as_ref()
+                    .map(|push| (PUSH_TO_PULL_REQUEST_BRANCH, push.rules()))
+            })
     }
 }
 
@@ -372,7 +515,9 @@ impl Policy {
     fn validate(&self) -> Result<()> {
         for output in self.safe_outputs.others.keys() {
             ensure!(
-                OUTPUT_TYPES.contains(&output.as_str()) && output != CREATE_PULL_REQUEST,
+                OUTPUT_TYPES.contains(&output.as_str())
+                    && output != CREATE_PULL_REQUEST
+                    && output != PUSH_TO_PULL_REQUEST_BRANCH,
                 "the output type {output:?} has no configuration here"
             );
         }
@@ -387,6 +532,25 @@ impl Policy {
             );
             ensure!(pr.max == MAX_PULL_REQUESTS, "more than one pull request");
         }
+        if let Some(push) = &self.safe_outputs.push_to_pull_request_branch {
+            ensure!(
+                self.kind == Kind::Branch && self.safe_outputs.create_pull_request.is_none(),
+                "a push in an analysis run, or beside a pull request"
+            );
+            ensure!(
+                push.protect_top_level_dot_folders,
+                "top-level dot-folders are not protected"
+            );
+            ensure!(push.max == MAX_PULL_REQUESTS, "more than one push");
+            ensure!(
+                PULL_NUMBER_RE.is_match(&push.target) && COMMIT_RE.is_match(&push.head),
+                "a push to no single pull request and commit"
+            );
+            ensure!(
+                PUSH_BRANCH_RE.is_match(&self.base) && !push_branch_ambiguous(&self.base),
+                "a push to a branch gh-aw would push by another name"
+            );
+        }
         Ok(())
     }
 }
@@ -396,6 +560,12 @@ impl Policy {
 /// forges ignore it in names. This is gh-aw's glob syntax
 /// (`glob_pattern_helpers.cjs`).
 fn glob(pattern: &str) -> Result<Regex, regex::Error> {
+    glob_cased(pattern, false)
+}
+
+/// [`glob`], or with case counting: a forge keeps it in a branch name, so
+/// `dispatch/**` is not to admit `DISPATCH/x` as a branch to push to.
+fn glob_cased(pattern: &str, cased: bool) -> Result<Regex, regex::Error> {
     let body = pattern
         .split("**")
         .map(|part| {
@@ -406,7 +576,14 @@ fn glob(pattern: &str) -> Result<Regex, regex::Error> {
         })
         .collect::<Vec<_>>()
         .join(".*");
-    Regex::new(&format!("(?i)^{body}$"))
+    let flags = if cased { "" } else { "(?i)" };
+    Regex::new(&format!("{flags}^{body}$"))
+}
+
+/// Whether gh-aw's handler would push `branch` under another name (it
+/// makes one dash of a run of them), or it is no branch name at all.
+fn push_branch_ambiguous(branch: &str) -> bool {
+    branch.contains("--") || branch.contains("..")
 }
 
 fn glob_matches(patterns: &[String], value: &str) -> bool {
@@ -451,8 +628,11 @@ impl Bounds {
             ensure!(limit.max >= 1, "`outputs.{output}.max` must be at least 1");
             // A hand-back holds one patch, for one pull request.
             ensure!(
-                output != CREATE_PULL_REQUEST || limit.max == MAX_PULL_REQUESTS,
-                "`outputs.{CREATE_PULL_REQUEST}.max` must be {MAX_PULL_REQUESTS}: a run hands back one patch"
+                !matches!(
+                    output.as_str(),
+                    CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH
+                ) || limit.max == MAX_PULL_REQUESTS,
+                "`outputs.{output}.max` must be {MAX_PULL_REQUESTS}: a run hands back one patch"
             );
         }
         ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
@@ -523,6 +703,8 @@ impl Bounds {
             outputs,
             max_outputs,
             job_token,
+            pull_request,
+            output_repo,
         } = *request;
         let mut errors = Vec::new();
 
@@ -540,13 +722,6 @@ impl Bounds {
         if repo_ok && let Some(problem) = self.clone_url_problem(clone_url, repo) {
             errors.push(problem);
         }
-        if !BASE_RE.is_match(base) || base.contains("..") || !glob_matches(&self.bases, base) {
-            errors.push(format!(
-                "base {base:?} is not within the bounds ({})",
-                self.bases.join(", ")
-            ));
-        }
-
         // An analysis run has no change to propose.
         let no_change = kind == Kind::Analysis;
         // What apply could not do with the credential it will hold: asked
@@ -557,13 +732,24 @@ impl Bounds {
                 .find(|(name, _)| job_token && *name == output)
                 .map(|(_, token)| *token)
         };
+        // A request names a pull request to push to it, and only then: of
+        // the two outputs that carry a patch, `all` means the one it can.
+        let other_carrier = if pull_request.is_some() {
+            CREATE_PULL_REQUEST
+        } else {
+            PUSH_TO_PULL_REQUEST_BRANCH
+        };
         let mut types: Vec<&str> = Vec::new();
         if outputs.trim() == ALL_OUTPUTS {
             types.extend(
                 self.outputs
                     .keys()
                     .map(String::as_str)
-                    .filter(|output| !(no_change && *output == CREATE_PULL_REQUEST))
+                    .filter(|output| {
+                        !(no_change
+                            && matches!(*output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH))
+                    })
+                    .filter(|output| *output != other_carrier)
                     .filter(|output| needs_token(output).is_none()),
             );
         } else {
@@ -601,10 +787,74 @@ impl Bounds {
                 )
             })
         }));
-        if no_change && types.contains(&CREATE_PULL_REQUEST) {
+        for carrier in [CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH] {
+            if no_change && types.contains(&carrier) {
+                errors.push(format!(
+                    "an analysis run hands back no change, so it can't {carrier}"
+                ));
+            }
+        }
+
+        // A push goes to the branch the run starts from, which the request
+        // names with the pull request and its head: the branch has to be
+        // one the bounds let a push go to, and `bases` does not say which.
+        let push = types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
+        let push_limit = self.outputs.get(PUSH_TO_PULL_REQUEST_BRANCH);
+        let branches = match push_limit {
+            Some(limit) if push => &limit.branches[..],
+            _ => &self.bases[..],
+        };
+        let named = BASE_RE.is_match(base) && !base.contains("..");
+        let pushable = !push || (PUSH_BRANCH_RE.is_match(base) && !push_branch_ambiguous(base));
+        let within = branches
+            .iter()
+            .any(|pattern| glob_cased(pattern, push).is_ok_and(|re| re.is_match(base)));
+        if !named || !pushable || !within {
             errors.push(format!(
-                "an analysis run hands back no change, so it can't {CREATE_PULL_REQUEST}"
+                "{} {base:?} is not within the bounds ({})",
+                if push { "pull request branch" } else { "base" },
+                branches.join(", ")
             ));
+        }
+        if let Some(limit) = push_limit.filter(|_| push) {
+            if !limit.repos.iter().any(|own| own.eq_ignore_ascii_case(repo)) {
+                errors.push(format!(
+                    "{PUSH_TO_PULL_REQUEST_BRANCH} is not allowed in {repo:?} (only in {})",
+                    limit.repos.join(", ")
+                ));
+            }
+            // The pull request is the repository's own: its outputs, and
+            // the push, are applied there and nowhere else.
+            if !output_repo.is_some_and(|output_repo| output_repo.eq_ignore_ascii_case(repo)) {
+                errors.push(format!(
+                    "{PUSH_TO_PULL_REQUEST_BRANCH} goes to {repo:?}, the repository the run works on, not to {}",
+                    output_repo.map_or_else(|| "an unnamed one".to_owned(), |o| format!("{o:?}"))
+                ));
+            }
+        }
+        match (push, pull_request) {
+            (true, Some((number, head))) => {
+                if !PULL_NUMBER_RE.is_match(number) {
+                    errors.push(format!("pull request {number:?} is not a number"));
+                }
+                if !COMMIT_RE.is_match(head) {
+                    errors.push(format!(
+                        "head {head:?} is not a 40-character lowercase commit SHA"
+                    ));
+                }
+                if types.contains(&CREATE_PULL_REQUEST) {
+                    errors.push(format!(
+                        "a run hands back one patch, so not both {CREATE_PULL_REQUEST} and {PUSH_TO_PULL_REQUEST_BRANCH}"
+                    ));
+                }
+            }
+            (true, None) => errors.push(format!(
+                "{PUSH_TO_PULL_REQUEST_BRANCH} needs the pull request and its head commit"
+            )),
+            (false, Some(_)) => errors.push(format!(
+                "a pull request and a head are only for {PUSH_TO_PULL_REQUEST_BRANCH}"
+            )),
+            (false, None) => {}
         }
 
         let max = match max_outputs {
@@ -648,6 +898,8 @@ impl Bounds {
                 .outputs
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
+            branches: Vec::new(),
+            repos: Vec::new(),
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -659,9 +911,21 @@ impl Bounds {
                 max_patch_size: self.max_patch_bytes / KB,
                 max_patch_files: self.max_patch_files,
             }),
+            push_to_pull_request_branch: pull_request.filter(|_| push).map(|(number, head)| Push {
+                max: limit(PUSH_TO_PULL_REQUEST_BRANCH).max,
+                target: number.to_owned(),
+                head: head.to_owned(),
+                protected_files: self.protected_files(repo),
+                protect_top_level_dot_folders: true,
+                protected_files_policy: ProtectedFilesPolicy::Blocked,
+                max_patch_size: self.max_patch_bytes / KB,
+                max_patch_files: self.max_patch_files,
+            }),
             others: types
                 .iter()
-                .filter(|output| **output != CREATE_PULL_REQUEST)
+                .filter(|output| {
+                    !matches!(**output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH)
+                })
                 .map(|output| ((*output).to_owned(), limit(output)))
                 .collect(),
         };
@@ -688,6 +952,8 @@ pub fn run(args: &Args) -> Result<Exit> {
         outputs: &args.outputs,
         max_outputs: &args.max_outputs,
         job_token: args.job_token,
+        pull_request: args.pull_request.as_deref().zip(args.head.as_deref()),
+        output_repo: args.output_repo.as_deref(),
     };
     let compiled = bounds
         .compile(&request)
@@ -766,6 +1032,30 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
         }
         _ => None,
     };
+    // Both compiled the one request, so the pull request and head are to
+    // agree; a pair that does not pins no single push.
+    policy.safe_outputs.push_to_pull_request_branch = match (
+        policy.safe_outputs.push_to_pull_request_branch,
+        other.safe_outputs.push_to_pull_request_branch,
+    ) {
+        (Some(push), Some(bound)) if (&push.target, &push.head) != (&bound.target, &bound.head) => {
+            return Err(vec![format!(
+                "the bounds files pin different pushes: pull request {} at {}, and {} at {}",
+                push.target, push.head, bound.target, bound.head
+            )]);
+        }
+        (Some(mut push), Some(bound)) => {
+            push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
+            push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
+            for name in bound.protected_files {
+                if !push.protected_files.contains(&name) {
+                    push.protected_files.push(name);
+                }
+            }
+            Some(push)
+        }
+        _ => None,
+    };
     if policy.safe_outputs.types().next().is_none() {
         return Err(vec!["the bounds files allow no common output type".into()]);
     }
@@ -814,6 +1104,8 @@ files = ["README.md", "AGENTS.md"]
             outputs: "create_pull_request,noop",
             max_outputs: "3",
             job_token: false,
+            pull_request: None,
+            output_repo: None,
         }
     }
 
@@ -844,6 +1136,8 @@ files = ["README.md", "AGENTS.md"]
                 outputs,
                 max_outputs: "1",
                 job_token: false,
+                pull_request: None,
+                output_repo: None,
             });
             assert_eq!(result.is_ok(), allowed, "{base}, {outputs}: {result:?}");
         }
@@ -1373,9 +1667,403 @@ files = ["README.md", "AGENTS.md"]
             outputs: "create_pull_request,delete_repo",
             max_outputs: "many",
             job_token: false,
+            pull_request: None,
+            output_repo: None,
         };
         let errors = bounds().compile(&request).unwrap_err();
         assert_eq!(errors.len(), 5, "{errors:?}");
+    }
+
+    pub(crate) const HEAD: &str = "2222222222222222222222222222222222222222";
+
+    /// Bounds that let a run push to branches this system names.
+    fn push_bounds() -> Bounds {
+        let mut bounds = bounds();
+        bounds.outputs.insert(
+            PUSH_TO_PULL_REQUEST_BRANCH.to_owned(),
+            OutputLimit {
+                max: 1,
+                branches: vec!["agent-run-*".to_owned(), "dispatch/**".to_owned()],
+                repos: vec![REPO.to_owned()],
+                ..OutputLimit::default()
+            },
+        );
+        bounds.validate().unwrap();
+        bounds
+    }
+
+    fn push_request() -> Request<'static> {
+        Request {
+            base: "agent-run-12",
+            outputs: "push_to_pull_request_branch,noop",
+            pull_request: Some(("42", HEAD)),
+            output_repo: Some(REPO),
+            ..request()
+        }
+    }
+
+    /// The policy of a run that pushes to pull request 42's branch,
+    /// `agent-run-12`, at [`HEAD`].
+    pub(crate) fn push_policy() -> Policy {
+        push_bounds().compile(&push_request()).unwrap()
+    }
+
+    #[test]
+    fn push_requests_against_the_bounds() {
+        let ok = push_request();
+        // The name, the request, and a part of the refusal if it is refused.
+        let cases: &[(&str, Request<'_>, Option<&str>)] = &[
+            ("ok", ok, None),
+            (
+                "a nested branch",
+                Request {
+                    base: "dispatch/implement/agent-run-12",
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "a branch the push globs do not name",
+                Request { base: "main", ..ok },
+                Some(
+                    "pull request branch \"main\" is not within the bounds (agent-run-*, dispatch/**)",
+                ),
+            ),
+            (
+                "a base the bounds admit for new pull requests only",
+                Request {
+                    base: "bot/x",
+                    ..ok
+                },
+                Some("pull request branch \"bot/x\" is not within"),
+            ),
+            (
+                "a branch gh-aw would push by another name",
+                Request {
+                    base: "agent-run--12",
+                    ..ok
+                },
+                Some("is not within"),
+            ),
+            (
+                "a branch ending in a dash",
+                Request {
+                    base: "agent-run-",
+                    ..ok
+                },
+                Some("is not within"),
+            ),
+            (
+                "no pull request",
+                Request {
+                    pull_request: None,
+                    output_repo: None,
+                    ..ok
+                },
+                Some("needs the pull request and its head commit"),
+            ),
+            (
+                "a pull request that is not a number",
+                Request {
+                    pull_request: Some(("42 ", HEAD)),
+                    ..ok
+                },
+                Some("pull request \"42 \" is not a number"),
+            ),
+            (
+                "a pull request of a leading zero",
+                Request {
+                    pull_request: Some(("042", HEAD)),
+                    ..ok
+                },
+                Some("is not a number"),
+            ),
+            (
+                "a short head",
+                Request {
+                    pull_request: Some(("42", "2222222")),
+                    ..ok
+                },
+                Some("is not a 40-character lowercase commit SHA"),
+            ),
+            (
+                "an upper-case head",
+                Request {
+                    pull_request: Some(("42", "2222222222222222222222222222222222222ABC")),
+                    ..ok
+                },
+                Some("is not a 40-character lowercase commit SHA"),
+            ),
+            (
+                "a push beside a pull request",
+                Request {
+                    outputs: "push_to_pull_request_branch,create_pull_request",
+                    ..ok
+                },
+                Some("not both create_pull_request and push_to_pull_request_branch"),
+            ),
+            (
+                "a push in an analysis run",
+                Request {
+                    kind: Kind::Analysis,
+                    ..ok
+                },
+                Some(
+                    "an analysis run hands back no change, so it can't push_to_pull_request_branch",
+                ),
+            ),
+            (
+                "the same repository, in another case",
+                Request {
+                    output_repo: Some("Bootc-Dev/Bootc"),
+                    ..ok
+                },
+                None,
+            ),
+            (
+                "a repository the bounds allow runs in but no push",
+                Request {
+                    repo: "bootc-dev/other",
+                    clone_url: "https://github.com/bootc-dev/other",
+                    output_repo: Some("bootc-dev/other"),
+                    ..ok
+                },
+                Some(
+                    "push_to_pull_request_branch is not allowed in \"bootc-dev/other\" (only in bootc-dev/bootc)",
+                ),
+            ),
+            (
+                "outputs applied in another repository",
+                Request {
+                    output_repo: Some("cgwalters-bot/bootc"),
+                    ..ok
+                },
+                Some("not to \"cgwalters-bot/bootc\""),
+            ),
+            (
+                "no repository the outputs are applied in",
+                Request {
+                    output_repo: None,
+                    ..ok
+                },
+                Some("not to an unnamed one"),
+            ),
+            (
+                "a branch the globs name in another case",
+                Request {
+                    base: "DISPATCH/implement/agent-run-12",
+                    ..ok
+                },
+                Some("is not within"),
+            ),
+            (
+                "a pull request without a push",
+                Request {
+                    outputs: "noop",
+                    ..ok
+                },
+                Some("a pull request and a head are only for push_to_pull_request_branch"),
+            ),
+        ];
+        let bounds = push_bounds();
+        for (name, request, refusal) in cases {
+            match (bounds.compile(request), refusal) {
+                (Ok(_), None) => {}
+                (Err(errors), Some(want)) => assert!(
+                    errors.iter().any(|e| e.contains(want)),
+                    "{name}: {errors:?}"
+                ),
+                (result, _) => panic!("{name}: {result:?}"),
+            }
+        }
+        // Bounds that do not list the type admit no push at all.
+        let errors = super::tests::bounds().compile(&ok).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("output type \"push_to_pull_request_branch\" is not within")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_push_policy_names_its_pull_request_and_always_a_max() {
+        let bounds = push_bounds();
+        let policy = bounds.compile(&push_request()).unwrap();
+        assert_eq!(policy.base, "agent-run-12");
+        assert!(policy.safe_outputs.create_pull_request.is_none());
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (push.max, push.target.as_str(), push.head.as_str()),
+            (1, "42", HEAD)
+        );
+        assert!(push.protect_top_level_dot_folders);
+        assert_eq!(
+            policy.safe_outputs.patch_carrier().map(|(name, _)| name),
+            Some(PUSH_TO_PULL_REQUEST_BRANCH)
+        );
+        // gh-aw's handler takes a missing `max` for no limit, and sets
+        // `allow_workflows` only when the configuration does.
+        let json = serde_json::to_value(&policy.safe_outputs).unwrap();
+        let config = &json[PUSH_TO_PULL_REQUEST_BRANCH];
+        assert_eq!(config["max"], 1, "{config}");
+        assert_eq!(config["target"], "42", "{config}");
+        assert!(config.get("allow_workflows").is_none(), "{config}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        assert_eq!(Policy::load(&path).unwrap(), policy);
+
+        // `all` with a pull request means the push; without, a new one.
+        let all = bounds
+            .compile(&Request {
+                outputs: "all",
+                max_outputs: "max",
+                ..push_request()
+            })
+            .unwrap();
+        assert!(all.safe_outputs.push_to_pull_request_branch.is_some());
+        assert!(all.safe_outputs.create_pull_request.is_none());
+        let all = bounds
+            .compile(&Request {
+                outputs: "all",
+                max_outputs: "max",
+                ..request()
+            })
+            .unwrap();
+        assert!(all.safe_outputs.push_to_pull_request_branch.is_none());
+        assert!(all.safe_outputs.create_pull_request.is_some());
+
+        // What `policy` never writes does not load.
+        type Edit = fn(&mut Policy);
+        let edits: &[(&str, Edit)] = &[
+            ("an analysis run", |p| p.kind = Kind::Analysis),
+            ("two pushes", |p| {
+                p.safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .max = 2;
+            }),
+            ("no head", |p| {
+                p.safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .head = String::new();
+            }),
+            ("a target of all", |p| {
+                p.safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .target = "*".into();
+            }),
+            ("dot-folders open", |p| {
+                p.safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .protect_top_level_dot_folders = false;
+            }),
+            ("a branch renamed on push", |p| p.base = "agent--run".into()),
+            ("beside a pull request", |p| {
+                p.safe_outputs.create_pull_request =
+                    super::tests::policy().safe_outputs.create_pull_request;
+            }),
+        ];
+        for (name, edit) in edits {
+            let mut edited = policy.clone();
+            edit(&mut edited);
+            assert!(edited.validate().is_err(), "{name}");
+        }
+        let mut json = serde_json::to_value(&policy).unwrap();
+        json["safe_outputs"][PUSH_TO_PULL_REQUEST_BRANCH]["allow_workflows"] = true.into();
+        assert!(serde_json::from_value::<Policy>(json).is_err());
+    }
+
+    #[test]
+    fn push_bounds_must_name_branches_repos_and_one_push() {
+        let limit = |text: &str| toml::from_str::<OutputLimit>(text).unwrap();
+        for (output, text, ok) in [
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o/r']",
+                true,
+            ),
+            (PUSH_TO_PULL_REQUEST_BRANCH, "max = 1", false),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = []\nrepos = ['o/r']",
+                false,
+            ),
+            // On every repository a glob names is not one at a time.
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']",
+                false,
+            ),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o/*']",
+                false,
+            ),
+            (
+                PUSH_TO_PULL_REQUEST_BRANCH,
+                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o']",
+                false,
+            ),
+            ("add_comment", "max = 1\nbranches = ['x']", false),
+            ("add_comment", "max = 1\nrepos = ['o/r']", false),
+        ] {
+            assert_eq!(limit(text).validate(output).is_ok(), ok, "{output} {text}");
+        }
+        let mut bounds = push_bounds();
+        bounds
+            .outputs
+            .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+            .unwrap()
+            .max = 2;
+        assert!(bounds.validate().is_err());
+    }
+
+    #[test]
+    fn push_bounds_intersect() {
+        let own = push_bounds().compile(&push_request()).unwrap();
+        let mut org_bounds = push_bounds();
+        org_bounds.max_patch_files = 7;
+        let org = org_bounds.compile(&push_request()).unwrap();
+        let both = intersect(own.clone(), org).unwrap();
+        let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
+        assert_eq!(push.max_patch_files, 7);
+        assert_eq!(push.head, HEAD);
+        // Two that pin different pushes are refused, not merged.
+        for edit in [
+            (|p: &mut Push| p.target = "43".into()) as fn(&mut Push),
+            |p| p.head = "3".repeat(40),
+        ] {
+            let mut other = own.clone();
+            edit(
+                other
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap(),
+            );
+            let errors = intersect(own.clone(), other).unwrap_err();
+            assert!(errors[0].contains("pin different pushes"), "{errors:?}");
+        }
+        // An organization file that allows no push leaves none.
+        let mut no_push = own;
+        no_push.safe_outputs.push_to_pull_request_branch = None;
+        let mut org = super::tests::policy();
+        org.safe_outputs.create_pull_request = None;
+        let left = intersect(no_push, org).unwrap();
+        assert!(left.safe_outputs.push_to_pull_request_branch.is_none());
     }
 
     #[test]

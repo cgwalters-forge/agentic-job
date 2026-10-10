@@ -47,6 +47,13 @@ on:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
         default: ""
+      push-item:
+        description: >-
+          Positive pull request number in `repo` whose branch a branch run starts from and pushes one
+          commit to (`push_to_pull_request_branch`, off unless the bounds allow it); its branch and head
+          are read here and replace `base`
+        type: string
+        default: ""
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public
         type: string
@@ -543,9 +550,31 @@ jobs:
           script: |
             const { resolveDispatch } = require(process.env.SOURCE_DIR + '/workflow/review.cjs');
             core.setOutput('review-head', await resolveDispatch(process.env, github));
-      # The base is the pull request's where an event named one, and the
-      # bounds have to cover it like any other. Comments go to the item
-      # the event was about unless the caller named a target.
+      # A run that pushes to a pull request starts from its branch at the
+      # head read here with the read-only token, never from agent text or
+      # the caller's task; the binary checks the branch against the bounds
+      # and pins the head, which the agent's run, check and apply hold to.
+      - name: Resolve the pull request a run pushes to
+        id: push
+        if: ${{ inputs.push-item != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EVENT: ${{ inputs.event }}
+          REVIEW: ${{ inputs.review }}
+          KIND: ${{ inputs.kind }}
+          ITEM: ${{ inputs.push-item }}
+          REPO: ${{ inputs.repo }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
+        with:
+          script: |
+            const { resolvePush } = require(process.env.SOURCE_DIR + '/workflow/push.cjs');
+            const { branch, head } = await resolvePush(process.env, github);
+            core.setOutput('branch', branch);
+            core.setOutput('head', head);
+      # The base is the pull request's where an event named one, or the
+      # branch of the one a run pushes to, and the bounds have to cover it
+      # like any other. Comments go to the item the event was about unless
+      # the caller named a target.
       - name: Check the request against the caller's bounds
         id: request
         if: ${{ steps.event.outputs.admitted != 'false' }}
@@ -559,12 +588,20 @@ jobs:
           TARGET: ${{ inputs.comment-target }}
           APPLY_ENVIRONMENT: ${{ inputs.apply-environment }}
           ISSUE: ${{ inputs.issue }}
+          PUSH_ITEM: ${{ inputs.push-item }}
+          PUSH_BRANCH: ${{ steps.push.outputs.branch }}
+          PUSH_HEAD: ${{ steps.push.outputs.head }}
+          OUTPUT_REPO: ${{ inputs.output-repo }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
           base=$BASE target=${TARGET:-*}
+          if [ -n "$PUSH_ITEM" ]; then
+            base=$PUSH_BRANCH
+            set -- --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
+          fi
           # Without an apply environment apply holds the job token: refuse
           # here, not after the agent ran, what that token cannot apply.
-          [ -n "$APPLY_ENVIRONMENT" ] || set -- --job-token
+          [ -n "$APPLY_ENVIRONMENT" ] || set -- "$@" --job-token
           if [ -e "$JOB_DIR/event.json" ]; then
             base=$(jq -r --arg base "$BASE" '.base // $base' "$JOB_DIR/event.json")
             [ -n "$TARGET" ] || target=$(jq -r '.item.number // "*"' "$JOB_DIR/event.json")

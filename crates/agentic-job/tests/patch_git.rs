@@ -601,7 +601,11 @@ impl Origin {
     /// The reading `check` makes of a patch: of its text with what is not
     /// UTF-8 replaced.
     fn read(&self, patch: &[u8]) -> PatchReading {
-        read_patch(&String::from_utf8_lossy(patch), &rules(), &self.base)
+        read_patch(
+            &String::from_utf8_lossy(patch),
+            &rules().rules(),
+            &self.base,
+        )
     }
 }
 

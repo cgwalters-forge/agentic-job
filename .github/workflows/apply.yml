@@ -165,19 +165,26 @@ jobs:
           git config am.keepcr true
       # The target's base branch as this job fetched it, not as anything
       # that was handed back says. A fork that is behind is fast-forwarded
-      # and one that has diverged stops here.
+      # and one that has diverged stops here. A push goes only to the
+      # repository the run worked on (policy refuses any other): checked
+      # again before anything here pushes to `OUTPUT_REPO`.
       - name: Fetch the target's base branch, and bring a fork's up to it
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
         run: |
+          jq -e '.push_to_pull_request_branch == null' "$GH_AW_TMP/config.json" > /dev/null || [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] ||
+            { echo "::error::a push goes to $REPO, the repository the run worked on, not to $OUTPUT_REPO"; exit 1; }
           git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
           [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || { git merge --ff-only refs/agentic-job/target-base && git push origin "HEAD:refs/heads/$BASE"; }
       # The branch a pull request is pushed as is named in the hand-back,
       # and the handlers push that name as it is: it has to be this
-      # run's, whatever the agent's machine wrote there.
+      # run's, whatever the agent's machine wrote there. A push's names
+      # its patch file: it has to be the policy's base, the pull request's
+      # branch, which the handler pushes to by the pull request's number.
       - name: The pull request's branch is this run's
         run: |
-          jq -e --arg want "agent-run-$GITHUB_RUN_ID" \
-            'all(.items[] | select(.type == "create_pull_request"); .branch == $want)' "$GH_AW_TMP/agent_output.json"
+          jq -e --arg want "agent-run-$GITHUB_RUN_ID" --arg base "$BASE" \
+            'all(.items[] | select(.type == "create_pull_request"); .branch == $want)
+             and all(.items[] | select(.type == "push_to_pull_request_branch"); .branch == $base)' "$GH_AW_TMP/agent_output.json"
       # The commit the patch says it starts from is the hand-back's own
       # claim: it has to be one the target's base branch holds. Applied
       # there with a plain `git am`, which takes a patch only where it
@@ -190,6 +197,7 @@ jobs:
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
       - name: Apply the patch on its own base, and compare what changed with what was checked
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        id: trial
         run: |
           patch=$(jq -c .patch "$REPORT")
           [ "$patch" != null ] || exit 0
@@ -201,7 +209,37 @@ jobs:
           git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
           jq -er '.patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/checked-files"
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"
+          echo "tree=$(git -C "$RUNNER_TEMP/trial" rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
           git worktree remove --force "$RUNNER_TEMP/trial"
+      # A push to a pull request goes on the head the run started from,
+      # which policy pinned and check held the patch to: a branch that
+      # moved since would have gh-aw's handler apply the patch on whatever
+      # it is at now, on code nobody gave the agent. One commit on that
+      # head with the tree the patch makes is this push, applied by an
+      # earlier attempt, and is not pushed again. The branch is the one
+      # fetched above; it is read again as the last step before the
+      # handlers, which narrows, but cannot close, the window in which it
+      # may move (docs/safe-outputs.md).
+      - name: A push goes on the head the run started from, and only once
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        env:
+          TREE: ${{ steps.trial.outputs.tree }}
+        run: |
+          head=$(jq -r '.push_to_pull_request_branch.head // ""' "$GH_AW_TMP/config.json")
+          [ -n "$head" ] || exit 0
+          tip=$(git rev-parse --verify refs/agentic-job/target-base)
+          [ "$tip" != "$head" ] || exit 0
+          if [ -n "$TREE" ] && [ "$(git rev-parse --verify --quiet "$tip^")" = "$head" ] && [ "$(git rev-parse "$tip^{tree}")" = "$TREE" ]; then
+            target=$(jq -r '.push_to_pull_request_branch.target' "$GH_AW_TMP/config.json")
+            jq '.items |= map(select(.type != "push_to_pull_request_branch"))' "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/unpushed.json"
+            mv "$RUNNER_TEMP/unpushed.json" "$GH_AW_TMP/agent_output.json"
+            jq -n --arg url "$GITHUB_SERVER_URL/$OUTPUT_REPO/pull/$target" --arg tip "$tip" \
+              '[{type: "push_to_pull_request_branch", name: $tip, url: $url}]' > "$GH_AW_TMP/skipped.json"
+            echo "::notice::$BASE is at $tip, this push applied by an earlier attempt; it is not pushed again"
+            exit 0
+          fi
+          echo "::error::$BASE is at $tip, not at $head, the head the run started from: the pull request changed since, and the run has to be made again"
+          exit 1
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
       # token's owner), and a pull request that fails is not to become an
@@ -215,11 +253,18 @@ jobs:
           TITLE_PREFIX: ${{ fromJSON(inputs.policy).title-prefix }}
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true}'
+          # A push that fails is not to become a pull request, and an
+          # empty one fails; `allow_workflows` is never set, so a change
+          # under .github/workflows/ is refused here as well as by check.
+          # Unsigned, as above. No title prefix: the push handler would
+          # take it for one the pull request's title must have.
+          PUSH: '{"signed_commits": false, "fallback_as_pull_request": false, "if_no_changes": "error"}'
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
-            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" '
+            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" '
             (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title}
+            | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push + {"target-repo": $repo}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
@@ -230,12 +275,16 @@ jobs:
       # The first line of what a partial run opens or posts says so too,
       # in this file's words, chosen by the exit state. A partial run with
       # neither a pull request, an issue nor a comment would leave nothing
-      # that says it was stopped, so it is not applied.
+      # that says it was stopped, so it is not applied. Nor is a partial
+      # run's push: its commit would land on someone else's pull request
+      # with nothing on it to say the work was cut short.
       - name: Mark what a partial run opens or posts
         if: ${{ fromJSON(inputs.policy).proposals-artifact == '' && format('{0}', fromJSON(inputs.agent).outputs.exit) != '0' }}
         env:
           STOPPED: ${{ fromJSON(inputs.agent).outputs.exit == '124' && 'its timeout' || 'a request, task or spending limit' }}
         run: |
+          jq -e 'all(.items[]; .type != "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
+            { echo "::error::the run was stopped at $STOPPED: a partial change is not pushed to a pull request's branch"; exit 1; }
           jq -e 'any(.items[]; .type == "create_pull_request" or .type == "add_comment" or .type == "create_issue")' "$GH_AW_TMP/agent_output.json" > /dev/null ||
             { echo "::error::the run was stopped at $STOPPED and handed back nothing that could say so"; exit 1; }
           jq --arg note "**Partial work.** The run was stopped at $STOPPED before the task was done; this is what it handed back." \
@@ -303,7 +352,9 @@ jobs:
               if (!report.patch?.file) throw new Error('a pull request is to be opened, and check accepted no patch');
               return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
             };
-            const kept = [], skipped = [];
+            // What the step before found applied already: a push.
+            const skippedFile = `${process.env.GH_AW_TMP}/skipped.json`;
+            const kept = [], skipped = fs.existsSync(skippedFile) ? JSON.parse(fs.readFileSync(skippedFile, 'utf8')) : [];
             for (const [index, item] of output.items.entries()) {
               if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
               // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
@@ -343,7 +394,7 @@ jobs:
               }
             }
             fs.writeFileSync(file, JSON.stringify({ ...output, items: kept }));
-            fs.writeFileSync(`${process.env.GH_AW_TMP}/skipped.json`, JSON.stringify(skipped));
+            fs.writeFileSync(skippedFile, JSON.stringify(skipped));
             if (skipped.length) {
               await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
                 .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
@@ -360,6 +411,27 @@ jobs:
       # in it, which a repository's or a branch's name may. A handler that
       # failed fails this step, and the last step says what that means
       # for the job.
+      #
+      # Just before that, a push's pull request is read again, as the
+      # handler will read it, with the token it pushes with: it must still
+      # be open, from the policy's branch, and that branch still at the
+      # head the run started from. The handler checks neither the state nor
+      # the head: on a branch rewritten so that `head` is no longer in it,
+      # it applies the patch on whatever the branch holds, and that push
+      # succeeds. What moves the branch after this read is caught only by
+      # the last step, after the push (docs/safe-outputs.md).
+      - name: A push's pull request is still open and at its head
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+        run: |
+          jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null || exit 0
+          target=$(jq -er '.push_to_pull_request_branch.target' "$GH_AW_TMP/config.json")
+          head=$(jq -er '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
+          gh api "repos/$OUTPUT_REPO/pulls/$target" | jq -e --arg base "$BASE" '.state == "open" and .head.ref == $base' > /dev/null ||
+            { echo "::error::pull request $target of $OUTPUT_REPO is no longer open from $BASE: nothing is pushed"; exit 1; }
+          tip=$(git ls-remote --exit-code origin "refs/heads/$BASE" | cut -f1)
+          [ "$tip" = "$head" ] || { echo "::error::$BASE is at $tip, not at $head, the head the run started from: the pull request changed since, and the run has to be made again"; exit 1; }
       - name: Apply the outputs with gh-aw's handlers
         id: apply
         continue-on-error: true
@@ -549,14 +621,15 @@ jobs:
             const fs = require('node:fs');
             const { createHash } = require('node:crypto');
             const applied = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/applied.json`, 'utf8'));
+            // A push's URL is the pull request it pushed to.
             const posted = [...applied.already_applied, ...applied.made]
-              .filter(item => ['add_comment', 'create_issue'].includes(item.type) && item.url).map(item => item.url);
+              .filter(item => ['add_comment', 'create_issue', 'push_to_pull_request_branch'].includes(item.type) && item.url).map(item => item.url);
             const url = applied.pull_request?.url ?? posted[0] ?? '';
             core.setOutput('result-url', url);
             if (!url) return;
             await core.summary.addHeading('What the run made', 3).addLink(url, url).write();
             const { ISSUE: issue, OUTPUT_REPO: where, POSTER: me } = process.env;
-            const on = new RegExp(`^https://[^/]+/${where.replace(/[.]/g, '\\.')}/(issues|pull)/${issue}#`, 'i');
+            const on = new RegExp(`^https://[^/]+/${where.replace(/[.]/g, '\\.')}/(issues|pull)/${issue}(#|$)`, 'i');
             if (!issue || on.test(url)) return;
             const [owner, repo] = where.split('/');
             const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '');
@@ -577,8 +650,17 @@ jobs:
           FAILED: ${{ steps.apply.outputs.items_failed }}
           PUSHES_FAILED: ${{ steps.apply.outputs.code_push_failure_count }}
           PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
+          TREE: ${{ steps.trial.outputs.tree }}
         run: |
           [ "$PROJECT_REFUSED" != true ] || { echo "::error::a project write was refused"; exit 1; }
+          # gh-aw counts a push its handler skipped as no failure: the
+          # branch itself has to hold the commit, on the head it was for.
+          if jq -e 'any(.items[]; .type == "push_to_pull_request_branch")' "$GH_AW_TMP/agent_output.json" > /dev/null; then
+            head=$(jq -r '.push_to_pull_request_branch.head' "$GH_AW_TMP/config.json")
+            git fetch --no-tags origin "+refs/heads/$BASE:refs/agentic-job/pushed"
+            [ "$(git rev-parse --verify --quiet 'refs/agentic-job/pushed^')" = "$head" ] && [ "$(git rev-parse 'refs/agentic-job/pushed^{tree}')" = "$TREE" ] ||
+              { echo "::error::$BASE of $OUTPUT_REPO does not hold the checked change as one commit on $head"; exit 1; }
+          fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json") refused=$(jq .refused "$GH_AW_TMP/applied.json")
           if [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; }; then exit 0; fi

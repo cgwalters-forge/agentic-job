@@ -50,6 +50,16 @@ and remaining observability work
 ([#122](https://github.com/cgwalters-forge/agentic-job/issues/122)).
 The offline audit command is already implemented.
 
+Pushing to a pull request's branch
+([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) is off in
+every shipped bounds file. Before one turns it on, a scripted `fix` case in CI's
+end-to-end dispatch should push to a throwaway pull request: today the handler's
+configuration, its patch lookup for a nested branch and its branch check with
+the job token are covered only by unit tests and by reading gh-aw's code.
+Dispatch gives a scripted `fix` the `implement` profile, which asks for no
+output: the run makes the push from its outcome, so that case needs no
+profile of its own.
+
 ## Interactive sessions
 
 Attachment is not built. [interactive.md](interactive.md) describes the

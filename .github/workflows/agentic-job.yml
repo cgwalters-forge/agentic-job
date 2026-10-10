@@ -55,6 +55,12 @@ on:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
         default: ""
+      push-item:
+        description: >-
+          Positive pull request number in `repo` whose branch a branch run starts from and pushes one
+          commit to (`push_to_pull_request_branch`, off unless the bounds allow it); replaces `base`
+        type: string
+        default: ""
       repo:
         description: The repository the agent works on, OWNER/NAME on github.com; it must be public
         type: string
@@ -305,6 +311,7 @@ jobs:
       review: ${{ inputs.review }}
       review-task: ${{ inputs.review-task }}
       review-item: ${{ inputs.review-item }}
+      push-item: ${{ inputs.push-item }}
       repo: ${{ inputs.repo }}
       base: ${{ inputs.base }}
       kind: ${{ inputs.kind }}

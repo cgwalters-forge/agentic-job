@@ -195,9 +195,16 @@ test('policy errors preserve the exit status and escape annotation data', () => 
   assert.match(step, /node "\$SOURCE_DIR\/workflow\/policy-command.cjs"/);
 });
 
-for (const [environment, issue, expected] of [['', '', ['--job-token']], ['', '64', ['--job-token']], ['apply', '64', []],
-  ['apply', '0', null], ['apply', '64 ', null], ['apply', 'owner/repo#64', null], ['apply', '$(exit 0)', null]]) {
-  test(`the policy command is told when apply holds only the job token: environment ${JSON.stringify(environment)}, issue ${JSON.stringify(issue)}`, () => {
+const head = 'a'.repeat(40);
+const push = { PUSH_ITEM: '42', PUSH_BRANCH: 'agent-run-1', PUSH_HEAD: head, OUTPUT_REPO: '', GITHUB_REPOSITORY: 'o/r' };
+const pushArgs = ['--pull-request', '42', '--head', head, '--output-repo'];
+for (const [environment, issue, expected, extra = {}] of [['', '', ['--job-token']], ['', '64', ['--job-token']], ['apply', '64', []],
+  ['apply', '0', null], ['apply', '64 ', null], ['apply', 'owner/repo#64', null], ['apply', '$(exit 0)', null],
+  // A push names where apply applies it, for the binary to refuse any
+  // repository but the run's: the calling one when `output-repo` is empty.
+  ['apply', '', [...pushArgs, 'o/r'], push], ['', '', [...pushArgs, 'o/r', '--job-token'], push],
+  ['apply', '', [...pushArgs, 'x/y'], { ...push, OUTPUT_REPO: 'x/y' }]]) {
+  test(`the policy command is told when apply holds only the job token: environment ${JSON.stringify(environment)}, issue ${JSON.stringify(issue)}, ${JSON.stringify(extra)}`, () => {
     const dir = mkdtempSync(join(homedir(), 'request-'));
     try {
       mkdirSync(join(dir, 'workflow'));
@@ -210,7 +217,7 @@ for (const [environment, issue, expected] of [['', '', ['--job-token']], ['', '6
       const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
         encoding: 'utf8', env: { ...process.env, SOURCE_DIR: dir, JOB_DIR: dir, GITHUB_OUTPUT: join(dir, 'output'),
           ALLOW: 'allow', REPO: 'o/r', BASE: 'main', KIND: 'implement', OUTPUTS: 'all', MAX_OUTPUTS: '3',
-          TARGET: '', APPLY_ENVIRONMENT: environment, ISSUE: issue },
+          TARGET: '', APPLY_ENVIRONMENT: environment, ISSUE: issue, ...extra },
       });
       // An issue is a number, or the run stops before the policy is written.
       assert.equal(result.status, expected ? 0 : 1, result.stderr);

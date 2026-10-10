@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, Policy};
+use crate::policy::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
 use crate::redact;
 
 /// The requests the agent wrote, one JSON object to a line.
@@ -293,6 +293,36 @@ fn redirections_to(
             .is_some_and(|draft| draft != &Value::Bool(true))
         {
             problems.push(format!("a {output} that is not a draft"));
+        }
+    }
+    if output == PUSH_TO_PULL_REQUEST_BRANCH {
+        // The pull request and its branch are the request's, not the
+        // agent's: the handler pushes to the number configured, and finds
+        // the patch by the branch.
+        problems.extend(differs("branch", &|branch| branch == policy.base));
+        let target = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .map(|push| push.target.as_str());
+        for key in [
+            "pull_request_number",
+            "pr_number",
+            "pull_number",
+            "pr",
+            "item_number",
+        ] {
+            if let Some(value) = item.get(key) {
+                let number = value
+                    .as_u64()
+                    .map(|n| n.to_string())
+                    .or_else(|| value.as_str().map(str::to_owned));
+                if number.as_deref() != target {
+                    problems.push(format!(
+                        "a {output} with {key} {value}, which is not the policy's pull request"
+                    ));
+                }
+            }
         }
     }
     if output == "update_project" {
@@ -604,13 +634,19 @@ fn check_outputs_to(
         .map(String::as_str)
         .filter(|name| PATCH_FILE_RE.is_match(name))
         .collect();
-    let rules = policy.safe_outputs.create_pull_request.as_ref();
-    let request = items
-        .iter()
-        .find(|item| item_type(item) == CREATE_PULL_REQUEST);
+    // The output that carries the patch: a pull request to open, or a
+    // push to the open one the run started from, whose head is pinned.
+    let carrier = policy.safe_outputs.patch_carrier();
+    let pinned = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .map(|push| push.head.as_str());
+    let request =
+        carrier.and_then(|(output, _)| items.iter().find(|item| item_type(item) == output));
     let mut patch = None;
-    match (request, rules) {
-        (Some(request), Some(rules)) => {
+    match (request, carrier) {
+        (Some(request), Some((output, rules))) => {
             // The patch is read against any commit base.json names, so that
             // a hand-back refused for its base is told what else is wrong.
             let base = contents
@@ -618,13 +654,24 @@ fn check_outputs_to(
                 .and_then(|content| serde_json::from_slice::<Base>(content).ok())
                 .filter(|base| COMMIT_RE.is_match(&base.commit));
             let ours = |base: &Base| {
-                base.repo.eq_ignore_ascii_case(&policy.repo) && base.r#ref == policy.base
+                base.repo.eq_ignore_ascii_case(&policy.repo)
+                    && base.r#ref == policy.base
+                    && pinned.is_none_or(|head| base.commit == head)
             };
             if !base.as_ref().is_some_and(ours) {
-                errors.push(format!(
-                    "{BASE_FILE} is not {{repo: {}, ref: {}, commit: SHA}}",
-                    policy.repo, policy.base
-                ));
+                errors.push(match pinned {
+                    // A branch that moved since the run was asked for is
+                    // another's work, which the push would be on top of
+                    // or beside: the run is asked for again instead.
+                    Some(head) => format!(
+                        "{BASE_FILE} is not {{repo: {}, ref: {}, commit: {head}}}: the pull request's head the run was asked for",
+                        policy.repo, policy.base
+                    ),
+                    None => format!(
+                        "{BASE_FILE} is not {{repo: {}, ref: {}, commit: SHA}}",
+                        policy.repo, policy.base
+                    ),
+                });
             }
             let branch = request
                 .get("branch")
@@ -636,7 +683,7 @@ fn check_outputs_to(
                     // What is not UTF-8 in it is in a file's content, where
                     // the rules look only at the first byte of a line.
                     let text = String::from_utf8_lossy(content);
-                    let PatchReading { problems, files } = read_patch(&text, rules, &base.commit);
+                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
                     errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
                     patch = Some(PatchInfo {
                         file: want,
@@ -647,7 +694,7 @@ fn check_outputs_to(
                 }
                 ([_], Some(_), None) => {}
                 _ => errors.push(format!(
-                    "{CREATE_PULL_REQUEST} needs exactly one patch, {want}; there is {}",
+                    "{output} needs exactly one patch, {want}; there is {}",
                     if patch_names.is_empty() {
                         "none".to_owned()
                     } else {
@@ -656,13 +703,15 @@ fn check_outputs_to(
                 )),
             }
         }
-        // Without the rules for a patch there is no pull request to check:
-        // the count above has refused it.
-        (Some(_), None) => {}
-        (None, _) if !patch_names.is_empty() => {
-            errors.push(format!("a patch without a {CREATE_PULL_REQUEST}"));
+        (None, carrier) if !patch_names.is_empty() => {
+            errors.push(format!(
+                "a patch without a {}",
+                carrier.map_or(CREATE_PULL_REQUEST, |(output, _)| output)
+            ));
         }
-        (None, _) => {}
+        // Without the rules for a patch there is no request to check: the
+        // count above has refused it.
+        _ => {}
     }
     Ok(Verdict::new(errors, items, patch))
 }
@@ -797,6 +846,10 @@ mod tests {
         }
 
         fn check(&self) -> Verdict {
+            self.check_against(&policy())
+        }
+
+        fn check_against(&self, policy: &Policy) -> Verdict {
             let dir = tempfile::tempdir().unwrap();
             let out = dir.path().join("out");
             std::fs::create_dir(&out).unwrap();
@@ -810,7 +863,7 @@ mod tests {
             let collected = dir.path().join("agent_output.json");
             let result = json!({"items": self.items, "errors": self.refused});
             std::fs::write(&collected, result.to_string()).unwrap();
-            check_outputs(&out, &collected, &policy()).unwrap()
+            check_outputs(&out, &collected, policy).unwrap()
         }
     }
 
@@ -861,6 +914,158 @@ mod tests {
         );
         assert_eq!(patch.bytes, patch_of("src/new.rs").len());
         assert_eq!(patch.files, ["src/new.rs"]);
+    }
+
+    /// A push to pull request 42's branch `agent-run-12` at `HEAD`.
+    mod push {
+        use super::*;
+        use crate::policy::tests::{HEAD, push_policy};
+
+        const PUSH_PATCH: &str = "aw-agent-run-12.patch";
+
+        fn push() -> Value {
+            json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix the thing\n\nWhy.", "branch": "agent-run-12"})
+        }
+
+        fn handback() -> Handback {
+            Handback {
+                items: vec![push()],
+                files: vec![
+                    (PUSH_PATCH, patch_of("src/new.rs").replace(BASE, HEAD)),
+                    (
+                        BASE_FILE,
+                        json!({"repo": "bootc-dev/bootc", "ref": "agent-run-12", "commit": HEAD})
+                            .to_string(),
+                    ),
+                ],
+                ..Handback::default()
+            }
+        }
+
+        fn with_item(fields: Value) -> Handback {
+            let mut item = push();
+            for (key, value) in fields.as_object().unwrap() {
+                item[key] = value.clone();
+            }
+            Handback {
+                items: vec![item],
+                ..handback()
+            }
+        }
+
+        #[test]
+        fn a_push_on_the_pinned_head_is_accepted() {
+            let verdict = handback().check_against(&push_policy());
+            assert_eq!(verdict.errors, Vec::<String>::new());
+            let patch = verdict.patch.unwrap();
+            assert_eq!(
+                (patch.file.as_str(), patch.base_commit.as_str()),
+                (PUSH_PATCH, HEAD)
+            );
+            let verdict =
+                with_item(json!({"pull_request_number": 42})).check_against(&push_policy());
+            assert_eq!(verdict.errors, Vec::<String>::new());
+            let verdict =
+                with_item(json!({"pull_request_number": "42"})).check_against(&push_policy());
+            assert_eq!(verdict.errors, Vec::<String>::new());
+        }
+
+        #[test]
+        fn what_is_refused_of_a_push() {
+            let stale_base =
+                json!({"repo": "bootc-dev/bootc", "ref": "agent-run-12", "commit": BASE})
+                    .to_string();
+            let cases: Vec<(&str, Handback, &str)> = vec![
+                (
+                    "another branch",
+                    with_item(json!({"branch": "main"})),
+                    "a push_to_pull_request_branch with branch \"main\", which is not the policy's",
+                ),
+                (
+                    "another pull request",
+                    with_item(json!({"pull_request_number": 43})),
+                    "with pull_request_number 43, which is not the policy's pull request",
+                ),
+                (
+                    "another pull request by an alias",
+                    with_item(json!({"pr_number": "7"})),
+                    "with pr_number \"7\", which is not the policy's pull request",
+                ),
+                (
+                    "another repository",
+                    with_item(json!({"repo": "evil/bootc"})),
+                    "with repo \"evil/bootc\", which is not the policy's",
+                ),
+                (
+                    "a head that moved since the run was asked for",
+                    handback()
+                        .with(BASE_FILE, Some(stale_base))
+                        .with(PUSH_PATCH, Some(patch_of("src/new.rs"))),
+                    "the pull request's head the run was asked for",
+                ),
+                (
+                    "a patch on another commit than base.json's",
+                    handback().with(PUSH_PATCH, Some(patch_of("src/new.rs"))),
+                    "aw-agent-run-12.patch: ",
+                ),
+                (
+                    "a patch to a workflow",
+                    handback().with(
+                        PUSH_PATCH,
+                        Some(patch_of(".github/workflows/ci.yml").replace(BASE, HEAD)),
+                    ),
+                    "protected files: .github/workflows/ci.yml",
+                ),
+                (
+                    "a pull request instead",
+                    Handback {
+                        items: vec![pull_request()],
+                        ..handback()
+                    },
+                    "an output of type \"create_pull_request\", which the policy does not allow",
+                ),
+                (
+                    "a patch without the push",
+                    Handback {
+                        items: vec![noop()],
+                        ..handback()
+                    },
+                    "a patch without a push_to_pull_request_branch",
+                ),
+                (
+                    "a push without its patch",
+                    handback().with(PUSH_PATCH, None),
+                    "push_to_pull_request_branch needs exactly one patch, aw-agent-run-12.patch; there is none",
+                ),
+                (
+                    "two pushes",
+                    Handback {
+                        items: vec![push(), push()],
+                        ..handback()
+                    },
+                    "2 outputs of type \"push_to_pull_request_branch\", over 1",
+                ),
+            ];
+            for (name, handback, want) in cases {
+                let verdict = handback.check_against(&push_policy());
+                assert!(!verdict.ok, "{name}");
+                assert!(
+                    verdict.errors.iter().any(|error| error.contains(want)),
+                    "{name}: {:?}",
+                    verdict.errors
+                );
+            }
+            // And a push where the policy opens pull requests.
+            let verdict = handback().check();
+            assert!(
+                verdict
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("which the policy does not allow")),
+                "{:?}",
+                verdict.errors
+            );
+        }
     }
 
     /// An issue that names other issues is refused by this rule, and one

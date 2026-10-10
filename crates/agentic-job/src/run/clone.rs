@@ -182,6 +182,7 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
         "the clone's HEAD is not a commit: {:?}",
         one_line(&base_commit)
     );
+    check_pinned_head(policy, &base_commit)?;
     let head = git(&["log", "-1", "--format=%h %s"])?;
     eprintln!(
         "Cloned {} ({}) as {}: {}",
@@ -191,6 +192,22 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
         one_line(&head)
     );
     Ok(Checkout { dir, base_commit })
+}
+
+/// A run that pushes to a pull request starts from the head the policy
+/// pins, or not at all: the patch would be against a commit apply refuses
+/// to push on, and the agent's work lost.
+pub fn check_pinned_head(policy: &Policy, base_commit: &str) -> Result<()> {
+    if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
+        ensure!(
+            base_commit == push.head,
+            "{} is at {base_commit}, not at {}, the head the run was asked for: the pull request \
+             changed since",
+            policy.base,
+            push.head
+        );
+    }
+    Ok(())
 }
 
 /// Only analysis runs may start from a review head, never propose a patch on it.
@@ -423,6 +440,18 @@ mod tests {
             argv[argv.len() - 5..],
             ["--depth", "1", "--", "file:///srv/r.git", "d"]
         );
+    }
+
+    #[test]
+    fn a_push_starts_from_its_pinned_head() {
+        let push = crate::policy::tests::push_policy();
+        let head = crate::policy::tests::HEAD;
+        check_pinned_head(&push, head).unwrap();
+        let err = check_pinned_head(&push, &"3".repeat(40)).unwrap_err();
+        assert!(err.to_string().contains("changed since"), "{err}");
+        // Other runs pin nothing.
+        let other = policy("o/r", "https://example.invalid/o/r", "main");
+        check_pinned_head(&other, &"3".repeat(40)).unwrap();
     }
 
     #[test]

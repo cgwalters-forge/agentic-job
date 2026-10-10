@@ -45,7 +45,7 @@ gh-aw's own compiled workflows, and CI fails when the file is not what
 the pinned commit gives.
 
 The types a run can be allowed are `create_pull_request`, `create_issue`, `add_comment`,
-`close_issue`, `add_labels`, `update_project`,
+`close_issue`, `add_labels`, `update_project`, `push_to_pull_request_branch`,
 `noop`, `missing_tool` and `missing_data`.
 
 ### Updating project fields
@@ -113,6 +113,83 @@ closes issue 7 without a comment. `body` is refused; use a separately bounded
 `add_comment` request to post a comment.
 Both operations need issue-write access in apply (PR labels can instead use
 pull-request write access). No producer or check token gains write access.
+
+### Pushing to a pull request's branch
+
+`push_to_pull_request_branch` lets a follow-up run fix an open pull request:
+its change goes onto that pull request's branch as one commit, not into a new
+pull request. It is off unless a bounds file lists it, with globs of the
+branches a push may go to and the repositories it may go to, each named
+exactly (no globs, as in `unprotected_files.repos`), so that it is turned on
+one repository at a time:
+
+```toml
+[outputs.push_to_pull_request_branch]
+max = 1
+branches = ["agent-run-*", "dispatch/**"]
+repos = ["OWNER/NAME"]
+```
+
+Unlike `bases`, the `branches` globs match case exactly: `dispatch/**` does
+not admit `DISPATCH/x`, since a forge keeps a branch name's case.
+
+It has the exposure of
+[#340](https://github.com/cgwalters-forge/agentic-job/issues/340): a branch of
+the repository itself runs that repository's `pull_request` workflows on code
+the agent wrote, with whatever token and OIDC access those workflows hold.
+Enable it only for a target repository whose CI does not give a pull request
+from its own branches write or OIDC access, as for `create_pull_request`.
+
+The caller names the pull request by number (`push-item`, the `fix` profile of
+[dispatch](dispatch.md)); the agent never does. The policy job reads that pull
+request with its read-only token and refuses it unless it is open and both its
+head and base are in the run's repository: a fork's branch is not one apply
+can push to. The repository must be in `repos`, and the outputs must be
+applied there (`output-repo` empty or that repository): policy refuses
+anything else before the agent runs. Its branch must match `branches`
+(`bases` does not apply), and `policy.json` records the number as the push's `target` and the head commit
+the branch was at as its `head`. A run with a push has no
+`create_pull_request`: it hands back one patch.
+
+The run starts from that head, and each step holds it there:
+
+- the run refuses to start when the clone's branch is no longer at `head`;
+- check refuses a hand-back whose base is not `head`, a push line naming any
+  branch but the pull request's, and the same patch rules as a pull request
+  (protected files, every top-level dot-folder, size and file count);
+- apply refuses when the branch has moved since `head`, so a pull request
+  that changed under the run has to be run again. gh-aw's handler pushes one
+  commit without force (so the forge refuses anything that is not a
+  fast-forward), with no fallback to a new pull request and never with
+  `allow_workflows`, and apply then fetches the branch back and refuses unless
+  it is that one commit on `head` with the checked tree.
+
+Running apply again does not push twice: a branch that is already one commit
+on `head` with the checked tree is the push done, and apply skips it.
+
+A partial run (one stopped at a limit, applied under `apply-partial`) is not
+pushed: nothing on a pushed commit would say the work was cut short, so
+apply fails instead.
+
+As the last step before gh-aw's handlers, apply reads the pull request again
+with the token it pushes with, and refuses unless it is still open, from the
+same branch, and that branch is still at `head`. gh-aw's handler checks
+neither the pull request's state nor its head, so this is what keeps a push
+off a pull request closed or changed since policy read it. The branch can
+still move between that read and the handler's push, and apply detects
+that; it cannot prevent it. What happens then depends on the move. The
+handler resets to the patch's recorded base commit (`head`) only if
+`git merge-base --is-ancestor` finds that commit in the branch: then a
+commit added on top makes the push not a fast-forward, which the forge
+refuses, and with no force and no fallback to a pull request the push
+fails. If the branch was force-pushed or rebased so that `head` is no longer
+in it, the handler logs a warning and applies the patch with `git am --3way`
+on the branch as it finds it; that push is a plain fast-forward and
+succeeds, and apply's last step then fails, reporting the branch as not
+holding the checked change on `head`, after the commit is on the branch.
+
+The push needs `contents: write` in apply; see
+[the apply job and its token](workflow.md#the-apply-job-and-its-token).
 
 ## The bounds and the policy
 

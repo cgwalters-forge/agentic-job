@@ -10,7 +10,7 @@ use std::path::Path;
 use super::handback::{
     AGENT_OUTCOME, AGENT_OUTPUTS, MAX_LINES, MAX_OUTCOME_BYTES, MAX_OUTPUTS_BYTES,
 };
-use crate::policy::{CREATE_PULL_REQUEST, Kind, Policy, PullRequest};
+use crate::policy::{CREATE_PULL_REQUEST, Kind, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy};
 
 const KIB: usize = 1 << 10;
 
@@ -33,7 +33,7 @@ const REFUSED_KINDS: &str = "adds an executable, adds, changes or deletes a symb
 /// that would otherwise learn it only from `check` refusing all it did:
 /// the first real run lost its whole change to one line added to a
 /// README.
-fn patch_rules(rules: &PullRequest) -> String {
+fn patch_rules(rules: &PatchRules<'_>) -> String {
     let mut text = String::from(
         " A change is refused whole, with everything else in it, if it touches one of these: ",
     );
@@ -68,21 +68,29 @@ fn patch_rules(rules: &PullRequest) -> String {
 /// in CHECKOUT. It ends with an empty line.
 pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
     let outputs = &policy.safe_outputs;
-    let rules = outputs
-        .create_pull_request
-        .as_ref()
+    let carrier = outputs
+        .patch_carrier()
         .filter(|_| policy.kind == Kind::Branch);
+    let push = outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .filter(|_| carrier.is_some_and(|(kind, _)| kind == PUSH_TO_PULL_REQUEST_BRANCH));
     let mut text = String::from(
         "How this run hands back its results. Nothing else leaves this machine, and all of it \
          is published.\n\n",
     );
-    let pull_request = rules.is_some();
-    let tree = if let Some(rules) = rules {
+    let tree = if let Some((_, rules)) = &carrier {
+        let proposed = match push {
+            Some(push) => format!(
+                "pushed as one commit on top of pull request #{}'s branch, `{}`",
+                push.target, policy.base
+            ),
+            None => "proposed as a pull request".to_owned(),
+        };
         format!(
             "everything you change, add or delete in it (ignored files excepted) is collected \
              when you finish, as one patch of at most {} KiB against the commit you started \
-             from, and proposed as a pull request. Leave your changes uncommitted, and do not \
-             push.{}",
+             from, and {proposed}. Leave your changes uncommitted, and do not push.{}",
             policy.max_patch_bytes / (KIB as u64),
             patch_rules(rules)
         )
@@ -95,7 +103,10 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
 
     let types: Vec<String> = outputs
         .types()
-        .filter(|&name| pull_request || name != CREATE_PULL_REQUEST)
+        .filter(|&name| {
+            carrier.is_some_and(|(kind, _)| kind == name)
+                || ![CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH].contains(&name)
+        })
         .map(|name| match outputs.max_of(name) {
             Some(max) => format!("`{name}` (at most {max})"),
             None => format!("`{name}`"),
@@ -122,7 +133,15 @@ pub fn hand_back(policy: &Policy, home: &Path, checkout: &Path) -> String {
             types.join(", "),
         );
     }
-    if pull_request {
+    if push.is_some() {
+        text.push_str(
+            "  To word the commit yourself, write `{\"type\": \"push_to_pull_request_branch\", \
+             \"message\": \"...\"}`: the message's first line is the commit's subject and the \
+             rest its body. Put no line in it that credits a tool or a model (\"Generated with \
+             ...\", `Co-Authored-By:`): the run's own configuration adds the commit's trailers. \
+             Without one, the message is made from the `summary` below.\n",
+        );
+    } else if carrier.is_some() {
         text.push_str(
             "  To word the pull request yourself, write `{\"type\": \"create_pull_request\", \
              \"title\": \"...\", \"body\": \"...\"}`: the title and the body are also the \
@@ -252,6 +271,34 @@ mod tests {
             "{nothing}"
         );
         assert!(nothing.contains("outcome.json"), "{nothing}");
+    }
+
+    #[test]
+    fn a_push_run_is_told_where_its_change_goes() {
+        let push = crate::policy::tests::push_policy();
+        let brief = text(&push);
+        for want in [
+            "pushed as one commit on top of pull request #42's branch, `agent-run-12`",
+            "This run allows: `push_to_pull_request_branch` (at most 1), `noop`",
+            "{\"type\": \"push_to_pull_request_branch\", \"message\": \"...\"}",
+            "anything under a top-level directory whose name starts with a dot",
+        ] {
+            assert!(brief.contains(want), "{want}\n{brief}");
+        }
+        assert!(!brief.contains("create_pull_request"), "{brief}");
+        // An analysis run pushes nothing, and is not offered to.
+        let analysis = text(&Policy {
+            kind: Kind::Analysis,
+            ..push
+        });
+        assert!(
+            analysis.contains("this run proposes no change"),
+            "{analysis}"
+        );
+        assert!(
+            !analysis.contains(PUSH_TO_PULL_REQUEST_BRANCH),
+            "{analysis}"
+        );
     }
 
     #[test]
