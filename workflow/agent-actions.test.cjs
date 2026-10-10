@@ -284,6 +284,40 @@ test('the agent gets its GitHub token, and a classic token that can write is ref
     assert.equal(result.status, expected, `${headers}: ${result.stdout}${result.stderr}`);
     assert.doesNotMatch(result.stdout + result.stderr, /ghs_job|gho_classic/);
   }
+  // The job token, whose grants nothing shows, only from agentic-job.yml's
+  // agent job at the policy call's commit; another token from any job.
+  const sha = 'a'.repeat(40), other = 'b'.repeat(40);
+  const wrapperFile = '.github/workflows/agentic-job.yml';
+  // [token, the job token, file, its commit, the policy call's commit, status]
+  for (const [token, jobToken, file, commit, source, expected] of [
+    ['ghs_job', 'ghs_job', wrapperFile, sha, sha, 0],
+    ['ghs_job', 'ghs_job', '.github/workflows/example-compose.yml', sha, sha, 1],
+    ['ghs_job', 'ghs_job', wrapperFile, other, sha, 1],
+    ['ghs_job', 'ghs_job', `${wrapperFile}x`, sha, sha, 1],
+    ['ghs_job', 'ghs_job', `./${wrapperFile}`, sha, sha, 1],
+    // No job context, or no policy commit, is no proof.
+    ['ghs_job', 'ghs_job', '', '', sha, 1],
+    ['ghs_job', 'ghs_job', wrapperFile, '', '', 1],
+    ['ghs_read', 'ghs_job', '.github/workflows/example-compose.yml', sha, sha, 0],
+    ['ghs_read', 'ghs_job', '', '', '', 0],
+  ]) {
+    // GitHub, which would take it, is asked only once the token was let through.
+    const result = shell('curl() { cat > /dev/null; echo asked >&2; };\n' + probe, {
+      GH_TOKEN: token, JOB_TOKEN: jobToken, SOURCE_SHA: source, WORKFLOW_FILE: file, WORKFLOW_SHA: commit,
+    });
+    assert.equal(result.status, expected, `${token} ${file} ${commit}: ${result.stdout}${result.stderr}`);
+    assert.equal(result.stderr.includes('asked'), expected === 0, `${token} ${file} ${commit}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /ghs_job|ghs_read/);
+  }
+  const probeEnv = run.split('- name: Refuse a GitHub token that can write\n')[1].split('      run: |\n')[0];
+  for (const line of ['JOB_TOKEN: ${{ github.token }}', 'SOURCE_SHA: ${{ steps.settings.outputs.source_sha }}',
+    'WORKFLOW_FILE: ${{ job.workflow_file_path }}', 'WORKFLOW_SHA: ${{ job.workflow_sha }}']) {
+    assert.ok(probeEnv.includes(`        ${line}\n`), line);
+  }
+  // The composed example and the guide give the agent no job token.
+  for (const source of [compose, readFileSync(join(__dirname, '../docs/workflow.md'), 'utf8')]) {
+    assert.equal([...source.matchAll(/^ +github-token: (.*)$/gm)].map(match => match[1]).join(), '${{ secrets.GH_READ_TOKEN }}');
+  }
 });
 
 // agentic-job.yml is the pieces composed: every setting it takes but the
