@@ -65,7 +65,7 @@ holds no secret.
 | --- | --- |
 | `[sandbox]` | the sandbox user and its groups, directories to close, services to stop; `[sandbox.check]` has what the probes need and what they accept |
 | `[egress]` | `proxy` (whether the egress proxy runs), `direct` (addresses reached without it), `policy` |
-| `[setup]` | `packages`, `npm`, and a `script` for toolchains |
+| `[setup]` | `packages`, `npm`, and a `script` for toolchains; `repo-packages` only in a file given to `agentic-job config`, which adds the `--repo` entry to `packages` ([toolchains](dispatch.md#giving-runs-a-toolchain)) |
 | `[inference]` | `url`; `register`, one of `github-oidc`, `plain` and `token-file`, with no default; `audience`; `token-file`; `anthropic-url` and `openai-url` |
 | `[agent]` | `name`, `model`, and `config-repo`, `config-ref`, `config-path` for a public repository holding its configuration |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped` |

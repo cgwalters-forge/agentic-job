@@ -67,13 +67,13 @@ class PreflightTests(unittest.TestCase):
                 "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "TIMEOUT",
                 "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "SETUP",
             ], "")
-            env.update(JOB_DIR=str(root), PATH="/usr/bin:/bin", AGENT="fake")
+            env.update(JOB_DIR=str(root), PATH="/usr/bin:/bin", AGENT="fake", REPO="example/repo")
             result = subprocess.run(
                 ["bash", "-euo", "pipefail", "-c", script], env=env,
                 capture_output=True, text=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((root / "config.toml").read_text().startswith("config --string agent.name=fake "))
+            self.assertTrue((root / "config.toml").read_text().startswith("config --repo example/repo --string agent.name=fake "))
 
     def test_proposals_skip_agent_configuration(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/policy.yml").read_text()

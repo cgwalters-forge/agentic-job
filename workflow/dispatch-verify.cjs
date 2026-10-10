@@ -18,6 +18,11 @@ if (pr) {
   const verdicts = comments(pr).filter(comment => comment.body.startsWith('VERDICT: APPROVE\nREASON: Scripted dispatch'));
   assert.equal(verdicts.length, 1);
   assert.ok(verdicts[0].body.includes(`Reviewed SHA: ${head}`));
+  // hosted.toml gives this repository, and no fork of it, cargo; the
+  // scripted review ran `cargo metadata --locked` before writing this.
+  if (repo === 'cgwalters-forge/agentic-job') {
+    assert.match(verdicts[0].body, /\nToolchain: cargo \d/, 'the review sandbox must have a working cargo');
+  }
 }
 const branch = `dispatch/implement/agent-run-${id}`;
 const commit = api(`repos/${repo}/commits/${branch}`)[0];

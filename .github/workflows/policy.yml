@@ -570,7 +570,9 @@ jobs:
       # `register` means nothing without a proxy. No network probe here:
       # this machine need not be on the proxy's network (secure-host makes
       # one on the agent's). Proposals mode runs no agent and needs no
-      # inference configuration.
+      # inference configuration. `--repo` picks the target's entry of the
+      # caller's `setup.repo-packages`, a list in the caller's own file:
+      # the target's contents name no package.
       - name: Write the configuration
         if: ${{ inputs.proposals-artifact == '' && steps.event.outputs.admitted != 'false' }}
         env:
@@ -591,8 +593,9 @@ jobs:
           PACKAGES: ${{ inputs.packages }}
           NPM: ${{ inputs.npm || (inputs.agent == 'opencode' && 'opencode-ai@1.18.35' || inputs.agent == 'claude' && '@agentclientprotocol/claude-agent-acp@0.88.0' || '') }}
           SETUP: ${{ inputs.setup }}
+          REPO: ${{ inputs.repo }}
         run: |
-          "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} \
+          "$JOB_DIR/bin/agentic-job" config ${CONFIG:+--from "$CONFIG"} --repo "$REPO" \
             --string agent.name="$AGENT" --string agent.model="$MODEL" --string agent.config-repo="$CONFIG_REPO" \
             --string agent.config-ref="$CONFIG_REF" --string agent.config-path="$CONFIG_PATH" \
             --string inference.url="$URL" --string inference.register="$REGISTER" \
