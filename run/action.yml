@@ -1,0 +1,99 @@
+name: Run a sandboxed agent
+description: Run on an already locked host and publish untrusted proposals for a separate checker
+inputs:
+  job-dir:
+    description: Runner-private directory containing policy.json, task.md and meta.json
+    required: true
+  repo:
+    description: Public target repository, OWNER/NAME
+    required: true
+  agent-config-repo:
+    description: Public agent configuration repository, OWNER/NAME, if any
+    default: ""
+  review-head:
+    description: Exact review head resolved by the trusted policy job
+    default: ""
+  artifact-prefix:
+    description: Unique prefix for this producer's artifacts within the workflow run
+    default: ""
+  apply-partial:
+    description: Accept a limit exit only when proposals were handed back
+    default: "false"
+outputs:
+  exit:
+    description: Exit state of agentic-job run
+    value: ${{ steps.run.outputs.exit }}
+  safe-outputs-artifact-id:
+    description: Immutable untrusted proposals upload ID; never a policy or checked artifact
+    value: ${{ steps.safe-outputs.outputs.artifact-id }}
+runs:
+  using: composite
+  steps:
+    # Do not let a caller accidentally turn this into an unsandboxed runner.
+    # Unlocked configurations skip runner privilege probes, so reject them
+    # explicitly before checking the root-owned installed configuration.
+    - name: Prove the host is secured
+      shell: bash
+      run: |
+        python3 -c 'import sys, tomllib; c = tomllib.load(open("/etc/agentic-job/config.toml", "rb")); sys.exit(0 if c.get("sandbox", {}).get("lock-runner", True) is True else "run requires a locked host")'
+        agentic-job sandbox check
+    - name: Run the agent
+      id: run
+      shell: bash
+      env:
+        JOB_DIR: ${{ inputs.job-dir }}
+        REVIEW_HEAD: ${{ inputs.review-head }}
+      run: |
+        echo '::group::agent (condensed)'
+        state=0
+        [ -z "$REVIEW_HEAD" ] || set -- --review-head "$REVIEW_HEAD"
+        agentic-job run --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
+        echo '::endgroup::'
+        echo "exit=$state" >> "$GITHUB_OUTPUT"
+        [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
+    # Re-check visibility before uploading: a repository can become private
+    # while the agent works. This credential stays with the runner user.
+    - name: Check again that the repositories are public
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ inputs.repo }}
+        REPOS: ${{ inputs.repo }} ${{ inputs.agent-config-repo }}
+      run: |
+        [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo '::error::run requires a public target repository name'; exit 1; }
+        set -f
+        for repo in $REPOS; do
+          [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::not a repository name: $repo"; exit 1; }
+          gh api "repos/$repo" --jq '.private == false and .visibility == "public"' | grep -qx true ||
+            { echo "::error::$repo cannot be confirmed to be public, and everything about a run is published"; exit 1; }
+        done
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-prefix }}agent-run
+        path: ${{ inputs.job-dir }}/out/run/
+        retention-days: 90
+        if-no-files-found: ignore
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-prefix }}agent-transcript
+        path: ${{ inputs.job-dir }}/out/transcript.tar.zst
+        retention-days: 30
+        if-no-files-found: ignore
+    - id: safe-outputs
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-prefix }}safe-outputs
+        path: ${{ inputs.job-dir }}/out/safe-outputs/
+        retention-days: 30
+        if-no-files-found: ignore
+    - name: The run's result
+      shell: bash
+      env:
+        EXIT: ${{ steps.run.outputs.exit }}
+        PARTIAL: ${{ inputs.apply-partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' }}
+      run: |
+        case "$EXIT/$PARTIAL" in
+          0/*) ;;
+          3/true | 124/true) echo "::warning::the run was stopped at a limit (exit state $EXIT) and handed back what it had" ;;
+          *) echo "::error::agentic-job run ended with exit state $EXIT"; exit 1 ;;
+        esac

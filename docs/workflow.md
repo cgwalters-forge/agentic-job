@@ -39,8 +39,8 @@ and `id-token: write`, not repository write permissions.
 ## Reusable checker contract
 
 The whole workflow calls [check.yml](../.github/workflows/check.yml) at its
-own source commit. This is the first extracted piece of the composition
-migration; policy, apply and agent preparation/execution remain in the wrapper.
+own source commit. This is an extracted piece of the composition
+migration; policy and apply remain in the wrapper.
 Existing callers need no changes, including proposals-only callers.
 
 The checker takes `binary-artifact-id` and `policy-artifact-id` directly from
@@ -63,6 +63,35 @@ checkout source selection. No secrets are passed to the nested workflow;
 apply alone retains the apply token. The wrapper's admission, failed-run check,
 partial-apply, activation and notification gates are unchanged. Patch ancestry
 semantics are unchanged. Tailscale inputs and setup/cleanup are not changed.
+
+## Agent step extraction (not yet a complete composed pipeline)
+
+The wrapper now uses [prepare](../prepare/action.yml) to download policy and
+binary uploads by their trusted IDs and install the binary before hardening.
+It uses [run](../run/action.yml) after `secure-host` to run the agent, hand back,
+re-check repository visibility and upload proposals. Both actions come from
+the wrapper's own source commit, just like `secure-host`; all third-party
+action pins and agent job permissions are unchanged. The run action rejects
+an unlocked root-owned configuration and repeats `sandbox check` before
+execution. No apply credential is accepted by either action.
+
+Preparation still needs the wrapper's configuration, preflight, task and
+metadata steps. The run action takes their runner-private `job-dir`, the
+public target `repo`, optional `agent-config-repo`, policy-resolved
+`review-head`, `artifact-prefix` and `apply-partial`. It returns `exit` and
+`safe-outputs-artifact-id`; the latter selects **untrusted proposals only**.
+Its uploads and exit/partial gate retain the wrapper's retention and failure
+behaviour. A step after a successful run runs as the runner user without
+sudo, not as the sandbox user. Do not execute agent-produced code there;
+use `sandbox exec` for untrusted commands.
+
+This is groundwork, not the caller-owned-job interface yet: reusable policy
+and apply workflows, complete configuration/task preparation and a composed
+hosted end-to-end case remain to be extracted. Existing callers keep working
+without changing inputs. In particular, the Tailscale inputs have **not** been
+removed and dispatch has not been migrated; keep the old form until the full
+composed replacement is available. External privileged setup belongs before
+`secure-host`, and its cleanup must work without sudo after hardening.
 
 ## What has run, and what has not
 
