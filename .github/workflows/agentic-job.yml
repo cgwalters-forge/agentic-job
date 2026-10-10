@@ -58,7 +58,8 @@ on:
       push-item:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
-          commit to (`push_to_pull_request_branch`, off unless the bounds allow it); replaces `base`
+          commit to (`push_to_pull_request_branch`, off unless the bounds allow it); replaces `base`.
+          Only a pull request apply opened from the fork of the identity it applies as
         type: string
         default: ""
       repo:

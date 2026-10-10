@@ -257,6 +257,14 @@ unknown input; drop it when bumping the pin. A caller that asks for
 repository ([pull requests come from a fork](#pull-requests-come-from-a-fork)),
 and no longer needs `contents: write`, which only pushed the branch.
 
+`push_to_pull_request_branch` goes the same way: only to a pull request
+apply opened from its fork, never to a same-repository one or anyone
+else's fork
+([#430](https://github.com/cgwalters-forge/agentic-job/issues/430)). Its
+bounds lose `repos`, which a bounds file that still names it is refused
+for: drop it. A call that pushes needs `apply-environment`, and no call
+needs `contents: write` for it any more.
+
 ## What has run, and what has not
 
 Read this before relying on it.
@@ -594,10 +602,9 @@ that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `issues: write` (comments and issues)
-and `pull-requests: write` for the job's own token. A new pull request
-needs no `contents: write`, as its branch goes to a fork with the
-environment's token ([below](#pull-requests-come-from-a-fork)); only a
-`push_to_pull_request_branch` applied with the job token does.
+and `pull-requests: write` for the job's own token. Nothing needs
+`contents: write`: a new pull request's branch, and a push to it, go to a
+fork with the environment's token ([below](#pull-requests-come-from-a-fork)).
 
 **Limits that fit the agent.** The workflow's defaults are for a real
 agent behind a proxy. A cap on model requests that nothing counts is
@@ -827,6 +834,12 @@ requires for outside contributors. A workflow there on
 `pull_request_target` or `workflow_run` still runs with privileges and
 must not check out or run the pull request's code.
 
+A `push_to_pull_request_branch` goes the same way, to the branch of a
+pull request apply opened from that fork and to no other: apply refuses a
+pull request whose head is not its own fork's before it fetches or pushes
+anything, and gives the push handler the fork as its `head-repo`, which
+refuses any other head repository.
+
 A push with a PAT, unlike one with the job token, starts the fork's
 workflows on `push`, with the fork's secrets and a token that writes to
 the fork. So apply turns Actions off on the fork
@@ -857,8 +870,9 @@ an account cannot read it, and so cannot fork it. A
 fine-grained PAT of such an account, for "All repositories" with
 Contents, Pull requests and Administration write, would narrow it to
 the account's own repositories; which permissions GitHub asks of each
-step has not been tried here ([what is left](plan.md#open-work)). Policy refuses `create_pull_request` to a call without
-`apply-environment`, as it refuses `update_project`: the job token names
+step has not been tried here ([what is left](plan.md#open-work)). Policy refuses `create_pull_request` and
+`push_to_pull_request_branch` to a call without `apply-environment`, as
+it refuses `update_project`: the job token names
 nobody and has no account to fork into. Apply fails before it pushes
 anything when `GET /user` names nobody (an App's token), or when that
 user owns the output repository and so has no fork of it, or when what
@@ -974,16 +988,16 @@ secret is passed, so a PAT passed without an environment is refused it too.
 
 For `push_to_pull_request_branch`, the caller passes the pull request's
 number as `push-item` on a `branch` run; it is off unless the bounds list it
-(see [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch),
-and [#340](https://github.com/cgwalters-forge/agentic-job/issues/340) for what
-enabling it exposes). The policy job reads the pull request's branch and head
-with its read-only token (`pull-requests: read`, which the call already
-grants), and the run starts from that branch. The push is apply's alone and
-needs `contents: write` there: with the job token, grant it to the call; with
-`SAFE_OUTPUTS_PAT`, give that token contents write on the repository. A push
-goes only to the run's own repository, so `output-repo` is left out or names
-it; policy refuses any other before the agent runs, and apply checks again
-before its first push to `output-repo`. No other job's permissions change, and no token reaches the agent, check
+(see [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+It goes only to a pull request apply opened from its fork, so it needs
+`apply-environment` and its `SAFE_OUTPUTS_PAT`, as a new pull request does;
+the job token is refused it. The policy job reads the pull request's branch
+and head with its read-only token (`pull-requests: read`, which the call
+already grants), and the run starts from that head. The pull request is in
+the run's own repository, so `output-repo` is left out or names it; policy
+refuses any other before the agent runs, and apply checks again. Apply checks
+that the pull request's head is its own fork before it fetches or pushes
+anything for it, and the push goes to the fork with the environment's token. No other job's permissions change, and no token reaches the agent, check
 or policy beyond the read-only ones they hold already.
 
 The project workflow changes leave permissions, action pins and token placement

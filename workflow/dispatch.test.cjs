@@ -42,8 +42,8 @@ for (const profile of ['implement', 'triage', 'research']) {
 
 for (const [name, env, data, ref, error] of [
   ['review issue', { PROFILE: 'review' }, undefined, undefined, /requires a pull request/],
-  ['fix issue', { PROFILE: 'fix' }, undefined, undefined, /fix requires a pull request/],
-  ['fix wrong pull request', { PROFILE: 'fix' }, { number: 172, pull_request: {} }, undefined, /fix requires a pull request/],
+  ['fix issue', { PROFILE: 'fix', APPLY_ENVIRONMENT: 'agent-apply' }, undefined, undefined, /fix requires a pull request/],
+  ['fix wrong pull request', { PROFILE: 'fix', APPLY_ENVIRONMENT: 'agent-apply' }, { number: 172, pull_request: {} }, undefined, /fix requires a pull request/],
   ['unknown profile', { PROFILE: 'other' }, undefined, undefined, /Unknown dispatch profile/],
   ['non-default ref', {}, undefined, 'refs/heads/untrusted', /default branch/],
   ['PR item', {}, { number: 171, pull_request: {} }, undefined, /not a pull request/],
@@ -124,13 +124,16 @@ test('real agent preflight names all missing deployment variables together', asy
   await assert.rejects(preflight({ AGENT: 'opencode' }),
     /AGENT_MODEL, AGENT_RUNNER, INFERENCE_URL, INFERENCE_AUDIENCE/);
   await assert.rejects(preflight({ TARGET_REPO: 'other/repo' }), /APPLY_ENVIRONMENT/);
-  // A pull request is opened from a fork, which the job token cannot make.
-  for (const environment of ['', ' ']) {
-    await assert.rejects(preflight({ PROFILE: 'implement', APPLY_ENVIRONMENT: environment }), /APPLY_ENVIRONMENT/);
+  // A pull request is opened from a fork, and a fix pushed to one, which
+  // the job token cannot make.
+  for (const profile of ['implement', 'fix']) {
+    for (const environment of ['', ' ']) {
+      await assert.rejects(preflight({ PROFILE: profile, APPLY_ENVIRONMENT: environment }, { number: 171, pull_request: {} }), /APPLY_ENVIRONMENT/);
+    }
   }
   // As a scripted run, which is given no APPLY_ENVIRONMENT, is told.
   await assert.rejects(preflight({ PROFILE: 'implement', APPLY_ENVIRONMENT: '' }),
-    /a scripted run is given none, so it cannot implement or write to another repository\): APPLY_ENVIRONMENT$/);
+    /a scripted run is given none, so it cannot implement, fix or write to another repository\): APPLY_ENVIRONMENT$/);
 });
 
 test('opencode configuration variables do not affect scripted or Claude runs', () => {
@@ -156,7 +159,7 @@ test('issue text is passed as data, including hostile fence text', async () => {
 
 test('review and fix preflights accept a PR', async () => {
   await preflight({ PROFILE: 'review' }, { number: 171, pull_request: {} });
-  await preflight({ PROFILE: 'fix' }, { number: 171, pull_request: {} });
+  await preflight({ PROFILE: 'fix', APPLY_ENVIRONMENT: 'agent-apply' }, { number: 171, pull_request: {} });
 });
 
 test('the URL of what apply made is an output of dispatch, by way of the wrapper', () => {

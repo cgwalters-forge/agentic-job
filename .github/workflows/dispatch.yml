@@ -107,14 +107,15 @@ jobs:
               throw new Error('Expected OWNER/NAME and a positive safe issue number');
             }
             // Another repository is written to, and a pull request opened from
-            // a fork, only with a user's token: the job token can do neither.
-            if ((repo !== context.repo.owner + '/' + context.repo.repo || profile === 'implement') &&
+            // a fork or a fix pushed to one, only with a user's token: the job
+            // token can do none of these.
+            if ((repo !== context.repo.owner + '/' + context.repo.repo || profile === 'implement' || profile === 'fix') &&
                 !process.env.APPLY_ENVIRONMENT?.trim()) missing.push('APPLY_ENVIRONMENT');
             // A scripted run, as CI starts, is given none of the repository
             // variables, APPLY_ENVIRONMENT included: it stops here for implement
             // or another repository.
             if (missing.length) {
-              throw new Error('Missing repository variables (a scripted run is given none, so it cannot implement or write to another repository): ' +
+              throw new Error('Missing repository variables (a scripted run is given none, so it cannot implement, fix or write to another repository): ' +
                 missing.join(', '));
             }
             core.setOutput('agent', agent);
@@ -151,11 +152,10 @@ jobs:
       GH_READ_TOKEN: ${{ !inputs.scripted && secrets.GH_READ_TOKEN || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
-      # use these writes; neither executes agent-produced code. A new pull
-      # request's branch goes to a fork with the apply environment's token:
-      # the job token's one push is a fix to a pull request's branch, off
-      # unless the bounds allow it.
-      contents: write
+      # use these writes; neither executes agent-produced code. Every push,
+      # a new pull request's branch or a fix to one, goes to a fork with the
+      # apply environment's token: the job token pushes nothing.
+      contents: read
       issues: write
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload

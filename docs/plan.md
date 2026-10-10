@@ -53,12 +53,13 @@ The offline audit command is already implemented.
 Pushing to a pull request's branch
 ([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) is off in
 every shipped bounds file. Before one turns it on, a scripted `fix` case in CI's
-end-to-end dispatch should push to a throwaway pull request: today the handler's
-configuration, its patch lookup for a nested branch and its branch check with
-the job token are covered only by unit tests and by reading gh-aw's code.
-Dispatch gives a scripted `fix` the `implement` profile, which asks for no
-output: the run makes the push from its outcome, so that case needs no
-profile of its own.
+end-to-end dispatch should push to a throwaway pull request from the applying
+account's fork: today the handler's configuration with `head-repo`, its patch
+lookup for a nested branch and its push to the fork are covered only by unit
+tests and by reading gh-aw's code. That needs the same bot PAT as the fork
+case below.
+Dispatch refuses a scripted `fix` today: a push needs an apply environment,
+and a scripted run is given none, so that case needs one first.
 
 Pull requests from a fork ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340))
 have run live from one caller, with a classic PAT that has the `repo` and
@@ -72,12 +73,6 @@ credential is a classic `repo` PAT of a dedicated account; a fine-grained
 PAT for "All repositories" of an account that owns only its forks would
 be narrower, once the permissions it needs to fork, push, turn off the
 fork's Actions and open the pull request are known.
-
-Pushing to a pull request's branch
-([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) still
-pushes to the branch in the output repository itself, not to a fork: the
-target's `pull_request` workflows then run the agent's commit as a
-same-repository one. It stays off by default.
 
 ## Interactive sessions
 

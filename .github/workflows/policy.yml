@@ -51,7 +51,8 @@ on:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
           commit to (`push_to_pull_request_branch`, off unless the bounds allow it); its branch and head
-          are read here and replace `base`
+          are read here and replace `base`. Only a pull request apply opened from the fork of the
+          identity it applies as
         type: string
         default: ""
       repo:
@@ -263,6 +264,9 @@ on:
       review-head:
         description: The exact review head resolved by the read-only policy job
         value: ${{ jobs.policy.outputs.review-head }}
+      push-item:
+        description: The `push-item` input, the pull request a run pushes to
+        value: ${{ jobs.policy.outputs.push-item }}
       runner:
         description: The `runner` input, for check and apply
         value: ${{ jobs.policy.outputs.runner }}
@@ -354,6 +358,7 @@ jobs:
       base: ${{ steps.request.outputs.base }}
       comment-target: ${{ steps.request.outputs.comment-target }}
       issue: ${{ steps.request.outputs.issue }}
+      push-item: ${{ inputs.push-item }}
       review-head: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
       source-repository: ${{ job.workflow_repository }}
       source-sha: ${{ job.workflow_sha }}

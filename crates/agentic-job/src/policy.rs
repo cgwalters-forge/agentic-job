@@ -47,13 +47,18 @@ pub const OUTPUT_TYPES: &[&str] = &[
 /// it, and the credential each needs instead. GitHub gives a workflow's
 /// token no permission on Projects, and no account to fork into: apply
 /// opens a pull request only from a fork of the identity it applies as,
-/// so that the target's CI runs agent-written code as a fork's, with a
-/// read-only token. Every other type writes to a repository, which the
-/// token can when it is the calling one.
+/// and pushes only to such a pull request's branch in that fork, so that
+/// the target's CI runs agent-written code as a fork's, with a read-only
+/// token. Every other type writes to a repository, which the token can
+/// when it is the calling one.
 const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
     (
         CREATE_PULL_REQUEST,
         "a user's token that can fork the output repository and push to its fork, as SAFE_OUTPUTS_PAT in an apply environment",
+    ),
+    (
+        PUSH_TO_PULL_REQUEST_BRANCH,
+        "the token of the user whose fork the pull request is from, as SAFE_OUTPUTS_PAT in an apply environment",
     ),
     (
         "update_project",
@@ -189,7 +194,7 @@ pub struct Args {
     )]
     pub head: Option<String>,
     /// Where apply applies the outputs (OWNER/NAME); a push is refused
-    /// unless it is `--repo`
+    /// unless it is `--repo`, where the pull request is
     #[arg(long, value_name = "OWNER/NAME", allow_hyphen_values = true)]
     pub output_repo: Option<String>,
 }
@@ -265,12 +270,6 @@ pub struct OutputLimit {
     /// Unlike `bases`, case counts: a forge's branch names keep it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<String>,
-    /// The repositories a push may go to, named exactly (no globs), as
-    /// `unprotected_files.repos` are: a push runs the target's
-    /// `pull_request` workflows on code the agent wrote (#340), so a
-    /// bounds file turns it on one repository at a time.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub repos: Vec<String>,
 }
 
 impl OutputLimit {
@@ -309,21 +308,12 @@ impl OutputLimit {
                 );
             }
         }
-        let push = output == PUSH_TO_PULL_REQUEST_BRANCH;
-        for (name, list) in [("branches", &self.branches), ("repos", &self.repos)] {
-            ensure!(
-                push != list.is_empty(),
-                "outputs.{output}: `{name}` is required for {PUSH_TO_PULL_REQUEST_BRANCH}, and only for it"
-            );
-        }
+        ensure!(
+            (output == PUSH_TO_PULL_REQUEST_BRANCH) != self.branches.is_empty(),
+            "outputs.{output}: `branches` is required for {PUSH_TO_PULL_REQUEST_BRANCH}, and only for it"
+        );
         for pattern in &self.branches {
             glob(pattern).with_context(|| format!("outputs.{output}: the glob {pattern:?}"))?;
-        }
-        for repo in &self.repos {
-            ensure!(
-                REPO_RE.is_match(repo),
-                "outputs.{output}: {repo:?} is not one OWNER/NAME: a push is allowed per repository, named exactly"
-            );
         }
         ensure!(
             matches!(output, "create_issue" | "add_labels")
@@ -418,8 +408,8 @@ pub struct Push {
     /// The pull request's number, from the request and never the agent.
     pub target: String,
     /// The commit its branch was at when the run was asked for: what the
-    /// run starts from, the patch is against, and the branch must still
-    /// be at when the patch is applied.
+    /// run starts from and the patch is against. A plain push of a commit
+    /// on it fails if the branch moved since.
     pub head: String,
     pub protected_files: Vec<String>,
     pub protect_top_level_dot_folders: bool,
@@ -825,15 +815,10 @@ impl Bounds {
                 branches.join(", ")
             ));
         }
-        if let Some(limit) = push_limit.filter(|_| push) {
-            if !limit.repos.iter().any(|own| own.eq_ignore_ascii_case(repo)) {
-                errors.push(format!(
-                    "{PUSH_TO_PULL_REQUEST_BRANCH} is not allowed in {repo:?} (only in {})",
-                    limit.repos.join(", ")
-                ));
-            }
-            // The pull request is the repository's own: its outputs, and
-            // the push, are applied there and nowhere else.
+        if push {
+            // The pull request is in the repository the run works on: its
+            // outputs are applied there, and the push goes to the fork
+            // apply opened that pull request from (docs/safe-outputs.md).
             if !output_repo.is_some_and(|output_repo| output_repo.eq_ignore_ascii_case(repo)) {
                 errors.push(format!(
                     "{PUSH_TO_PULL_REQUEST_BRANCH} goes to {repo:?}, the repository the run works on, not to {}",
@@ -908,7 +893,6 @@ impl Bounds {
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
             branches: Vec::new(),
-            repos: Vec::new(),
         };
         let safe_outputs = SafeOutputs {
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
@@ -1671,7 +1655,12 @@ files = ["README.md", "AGENTS.md"]
         for output in OUTPUT_TYPES {
             assert_eq!(
                 NOT_FOR_THE_JOB_TOKEN.iter().any(|(name, _)| name == output),
-                ["create_pull_request", "update_project"].contains(output),
+                [
+                    "create_pull_request",
+                    "push_to_pull_request_branch",
+                    "update_project"
+                ]
+                .contains(output),
                 "{output}"
             );
         }
@@ -1704,7 +1693,6 @@ files = ["README.md", "AGENTS.md"]
             OutputLimit {
                 max: 1,
                 branches: vec!["agent-run-*".to_owned(), "dispatch/**".to_owned()],
-                repos: vec![REPO.to_owned()],
                 ..OutputLimit::default()
             },
         );
@@ -1840,16 +1828,27 @@ files = ["README.md", "AGENTS.md"]
                 },
                 None,
             ),
+            // The push goes to the applying identity's fork, as a new
+            // pull request's branch does: any repository the bounds let
+            // runs work on, and never with the job token, which has none.
             (
-                "a repository the bounds allow runs in but no push",
+                "another repository the bounds allow runs in",
                 Request {
                     repo: "bootc-dev/other",
                     clone_url: "https://github.com/bootc-dev/other",
                     output_repo: Some("bootc-dev/other"),
                     ..ok
                 },
+                None,
+            ),
+            (
+                "apply holding only the job token",
+                Request {
+                    job_token: true,
+                    ..ok
+                },
                 Some(
-                    "push_to_pull_request_branch is not allowed in \"bootc-dev/other\" (only in bootc-dev/bootc)",
+                    "output type \"push_to_pull_request_branch\" needs the token of the user whose fork",
                 ),
             ),
             (
@@ -2007,40 +2006,28 @@ files = ["README.md", "AGENTS.md"]
     }
 
     #[test]
-    fn push_bounds_must_name_branches_repos_and_one_push() {
-        let limit = |text: &str| toml::from_str::<OutputLimit>(text).unwrap();
+    fn push_bounds_must_name_branches_and_one_push() {
+        let valid = |output: &str, text: &str| {
+            toml::from_str::<OutputLimit>(text).is_ok_and(|limit| limit.validate(output).is_ok())
+        };
         for (output, text, ok) in [
             (
                 PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o/r']",
+                "max = 1\nbranches = ['agent-run-*']",
                 true,
             ),
             (PUSH_TO_PULL_REQUEST_BRANCH, "max = 1", false),
+            (PUSH_TO_PULL_REQUEST_BRANCH, "max = 1\nbranches = []", false),
+            // The per-repository list a push to the target's own branches
+            // needed (#340) is gone with those pushes, and refused.
             (
                 PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = []\nrepos = ['o/r']",
-                false,
-            ),
-            // On every repository a glob names is not one at a time.
-            (
-                PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = ['agent-run-*']",
-                false,
-            ),
-            (
-                PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o/*']",
-                false,
-            ),
-            (
-                PUSH_TO_PULL_REQUEST_BRANCH,
-                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o']",
+                "max = 1\nbranches = ['agent-run-*']\nrepos = ['o/r']",
                 false,
             ),
             ("add_comment", "max = 1\nbranches = ['x']", false),
-            ("add_comment", "max = 1\nrepos = ['o/r']", false),
         ] {
-            assert_eq!(limit(text).validate(output).is_ok(), ok, "{output} {text}");
+            assert_eq!(valid(output, text), ok, "{output} {text}");
         }
         let mut bounds = push_bounds();
         bounds
