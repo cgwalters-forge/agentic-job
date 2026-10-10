@@ -30,8 +30,9 @@ served by the proxy. The reusable workflow supplies its default opencode npm
 pin; a caller can override `npm` like other dependencies. Claude's pinned ACP
 adapter is also supplied by default; neither agent needs an explicit `npm` input.
 
-The caller grants contents read, id-token write for broker registration, and
-pull-requests write for posting. Policy and check restrict themselves to
+The caller grants contents, issues and actions read for the agent's GitHub
+reads, id-token write for broker registration, and pull-requests write for
+posting. Policy and check restrict themselves to
 contents read. The agent job has no comment token accessible to the sandbox;
 only the separate apply job posts. No inherited secrets or apply environment
 are needed with GitHub OIDC. Keep the existing full action pins and use a

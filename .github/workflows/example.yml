@@ -46,9 +46,11 @@ jobs:
       # The agent job asks for it: to announce the run to the inference
       # proxy, and to join a tailnet.
       id-token: write
+      # The agent job's GitHub reads, with the reads of the three below.
+      actions: read
       # For the job's own token to apply the outputs here. With
-      # `apply-environment` these are `contents: read` and nothing more:
-      # the environment's token does the writing.
+      # `apply-environment` these are `read` and nothing more: the
+      # environment's token does the writing.
       contents: write
       issues: write
       pull-requests: write

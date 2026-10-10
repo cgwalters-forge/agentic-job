@@ -162,8 +162,7 @@ Three smaller differences:
   workflow YAML that calls a reusable workflow.
 
 gh-aw has much that this does not: a large catalogue of output types,
-GitHub read access for the agent, threat detection, memory across runs
-and many triggers. This has a handful of each, or none.
+threat detection, memory across runs and many triggers. This has a handful of each, or none.
 [docs/background-ghaw.md](docs/background-ghaw.md) lists the gaps item by
 item.
 

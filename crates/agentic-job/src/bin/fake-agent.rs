@@ -51,7 +51,9 @@
 //! starting another one, and answers it when the turn ends.
 //!
 //! `{cwd}` is the session's working directory and `{home}` is `$HOME`.
-//! Commands run with `sh -c` in the session's working directory.
+//! Commands run with `sh -c` in the session's working directory, with
+//! the run's read-only GitHub token as `GH_TOKEN` where the run has one,
+//! as the launcher gives it to a real agent.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -59,6 +61,8 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use agentic_job::run::agent::GITHUB_TOKEN_VAR;
+use agentic_job::run::launch::github_token;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -489,11 +493,17 @@ fn play(
     let (ok, text, raw_output) = match step {
         Step::Execute { .. } => {
             let command = input["command"].as_str().unwrap_or_default();
-            match Command::new("sh")
-                .args(["-c", command])
-                .current_dir(cwd)
-                .output()
-            {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let token = match home {
+                Some(home) => github_token(&home, |path| std::fs::read_to_string(path))?,
+                None => None,
+            };
+            let mut sh = Command::new("sh");
+            sh.args(["-c", command]).current_dir(cwd);
+            if let Some(token) = token {
+                sh.env(GITHUB_TOKEN_VAR, token);
+            }
+            match sh.output() {
                 Ok(out) => {
                     let code = out.status.code().unwrap_or(-1);
                     let (stdout, stderr) = (

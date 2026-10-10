@@ -20,7 +20,9 @@ use std::process::Command;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use super::agent::{CLAUDE_ENV_FILE, CLAUDE_QUIET, Kind, OPENCODE_PROFILE_FILE};
+use super::agent::{
+    CLAUDE_ENV_FILE, CLAUDE_QUIET, GITHUB_TOKEN_FILE, GITHUB_TOKEN_VAR, Kind, OPENCODE_PROFILE_FILE,
+};
 use crate::exit::Exit;
 use crate::session::agents;
 use crate::session::process::is_inherited_setting;
@@ -60,6 +62,14 @@ const OPENCODE_SWITCHES: &[(&str, &str)] = &[
 ];
 /// Selects an opencode configuration merged over the global one.
 const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG";
+/// The variables `gh` takes a GitHub token from: only the run's is
+/// passed on, as [`GITHUB_TOKEN_VAR`].
+const GITHUB_TOKEN_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -90,6 +100,20 @@ fn claude_env(text: &str) -> Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
+/// The run's read-only GitHub token, from the file under HOME that
+/// `agentic-job run` wrote, if it wrote one.
+pub fn github_token(
+    home: &Path,
+    read: impl Fn(&Path) -> std::io::Result<String>,
+) -> Result<Option<String>> {
+    let file = home.join(GITHUB_TOKEN_FILE);
+    match read(&file) {
+        Ok(text) => Ok(Some(text.trim_end().to_owned()).filter(|token| !token.is_empty())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
+    }
+}
+
 /// The agent's own program and its first arguments, found on the sandbox
 /// user's PATH: the command of its entry in the session's registry,
 /// which is the one place that names it.
@@ -103,7 +127,7 @@ fn program(kind: Kind) -> Result<Vec<String>> {
 
 /// The agent's environment: INHERITED without anything that selects an
 /// agent's provider, credential or configuration, then what the run
-/// configured.
+/// configured, the run's GitHub token included.
 ///
 /// HOME is the sandbox user's home. Nothing here is resolved against the
 /// working directory, which is the target repository.
@@ -117,7 +141,8 @@ fn environment(
     let dropped = |name: &OsString| {
         let kept = KEPT.iter().any(|kept| name == kept);
         let xdg = kind == Kind::Opencode && XDG_BASE_DIRS.iter().any(|dir| name == dir);
-        (is_inherited_setting(name) && !kept) || xdg
+        let github = GITHUB_TOKEN_VARS.iter().any(|var| name == var);
+        (is_inherited_setting(name) && !kept) || xdg || github
     };
     let mut env: BTreeMap<OsString, OsString> =
         inherited.filter(|(name, _)| !dropped(name)).collect();
@@ -156,6 +181,9 @@ fn environment(
             }
         }
         Kind::Fake => {}
+    }
+    if let Some(token) = github_token(home, &read)? {
+        env.insert(GITHUB_TOKEN_VAR.into(), token.into());
     }
     Ok(env)
 }
@@ -205,6 +233,8 @@ mod tests {
             .collect()
     }
 
+    const TOKEN_FILE: &str = "/home/agent/.config/agentic-job/github-token";
+
     fn missing(_: &Path) -> std::io::Result<String> {
         Err(std::io::ErrorKind::NotFound.into())
     }
@@ -222,8 +252,15 @@ mod tests {
             ("OPENCODE_CONFIG", "/tmp/y"),
             ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "t"),
             ("XDG_CONFIG_HOME", "/tmp/xdg"),
+            ("GH_TOKEN", "ambient"),
+            ("GITHUB_TOKEN", "ambient"),
+            ("GH_ENTERPRISE_TOKEN", "ambient"),
+            ("GITHUB_ENTERPRISE_TOKEN", "ambient"),
         ];
         let read = |path: &Path| {
+            if path == Path::new(TOKEN_FILE) {
+                return missing(path);
+            }
             assert_eq!(
                 path,
                 Path::new("/home/agent/.config/agentic-job/claude-env.json")
@@ -326,6 +363,9 @@ mod tests {
             inherited(&ambient),
             Path::new(HOME),
             |path| {
+                if path == Path::new(TOKEN_FILE) {
+                    return missing(path);
+                }
                 assert_eq!(
                     path,
                     Path::new("/home/agent/.config/opencode/opencode-runner.json")
@@ -343,6 +383,45 @@ mod tests {
         let denied = |_: &Path| Err(std::io::ErrorKind::PermissionDenied.into());
         let err = environment(Kind::Opencode, inherited(&[]), Path::new(HOME), denied);
         assert!(format!("{:#}", err.unwrap_err()).contains("opencode-runner.json"));
+    }
+
+    /// Every agent gets the run's GitHub token, and no other.
+    #[test]
+    fn agents_get_only_the_runs_github_token() {
+        let ambient = [
+            ("GH_TOKEN", "ambient"),
+            ("GITHUB_TOKEN", "ambient"),
+            ("GH_ENTERPRISE_TOKEN", "ambient"),
+            ("GITHUB_ENTERPRISE_TOKEN", "ambient"),
+        ];
+        let denied = std::io::ErrorKind::PermissionDenied;
+        for kind in [Kind::Claude, Kind::Opencode] {
+            for (file, want) in [
+                (Err(std::io::ErrorKind::NotFound), Ok(vec![])),
+                (Ok(""), Ok(vec![])),
+                (Ok("ghs_run\n"), Ok(vec!["GH_TOKEN=ghs_run".to_owned()])),
+                (Err(denied), Err(format!("reading {TOKEN_FILE}"))),
+            ] {
+                let read = |path: &Path| match path.to_str() {
+                    Some(TOKEN_FILE) => file.map(str::to_owned).map_err(Into::into),
+                    _ if kind == Kind::Claude => Ok(r#"{"env": {}}"#.to_owned()),
+                    _ => missing(path),
+                };
+                let got = environment(kind, inherited(&ambient), Path::new(HOME), read)
+                    .map(|env| {
+                        strings(&env)
+                            .into_iter()
+                            .filter(|(name, _)| name.ends_with("_TOKEN"))
+                            .map(|(name, value)| format!("{name}={value}"))
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|err| format!("{err:#}"));
+                match (&got, &want) {
+                    (Err(got), Err(want)) => assert!(got.contains(want), "{got}"),
+                    _ => assert_eq!(got, want, "{kind:?} {file:?}"),
+                }
+            }
+        }
     }
 
     #[test]

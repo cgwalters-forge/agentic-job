@@ -258,9 +258,12 @@ environment points `HTTPS_PROXY` and the bundle variables of `git`,
 A `GET`, `HEAD` or `OPTIONS` without a body may go to any host that is
 not on a threat feed. Anything else, a WebSocket and a read with a body
 included, needs a `[[write]]` rule: the ones shipped allow `git fetch`
-from six forges and `npm audit`, and `egress.policy` replaces them. A
-push is refused. So is a request whose `Host` header or TLS name is not
-the host it connected to, and with raw TCP off, anything in a tunnel
+from six forges, `gh`'s GraphQL reads and `npm audit`, and
+`egress.policy` replaces them. The proxy does not read a GraphQL query,
+so a mutation passes it too: only GitHub's enforcement of the agent's
+read-only token stops a write there. A push is refused. So is a
+request whose `Host` header or TLS name is not the host it connected
+to, and with raw TCP off, anything in a tunnel
 that is not HTTP. A refusal is a 403 with the reason in
 `X-Egress-Denied`. The log is one JSON line per request with method,
 host, path and decision, never headers, bodies or query strings; `run`

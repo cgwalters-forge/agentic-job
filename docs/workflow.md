@@ -33,8 +33,10 @@ separate jobs on separate machines. The apply job's additional checks are
 `activate`, `notify` and `conclude` also inherit the caller's permissions
 and can remove labels, post reactions and create or edit status comments.
 None of these write-capable jobs executes code produced by the agent.
-`policy` and `check` have `contents: read`; `agent` has `contents: read`
-and `id-token: write`, not repository write permissions.
+`policy` and `check` have `contents: read`; `agent` has `contents`,
+`issues`, `pull-requests` and `actions` read and `id-token: write`, not
+repository write permissions, and hands its token to the agent for
+[GitHub reads](#github-reads-from-the-agent).
 
 ## Reusable checker contract
 
@@ -237,6 +239,8 @@ jobs:
     permissions:
       contents: read
       issues: write # apply may post the allowed comments
+      pull-requests: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads
       id-token: write # GitHub validates the skipped agent job's permission too
     with:
       id: board
@@ -257,9 +261,9 @@ own explicit bounds entry. Set `max-outputs` no higher than your bounds file's
 `max_outputs` (the workflow default is 3).
 
 Keep the permissions above, or configure `apply-environment` as below and
-omit `issues: write`. Even proposals-only callers need `id-token: write`:
-GitHub validates the reusable workflow's permission requests before deciding
-which jobs to skip. No OIDC token is requested in proposals mode.
+grant `issues: read`. Even proposals-only callers need `id-token: write`
+and the agent job's reads: GitHub validates the reusable workflow's
+permission requests before deciding which jobs to skip. No OIDC token is requested in proposals mode.
 CI's `e2e-proposals` runs this noop producer and call without a sandbox or model.
 The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
@@ -294,6 +298,9 @@ jobs:
     uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
+      actions: read
       id-token: write
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
@@ -405,10 +412,13 @@ workflow's commit, the policy job builds the binary there with rustup,
 and apt for the musl compiler. Labels resolve
 in the calling repository.
 
-**Permissions.** The call needs `contents: read` and `id-token: write`
-(the agent job asks for the identity token, for the proxy and the
-tailnet, whether or not the run uses either). The policy, agent and check
-jobs take no more than that. Activate, notify, conclude and apply name no
+**Permissions.** The call needs `contents`, `issues`, `pull-requests`
+and `actions` read, and `id-token: write`: the agent job asks for the
+reads [for the agent](#github-reads-from-the-agent), and for the identity
+token, for the proxy and the tailnet, whether or not the run uses either.
+GitHub refuses the whole call when any of them is missing, even with
+`github-reads: false`. The policy, agent and check jobs take no more than
+that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
 nothing more, and without it add `contents: write`, `issues: write`
@@ -549,19 +559,45 @@ bounds' events and the run ends in the policy job.
 
 ### GitHub reads from the agent
 
-There is currently no opt-in authenticated GitHub read input. The
-sandbox user has no `GITHUB_TOKEN` or `GH_TOKEN`; installing `gh` is
-not enough to give it authenticated issue or pull-request access.
-Public HTTP reads and git HTTPS fetches still use the existing egress
-policy, with writes refused.
+The agent gets a GitHub token as `GH_TOKEN`, so `gh` and the API can read
+issues, pull requests, workflow runs and their logs, with a higher rate
+limit than anonymous reads. It is the agent job's own token, which asks
+for `contents`, `issues`, `pull-requests` and `actions` read only, and
+expires when the job ends. The agent can leak it, and that is accepted:
+whoever gets it can read what the agent could, until the job ends, and
+write nothing. The workflow passes no credential that can write to the
+agent job, unless a caller's `GH_READ_TOKEN` (below) can; `SAFE_OUTPUTS_PAT`
+is passed only to apply.
 
-The [integration decision](background-ghaw.md#host-user-integration-decision)
-now calls for handing the read-only job token directly to the agent as
-`GH_TOKEN`, not injecting credentials at the egress proxy. That design is
-not implemented or enabled yet. Permission verification, token delivery,
-the GraphQL POST exception and scripted-agent isolation proof remain work
-for #112. Do not pass a forge token through `sandbox.env` to work around
-the missing permission verification.
+To give the agent another token, store a read-only one as a secret and
+pass it explicitly as `GH_READ_TOKEN: ${{ secrets.NAME }}` under the
+call's `secrets:`; it replaces the job token. GitHub reserves the
+`GITHUB_` prefix for its own names. Before
+the agent starts, a classic personal access token is refused if it has
+any scope but `read:*` and `user:email`: GitHub reports a classic token's
+scopes, so this is checked. Fine-grained, App and job tokens name none,
+and nothing short of trying a write tells whether one can write. Giving
+`GH_READ_TOKEN` read permissions only is therefore the caller's job: use a
+fine-grained token with read access and nothing else, and an expiry. One
+that can write lets the agent write through GraphQL, below.
+Set `github-reads: false` to give the agent no token at all.
+
+The runner writes the token to a file in the sandbox user's home that
+only it can read, and the agent launcher sets it as `GH_TOKEN` and
+drops any other GitHub token variable. A run without one removes the
+file. The token's value is redacted from the transcript, the logs, the
+summary and the proposals, like the run's other tokens. Clone over
+`https://`; public repositories need no credential, and SSH is not
+allowed through the proxy.
+
+The egress proxy still refuses writes to GitHub, with one exception:
+`gh` reads issues and pull requests with GraphQL queries, which are
+`POST api.github.com/graphql`, so that request passes, mutations
+included. GitHub refuses a mutation only because the token cannot write;
+the proxy does not look inside the query. REST writes and pushes are
+refused at the proxy whatever the token. CI's `e2e-full` proves both:
+its scripted agent reads its repository with `gh api` and asks for its
+comment only after GitHub refused it a GraphQL comment.
 
 ### The apply job and its token
 
@@ -638,6 +674,9 @@ To set it up:
        uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
        permissions:
          contents: read
+         issues: read
+         pull-requests: read
+         actions: read
          id-token: write
        secrets:
          SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
