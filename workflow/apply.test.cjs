@@ -146,9 +146,46 @@ test('check and apply refuse a policy call of another commit, and apply an empty
   }
 });
 
-test('a failed status post does not stop the run, and conclude still reports it', () => {
+// A caller that wires apply's checked ID from the agent job, or from
+// another run, would have it apply what check never accepted.
+test("apply takes only this run's check output, whatever the caller wired", () => {
+  const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
+  const verify = "- name: The checked outputs are this run's check's\n";
+  assert.ok(apply.indexOf("- name: Require the checked outputs' artifact ID\n") < apply.indexOf(verify));
+  assert.ok(apply.indexOf(verify) < apply.indexOf('uses: actions/download-artifact@'));
+  assert.ok(apply.indexOf(verify) < apply.indexOf('uses: actions/checkout@'));
+  // Check uploads under the name apply looks for, and only on acceptance.
+  const checker = readFileSync(join(__dirname, '../.github/workflows/check.yml'), 'utf8');
+  assert.match(checker, /- id: upload\n {8}if: \$\{\{ success\(\) && [^\n]*\n(?:[^\n]*\n){2} {10}name: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n/);
+  assert.match(apply, /NAME: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n/);
+  const artifact = (name, run) => JSON.stringify({ id: 42, name, workflow_run: { id: run, head_sha: 'a'.repeat(40) } });
+  // [what the read API says of artifact 42, status]
+  for (const [answer, expected] of [
+    [artifact('p-checked-outputs', 7), 0],
+    // The agent job's proposals, or the outputs of another policy call.
+    [artifact('p-safe-outputs', 7), 1], [artifact('checked-outputs', 7), 1], [artifact('q-checked-outputs', 7), 1],
+    // Another run's.
+    [artifact('p-checked-outputs', 8), 1], [artifact('p-checked-outputs', 77), 1], [JSON.stringify({ name: 'p-checked-outputs' }), 1],
+    // Not found, or not readable without `actions: read`.
+    ['', 1],
+  ]) {
+    const result = command(homedir(), 'bash', ['-eo', 'pipefail', '-c',
+      'gh() { [ "$*" = "api repos/o/r/actions/artifacts/42" ] || return 9; [ -n "$ANSWER" ] && printf "%s" "$ANSWER"; }\n' + step("The checked outputs are this run's check's")],
+      { CHECKED: '42', NAME: 'p-checked-outputs', GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '7', ANSWER: answer });
+    assert.equal(result.status, expected, `${answer}: ${result.stdout}${result.stderr}`);
+  }
+  // The callers whose apply job names its permissions grant it the read.
+  const compose = readFileSync(join(__dirname, '../.github/workflows/example-compose.yml'), 'utf8');
+  assert.match(compose.split('\n  apply:\n')[1], /^ {4}permissions:\n(?: {6}[-\w]+: \w+\n)*? {6}actions: read\n/m);
+});
+
+test('no failure in notify stops the run, and conclude still reports it', () => {
   const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   const notify = policy.split('\n  notify:\n')[1];
+  // Nor does any other failure of notify's, its download or its target:
+  // conclude then reports on the policy's item.
+  assert.match(notify.split('    steps:\n')[0], /^ {4}continue-on-error: true$/m);
+  assert.match(policy, /notified:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.result != 'skipped' \}\}/);
   for (const name of ['An eyes reaction on what started the run', 'A comment that says the run started']) {
     const posted = notify.split(`- name: ${name}\n`)[1].split('\n      - ')[0];
     assert.match(posted, /^ {8}continue-on-error: true$/m, name);
@@ -156,7 +193,7 @@ test('a failed status post does not stop the run, and conclude still reports it'
   // What names the target is still checked, and fails the job.
   assert.doesNotMatch(notify.split('- name: What to react to, and where to comment\n')[1].split('\n      - ')[0], /continue-on-error/);
   assert.match(notify, /^ {6}item: \$\{\{ steps.target.outputs.item \}\}$/m);
-  assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \}\}/);
+  assert.match(policy, /notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \|\| jobs.policy.outputs.item \}\}/);
   const conclude = workflow.split('\n  conclude:\n')[1];
   assert.match(conclude, /- name: Edit the status comment\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true' \}\}/);
   assert.match(conclude, /fromJSON\(inputs.policy\).comment-target != '\*' && !\(fromJSON\(inputs.policy\).notify == 'comment' && fromJSON\(inputs.policy\).notified == 'true'\) \}\}/);
@@ -167,6 +204,19 @@ test('a failed status post does not stop the run, and conclude still reports it'
   ]) {
     const result = command(__dirname, 'bash', ['-eo', 'pipefail', '-c', 'gh() { echo "$3 $4"; };\n' + step('Edit the status comment')],
       { ID: id, ITEM: item, TEXT: 'done', GITHUB_REPOSITORY: 'o/r' });
+    assert.equal(result.status, expected, result.stdout + result.stderr);
+    if (expected === 0) assert.equal(result.stdout.trim(), call);
+  }
+  // Reactions alone: a notify that failed before it found its target left
+  // no id, and conclude reacts to nothing rather than failing.
+  assert.match(conclude, /- name: A reaction that says how it ended\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'reaction' && fromJSON\(inputs.policy\).notified == 'true' && fromJSON\(inputs.policy\).notify-id != '' \}\}/);
+  // [kind, id, status, the API call]
+  for (const [kind, id, expected, call] of [
+    ['issue', '42', 0, 'POST repos/o/r/issues/42/reactions'], ['comment', '42', 0, 'POST repos/o/r/issues/comments/42/reactions'],
+    ['review_comment', '42', 0, 'POST repos/o/r/pulls/comments/42/reactions'], ['issue', '$(exit 9)', 1, ''], ['issue', '4 2', 1, ''],
+  ]) {
+    const result = command(__dirname, 'bash', ['-eo', 'pipefail', '-c', 'gh() { echo "$3 $4"; };\n' + step('A reaction that says how it ended')],
+      { KIND: kind, ID: id, REACTION: 'rocket', GITHUB_REPOSITORY: 'o/r' });
     assert.equal(result.status, expected, result.stdout + result.stderr);
     if (expected === 0) assert.equal(result.stdout.trim(), call);
   }

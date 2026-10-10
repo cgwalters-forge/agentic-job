@@ -432,7 +432,7 @@ jobs:
       contents: read
       issues: write # apply may post the allowed comments
       pull-requests: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # GitHub validates the skipped agent job's permission too
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -451,7 +451,7 @@ jobs:
       contents: write # push the pull request's branch
       issues: write # add_comment
       pull-requests: write # create_pull_request
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # the agent job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -544,7 +544,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -575,7 +575,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
     uses: ./.github/workflows/agentic-job.yml
     with:
@@ -631,7 +631,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
     uses: ./.github/workflows/dispatch.yml
     with:
@@ -651,7 +651,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
     uses: ./.github/workflows/example-compose.yml
     with:
@@ -665,7 +665,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: read # the agent job's GitHub reads
-      actions: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
     uses: ./.github/workflows/agentic-job.yml
     with:

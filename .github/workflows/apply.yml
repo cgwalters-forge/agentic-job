@@ -105,6 +105,25 @@ jobs:
           CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
         run: |
           [[ "$CHECKED" =~ ^[1-9][0-9]*$ ]] || { echo '::error::a checked artifact ID is required'; exit 1; }
+      # Nor is the ID check's because the caller says so: one wired from
+      # the agent job would apply unchecked proposals. It has to be this
+      # run's upload of the name check.yml uploads under this policy
+      # call's prefix, which only check's last step does, and only when
+      # check accepted: a policy call's prefix is unique in a run, as its
+      # own uploads under it would conflict, and so would an earlier upload
+      # of the name with check's. Read with the job token (`actions: read`).
+      # This binds the run, not the attempt: the API names no attempt, and
+      # a re-run keeps the run ID, so an earlier attempt's upload passes.
+      # That is still check's accepted output under this prefix.
+      - name: The checked outputs are this run's check's
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKED: ${{ fromJSON(inputs.check).outputs.artifact-id }}
+          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}checked-outputs
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CHECKED" |
+            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null ||
+            { echo "::error::artifact $CHECKED is not $NAME of run $GITHUB_RUN_ID: apply takes check.yml's output of this run, and the call needs \`actions: read\`"; exit 1; }
       # The output repository, whole: the patch is applied on the commit
       # the agent started from, which a shallow clone does not have. The
       # handlers push with this checkout's credentials. Only check's accepted
@@ -583,8 +602,10 @@ jobs:
         run: |
           [[ "$TARGET" =~ ^[0-9]+$ && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
           gh api -X POST "repos/$REPO/issues/$TARGET/comments" -f body="$TEXT" --jq .html_url
+      # A notify that failed before it found what to react to leaves no
+      # id: nothing is reacted to then, and notify's failure says why.
       - name: A reaction that says how it ended
-        if: ${{ fromJSON(inputs.policy).notify == 'reaction' && fromJSON(inputs.policy).notified == 'true' }}
+        if: ${{ fromJSON(inputs.policy).notify == 'reaction' && fromJSON(inputs.policy).notified == 'true' && fromJSON(inputs.policy).notify-id != '' }}
         env:
           KIND: ${{ fromJSON(inputs.policy).notify-kind }}
           ID: ${{ fromJSON(inputs.policy).notify-id }}

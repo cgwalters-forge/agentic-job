@@ -296,8 +296,8 @@ on:
         description: The `notify` input
         value: ${{ jobs.policy.outputs.notify }}
       notified:
-        description: "`true` when the notify job reacted (and commented) on what started the run"
-        value: ${{ jobs.notify.result == 'success' }}
+        description: "`true` when the notify job ran, failed or not, so that conclude reports how the run ended"
+        value: ${{ jobs.notify.result != 'skipped' }}
       notify-kind:
         description: What the notify job reacted to
         value: ${{ jobs.notify.outputs.kind }}
@@ -305,8 +305,8 @@ on:
         description: Its number
         value: ${{ jobs.notify.outputs.id }}
       notify-item:
-        description: The issue or pull request the notify job comments on
-        value: ${{ jobs.notify.outputs.item }}
+        description: The issue or pull request the notify job comments on, and conclude reports to
+        value: ${{ jobs.notify.outputs.item || jobs.policy.outputs.item }}
       notify-comment-id:
         description: The status comment the notify job posted, which apply.yml's conclude job edits
         value: ${{ jobs.notify.outputs.comment-id }}
@@ -684,11 +684,16 @@ jobs:
   # caller granted the call; the agent's machine never holds a token that
   # can comment. Nothing of the event reaches these steps but numbers,
   # from event.json: the item's and the comment's.
+  # Nothing here gates the run: a failure anywhere in this job, its
+  # download included, would otherwise fail the policy call and skip the
+  # agent, check, apply and conclude with nothing said. conclude reports
+  # how the run ended on the policy's item if this found none.
   notify:
     needs: [policy, activate]
     if: ${{ inputs.event && inputs.notify != 'none' && needs.policy.outputs.admitted == 'true' && needs.policy.outputs.item != '' }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
+    continue-on-error: true
     outputs:
       kind: ${{ steps.target.outputs.kind }}
       id: ${{ steps.target.outputs.id }}

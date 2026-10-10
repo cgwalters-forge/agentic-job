@@ -107,10 +107,13 @@ unexpected successes and other failures fail the script. This follows gh-aw's
 `BrokenName` resolves the artifact name again at apply, allowing a different
 upload to replace what check accepted. It deliberately collapses producer and
 checked-artifact names to demonstrate substitution, rather than literally
-modeling both name registries. `BrokenCredential` runs producer code in
+modeling both name registries. `BrokenWiring` lets apply take the ID a
+caller wired, which may be a producer upload's, instead of looking it up as
+check's upload of this run; the model labels a checked copy by its producer
+index, so only wiring to another upload shows. `BrokenCredential` runs producer code in
 the credential-bearing step. `BrokenBranch` permits overwriting the run branch.
-These are one deliberately broken variant per **passing** invariant, selected
-by constants in the same small module. `BrokenGuard` applies without looking
+These are at least one deliberately broken variant per **passing** invariant,
+selected by constants in the same small module. `BrokenGuard` applies without looking
 for what was posted, as apply did before issue 300. `BrokenMarker` lets check
 accept a proposal holding the name, so that a posted proposal makes another
 look applied.
