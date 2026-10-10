@@ -333,14 +333,15 @@ test("a partial run's push is not applied, whatever else it posts", () => {
 
 // A push goes only to the repository the run worked on: apply checks so
 // before its first step that pushes anything to the output repository.
-test('a push to another output repository stops apply before a fork is brought up to date', () => {
-  const name = "Fetch the target's base branch, and bring a fork's up to it";
+test('target base fetching never advances the output repository and a stale base is refused', () => {
+  const name = "Fetch the target's base branch";
   // [output repository, config, status, whether the fork's branch moved]
   for (const [outputRepo, config, expected, synced] of [
     ['owner/repo', { push_to_pull_request_branch: { target: '42' } }, 0, false],
     ['Owner/Repo', { push_to_pull_request_branch: { target: '42' } }, 0, false],
     ['owner/fork', { push_to_pull_request_branch: { target: '42' } }, 1, false],
-    ['owner/fork', { create_pull_request: { max: 1 } }, 0, true],
+    ['owner/fork', { create_pull_request: { max: 1 } }, 1, false],
+    ['owner/fork', { create_pull_request: { max: 1 }, synced: true }, 0, false],
   ]) {
     const root = mkdtempSync(join(homedir(), 'apply-test-'));
     try {
@@ -357,18 +358,21 @@ test('a push to another output repository stops apply before a fork is brought u
       git(target, 'commit', '-qm', 'base');
       git(target, 'branch', '-M', 'main');
       git(root, 'clone', '-q', '--bare', target, fork);
+      const oldBase = git(target, 'rev-parse', 'HEAD');
       writeFileSync(join(target, 'file.txt'), 'after\n');
       git(target, 'commit', '-qam', 'ahead');
       const ahead = git(target, 'rev-parse', 'HEAD');
       git(root, 'clone', '-q', fork, work);
       writeFileSync(join(root, 'config.json'), JSON.stringify(config));
+      writeFileSync(join(root, 'report.json'), JSON.stringify({ patch: { base_commit: config.synced ? oldBase : ahead } }));
       const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
-        GH_AW_TMP: root, REPO: 'owner/repo', OUTPUT_REPO: outputRepo, BASE: 'main',
+        GH_AW_TMP: root, REPORT: join(root, 'report.json'), REPO: 'owner/repo', OUTPUT_REPO: outputRepo, BASE: 'main',
         GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${target}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/owner/repo',
       });
       const label = `${outputRepo} ${JSON.stringify(config)}`;
       assert.equal(result.status, expected, `${label}: ${result.stdout}${result.stderr}`);
-      if (expected) assert.match(result.stdout, /a push goes to owner\/repo/, label);
+      if (expected) assert.match(result.stdout, config.create_pull_request ? /sync owner\/fork/ : /a push goes to owner\/repo/, label);
+      if (!config.push_to_pull_request_branch || !expected) assert.equal(git(work, 'rev-parse', 'refs/agentic-job/target-base'), ahead);
       assert.equal(git(fork, 'rev-parse', 'main') === ahead, synced, label);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -498,7 +502,7 @@ test('comment-only apply skips every repository step, including checkout', () =>
   const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
   const gate = "if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}";
   assert.match(apply, new RegExp(`uses: actions/checkout@[^\\n]+\\n        ${gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  for (const name of ['Configure git', "Fetch the target's base branch, and bring a fork's up to it",
+  for (const name of ['Configure git', "Fetch the target's base branch",
     'Apply the patch on its own base, and compare what changed with what was checked',
     'A push goes on the head the run started from, and only once']) {
     assert.ok(apply.split(`- name: ${name}\n`)[1].startsWith(`        ${gate}\n`), name);
@@ -945,9 +949,9 @@ test('a pull request is opened from a fork the token owns, made if missing and r
   ]) {
     await assert.rejects(fork([pull], options), error, name);
   }
-  // Before anything is pushed, a fork's base branch included.
+  // Fork isolation is established before fetching and applying the patch.
   assert.ok(workflow.indexOf('- name: Fork the output repository for the pull request\n') <
-    workflow.indexOf("- name: Fetch the target's base branch, and bring a fork's up to it\n"));
+    workflow.indexOf("- name: Fetch the target's base branch\n"));
   assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' \}\}\n/);
 });
 
@@ -958,13 +962,15 @@ test("a pull request's handler pushes only to the fork, and there is none withou
     const handlers = (forked, { partial = '', title = '', branch = 'p/' } = {}) => {
       const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
         GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source', OUTPUT_REPO: 'owner/other', BASE: 'main',
-        BRANCH_PREFIX: branch, PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '', PULL_REQUEST: '{"fallback_as_issue": false}', PUSH: '{}', FORK: forked,
+        BRANCH_PREFIX: branch, PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '',
+        PULL_REQUEST: workflow.match(/PULL_REQUEST: '([^'\n]+)'/)[1], PUSH: '{}', FORK: forked,
       });
       assert.equal(result.status, 0, result.stderr);
       return JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
     };
     assert.deepEqual(handlers('bot/other').create_pull_request, {
-      max: 1, draft: true, fallback_as_issue: false, 'target-repo': 'owner/other', base_branch: 'main',
+      max: 1, draft: true, signed_commits: false, fallback_as_issue: false,
+      preserve_branch_name: true, auto_close_issue: false, 'target-repo': 'owner/other', base_branch: 'main',
       branch_prefix: 'p/', title_prefix: '', 'head-repo': 'bot/other', allowed_repos: ['bot/other'],
     });
     assert.deepEqual(handlers(''), { noop: { max: 1 } });

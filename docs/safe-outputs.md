@@ -340,7 +340,8 @@ Comment-only results need the API token, not a checkout or a fetched base.
 The configuration is the collector's with settings added:
 `create_pull_request` gets `signed_commits: false` (a signed push is
 made through the API as the token's owner), `fallback_as_issue: false`,
-`preserve_branch_name: true`, `target-repo`, `base_branch`,
+`preserve_branch_name: true`, `auto_close_issue: false` (no automatic closing
+keyword for the triggering issue), `target-repo`, `base_branch`,
 `branch_prefix`, `title_prefix`, and the applying account's fork as
 `head-repo` and as the one entry of `allowed_repos`, which the handler
 requires of a `head-repo`; the agent cannot name it, since check refuses
