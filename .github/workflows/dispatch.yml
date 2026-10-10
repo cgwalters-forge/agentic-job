@@ -106,9 +106,17 @@ jobs:
                 !/^[1-9][0-9]*$/.test(item) || !Number.isSafeInteger(Number(item))) {
               throw new Error('Expected OWNER/NAME and a positive safe issue number');
             }
-            if (repo !== context.repo.owner + '/' + context.repo.repo &&
+            // Another repository is written to, and a pull request opened from
+            // a fork, only with a user's token: the job token can do neither.
+            if ((repo !== context.repo.owner + '/' + context.repo.repo || profile === 'implement') &&
                 !process.env.APPLY_ENVIRONMENT?.trim()) missing.push('APPLY_ENVIRONMENT');
-            if (missing.length) throw new Error('Missing repository variables: ' + missing.join(', '));
+            // A scripted run, as CI starts, is given none of the repository
+            // variables, APPLY_ENVIRONMENT included: it stops here for implement
+            // or another repository.
+            if (missing.length) {
+              throw new Error('Missing repository variables (a scripted run is given none, so it cannot implement or write to another repository): ' +
+                missing.join(', '));
+            }
             core.setOutput('agent', agent);
             const [owner, name] = repo.split('/');
             const { data } = await github.rest.issues.get({ owner, repo: name, issue_number: Number(item) });
@@ -143,7 +151,10 @@ jobs:
       GH_READ_TOKEN: ${{ !inputs.scripted && secrets.GH_READ_TOKEN || '' }}
     permissions:
       # Agent/policy/check downscope to read. Apply and refusal reporting
-      # use these writes; neither executes agent-produced code.
+      # use these writes; neither executes agent-produced code. A new pull
+      # request's branch goes to a fork with the apply environment's token:
+      # the job token's one push is a fix to a pull request's branch, off
+      # unless the bounds allow it.
       contents: write
       issues: write
       pull-requests: write
@@ -178,7 +189,6 @@ jobs:
       # the run made when that is not a comment on it.
       issue: ${{ inputs.item }}
       apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
-      refused-pull-request: branch
       apply-partial: false
       notify: none
       artifact-prefix: dispatch-${{ inputs.kind }}-

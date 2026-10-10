@@ -88,8 +88,6 @@ jobs:
       REPORT: /tmp/gh-aw/report.json
       # What gh-aw's handlers list the things they made in.
       MADE: /tmp/gh-aw/safe-output-items.jsonl
-      # What the forge answers where Actions may not open pull requests.
-      REFUSAL: GitHub Actions is not permitted to create or approve pull requests
     steps:
       # The pieces must be one commit's: a policy call pinned elsewhere
       # would have this commit's code check (or apply) the settings,
@@ -163,6 +161,62 @@ jobs:
           git config merge.renames false
           git config diff.renames false
           git config am.keepcr true
+      # A pull request is opened from a fork of the output repository owned
+      # by whoever the token names, never from a branch of the output
+      # repository: its CI then runs the agent's commit as a fork's, with a
+      # read-only token, no secrets and no OIDC token. The forge makes the
+      # fork if there is none and answers with the existing one otherwise;
+      # it is not synced, as the handler pushes the commit together with the
+      # base it sits on. The job token names nobody and cannot fork (policy
+      # refuses it create_pull_request), and an owner of the output
+      # repository has no fork of it to push to. What the forge answers
+      # with is the user's repository in the output repository's network,
+      # which can be the network's root or the caller's repository: it has
+      # to be a fork, the user's, and neither of those, with Actions turned
+      # off. This comes before anything is pushed, the fast-forward of a
+      # fork's base included.
+      - name: Fork the output repository for the pull request
+        id: fork
+        if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const output = JSON.parse(require('node:fs').readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
+            if (!output.items.some(item => item.type === 'create_pull_request')) return;
+            const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null);
+            if (!me) throw new Error("a pull request is opened from a fork of the identity apply holds, and GET /user names none: SAFE_OUTPUTS_PAT must be a user's token");
+            const [owner, repo] = process.env.OUTPUT_REPO.split('/');
+            if (owner.toLowerCase() === me.toLowerCase()) {
+              throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: apply as an account that does not own it`);
+            }
+            const { data: fork } = await github.rest.repos.createFork({ owner, repo, default_branch_only: true });
+            const name = String(fork.full_name);
+            if (fork.fork !== true || String(fork.owner?.login).toLowerCase() !== me.toLowerCase() ||
+                [process.env.REPO, process.env.OUTPUT_REPO].some(other => other.toLowerCase() === name.toLowerCase())) {
+              throw new Error(`the forge answered a fork of ${process.env.OUTPUT_REPO} for ${me} with ${name}, which is not ${me}'s own fork of it`);
+            }
+            // The forge makes a fork in the background: wait until git can reach it and its branch.
+            for (let attempt = 1; ; attempt++) {
+              const { exitCode, stdout } = await exec.getExecOutput('git', ['ls-remote', '--heads', `https://github.com/${name}.git`],
+                { ignoreReturnCode: true, silent: true });
+              if (exitCode === 0 && stdout.includes('\trefs/heads/')) break;
+              if (attempt === 30) throw new Error(`the fork ${name} is still not there after ${attempt} tries`);
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            // A push with a PAT, unlike one with the job token, starts the
+            // fork's workflows on `push`, with the fork's secrets: Actions
+            // are turned off there, and nothing is pushed unless the forge
+            // then says they are off.
+            const [forkOwner, forkRepo] = name.split('/');
+            const enabled = await github.rest.actions.setGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo, enabled: false })
+              .then(() => github.rest.actions.getGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo }))
+              .then(({ data }) => data.enabled, () => null);
+            if (enabled !== false) {
+              throw new Error(`Actions could not be turned off on the fork ${name}, which a push with ${me}'s token would run workflows in: ` +
+                "turn them off there, and give SAFE_OUTPUTS_PAT the repo scope (or a fine-grained token Administration: write on the fork)");
+            }
+            core.setOutput('repo', name);
       # The target's base branch as this job fetched it, not as anything
       # that was handed back says. A fork that is behind is fast-forwarded
       # and one that has diverged stops here. A push goes only to the
@@ -242,10 +296,14 @@ jobs:
           exit 1
       # The collector's configuration with how to apply added: an unsigned
       # push keeps the author (a signed one is made through the API, as the
-      # token's owner), and a pull request that fails is not to become an
-      # issue. Each input is one string of the result.
+      # token's owner), a pull request that fails is not to become an
+      # issue, and the branch goes to the fork, which only it may name.
+      # Without a fork there is no pull request to open, and no handler for
+      # one: a pull request's handler without its `head-repo` would push to
+      # the output repository. Each input is one string of the result.
       - name: Write the handlers' configuration
         env:
+          FORK: ${{ steps.fork.outputs.repo }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           PARTIAL: >-
             ${{ fromJSON(inputs.agent).outputs.exit == '124' && '[partial: stopped at the timeout] '
@@ -261,9 +319,11 @@ jobs:
           PUSH: '{"signed_commits": false, "fallback_as_pull_request": false, "if_no_changes": "error"}'
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
-            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" '
-            (select(has("create_pull_request")).create_pull_request) += $pr
-              + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title}
+            --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
+            (if $fork == "" then del(.create_pull_request) else . end)
+            | (select(has("create_pull_request")).create_pull_request) += $pr
+              + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
+                 "head-repo": $fork, allowed_repos: [$fork]}
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push + {"target-repo": $repo}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
@@ -325,6 +385,8 @@ jobs:
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
+          # Where a pull request's branch is pushed, the step above's fork.
+          FORK: ${{ steps.fork.outputs.repo }}
           # Whether the token below is the PAT; the secret itself stays there.
           TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
         with:
@@ -372,11 +434,13 @@ jobs:
                   found = comments.find(marked);
                 }
               } else if (item.type === 'create_pull_request') {
-                // The branch is this run's, checked above; the handler names it so.
+                // The branch is this run's, checked above; the handler names it so, in the fork.
+                if (!process.env.FORK) throw new Error('a pull request is to be opened, and there is no fork to open it from');
                 const { normalizeBranchName } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/normalize_branch_name.cjs`);
                 const prefix = normalizeBranchName(process.env.BRANCH_PREFIX);
                 const branch = prefix && !item.branch.startsWith(prefix) ? prefix + item.branch : item.branch;
-                const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, head: `${owner}:${branch}`, state: 'all', per_page: 100 });
+                const head = `${process.env.FORK.split('/')[0]}:${branch}`;
+                const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, head, state: 'all', per_page: 100 });
                 found = pulls.find(pull => marked(pull) && (pull.state === 'open' || pull.merged_at));
                 if (found) {
                   core.setOutput('pull-request-number', found.number);
@@ -399,18 +463,12 @@ jobs:
               await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
                 .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
             }
-      # Where the forge refuses the pull request to Actions, gh-aw's
-      # handler opens an issue in its place before it looks at
-      # `fallback_as_issue`: it knows that refusal by its words. So the
-      # refusal reaches the handler in other words, as a pull request that
-      # failed, which that setting does keep from becoming an issue; and
-      # no client the handlers use opens more issues than the run's
-      # create_issue outputs allow, none for a run without that type. The
-      # other words are fixed ones: gh-aw tries again for minutes when an
-      # error's text has a word like `timeout`
-      # in it, which a repository's or a branch's name may. A handler that
-      # failed fails this step, and the last step says what that means
-      # for the job.
+      # gh-aw's handler can open an issue in a pull request's place
+      # whatever `fallback_as_issue` says (where the forge refuses it to
+      # Actions, for one), so no client the handlers use opens more issues
+      # than the run's create_issue outputs allow, none for a run without
+      # that type. A handler that failed fails this step, and the last step
+      # says what that means for the job.
       #
       # Just before that, a push's pull request is read again, as the
       # handler will read it, with the token it pushes with: it must still
@@ -561,11 +619,6 @@ jobs:
               client.hook.after("request", (response, options) => {
                 if (creates(options, "issues")) issues -= 1;
               });
-              client.hook.error("request", (error, options) => {
-                if (!creates(options, "pulls") || !String(error.message).includes(process.env.REFUSAL)) throw error;
-                core.setOutput("refused", "true");
-                throw new Error("Actions may not open pull requests in the output repository; the branch is pushed there");
-              });
               return client;
             };
             require(`${dir}/setup_globals.cjs`).setupGlobals(core, guarded(github), context, exec, io, (...args) => guarded(getOctokit(...args)));
@@ -575,20 +628,20 @@ jobs:
               throw new Error("a project write was refused by the apply bounds");
             }
       # What was made, for whoever reads the run: `pull_request` is null
-      # when none was opened, and `refused` then says whether the forge
-      # refused it to Actions after the branch was pushed.
+      # when none was opened, and `fork` names where its branch went.
       - name: Write applied.json
         if: ${{ always() && steps.apply.outcome != 'skipped' }}
         env:
           PR: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
           PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
-          REFUSED: ${{ steps.apply.outputs.refused == 'true' }}
+          FORK: ${{ steps.fork.outputs.repo }}
           EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
         run: |
           touch "$MADE"
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
-            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$REFUSED" '
-            {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made, refused: $refused,
+            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --arg fork "$FORK" '
+            {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made,
+             fork: (if $fork == "" then null else $fork end),
              already_applied: $skipped[0],
              pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
              handlers: $handlers[0]}' | tee "$GH_AW_TMP/applied.json"
@@ -640,15 +693,10 @@ jobs:
               body: `The [run](${process.env.RUN_URL}) for this made ${url}\n\n<!-- ${name} -->` });
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed.
-      # The one failure a caller may take for an answer is the forge's
-      # refusal of the pull request and of nothing else, with the branch
-      # pushed: one output failed, and it was the one that pushes.
-      - name: Every output was applied, or only the pull request was refused
+      - name: Every output was applied
         env:
-          MODE: ${{ fromJSON(inputs.policy).refused-pull-request }}
           OUTCOME: ${{ steps.apply.outcome }}
           FAILED: ${{ steps.apply.outputs.items_failed }}
-          PUSHES_FAILED: ${{ steps.apply.outputs.code_push_failure_count }}
           PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
           TREE: ${{ steps.trial.outputs.tree }}
         run: |
@@ -662,11 +710,9 @@ jobs:
               { echo "::error::$BASE of $OUTPUT_REPO does not hold the checked change as one commit on $head"; exit 1; }
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
-          opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json") refused=$(jq .refused "$GH_AW_TMP/applied.json")
-          if [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; }; then exit 0; fi
-          [ "$refused/$FAILED/$PUSHES_FAILED/$MODE" = true/1/1/branch ] ||
-            { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened, refused to Actions: $refused)"; exit 1; }
-          echo "::warning::the branch is pushed to $OUTPUT_REPO and the pull request was refused: $REFUSAL there. Allow it in the repository's settings, or give the apply job a token (apply-environment)"
+          opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json")
+          [ "$OUTCOME" = success ] && { [ "$asked" = 0 ] || [ "$opened" = true ]; } ||
+            { echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1; }
 
   # How an event-triggered run ended, for whoever started it: the status
   # comment `notify` posted is edited to say so, or a reaction says it

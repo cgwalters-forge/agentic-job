@@ -20,10 +20,11 @@ the `review-item` and `fake-profile` inputs**. A local reusable call here pins t
 and actions to this checkout's commit: it cannot silently run an older release.
 In `dispatch.toml`, replace `repos` with your exact public repository name.
 Commit the files to your protected default branch and allow the pinned actions
-and reusable workflow in Actions settings. Enable Actions to create pull
-requests if you want a draft rather than the pushed-branch fallback.
+and reusable workflow in Actions settings. `implement` also needs
+`APPLY_ENVIRONMENT` ([below](#switch-to-a-real-agent)): apply opens its
+pull request only from a fork owned by the account whose PAT that is.
 
-Leave repository variables unset for this trial. Start with an existing issue:
+Leave the other repository variables unset for this trial. Start with an existing issue:
 
 ```sh
 gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 \
@@ -31,11 +32,12 @@ gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 \
 ```
 
 `triage` and `research` post a canned comment on that issue and leave the tree
-clean. `implement` writes `DISPATCH-TRIAL.md` and proposes one draft PR (or
-pushes a branch if Actions cannot open a PR). `review` takes an **open,
+clean. `implement` writes `DISPATCH-TRIAL.md` and proposes one draft PR from
+the applying account's fork. `review` takes an **open,
 same-repository pull request number targeting main**, not an issue number. It
 posts a clearly scripted verdict naming the pinned head. This is not an
-approval or permission to merge. Delete trial branches/comments when finished.
+approval or permission to merge. Delete trial comments, and branches in the
+applying account's fork, when finished.
 
 `fix` also takes an open, same-repository pull request number. Its run starts
 from that pull request's branch at the head it had when dispatched, and its
@@ -106,25 +108,30 @@ before real tasks. No model API key goes on the runner. Narrowing broker
 admission to a specific caller remains optional hardening tracked in
 [tracker#452](https://github.com/cgwalters-forge/tracker/issues/452).
 
-For cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
+For `implement`, and for cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
 restricted to the protected default branch, and store its sole secret
 `SAFE_OUTPUTS_PAT` there, as described in
 [credential setup](workflow.md#the-apply-job-and-its-token).
 This is gh-aw's `safe-outputs.github-token` for
 [cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
 see [the mapping and job-token limits](workflow.md#the-apply-job-and-its-token).
-Use a fine-grained bot PAT restricted to the
-exact targets with Contents, Issues and Pull requests read/write, no workflow
-write or administration. Preflight names a missing `APPLY_ENVIRONMENT` too.
+Use a classic PAT with `repo` scope of a dedicated bot account that does not
+own the target and has write access to nothing but its own forks: such a PAT
+writes to every repository its account can, and still comments, opens issues
+and forks on any public repository, so the account is what bounds it. Apply
+pushes an `implement` branch only to that account's fork of the target, which
+it makes if missing, and turns off Actions there before it pushes
+([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
+Preflight names a missing `APPLY_ENVIRONMENT` too.
 Only apply enters the environment; an empty secret falls back to the job token,
-which cannot write cross-repository. The shipped caller explicitly forwards
+which cannot write cross-repository, fork or open pull requests. The shipped caller explicitly forwards
 `SAFE_OUTPUTS_PAT` whether or not an environment is configured; scripted CI
 forwards no credential value. If you call `dispatch.yml` as a reusable workflow,
 explicitly pass `SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}` to that wrapper
 too. A repository/organization secret also works; environment protection rules
 still gate apply, and the environment's same-name secret takes precedence.
-Never use `secrets: inherit`. For same-repository trials the apply job uses
-its job token instead; no environment is needed.
+Never use `secrets: inherit`. For same-repository triage, research and review
+the apply job uses its job token instead; no environment is needed.
 
 ## Giving runs a toolchain
 
@@ -243,8 +250,9 @@ Comment routing is fixed to the dispatched item, not agent-supplied fields.
 
 `node --test workflow/dispatch.test.cjs workflow/review.test.cjs` executes the
 actual preflight, all shipped sessions and hostile review routing/output cases.
-CI calls the **same dispatch.yml**, running implement, triage and research on
-pushes and same-repository PRs, plus review on PRs. Its separate verifier checks
-the patch, both issue comments and the review verdict, then existing CI cleanup
-removes trial branches, drafts and comments. Fork PRs do not get write jobs.
+CI calls the **same dispatch.yml**, running triage and research on pushes and
+same-repository PRs, plus review on PRs. Not implement: CI holds no PAT to
+fork with. Its separate verifier checks both issue comments and the review
+verdict, then existing CI cleanup removes the comments. Fork PRs skip these
+jobs.
 These tests do not prove real-model quality or connectivity to a private broker.

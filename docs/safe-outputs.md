@@ -341,12 +341,16 @@ The configuration is the collector's with settings added:
 `create_pull_request` gets `signed_commits: false` (a signed push is
 made through the API as the token's owner), `fallback_as_issue: false`,
 `preserve_branch_name: true`, `target-repo`, `base_branch`,
-`branch_prefix` and `title_prefix`; `add_comment` gets `target-repo` and
-`target`. They list what they made in
-`/tmp/gh-aw/safe-output-items.jsonl`. Where the forge refuses pull
-requests to Actions, the upstream handler would push the branch and
-open a fallback issue despite `fallback_as_issue: false`. The workflow
-intercepts that refusal so it cannot open an unrequested issue.
+`branch_prefix`, `title_prefix`, and the applying account's fork as
+`head-repo` and as the one entry of `allowed_repos`, which the handler
+requires of a `head-repo`; the agent cannot name it, since check refuses
+a request's `repo`. Without a fork there is no `create_pull_request`
+handler ([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
+`add_comment` gets `target-repo` and `target`. They list what they made in
+`/tmp/gh-aw/safe-output-items.jsonl`. Where the forge refuses a pull
+request, the upstream handler would open a fallback issue despite
+`fallback_as_issue: false`; the workflow lets no handler open more
+issues than the run's `create_issue` outputs allow.
 
 CI drives both scripts with the scripted agent, and
 [`safe-outputs-probe.yml`](../.github/workflows/safe-outputs-probe.yml)

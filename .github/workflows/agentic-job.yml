@@ -189,13 +189,6 @@ on:
         description: Apply what a run stopped at a limit handed back, as a draft that says it is partial
         type: boolean
         default: false
-      refused-pull-request:
-        description: >-
-          What the apply job does when the branch is pushed and the forge then refuses to open
-          the pull request because Actions may not: `fail`, or `branch` to end well with the
-          branch and say so
-        type: string
-        default: fail
       expect-check-refusal:
         description: Expect a policy-check refusal instead of applying outputs; unexpected acceptance or operational failure still fails
         type: boolean
@@ -341,7 +334,6 @@ jobs:
       output-repo: ${{ inputs.output-repo }}
       apply-environment: ${{ inputs.apply-environment }}
       apply-partial: ${{ inputs.apply-partial }}
-      refused-pull-request: ${{ inputs.refused-pull-request }}
       expect-check-refusal: ${{ inputs.expect-check-refusal }}
       comment-target: ${{ inputs.comment-target }}
       issue: ${{ inputs.issue }}

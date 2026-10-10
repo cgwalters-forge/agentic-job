@@ -23,8 +23,15 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # A fork's pull request, as apply opens every agent's, gets a read-only
+    # token and no OIDC token: the end-to-end jobs, which write here, cannot
+    # run for it. Whether this is one is decided here and not in
+    # ci-paths.cjs, which runs from the pull request's own tree. `e2e` says
+    # whether the jobs run; `fork-e2e` that the paths need them (or do not
+    # say) and they cannot, which fails the required ci check.
     outputs:
-      e2e: ${{ steps.paths.outputs.e2e }}
+      e2e: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'false' || steps.paths.outputs.e2e }}
+      fork-e2e: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && steps.paths.outputs.e2e != 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -394,22 +401,23 @@ jobs:
 
   # The reusable workflow, called as another repository would call it,
   # with the scripted agent: all four jobs, on four machines. The agent
-  # clones this repository's main branch, changes a file and asks for a
-  # pull request and a comment, and the apply job applies both here with
-  # the job's own token. `e2e-verify` then looks at what was made.
+  # clones this repository's main branch and asks for a comment, and the
+  # apply job applies it here with the job's own token. `e2e-verify` then
+  # looks at what was made.
   #
-  # This organization does not let Actions open pull requests, and no
-  # other token is stored yet, so the pull request ends at that refusal
-  # with its branch pushed: `refused-pull-request: branch` takes that for
-  # an answer, and `e2e-verify` requires either the draft or exactly that
-  # refusal.
+  # None asks for a pull request: apply opens one only from a fork of the
+  # account its SAFE_OUTPUTS_PAT belongs to, policy refuses it to the job
+  # token, and CI holds no PAT. apply.test.cjs runs the fork, the handlers'
+  # configuration and the guard against a stand-in for the forge.
   #
   # Nothing is opened in the tracker for a run. The comments go to issue
   # 64, which exists for them and stays closed (`with:` takes no `env`,
   # so its number is written out three times below), and `e2e-verify`
   # deletes them again.
   #
-  # A pull request from a fork cannot run these: its token cannot write.
+  # A pull request from a fork skips these (the changes job): its token cannot
+  # write. Unless it changes only documentation, the required ci check then
+  # fails, and a maintainer runs them from a branch of this repository.
   # Never forward a deployment PAT to proposed workflow code. These callers
   # exercise apply's job-token fallback under their declared permissions.
   # Same noop producer/call as docs/workflow.md; no checkout or producer token.
@@ -449,17 +457,17 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions: &e2e-permissions
-      contents: write # push the pull request's branch
+      contents: read
       issues: write # add_comment
-      pull-requests: write # create_pull_request
+      pull-requests: write # the status comment and reaction on the pull request e2e-event is for
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write # the agent job asks for it, for a proxy this run has none of
     uses: ./.github/workflows/agentic-job.yml
     with:
       id: e2e-full-${{ github.run_id }}
-      task: Add a scratch file under docs/, ask for a pull request, and comment on the issue.
+      task: Comment on the issue.
       repo: ${{ github.repository }}
-      outputs: create_pull_request,add_comment,noop
+      outputs: add_comment,noop
       allow: .github/agentic-job/allow.toml
       config: .github/agentic-job/hosted.toml
       agent: fake
@@ -468,16 +476,11 @@ jobs:
       max-requests: "0"
       budget: "100"
       comment-target: "64"
-      # A quote of each kind: it must reach the handlers as it is.
-      title-prefix: 'e2e "full" it''s:'
-      branch-prefix: e2e/full/
       artifact-prefix: full-
-      refused-pull-request: branch
 
   # The same, with an agent that starts more subagent tasks than it may:
   # the session has it hand back and stops it, `run` ends with the exit
-  # state of a limit, and what it had done is applied as a draft that
-  # says it is partial.
+  # state of a limit, and its comment is applied saying it is partial.
   e2e-limit:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
@@ -485,9 +488,9 @@ jobs:
     uses: ./.github/workflows/agentic-job.yml
     with:
       id: e2e-limit-${{ github.run_id }}
-      task: Start a change and then too many subagent tasks.
+      task: Start a comment and then too many subagent tasks.
       repo: ${{ github.repository }}
-      outputs: create_pull_request,add_comment,noop
+      outputs: add_comment,noop
       allow: .github/agentic-job/allow.toml
       config: .github/agentic-job/hosted.toml
       agent: fake
@@ -498,11 +501,9 @@ jobs:
       max-tasks: "2"
       budget: "100"
       apply-partial: true
-      branch-prefix: e2e/limit/
       artifact-prefix: limit-
       # So that both ways to the binary run here once a release is pinned.
       build-binary: true
-      refused-pull-request: branch
 
   # The event-triggered path, through the workflow itself and on the
   # event that started this run. On a pull request the policy job admits
@@ -620,16 +621,17 @@ jobs:
           echo "installed=$installed" >> "$GITHUB_OUTPUT"
 
   # Exercise the shipped caller, not a separately maintained imitation.
-  # Pushes and same-repository PRs only; no fork source with a write token.
+  # Not implement: it opens a pull request only with an apply environment's
+  # PAT, which CI does not hold.
   e2e-dispatch:
     needs: changes
-    if: ${{ needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["implement","triage","research","review"]' || '["implement","triage","research"]') }}
+        profile: ${{ fromJSON(github.event_name == 'pull_request' && '["triage","research","review"]' || '["triage","research"]') }}
     permissions:
-      contents: write
+      contents: write # what dispatch.yml asks for; no profile here pushes or opens a pull request
       issues: write
       pull-requests: write
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
@@ -643,11 +645,11 @@ jobs:
       kind: ${{ matrix.profile }}
 
   # The composed example: a caller-owned agent job with a privileged step
-  # before secure-host and a later one without sudo. Gated like
-  # e2e-dispatch, whose verifier counts this job's comment too.
+  # before secure-host and a later one without sudo. e2e-dispatch's
+  # verifier counts this job's comment too.
   e2e-compose:
     needs: changes
-    if: ${{ needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     permissions:
       contents: read
       issues: write
@@ -693,7 +695,7 @@ jobs:
   # apply guard the forge, but never gets cleanup's write token. Cleanup
   # waits for this job even when verification fails.
   e2e-dispatch-verify:
-    if: ${{ always() && needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
     needs: [changes, e2e-dispatch, e2e-compose, e2e-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -719,8 +721,7 @@ jobs:
       # A re-run of the full run's apply job, as far as the forge is
       # concerned: its guard, from the workflow under test, given the
       # outputs check accepted, leaves out the comment the first attempt
-      # posted and the draft if one was opened, and the comment is there
-      # once. The handlers that would post again are not run here; that
+      # posted, and the comment is there once. The handlers that would post again are not run here; that
       # they post only what the guard keeps is apply.test.cjs's to show.
       # Where apply has gh-aw's scripts: the guard names the branch with them.
       - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
@@ -747,7 +748,6 @@ jobs:
           TOKEN_IS_PAT: 'false'
           OUTPUT_REPO: ${{ github.repository }}
           COMMENT_TARGET: "64"
-          BRANCH_PREFIX: e2e/full/
           # e2e-full's, which its name is digested with.
           ARTIFACT_PREFIX: full-
         with:
@@ -766,9 +766,7 @@ jobs:
         run: |
           set -o pipefail
           jq -e '.already_applied == []' "$RUNNER_TEMP/full/applied.json"
-          url=$(jq -r '.pull_request.url // empty' "$RUNNER_TEMP/full/applied.json")
-          jq -e --arg url "$url" 'map(.type) | sort == (["create_pull_request" | select($url != "")] + ["add_comment"] | sort)' "$RUNNER_TEMP/rerun/skipped.json"
-          jq -e --arg url "$url" 'all(.[]; .type != "create_pull_request" or .url == $url)' "$RUNNER_TEMP/rerun/skipped.json"
+          jq -e 'map(.type) == ["add_comment"]' "$RUNNER_TEMP/rerun/skipped.json"
           jq -e '[.items[] | select(.type == "add_comment")] == []' "$RUNNER_TEMP/rerun/agent_output.json"
           name=$(jq -r '.[] | select(.type == "add_comment").name' "$RUNNER_TEMP/rerun/skipped.json")
           gh api --paginate "repos/$GH_REPO/issues/64/comments" | jq -se --arg marker "<!-- $name -->" '
@@ -780,26 +778,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write # delete the scratch branches
       issues: write # delete the comments
-      pull-requests: write # close the drafts
+      pull-requests: write # delete the comments and the reaction on the pull request this run is for
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       ISSUE: "64"
       # What gh-aw's handlers end each comment of this run with.
       RUN: actions/runs/${{ github.run_id }}
-      FULL: e2e/full/agent-run-${{ github.run_id }}
-      LIMIT: e2e/limit/agent-run-${{ github.run_id }}
-      TITLE_PREFIX: 'e2e "full" it''s:'
-      # What hosted.toml says the commit of a hand-back is by.
-      AUTHOR: agentic-job <agentic-job@users.noreply.github.com>
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.e2e-full.outputs.applied-artifact-id }}
@@ -867,30 +854,15 @@ jobs:
           grep -F 'A comment from the scripted agent of an event-triggered run.' "$RUNNER_TEMP/pr-comments"
           grep -F '✅ [ci](' "$RUNNER_TEMP/pr-comments" | grep -F 'ended well'
           gh api "repos/$GH_REPO/issues/$PR/reactions" --jq '[.[] | select(.content == "eyes" and .user.login == "github-actions[bot]")] | length' | grep -vqx 0
-      # The quoted prefix is one string of the handlers' configuration,
-      # and the configuration has the keys the apply job gives it and no
-      # others.
-      - name: An input with quotes reached the handlers as it is and added no key
-        env:
-          ADDED: >-
-            ["base_branch", "branch_prefix", "fallback_as_issue", "preserve_branch_name",
-             "signed_commits", "target-repo", "title_prefix"]
-          POLICY: '["draft", "max", "max_patch_files", "max_patch_size", "protect_top_level_dot_folders", "protected_files", "protected_files_policy"]'
+      # The configuration has the handlers of the outputs asked for and no
+      # others: none that could push.
+      - name: The handlers are those of the outputs asked for
         run: |
-          jq -e --arg prefix "$TITLE_PREFIX" --argjson added "$ADDED" --argjson policy "$POLICY" '
-            .partial == false and .handlers.create_pull_request.title_prefix == $prefix
-            and (.handlers.create_pull_request | keys) == ($added + $policy | sort)
-            and (.handlers | keys) == ["add_comment", "create_pull_request", "noop"]
+          jq -e '
+            .partial == false and .fork == null and .pull_request == null
+            and (.handlers | keys) == ["add_comment", "noop"]
             and (.handlers.add_comment | keys) == ["max", "target", "target-repo"]
           ' "$RUNNER_TEMP/full/applied.json"
-      - name: Each branch is one commit on main, by the hand-back's author, changing the one file
-        run: |
-          git fetch --no-tags origin "+refs/heads/e2e/*:refs/remotes/origin/e2e/*"
-          while read -r branch file; do
-            git merge-base --is-ancestor "origin/$branch~1" origin/main
-            test "$(git log -1 --format='%an <%ae>' "origin/$branch") $(git diff --name-only "origin/$branch~1" "origin/$branch")" = "$AUTHOR $file"
-            git log -1 --format='%H %an <%ae>%n%B' "origin/$branch" | tee -a "$GITHUB_STEP_SUMMARY"
-          done <<< "$FULL docs/e2e-scratch.md"$'\n'"$LIMIT docs/e2e-partial.md"
       # The comments of this run among those of the runs beside it.
       - name: The topic-branch analysis posted one comment on the named issue
         env:
@@ -921,54 +893,17 @@ jobs:
           gh api --paginate "repos/$GH_REPO/issues/$ISSUE/comments" --jq ".[] | select(.body | contains(\"$RUN\")).body" > "$RUNNER_TEMP/comments"
           grep -F 'A comment from the scripted agent of an end-to-end run.' "$RUNNER_TEMP/comments"
           grep -F -A2 "$NOTE" "$RUNNER_TEMP/comments" | grep -F 'A comment from the scripted agent of a run that is stopped.'
-      # Either is right, and nothing else: a draft with the prefixed
-      # title, or the branch with the forge's refusal to let Actions open
-      # the pull request, and then no issue in its place.
-      - name: A draft pull request each, or the refusal of the setting that keeps Actions from opening one
-        env:
-          FULL_TITLE: 'e2e "full" it''s:docs: Scratch change of an end-to-end run'
-          LIMIT_TITLE: "[partial: stopped at a limit] Wrote the first half of a scratch file."
-        run: |
-          jq -e '.partial and (.handlers.create_pull_request.title_prefix == "[partial: stopped at a limit] ")' "$RUNNER_TEMP/limit/applied.json"
-          while read -r run title; do
-            pr=$(jq -r '.pull_request.number // empty' "$RUNNER_TEMP/$run/applied.json")
-            if [ -n "$pr" ]; then gh pr view "$pr" --json isDraft,title,url | tee -a "$GITHUB_STEP_SUMMARY" | jq -e --arg title "$title" '.isDraft and .title == $title'
-            else jq -e '.refused and .pull_request == null and (.made | map(.type) | unique) - ["add_comment"] == []' "$RUNNER_TEMP/$run/applied.json"
-              echo "::notice::the branch was pushed and the pull request refused: this organization does not let Actions open pull requests, and the apply job has no other token (optional SAFE_OUTPUTS_PAT)"
-            fi
-          done <<< "full $FULL_TITLE"$'\n'"limit $LIMIT_TITLE"
+      - name: The run stopped at a limit was applied as partial
+        run: jq -e '.partial and (.handlers | keys) == ["add_comment", "noop"]' "$RUNNER_TEMP/limit/applied.json"
       # gh-aw's handlers end what they open with a link to the run.
       - name: The runs opened no issue
         run: |
           gh api "repos/$GH_REPO/issues?state=all&sort=created&direction=desc&per_page=50" \
             --jq "[.[] | select(.pull_request == null and .user.login == \"github-actions[bot]\" and ((.body // \"\") | contains(\"$RUN\"))).html_url]" | tee /dev/stderr | jq -e '. == []'
       # Whatever happened before: these ask the forge what this run left
-      # and need neither the checkout nor the artifacts, and each is tried
-      # whatever became of the one before it. A branch that is not there
-      # is no failure; a draft that cannot be closed or a comment that
-      # cannot be deleted fails the job, so that neither is left behind
-      # without a red run to say so.
-      - name: Remove the scratch branches
-        if: ${{ always() }}
-        run: |
-          for branch in "$FULL" "$LIMIT" "dispatch/implement/agent-run-$GITHUB_RUN_ID"; do
-            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch" || echo "::notice::no branch $branch to remove"
-          done
-      # Pull requests are closed as issues, which to the API they are.
-      # Branch deletion can close a draft between listing and PATCHing it;
-      # a failed PATCH succeeds only if a fresh read confirms it is closed.
-      - name: Close the drafts
-        if: ${{ always() }}
-        env:
-          MINE: agent-run-${{ github.run_id }}
-        run: |
-          set -o pipefail
-          prs=$(gh pr list --state open --limit 100 --json number,headRefName --jq ".[] | select(.headRefName | endswith(\"$MINE\")).number")
-          for pr in $prs; do
-            gh api -X PATCH "repos/$GH_REPO/issues/$pr" -f state=closed --jq .html_url || {
-              gh api "repos/$GH_REPO/issues/$pr" --jq .state | grep -Fx closed
-            }
-          done
+      # and need no artifact, and each is tried whatever became of the one
+      # before it. A comment that cannot be deleted fails the job, so that
+      # none is left behind without a red run to say so.
       # From the scratch issue, and from the pull request this run is for:
       # gh-aw's handlers also comment where a run was started from.
       - name: Delete the comments
@@ -998,16 +933,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: A fork's pull request cannot run the end-to-end jobs
+        if: ${{ needs.changes.outputs.fork-e2e == 'true' }}
+        run: |
+          echo '::error::This pull request is from a fork and changes what the end-to-end jobs test, which cannot run with its read-only token. ci stays red until a maintainer runs them from a branch of this repository.'
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
           REVIEW_INSTALLED: ${{ needs.review-base.outputs.installed }}
           E2E: ${{ needs.changes.outputs.e2e }}
-          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          FORK_E2E: ${{ needs.changes.outputs.fork-e2e }}
         run: >-
-          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork "$FORK"
-          'all(to_entries[]; .value.result == "success" or
+          jq -e --arg installed "$REVIEW_INSTALLED" --arg e2e "$E2E" --arg fork_e2e "$FORK_E2E"
+          '$fork_e2e == "false" and all(to_entries[]; .value.result == "success" or
           (.value.result == "skipped" and $e2e == "false" and
             (.key | IN("proposals", "e2e-proposals", "e2e-full", "e2e-limit", "e2e-event", "review-base", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
-           (.key == "e2e-review" and .value.result == "skipped" and $installed == "false") or
-            ((.key | IN("e2e-dispatch", "e2e-compose", "e2e-dispatch-verify")) and .value.result == "skipped" and $fork == "true"))' <<<"$NEEDS"
+           (.key == "e2e-review" and .value.result == "skipped" and $installed == "false"))' <<<"$NEEDS"

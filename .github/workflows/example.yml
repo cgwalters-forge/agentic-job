@@ -6,9 +6,9 @@
 #
 # It runs the scripted agent, which needs no inference and no secret: the
 # target is cloned for it, and it tries what it must not be able to do,
-# changes one file and reports. The change comes back as the branch
-# `agent-run-RUNID` here, and as a draft pull request where the
-# repository lets Actions open one.
+# changes one file and reports. The change comes back as a draft pull
+# request here, from the branch `agent-run-RUNID` of the applying
+# account's fork.
 name: example
 run-name: agent ${{ inputs.item }} ${{ inputs.repo }}
 
@@ -48,10 +48,11 @@ jobs:
       id-token: write
       # The agent job's GitHub reads, with the reads of the three below.
       actions: read
-      # For the job's own token to apply the outputs here. With
-      # `apply-environment` these are `read` and nothing more: the
-      # environment's token does the writing.
-      contents: write
+      # For the job's own token to apply the outputs here, which are
+      # comments and issues: a pull request's branch goes to a fork with
+      # the environment's token, so the job token pushes nothing. With
+      # every output applied by that token the writes below can be `read`.
+      contents: read
       issues: write
       pull-requests: write
     with:
@@ -76,12 +77,11 @@ jobs:
       #   inference-url: ${{ vars.INFERENCE_URL }}
       #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       #   max-requests: "150"
-      # To apply with a token of your own, from an environment of this
-      # repository that holds SAFE_OUTPUTS_PAT. The job's explicit mapping
-      # also works when the secret exists only in this environment;
-      # see docs/workflow.md for the full call, never use secrets: inherit.
-      #   output-repo: OWNER/FORK
-      #   apply-environment: agent-apply
-      # Without one: this organization keeps Actions from opening pull
-      # requests, so the pushed branch is the result.
-      refused-pull-request: branch
+      # A pull request is opened from a fork owned by the account whose
+      # token SAFE_OUTPUTS_PAT is, so apply needs one, from an environment
+      # of this repository that holds it: the job token cannot fork, and
+      # policy refuses create_pull_request without an environment. The
+      # job's explicit mapping also works when the secret exists only in
+      # this environment; see docs/workflow.md for the full call, never use
+      # secrets: inherit.
+      apply-environment: agent-apply

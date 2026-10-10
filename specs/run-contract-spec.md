@@ -96,11 +96,12 @@ the token succeeded and GitHub refused it a GraphQL write.
 **RC-018 — What apply's credential can do.** Policy MUST refuse, before an
 agent runs, an output type that the credential apply will hold cannot apply,
 naming the type and the credential it needs. Without an `apply-environment`
-apply holds the job token, which cannot write a Project: `update_project` is
-refused then, and `all` leaves it out. Every other shipped type the job token
-can apply in the calling repository; where the outputs go is the caller's to
-bound (`docs/dispatch.md` requires an apply environment for another
-repository).
+apply holds the job token, which cannot write a Project nor fork (RC-021):
+`update_project` and `create_pull_request` are refused then, and `all`
+leaves them out. Every other shipped type the job token can apply in the
+calling repository; where the outputs go is the caller's to bound
+(`docs/dispatch.md` requires an apply environment for another repository
+and for `implement`).
 Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), test
 `what_the_job_token_cannot_apply_is_refused`;
 [proposals.test.cjs](../workflow/proposals.test.cjs), the `the policy command
@@ -210,7 +211,8 @@ ID, position and digest (over the call's artifact prefix, and a pull
 request's over its checked patch too), puts the name last in what it posts,
 hidden, and
 leaves out a request whose name it finds last in a comment on the target, an
-open or merged pull request from the run's branch, or an issue, posted by its
+open or merged pull request from the run's branch in the fork RC-021 names,
+or an issue, posted by its
 own token's principal: `github-actions[bot]` for the job token, the user
 `GET /user` names for a PAT, and no one for a PAT it does not name. Check MUST refuse any request holding the name. Closing, labelling and setting a project
 field are left to be repeated: done twice they leave the forge as once.
@@ -288,6 +290,39 @@ repository stops apply before a fork is brought up to date`;
 [proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
 policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary`.
+
+**RC-021 — Pull requests from a fork.** Apply MUST NOT push an agent's commit
+to a branch of the output repository. It MUST push a pull request's branch to
+a fork of the output repository owned by the user `GET /user` names for its
+credential, making the fork when there is none, and open the pull request
+with that fork's owner and branch as its head, so that the output
+repository's CI runs the commit as a fork's: with a read-only token, no
+secrets and no OIDC token. Apply MUST fail before any push when that user
+cannot be named, when it owns the output repository, when what the forge
+answers is not that user's own fork and neither the caller's nor the output
+repository, when the fork has no branch git can reach, or when Actions
+cannot be turned off on the fork, as a push with a user's token would start
+its workflows with its secrets; without a fork,
+no pull request handler is configured. There
+is no same-repository mode. This repository's CI MUST give a fork's pull
+request nothing privileged: no `pull_request_target` or `workflow_run`
+trigger, no secret, and no job that writes or asks for an OIDC token runs
+for it; and its required `ci` check MUST NOT pass when the end-to-end jobs
+it skips are needed for what it changes.
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), `a pull request is
+opened from a fork the token owns, made if missing and reached by git`, `a
+pull request's handler pushes only to the fork, and there is none without
+one`, `the pull request is looked for from the branch gh-aw names in the fork,
+prefix normalized`, `a pull request without a fork to open it from stops the
+guard` and `the job fails unless every output was applied and a pull request
+asked for was opened`; [policy.rs](../crates/agentic-job/src/policy.rs), test
+`what_the_job_token_cannot_apply_is_refused` (RC-018);
+[dispatch.test.cjs](../workflow/dispatch.test.cjs), `real agent preflight
+names all missing deployment variables together`;
+[ci-paths.test.cjs](../workflow/ci-paths.test.cjs), `a fork's pull request
+skips E2E, and is held back when its paths need it`, `required ci check
+permits only explicitly gated skips` and `CI gives a fork's pull request no
+trigger, secret or OIDC token`.
 
 ### 3.4 The caller's own agent job
 
@@ -368,15 +403,15 @@ These limitations are not additional guarantees:
   the tested conformance claim.
 - RC-018 decides by `apply-environment`, not by the secret: the policy job
   cannot see whether `SAFE_OUTPUTS_PAT` is passed (RC-009 keeps it from
-  policy). A PAT passed without an environment is refused `update_project`,
-  and an environment whose secret is empty or lacks project scope is admitted
-  and fails at apply. Nor does policy check where the job token can write: it
+  policy). A PAT passed without an environment is refused `update_project`
+  and `create_pull_request`, and an environment whose secret is empty, lacks
+  project scope or cannot fork is admitted and fails at apply. Nor does policy check where the job token can write: it
   writes only the calling repository, and a call whose `repo` or `output-repo`
   is another, without an apply environment, is admitted and fails at apply
   (`dispatch.yml` refuses that before the run). The job token cannot push
   changes under `.github/workflows/` either, which bounds may admit.
-- RC-019 posts no link when the forge refused the pull request and only its
-  branch was pushed: there is no result URL. Its link comment has RC-013's
+- RC-019 posts no link when the pull request was not opened (the job then
+  fails): there is no result URL. Its link comment has RC-013's
   limits for a comment, and a re-run that makes another result is not linked
   again. An event-triggered run on an issue still gets gh-aw's own `Fixes #N`
   in a pull request's body (its `auto_close_issue` default), as before.
@@ -392,6 +427,18 @@ These limitations are not additional guarantees:
   [issue 340](https://github.com/cgwalters-forge/agentic-job/issues/340). No
   CI run pushes to a live pull request: RC-020's evidence is unit tests and
   apply's steps run against a local repository.
+- RC-021 has run against a stand-in for the forge only: no live run has made
+  a fork, pushed to it or opened a pull request from it. What it guarantees
+  of the output repository's CI is what GitHub gives a fork's pull request
+  there; a workflow of that repository on `pull_request_target` or
+  `workflow_run` still runs with its privileges, and its settings decide
+  whether a fork's runs wait for approval. The fork is never deleted, its
+  other branches are left as they are, and the credential that pushes to it
+  can push to every other repository its user owns.
+- Under RC-021 every agent's pull request is a fork's: this repository's
+  CI runs no end-to-end job for it (they run on the push to main once it
+  is merged), and the event and review callers refuse it unless their
+  bounds say `forks = true`.
 - Patch author identity is not bound to the producer or operator; see
   [issue 22](https://github.com/cgwalters-forge/agentic-job/issues/22).
 - Token selection has source and expression tests, not live tests of

@@ -157,7 +157,7 @@ jobs:
     if: ${{ always() && needs.policy.result == 'success' }}
     uses: cgwalters-forge/agentic-job/.github/workflows/apply.yml@COMMIT
     permissions:
-      contents: write
+      contents: read
       issues: write
       pull-requests: write
       actions: read
@@ -244,6 +244,18 @@ and `apply.yml` after it. A caller of `agentic-job.yml` changes nothing
 but dropping the `tailscale-*` inputs: a call that still passes them is
 refused when the workflow starts.
 
+### Migrating to pull requests from a fork
+
+The `refused-pull-request` input of `agentic-job.yml` and `policy.yml` is
+gone: apply no longer pushes a branch to the output repository, so there
+is no pushed branch for `branch` to end with. A call that still passes
+it, `fail` or `branch`, is refused when the workflow starts, as for any
+unknown input; drop it when bumping the pin. A caller that asks for
+`create_pull_request` also needs `apply-environment` with a
+`SAFE_OUTPUTS_PAT` of an account that does not own the output
+repository ([pull requests come from a fork](#pull-requests-come-from-a-fork)),
+and no longer needs `contents: write`, which only pushed the branch.
+
 ## What has run, and what has not
 
 Read this before relying on it.
@@ -251,8 +263,9 @@ Read this before relying on it.
 - The branch pipeline runs in this repository's CI on same-repository pull requests, twice,
   with the scripted agent (`fake`): once to the end, and once stopped at
   a limit. The egress proxy, the network rules and every probe of
-  `sandbox check` are real in those runs. The apply job pushes the
-  branches and posts the comment with the job's own token.
+  `sandbox check` are real in those runs. The apply job posts the
+  comments with the job's own token; neither run asks for a pull
+  request, which takes a PAT ([below](#pull-requests-come-from-a-fork)).
 - Claude Code and opencode have run real tasks on RHEL 10 runners.
   The reusable workflow has been called from
   `cgwalters-bot/agentic-job-trial`: runs
@@ -265,9 +278,11 @@ Read this before relying on it.
   repository, `bootc-dev/cgwalters-devspace-sandbox`, yet.
   A real agent through the reusable workflow
   on GitHub-hosted runners remains untried; the existing broker is private.
-- This repository's CI expects Actions PR creation to be refused, with
-  the branch pushed. That local setting does not prevent other callers
-  from opening PRs with an appropriate token.
+- This repository's CI opens no pull request: apply opens one only from
+  a fork, which takes a PAT that CI does not hold. `apply.test.cjs` runs
+  the fork step, the handlers' configuration and the guard against a
+  stand-in for the forge; a pull request from a fork has not been opened
+  by a live run, and neither has Actions been turned off on a real fork.
 - The example caller has been dispatched on this repository's main
   branch: once to the end, with the scripted agent's built-in session,
   and once naming a private repository, which stopped in the policy
@@ -278,7 +293,12 @@ Read this before relying on it.
   admitted on a pull request, with the comments on the pull request;
   refused on a push. The slash-command, label and schedule examples are
   live here with the scripted agent.
-- Fork pull requests do not run CI's write end-to-end jobs.
+- Fork pull requests, as apply opens every agent's, skip CI's end-to-end
+  jobs, which write here (the `changes` job in `ci.yml`); the other jobs run
+  for them with a read-only token, no secrets and no OIDC token. Unless
+  such a pull request changes only documentation, the required `ci`
+  check fails for it, and a maintainer runs the end-to-end jobs from a
+  branch of this repository before merging it.
 - Not tried at all: `apply-environment`, an `output-repo` other than the
   calling repository, bringing a fork's base branch up to date, a
   network join in a caller's own agent job,
@@ -433,9 +453,10 @@ using a reviewed commit. Replace the example's `repo` default and the
 bounds file's `repos` with your public repository; the allowed base is
 `main`. Keep the permissions. Commit to your default branch, enable
 Actions and permit the referenced actions/workflow and branch writes.
-The example uses the automatic job token, not a configured secret;
-it returns a draft PR when Actions PR creation is enabled, otherwise a
-pushed branch. Three more are started by events, [below](#event-triggered-callers):
+The example applies with the `SAFE_OUTPUTS_PAT` of an `agent-apply`
+environment: it asks for a pull request, which apply opens only from a
+fork owned by the account whose token that is
+([below](#pull-requests-come-from-a-fork)). Three more are started by events, [below](#event-triggered-callers):
 a slash command in a comment, a label on a pull request, a schedule.
 Every input is described where it is declared, at the top of the
 workflow file; this page says what a caller has to provide for them.
@@ -463,7 +484,6 @@ jobs:
       agent-runner: '["self-hosted", "my-label"]'
       inference-url: ${{ vars.INFERENCE_URL }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
-      output-repo: OWNER/FORK
       apply-environment: agent-apply
       apply-partial: true
 ```
@@ -572,8 +592,11 @@ GitHub refuses the whole call when any of them is missing, even with
 that. Activate, notify, conclude and apply name no
 permissions and so
 keeps whatever the call was granted: with `apply-environment` grant
-nothing more, and without it add `contents: write`, `issues: write`
-(comments and issues) and `pull-requests: write` for the job's own token.
+nothing more, and without it add `issues: write` (comments and issues)
+and `pull-requests: write` for the job's own token. A new pull request
+needs no `contents: write`, as its branch goes to a fork with the
+environment's token ([below](#pull-requests-come-from-a-fork)); only a
+`push_to_pull_request_branch` applied with the job token does.
 
 **Limits that fit the agent.** The workflow's defaults are for a real
 agent behind a proxy. A cap on model requests that nothing counts is
@@ -679,9 +702,10 @@ session for testing the wiring, not a response to the task's text.
 
 Comment-only callers use `kind: analysis` with `outputs: add_comment,noop`,
 so no patch is handed back and policy refuses pull request outputs. They
-need no `contents: write`; keep the item write permissions for label
-activation, status and output comments. The command and schedule callers
-also allow pull requests and therefore retain `contents: write` for apply.
+keep `contents: read` and the item write permissions for label activation,
+status and output comments. The command and schedule callers also allow pull requests, which
+apply opens from a fork with its environment's token, so they too keep
+`contents: read`.
 
 What changes with `event: true`. `base` gives way to the pull request's
 base branch where the event names one, and the bounds have to cover it.
@@ -778,19 +802,79 @@ to the protected default branch, entered only by apply.
 
 With no nonempty apply secret, apply uses the job's own token (even with an environment),
 which can write only to the calling repository: `repo` then has to be
-the calling repository, and `output-repo` is left out. Many organizations do
-not let Actions open pull requests. The handlers then push the branch
-and the forge refuses the pull request. By default that fails the job,
-since a run that asked for a pull request and has none did not do what
-it was for. `refused-pull-request: branch` takes the pushed branch for
-the result and says so in a warning, as long as the pull request is the
-only output that failed. Either way no issue is opened in the pull
-request's place: gh-aw's handler would leave one whatever its
-`fallback_as_issue` says, so the apply job hands it that refusal as a
-pull request that failed, and lets no handler open an issue for a run
-whose outputs have none. A comment that comes after the pull request
-in the same hand-back then begins with gh-aw's note that the pull
-request failed.
+the calling repository, and `output-repo` is left out. The job token
+cannot open a pull request either ([below](#pull-requests-come-from-a-fork)).
+
+### Pull requests come from a fork
+
+Apply never pushes an agent's commit to a branch of the output
+repository. Before the handlers run, it forks the output repository
+into the account that `GET /user` names for `SAFE_OUTPUTS_PAT` (the
+forge answers with the existing fork when there is one), waits until
+git reaches the fork, and gives gh-aw's `create_pull_request` handler
+that fork as its `head-repo`. The handler pushes the branch there, on
+top of the checked base it sits on, so the fork's own branches are
+never synced, and opens the pull request in the output repository with
+`head: FORK_OWNER:BRANCH`. The output repository's CI then runs the
+agent's commit as a fork's pull request: with a read-only token, no
+secrets and no OIDC token, and with whatever approval the repository
+requires for outside contributors. A workflow there on
+`pull_request_target` or `workflow_run` still runs with privileges and
+must not check out or run the pull request's code.
+
+A push with a PAT, unlike one with the job token, starts the fork's
+workflows on `push`, with the fork's secrets and a token that writes to
+the fork. So apply turns Actions off on the fork
+(`PUT /repos/FORK/actions/permissions`) and reads the setting back
+before it pushes anything, and stops if it cannot or they stay on. Keep
+Actions off and no secrets on the bot account's forks all the same.
+
+So `create_pull_request` needs a user's token, of an account that does
+not own the output repository, that can fork it, push to the fork, turn
+off the fork's Actions and open pull requests on it: a classic PAT of a
+bot account with `repo` scope, which the Actions setting needs even
+for a public repository. That is wider than the fine-grained PAT
+restricted to the exact target repositories this page used to
+recommend: a classic PAT writes to every repository its account can
+reach, and every handler of apply holds it. Use a dedicated bot account
+with access to nothing but its own forks (no organization membership, no
+collaborator invitations, no repositories of its own beyond the forks),
+so that what the token can push to is what apply means it to. That does
+not bound everything: like any GitHub account, it can still comment, open
+issues and pull requests, and fork on every public repository, and create
+repositories and gists of its own, and every handler of apply holds the
+token that does so. A private output repository is not supported: such
+an account cannot read it, and so cannot fork it. A
+fine-grained PAT of such an account, for "All repositories" with
+Contents, Pull requests and Administration write, would narrow it to
+the account's own repositories; which permissions GitHub asks of each
+step has not been tried here ([what is left](plan.md#open-work)). Policy refuses `create_pull_request` to a call without
+`apply-environment`, as it refuses `update_project`: the job token names
+nobody and has no account to fork into. Apply fails before it pushes
+anything when `GET /user` names nobody (an App's token), or when that
+user owns the output repository and so has no fork of it, or when what
+the forge answers is not that user's own fork (the user's repository in
+the network can be its root, or the caller's repository). There is no
+mode that pushes to the output repository instead.
+
+Every agent's pull request is then a fork's, and so is treated as one
+everywhere. This repository's CI skips the end-to-end jobs for it, as
+they need a write token and an OIDC token, and then fails its required
+`ci` check unless it changes only documentation: a maintainer runs them
+from a branch of this repository with the same commits before merging. The event callers and the review caller refuse a
+fork's pull request unless their bounds say `forks = true`
+([events](events.md)), so an agent's pull request is reviewed by a
+person or by a caller that admits forks.
+
+A re-run looks for the pull request by the fork's owner and branch and
+leaves it out when an earlier attempt opened it, so it is neither pushed
+nor opened again; one whose branch was pushed and that was not opened is
+not completed by a re-run ([below](#running-apply-again)). A run that
+asked for a pull request and has none, or one of whose outputs a handler
+failed, fails the job. No issue is opened in
+the pull request's place: gh-aw's handler would leave one whatever its
+`fallback_as_issue` says, so no handler may open an issue for a run
+whose outputs have none.
 
 The single optional declared secret is `SAFE_OUTPUTS_PAT`. When nonempty,
 it replaces the built-in job token. Checkout and the API handlers use the same
@@ -816,7 +900,7 @@ To set it up:
    default branch, and protect that branch.
 2. Store the token as `SAFE_OUTPUTS_PAT`.
 3. Explicitly pass that same name and set `apply-environment: NAME` and,
-   for a fork, `output-repo`:
+   for another repository, `output-repo`:
 
    ```yaml
    jobs:
@@ -897,20 +981,24 @@ The project workflow changes leave permissions, action pins and token placement
 unchanged. Handler configuration fixes the issue repository to the checked run's
 `repo`, not `output-repo`. The apply-only GraphQL guard prevents gh-aw's implicit
 schema creation and normalized-name writes to unlisted fields. A refused project
-write fails the final outcome even when the PR-refusal exception is enabled.
+write fails the final outcome.
 
 Three things about that environment are easy to get wrong. Its branch
 rule is evaluated against the ref the caller's run is on, not against
 the commit named after `uses:`, which is one more reason to pin by
 commit. Whoever may start the caller's workflow on that branch can have
 the token used, through checked outputs only. And everything the token
-can do is within reach of that one job, so give it no more than pushing
-to the output repository and opening pull requests and comments there.
+can do is within reach of that one job, so give it no more than forking
+the output repository, pushing to its own fork, and opening pull requests
+and comments in the output repository (and pushing its base branch, for an
+`output-repo` that is a fork of the target).
 
-For a patch, when `output-repo` is not the target, it is taken to be a fork: the job
-fast-forwards the fork's base branch to the target's and pushes it
-before the handlers run. A fork whose base branch has commits of its own
-stops the job there.
+For a patch, when `output-repo` is not the target, it is taken to be a fork of
+it: the job fast-forwards its base branch to the target's and pushes it
+before the handlers run. One whose base branch has commits of its own
+stops the job there. The pull request's own branch still goes to the
+applying account's fork of `output-repo`, so that account must not own
+`output-repo`.
 
 Without a patch, apply does not check out a repository, configure git or
 fetch/advance a base branch. An analysis can therefore inspect a topic branch

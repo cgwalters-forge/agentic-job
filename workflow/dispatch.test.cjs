@@ -33,7 +33,7 @@ async function preflight(env = {}, data = { number: 171, title: 'Title', body: '
 
 for (const profile of ['implement', 'triage', 'research']) {
   test(`${profile} resolves exactly the dispatched issue`, async () => {
-    const calls = await preflight({ PROFILE: profile });
+    const calls = await preflight({ PROFILE: profile, APPLY_ENVIRONMENT: profile === 'implement' ? 'agent-apply' : '' });
     assert.equal(JSON.stringify(calls), JSON.stringify([
       { owner: 'owner', repo: 'repo', issue_number: 171 },
     ]));
@@ -124,6 +124,13 @@ test('real agent preflight names all missing deployment variables together', asy
   await assert.rejects(preflight({ AGENT: 'opencode' }),
     /AGENT_MODEL, AGENT_RUNNER, INFERENCE_URL, INFERENCE_AUDIENCE/);
   await assert.rejects(preflight({ TARGET_REPO: 'other/repo' }), /APPLY_ENVIRONMENT/);
+  // A pull request is opened from a fork, which the job token cannot make.
+  for (const environment of ['', ' ']) {
+    await assert.rejects(preflight({ PROFILE: 'implement', APPLY_ENVIRONMENT: environment }), /APPLY_ENVIRONMENT/);
+  }
+  // As a scripted run, which is given no APPLY_ENVIRONMENT, is told.
+  await assert.rejects(preflight({ PROFILE: 'implement', APPLY_ENVIRONMENT: '' }),
+    /a scripted run is given none, so it cannot implement or write to another repository\): APPLY_ENVIRONMENT$/);
 });
 
 test('opencode configuration variables do not affect scripted or Claude runs', () => {
@@ -186,42 +193,35 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);
   assert.match(verifier, /GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-compose, e2e-full\]/);
-  assert.match(verifier, /if: .*always\(\).*outputs.e2e == 'true'.*head.repo.full_name == github.repository/);
+  assert.match(verifier, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
   assert.match(cleanup, /needs: \[.*e2e-dispatch-verify\]/);
   assert.match(cleanup, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);
-  assert.equal((cleanup.match(/uses: actions\/checkout@/g) ?? []).length, 1);
-  assert.match(cleanup, /ref: main\n/);
-  assert.match(cleanup, /persist-credentials: false/);
-  assert.doesNotMatch(cleanup, /dispatch-verify\.cjs|github.sha|\.dispatch-verifier/);
-  for (const name of ['Remove the scratch branches', 'Close the drafts', 'Delete the comments', 'Remove the reaction']) {
+  assert.doesNotMatch(cleanup, /uses: actions\/checkout@|dispatch-verify\.cjs|github.sha|\.dispatch-verifier/);
+  for (const name of ['Delete the comments', 'Remove the reaction']) {
     assert.ok(cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() `) ||
       cleanup.includes(`- name: ${name}\n        if: \$\{\{ always() }}`), name);
   }
   const aggregate = job('ci');
   assert.match(aggregate, /needs: \[.*e2e-dispatch-verify.*\]/);
-  assert.match(aggregate, /IN\("e2e-dispatch", "e2e-compose", "e2e-dispatch-verify"\).*result == "skipped" and \$fork == "true"/);
+  // A fork's pull request is no reason to pass a skipped job: it fails ci.
+  assert.doesNotMatch(aggregate, /\$fork\b/);
+  assert.match(aggregate, /'\$fork_e2e == "false" and all\(/);
 });
 
-test('CI verifies actual dispatch comments, pinned SHA and patch, not only job success', () => {
+test('CI verifies actual dispatch comments and pinned SHA, not only job success', () => {
   const source = fs.readFileSync(path.join(root, 'workflow/dispatch-verify.cjs'), 'utf8');
   const head = 'a'.repeat(40);
   const comment = body => ({ user: { login: 'github-actions[bot]' }, body: body + '\nactions/runs/1' });
-  const draft = 'https://github.com/owner/repo/pull/150';
-  const link = comment(`The [run](https://github.com/owner/repo/actions/runs/1) for this made ${draft}\n\n<!-- agentic-job-linked: 1/0123456789abcdef -->`);
   const completed = [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.')];
   const verify = (change = {}) => {
     const repo = change.repo ?? 'owner/repo';
     const env = { GH_REPO: repo, RUN: 'actions/runs/1', PR: '147',
-      REVIEW_HEAD: head, GITHUB_RUN_ID: '1', RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
+      REVIEW_HEAD: head, RESULT: 'success', COMPOSE_RESULT: 'success', ...change.env };
     const responses = {
-      [`repos/${repo}/issues/64/comments`]: change.comments ?? [...completed, link],
+      [`repos/${repo}/issues/64/comments`]: change.comments ?? completed,
       [`repos/${repo}/issues/147/comments`]: [comment(
         'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: ' + (change.head ?? head) +
         '\nToolchain: ' + (change.toolchain ?? 'cargo 1.93.1'))],
-      [`repos/${repo}/commits/dispatch/implement/agent-run-1`]: {
-        files: [{ filename: change.file ?? 'DISPATCH-TRIAL.md' }], parents: [{}] },
-      [`repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':')}dispatch%2Fimplement%2Fagent-run-1&state=all`]: [{ draft: change.draft ?? true,
-        body: change.body ?? `Scripted.\n\nRefs ${repo}#64\n\n<!-- agentic-job-applied: 1/0/0123456789abcdef -->`, html_url: draft }],
     };
     vm.runInNewContext(source, {
       process: { env },
@@ -236,10 +236,9 @@ test('CI verifies actual dispatch comments, pinned SHA and patch, not only job s
   verify();
   verify({ toolchain: 'none' });
   verify({ repo: 'cgwalters-forge/agentic-job' });
-  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'cgwalters-forge/agentic-job', toolchain: 'none' }, { file: 'README.md' }, { comments: [] },
-    { draft: false }, { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
-    { comments: [comment('Scripted dispatch completed.'), comment('Scripted dispatch completed.'), link] },
-    { comments: completed }, { comments: [...completed, link, link] }, { body: 'Scripted.\n\nFixes #64' }]) {
+  for (const change of [{ head: 'b'.repeat(40) }, { repo: 'cgwalters-forge/agentic-job', toolchain: 'none' }, { comments: [] },
+    { env: { RESULT: 'failure' } }, { env: { COMPOSE_RESULT: 'skipped' } }, { env: { REVIEW_HEAD: '' } },
+    { comments: completed.slice(1) }, { comments: [...completed, completed[0]] }]) {
     assert.throws(() => verify(change));
   }
 });
