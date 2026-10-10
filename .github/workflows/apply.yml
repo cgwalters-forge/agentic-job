@@ -335,6 +335,11 @@ jobs:
           # Unsigned, as above. No title prefix: the push handler would
           # take it for one the pull request's title must have.
           PUSH: '{"signed_commits": false, "fallback_as_pull_request": false, "if_no_changes": "error"}'
+        # `checkout_mapping` tells the push handler that the output
+        # repository's checkout is the workspace. From a caller in another
+        # repository it would otherwise look for that checkout itself, and
+        # refuse the output repository as not in `allowed_repos`, which
+        # names the fork alone.
         run: |
           jq --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
             --arg target "$COMMENT_TARGET" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
@@ -343,7 +348,7 @@ jobs:
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
                  "head-repo": $fork, allowed_repos: [$fork]}
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) += $push
-              + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork]}
+              + {"target-repo": $repo, "head-repo": $fork, allowed_repos: [$fork], checkout_mapping: {($repo | ascii_downcase): "."}}
             | (select(has("add_comment")).add_comment) += {"target-repo": $repo, target: $target}
             | (select(has("create_issue")).create_issue) += {"target-repo": $repo, title_prefix: $title}
             | (select(has("close_issue")).close_issue) += {"target-repo": $action_repo, target: "*", issue_intent: false, allow_body: false}
