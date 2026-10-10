@@ -163,6 +163,26 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs), tests
 `issue_labels_are_checked_not_silently_filtered` and
 `an_issue_that_links_other_issues_is_refused`.
 
+**RC-013 — Re-run application.** A re-run of apply MUST NOT post an accepted
+comment, issue or pull request that an earlier attempt of the same run posted,
+and MUST apply the comments and issues it did not. Apply names each by run
+ID, position and digest (over the call's artifact prefix, and a pull
+request's over its checked patch too), puts the name last in what it posts,
+hidden, and
+leaves out a request whose name it finds last in a comment on the target, an
+open or merged pull request from the run's branch, or an issue, posted by its
+own token's principal: `github-actions[bot]` for the job token, the user
+`GET /user` names for a PAT, and no one for a PAT it does not name. Check MUST refuse any request holding the name. Closing, labelling and setting a project
+field are left to be repeated: done twice they leave the forge as once.
+Enforcement: [apply.test.cjs](../workflow/apply.test.cjs), tests from
+`a posted body hides the name the guard put last` to `a pull request
+without a checked patch stops the guard`;
+[check/mod.rs](../crates/agentic-job/src/check/mod.rs), test `what_is_refused`;
+the e2e-dispatch-verify step `The re-run left out what was applied, and the
+comment is there once` in [ci.yml](../.github/workflows/ci.yml), which re-runs
+apply's guard and not its handlers; and `AtMostOnce` and
+`NoFalseSkip` in the [TLA+ model](README.md).
+
 ## 4. Not yet enforced
 
 These limitations are not additional guarantees:
@@ -177,6 +197,18 @@ These limitations are not additional guarantees:
 - Token selection has source and expression tests, not live tests of
   environment-only secret delivery or environment protection gates. See
   [token setup](../docs/workflow.md#the-apply-job-and-its-token).
+- RC-013 does not cover an issue a re-run starts within seconds of the
+  attempt that opened it: the search apply looks it up with lags behind.
+  Nor a comment where the destination is `*` and the request names no item,
+  nor another workflow of the same repository posting a request's name with
+  its job token, which is the same `github-actions[bot]`. An app's token in
+  `SAFE_OUTPUTS_PAT` names no one, so a re-run with it posts again. A pull request whose branch an
+  earlier attempt pushed but did not open, or that was closed unmerged with
+  its branch kept, is not completed: the handler stops at the existing
+  branch, as before. "Re-run all jobs" keeps the run ID, but the agent hands
+  back anew, and what differs is applied as new. The hidden name is checked
+  on the forge, not a ledger, so deleting what was posted lets a re-run post
+  it again.
 - The separate-job design runs pinned handlers, not producer scripts, in apply.
   There is no comprehensive test proving that every future workflow step with
   a credential avoids executing producer code. Source review remains necessary.

@@ -647,11 +647,12 @@ jobs:
       budget: '100'
       artifact-prefix: review-
 
-  # Proposed verifier code may read dispatch results, but never gets cleanup's
-  # write token. Cleanup waits for this job even when verification fails.
+  # Proposed verifier code may read dispatch results, and the full run's
+  # apply guard the forge, but never gets cleanup's write token. Cleanup
+  # waits for this job even when verification fails.
   e2e-dispatch-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [changes, e2e-dispatch]
+    needs: [changes, e2e-dispatch, e2e-full]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -672,6 +673,63 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REVIEW_HEAD: ${{ needs.e2e-dispatch.outputs.review-head }}
         run: node workflow/dispatch-verify.cjs
+      # A re-run of the full run's apply job, as far as the forge is
+      # concerned: its guard, from the workflow under test, given the
+      # outputs check accepted, leaves out the comment the first attempt
+      # posted and the draft if one was opened, and the comment is there
+      # once. The handlers that would post again are not run here; that
+      # they post only what the guard keeps is apply.test.cjs's to show.
+      # Where apply has gh-aw's scripts: the guard names the branch with them.
+      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+        if: ${{ always() && needs.e2e-full.result == 'success' }}
+        with:
+          destination: ${{ runner.temp }}/gh-aw/actions
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ always() && needs.e2e-full.result == 'success' }}
+        with:
+          artifact-ids: ${{ needs.e2e-full.outputs.applied-artifact-id }}
+          path: ${{ runner.temp }}/full
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ always() && needs.e2e-full.result == 'success' }}
+        with:
+          name: full-checked-outputs
+          path: ${{ runner.temp }}/rerun
+      - name: Run the full run's apply guard again
+        if: ${{ always() && needs.e2e-full.result == 'success' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_TMP: ${{ runner.temp }}/rerun
+          REPORT: ${{ runner.temp }}/rerun/report.json
+          # e2e-full passes no SAFE_OUTPUTS_PAT: its apply posted with the job token.
+          TOKEN_IS_PAT: 'false'
+          OUTPUT_REPO: ${{ github.repository }}
+          COMMENT_TARGET: "64"
+          BRANCH_PREFIX: e2e/full/
+          # e2e-full's, which its name is digested with.
+          ARTIFACT_PREFIX: full-
+        with:
+          script: |
+            const workflow = require('node:fs').readFileSync('.github/workflows/agentic-job.yml', 'utf8');
+            const section = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
+            const guard = section.split('script: |\n')[1].split('\n')
+              .filter(line => line.startsWith(' '.repeat(12))).map(line => line.slice(12)).join('\n');
+            const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+            await new AsyncFunction('require', 'process', 'core', 'github', guard)(require, process, core, github);
+      - name: The re-run left out what was applied, and the comment is there once
+        if: ${{ always() && needs.e2e-full.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          jq -e '.already_applied == []' "$RUNNER_TEMP/full/applied.json"
+          url=$(jq -r '.pull_request.url // empty' "$RUNNER_TEMP/full/applied.json")
+          jq -e --arg url "$url" 'map(.type) | sort == (["create_pull_request" | select($url != "")] + ["add_comment"] | sort)' "$RUNNER_TEMP/rerun/skipped.json"
+          jq -e --arg url "$url" 'all(.[]; .type != "create_pull_request" or .url == $url)' "$RUNNER_TEMP/rerun/skipped.json"
+          jq -e '[.items[] | select(.type == "add_comment")] == []' "$RUNNER_TEMP/rerun/agent_output.json"
+          name=$(jq -r '.[] | select(.type == "add_comment").name' "$RUNNER_TEMP/rerun/skipped.json")
+          gh api --paginate "repos/$GH_REPO/issues/64/comments" | jq -se --arg marker "<!-- $name -->" '
+            [ .[][] | select(.body | contains($marker)) ] | length == 1'
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}

@@ -152,7 +152,7 @@ test('CI isolates proposed dispatch verifier code from write-capable cleanup', (
   assert.match(verifier, /persist-credentials: false/);
   assert.match(verifier, /run: node workflow\/dispatch-verify.cjs/);
   assert.match(verifier, /GH_TOKEN: \$\{\{ github.token \}\}/);
-  assert.match(verifier, /needs: \[changes, e2e-dispatch\]/);
+  assert.match(verifier, /needs: \[changes, e2e-dispatch, e2e-full\]/);
   assert.match(verifier, /if: .*always\(\).*outputs.e2e == 'true'.*head.repo.full_name == github.repository/);
   assert.match(cleanup, /needs: \[.*e2e-dispatch-verify\]/);
   assert.match(cleanup, /if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}/);

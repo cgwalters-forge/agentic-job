@@ -1,17 +1,16 @@
 # A first TLA+ model: proposal → check → apply
 
-**Today's pipeline does not satisfy universal at-most-once application.**
-Re-running apply on an accepted comment-only artifact can post the comment
-again. `RerunWitness.cfg` checks the actual model with `AtMostOnce` and TLC
-rejects it. This is a finding, not a deliberately weakened production model.
-No production workflow or Rust is changed here, and no follow-up issue is opened.
+`Pipeline.cfg` checks five properties of the pipeline: apply consumes the
+immutable contents check accepted (`AcceptedOnly`), the writer does not execute
+producer code (`CredentialIsolation`), an existing run-named branch blocks
+another patch push (`BranchOnce`), a re-run of apply posts no accepted proposal
+a second time (`AtMostOnce`), and apply leaves a proposal out only if it was
+posted (`NoFalseSkip`). Each has a broken variant that TLC must reject.
 
-The passing `Pipeline.cfg` checks three narrower properties: apply consumes
-the immutable contents check accepted (`AcceptedOnly`), the writer does not
-execute producer code (`CredentialIsolation`), and an existing run-named branch
-blocks another patch push (`BranchOnce`). The last property is not a comment
-deduplication rule. A green specs job means the expected results were reproduced,
-**not** that the desired universal at-most-once property holds.
+`AtMostOnce` was false before apply had its guard: re-running apply on an
+accepted comment posted the comment again, as
+[issue 300](https://github.com/cgwalters-forge/agentic-job/issues/300) saw on
+the forge. `BrokenGuard` keeps that pipeline as the negative control.
 
 ## Start with a state, then take a step
 
@@ -33,7 +32,8 @@ not the security property we are checking.
 ## Where the model meets the code
 
 `uploads` maps two immutable producer IDs to representative proposals:
-`comment`, `patch`, or `invalid`. Each ID denotes a distinct payload, even if
+`comment`, `patch`, `invalid`, or `marked`: a proposal holding the name apply
+hides in what it posts. Each ID denotes a distinct payload, even if
 both payloads have the same kind. `latest` is the ID currently under the same
 artifact name. `Upload` represents hand-back from
 [`run/handback.rs`](../crates/agentic-job/src/run/handback.rs), or a proposals-only
@@ -49,15 +49,20 @@ the workflow; the model labels a checked copy with its producer index, not with
 a claim that the numeric IDs are equal. `Check` abstracts the collector plus
 [`check/mod.rs`](../crates/agentic-job/src/check/mod.rs) and
 [`check.yml`](../.github/workflows/check.yml): invalid proposals are refused,
-and only accepted proposals are uploaded as `checked-outputs`. The legacy
+and only accepted proposals are uploaded as `checked-outputs`. A `marked`
+proposal is refused too. The legacy
 proposals selector uses a name **before** validation; apply still uses check's
 returned ID. Choosing any existing producer ID covers both selector routes.
 
 `phase` is the check/apply job gate, not every workflow step. `Apply` abstracts
 the writer's immutable-ID download and pinned gh-aw handlers in
 [`agentic-job.yml`](../.github/workflows/agentic-job.yml). `history` records
-successful effects as `(checked ID, used ID, kind)` for checking invariants;
-**it is observation state, not a deduplication ledger in the implementation**.
+successful effects as `(checked ID, used ID, kind)`: the forge's comments,
+issues and pull requests. Apply's guard reads it as the implementation reads the
+forge, for the name hidden in what the bot posted (`Evidence`). Only the bot's
+posts count, so a commenter's is not in `history`; a posted `marked` proposal
+is the bot's, and may name any proposal. `skipped` records what the guard left
+out.
 `branch` represents the persistent `agent-run-RUNID` branch: another patch push
 cannot overwrite it. `Retry` represents re-running apply with its old accepted
 artifact or re-running check (assuming its upload succeeds). Neither erases
@@ -71,11 +76,12 @@ interpret that data safely; this model does not verify their implementations.
 Separate machines, read-only check permissions, and apply-only token placement
 are documented in [the workflow guide](../docs/workflow.md).
 
-The rerun finding also follows from the actual pinned
-[add-comment handler](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/js/add_comment.cjs):
-its default path calls `issues.createComment`; `processedCount` is local to a
-new handler instance. Apply does not read an earlier `applied.json` to consume
-requests. Comment-only apply has no checkout or existing-branch gate.
+Why the guard is apply's and not the handlers': the pinned
+[add-comment handler](https://github.com/github/gh-aw/blob/c227508baacbbe271be6c5a4f303936840b3c813/actions/setup/js/add_comment.cjs)
+calls `issues.createComment` with a `processedCount` local to a new handler
+instance, and comment-only apply has no checkout or existing-branch gate. The
+pull request handler fails on an existing branch, but once a merged pull
+request's branch is deleted it opens another.
 
 ## Run it
 
@@ -104,9 +110,10 @@ checked-artifact names to demonstrate substitution, rather than literally
 modeling both name registries. `BrokenCredential` runs producer code in
 the credential-bearing step. `BrokenBranch` permits overwriting the run branch.
 These are one deliberately broken variant per **passing** invariant, selected
-by constants in the same small module. `RerunWitness` has all broken switches
-off: it demonstrates the already-false desired property, rather than pretending
-that production has a guard it does not have.
+by constants in the same small module. `BrokenGuard` applies without looking
+for what was posted, as apply did before issue 300. `BrokenMarker` lets check
+accept a proposal holding the name, so that a posted proposal makes another
+look applied.
 
 The independent [specs CI workflow](../.github/workflows/specs.yml) runs this
 command with `contents: read`, no secrets, the existing full checkout action
@@ -122,18 +129,19 @@ model reported:
 
 ```text
 Model checking completed. No error has been found.
-383 states generated, 227 distinct states found, 0 states left on queue.
-The depth of the complete state graph search is 8.
+879 states generated, 501 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 10.
 ```
 
-`RerunWitness` exited 12 with `Error: Invariant AtMostOnce is violated.`
+`BrokenGuard` exited 12 with `Error: Invariant AtMostOnce is violated.`
 Its first three states initialize, upload a comment under ID 1, then accept it.
 Here are the last three states from that actual trace (action locations omitted):
 
 ```text
 State 4: <Apply>
+/\ skipped = {}
 /\ credential = TRUE
-/\ history = <<[kind |-> "comment", checked |-> 1, used |-> 1]>>
+/\ history = <<[kind |-> "comment", used |-> 1, checked |-> 1]>>
 /\ phase = "done"
 /\ accepted = 1
 /\ uploads = <<"comment", "absent">>
@@ -142,8 +150,9 @@ State 4: <Apply>
 /\ latest = 1
 
 State 5: <Retry>
+/\ skipped = {}
 /\ credential = FALSE
-/\ history = <<[kind |-> "comment", checked |-> 1, used |-> 1]>>
+/\ history = <<[kind |-> "comment", used |-> 1, checked |-> 1]>>
 /\ phase = "apply"
 /\ accepted = 1
 /\ uploads = <<"comment", "absent">>
@@ -152,9 +161,10 @@ State 5: <Retry>
 /\ latest = 1
 
 State 6: <Apply>
+/\ skipped = {}
 /\ credential = TRUE
-/\ history = << [kind |-> "comment", checked |-> 1, used |-> 1],
-   [kind |-> "comment", checked |-> 1, used |-> 1] >>
+/\ history = << [kind |-> "comment", used |-> 1, checked |-> 1],
+   [kind |-> "comment", used |-> 1, checked |-> 1] >>
 /\ phase = "done"
 /\ accepted = 1
 /\ uploads = <<"comment", "absent">>
@@ -166,8 +176,22 @@ State 6: <Apply>
 Read adjacent states as a diff: `Retry` resets job-local credential state but
 keeps the prior effect. The second `Apply` appends a second effect for ID 1.
 Nothing was swapped and no untrusted code ran, yet `AtMostOnce` is false.
-TLC reported 195 generated states, 124 distinct states, and depth 6 before
-stopping at this counterexample. This is a model trace, not a live forge rerun.
+TLC reported 317 generated states, 190 distinct states, and depth 6 before
+stopping at this counterexample. With the guard, the same second `Apply` finds
+ID 1 in `history` and adds it to `skipped` instead.
+
+`BrokenMarker` exited 12 with `Error: Invariant NoFalseSkip is violated.` after
+eight states: a comment is uploaded under ID 1 and a `marked` proposal under
+ID 2; check accepts ID 2 and apply posts it; a re-run of check accepts ID 1,
+and apply finds the posted name and leaves ID 1 out, never posted:
+
+```text
+State 8: <Apply>
+/\ skipped = {1}
+/\ history = <<[kind |-> "marked", used |-> 2, checked |-> 2]>>
+```
+
+These are model traces, not live forge re-runs.
 
 ## Honest scope
 
@@ -176,16 +200,30 @@ two producer uploads, one proposal per upload and at most two successful effects
 in one workflow run. It abstracts validation into valid/invalid, assumes trusted
 policy/binary/handler source selection and immutable artifact IDs, and omits
 network failures, Git hooks, sandbox exploits, partial multi-output application,
-concurrent apply jobs, artifact expiry, branch deletion and forge/API retries.
+concurrent apply jobs, the forge's search lag, artifact expiry, branch deletion and forge/API retries.
 Branch persistence is an assumption: deleting the branch removes that guard.
+`Check` refusing every `marked` proposal is an assumption too: the handlers
+decode entities and drop invisible characters after check, so the code also
+counts only the first name in a body, the one apply puts before the request's
+text (`a name the handlers decoded into a posted body` in `apply.test.cjs`).
+A pull request whose branch was pushed without being opened is not completed
+by a re-run; the model's `Apply` posts or skips as a whole.
 Identical text uploaded under a new ID is not deduplicated by this model either.
+Each upload stands for one proposal, so a half-applied attempt, posting some of a
+run's proposals and not the rest, is not modelled: `workflow/apply.test.cjs`
+covers it with `a re-run after a half-applied attempt applies only what was not`,
+and that only the bot's posts count with the `a comment named by …` cases. The
+bot is apply's token's principal (`github-actions[bot]` for the job token, the
+PAT's user), not any bot; and a pull request's name covers its checked patch,
+so a different patch is a different proposal (`a different patch with the same
+request is not taken for the open pull request`).
 
 `AcceptedOnly` is artifact/proposal identity, not byte-for-byte equality of final
 forge text: trusted partial markers, sanitization, handler footers and caller-fixed
 destinations may change its presentation. The model does not establish that a
 patch changes only its checked paths; the trial/file-list checks and local
 `workflow/apply.test.cjs` tests cover that separate implementation boundary.
-There is no liveness, TLAPS, generated code, or new production security control.
+There is no liveness, TLAPS or generated code.
 
 When changing artifact selectors, check/upload gates, the pinned handlers,
 branch behavior or token-bearing steps, review this model's corresponding

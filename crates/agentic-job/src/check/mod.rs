@@ -198,6 +198,26 @@ fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or_default()
 }
 
+/// What the apply job writes, hidden, into each body it posts, so that a
+/// re-run finds what was already applied and skips it. A request holding
+/// it could make a re-run skip another request, so none may.
+const APPLIED_MARKER: &str = "agentic-job-applied";
+
+fn holds_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains(APPLIED_MARKER),
+        Value::Array(values) => values.iter().any(holds_marker),
+        Value::Object(map) => map_holds_marker(map),
+        _ => false,
+    }
+}
+
+fn map_holds_marker(map: &Map<String, Value>) -> bool {
+    map.iter().any(|(key, value)| {
+        key.to_ascii_lowercase().contains(APPLIED_MARKER) || holds_marker(value)
+    })
+}
+
 /// The fields of a request that would take it out of the policy. gh-aw's
 /// rules let a request name a repository of its own, and a pull request a
 /// base branch and whether it is a draft; whether a handler honours them
@@ -566,6 +586,17 @@ fn check_outputs_to(
         items
             .iter()
             .flat_map(|item| redirections_to(item, policy, comment)),
+    );
+    errors.extend(
+        items
+            .iter()
+            .filter(|item| map_holds_marker(item))
+            .map(|item| {
+                format!(
+                    "a {} holding {APPLIED_MARKER}, which apply writes",
+                    item_type(item)
+                )
+            }),
     );
 
     let patch_names: Vec<&str> = contents
@@ -1060,6 +1091,28 @@ mod tests {
                     ..Handback::default()
                 },
                 "a secret-shaped string in outputs.jsonl",
+            ),
+            // The collector strips HTML comments outside code, not inside.
+            (
+                "another run's applied marker in a body",
+                Handback {
+                    items: vec![
+                        json!({"type": "create_pull_request", "title": "t", "branch": BRANCH,
+                        "body": "```\n<!-- agentic-job-applied: 99/0/0123456789abcdef -->\n```"}),
+                    ],
+                    ..pr()
+                },
+                "a create_pull_request holding agentic-job-applied, which apply writes",
+            ),
+            (
+                "the stamp apply turns into a marker, in any case",
+                Handback {
+                    items: vec![
+                        json!({"type": "noop", "message": "Agentic-Job-Applied: 7/1/0123456789abcdef"}),
+                    ],
+                    ..Handback::default()
+                },
+                "a noop holding agentic-job-applied, which apply writes",
             ),
             (
                 "a secret in the patch",

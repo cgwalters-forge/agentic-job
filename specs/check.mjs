@@ -21,7 +21,8 @@ if (createHash('sha256').update(readFileSync(jar)).digest('hex') !== sha256) {
 
 const cases = [
   ['Pipeline', null],
-  ['RerunWitness', 'AtMostOnce'], // Today's pipeline, not a repaired design.
+  ['BrokenGuard', 'AtMostOnce'],
+  ['BrokenMarker', 'NoFalseSkip'],
   ['BrokenName', 'AcceptedOnly'],
   ['BrokenCredential', 'CredentialIsolation'],
   ['BrokenBranch', 'BranchOnce'],

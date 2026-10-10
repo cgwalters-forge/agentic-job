@@ -180,7 +180,10 @@ takes the collector's result and does none of it again, except to
 count. It refuses a hand-back holding any other file, a file over its
 size or a string shaped like a credential; a request naming another
 repository or base than the policy's; and a pull request that is not a
-draft, or does not come with exactly its patch.
+draft, or does not come with exactly its patch. It refuses any request
+holding `agentic-job-applied`, the name apply hides in what it posts
+so that a re-run leaves it out
+([running apply again](workflow.md#running-apply-again)).
 
 The workflow also supplies `--comment-repo OWNER/REPO --comment-target NUMBER`
 when the caller fixes a comment destination. These paired options bind comments

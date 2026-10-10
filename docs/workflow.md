@@ -770,17 +770,63 @@ day. `applied.json` names what the apply job made:
 ```json
 {"schema": "agentic-job-applied/v1", "repo": "OWNER/NAME", "partial": false,
  "made": [{"type": "create_pull_request", "number": 12, "url": "..."}],
- "refused": false, "pull_request": {"number": 12, "url": "..."},
- "handlers": {}}
+ "refused": false, "already_applied": [],
+ "pull_request": {"number": 12, "url": "..."}, "handlers": {}}
 ```
 
 `made` is gh-aw's own list. `pull_request` is null when none was opened,
 and `refused` then says whether the forge refused it to Actions after
 the branch was pushed; nothing in `made` stands for it then.
+`already_applied` lists what an earlier attempt of the job had posted
+(`type`, `name`, `url`), which this one left out; see
+[running apply again](#running-apply-again).
 `handlers` is the configuration the handlers ran with.
 
 The workflow's outputs are `exit` (the exit state of `run`),
 `pull-request` and `applied-artifact-id`.
+
+### Running apply again
+
+Re-running the apply job applies the accepted outputs again, and gh-aw's
+handlers would post each comment, issue and pull request again: once a
+merged pull request's branch is deleted, even the pull request. So
+before the handlers run, apply names each comment, issue and pull
+request `agentic-job-applied: RUNID/POSITION/DIGEST`, by the run, its
+place among the outputs and the first 16 hex digits of the SHA-256 of
+the `artifact-prefix` and the request (for a pull request, and the patch
+`check` accepted). The calls of one run share its ID, and two of them can
+hand back the same request, so the prefix, which tells them apart, is
+part of the name. Apply puts the name last in the body, so its first line
+is still the verdict or the partial run's note; the handlers' client
+turns that line into an HTML comment as it is sent. An attempt then
+leaves out each request whose name it finds last in a body already
+posted:
+
+- a comment, among the comments on its target;
+- a pull request, on an open or merged pull request from the run's
+  branch (the job's `pull-request` output is then that one's);
+- an issue, through the forge's search, as gh-aw finds its own issues.
+  The search lags seconds behind, so an issue opened just before is not
+  found.
+
+The rest are applied, so a re-run completes an attempt that stopped
+part-way, and the job summary lists what was left out. A pull request
+whose branch was pushed and that was not opened is the exception: the
+handler stops at the branch that is already there. Only what the
+job's token posted counts: `github-actions[bot]`'s for the job token,
+the user's `GET /user` names for a PAT; a name in anyone else's comment,
+another app's bot included, is ignored. A token in `SAFE_OUTPUTS_PAT`
+that `GET /user` does not name, such as an app's, has no one whose
+posts count: nothing is left out, and a re-run posts again. `check`
+refuses any request holding the name, so the agent cannot make one
+request look applied by posting another. Closing an issue, adding
+labels and setting a project field are left to be done again: done
+twice they leave the forge as once. "Re-run all jobs" keeps the run's
+ID, but runs the agent again: what it hands back the same is left out,
+and what differs is applied as new. A pull request with a different
+patch is new even with the same title, body and branch; its handler
+then stops at the run's branch, which is already there, and apply
+fails rather than report the earlier pull request.
 
 ### Auditing downloaded artifacts
 
@@ -845,7 +891,8 @@ handlers push the name they are given, so the job requires it to be
 `agent-run-RUNID` of this very run before the handlers push anything;
 a branch that exists is never overwritten. So a job that is run again
 in the same run, after its first attempt pushed, stops at the branch
-that is already there.
+that is already there, unless its pull request was opened, which it then
+leaves out ([running apply again](#running-apply-again)).
 
 Both the trial and the handler keep a carriage return at the end of a
 line (`am.keepcr`), for patches to files with CRLF line ends.
