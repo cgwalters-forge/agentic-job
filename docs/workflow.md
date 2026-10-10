@@ -833,7 +833,11 @@ So `create_pull_request` needs a user's token, of an account that does
 not own the output repository, that can fork it, push to the fork, turn
 off the fork's Actions and open pull requests on it: a classic PAT of a
 bot account with `repo` scope, which the Actions setting needs even
-for a public repository. That is wider than the fine-grained PAT
+for a public repository. Give it the `workflow` scope too: the fork is
+never synced, so a push to it brings in whatever workflow-file commits
+the output repository gained since, which was tried live only with that
+scope ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
+That is wider than the fine-grained PAT
 restricted to the exact target repositories this page used to
 recommend: a classic PAT writes to every repository its account can
 reach, and every handler of apply holds it. Use a dedicated bot account
