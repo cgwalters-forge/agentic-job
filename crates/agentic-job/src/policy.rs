@@ -45,12 +45,21 @@ pub const OUTPUT_TYPES: &[&str] = &[
 
 /// The output types the job token cannot apply, whatever the call grants
 /// it, and the credential each needs instead. GitHub gives a workflow's
-/// token no permission on Projects; every other type writes to a
-/// repository, which the token can when it is the calling one.
-const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[(
-    "update_project",
-    "a token with project scope as SAFE_OUTPUTS_PAT, in an apply environment",
-)];
+/// token no permission on Projects, and no account to fork into: apply
+/// opens a pull request only from a fork of the identity it applies as,
+/// so that the target's CI runs agent-written code as a fork's, with a
+/// read-only token. Every other type writes to a repository, which the
+/// token can when it is the calling one.
+const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
+    (
+        CREATE_PULL_REQUEST,
+        "a user's token that can fork the output repository and push to its fork, as SAFE_OUTPUTS_PAT in an apply environment",
+    ),
+    (
+        "update_project",
+        "a token with project scope as SAFE_OUTPUTS_PAT, in an apply environment",
+    ),
+];
 
 /// A run hands back one patch, so at most one pull request, or one push.
 const MAX_PULL_REQUESTS: u32 = 1;
@@ -1594,8 +1603,20 @@ files = ["README.md", "AGENTS.md"]
             ),
             ("update_project", false, Ok(&["update_project"])),
             (
+                "create_pull_request",
+                true,
+                Err(
+                    "output type \"create_pull_request\" needs a user's token that can fork the output repository",
+                ),
+            ),
+            (
                 "create_pull_request,add_comment,noop,missing_tool,missing_data",
                 true,
+                Err("without an apply environment, apply holds the job token"),
+            ),
+            (
+                "create_pull_request,add_comment,noop,missing_tool,missing_data",
+                false,
                 Ok(&[
                     "create_pull_request",
                     "add_comment",
@@ -1605,15 +1626,14 @@ files = ["README.md", "AGENTS.md"]
                 ]),
             ),
             (
+                "add_comment,noop,missing_tool,missing_data",
+                true,
+                Ok(&["add_comment", "missing_data", "missing_tool", "noop"]),
+            ),
+            (
                 "all",
                 true,
-                Ok(&[
-                    "create_pull_request",
-                    "add_comment",
-                    "missing_data",
-                    "missing_tool",
-                    "noop",
-                ]),
+                Ok(&["add_comment", "missing_data", "missing_tool", "noop"]),
             ),
             (
                 "all",
@@ -1651,7 +1671,7 @@ files = ["README.md", "AGENTS.md"]
         for output in OUTPUT_TYPES {
             assert_eq!(
                 NOT_FOR_THE_JOB_TOKEN.iter().any(|(name, _)| name == output),
-                *output == "update_project",
+                ["create_pull_request", "update_project"].contains(output),
                 "{output}"
             );
         }

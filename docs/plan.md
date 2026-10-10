@@ -60,6 +60,21 @@ Dispatch gives a scripted `fix` the `implement` profile, which asks for no
 output: the run makes the push from its outcome, so that case needs no
 profile of its own.
 
+Pull requests from a fork ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340))
+have run only against a stand-in for the forge. CI needs an end-to-end
+job that opens one from a fork again, with a bot PAT held in an
+environment that a fork's pull request cannot reach. The recommended
+credential is a classic `repo` PAT of a dedicated account; a fine-grained
+PAT for "All repositories" of an account that owns only its forks would
+be narrower, once the permissions it needs to fork, push, turn off the
+fork's Actions and open the pull request are known.
+
+Pushing to a pull request's branch
+([#406](https://github.com/cgwalters-forge/agentic-job/issues/406)) still
+pushes to the branch in the output repository itself, not to a fork: the
+target's `pull_request` workflows then run the agent's commit as a
+same-repository one. It stays off by default.
+
 ## Interactive sessions
 
 Attachment is not built. [interactive.md](interactive.md) describes the

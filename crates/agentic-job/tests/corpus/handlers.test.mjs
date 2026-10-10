@@ -19,9 +19,9 @@ const configStep = workflow.split('- name: Write the handlers\' configuration\n'
   .split('        run: |\n')[1].split(/\n        [^ ]/)[0]
   .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
 
-test('project boundary refusal cannot use the tolerated PR refusal exception', () => {
+test('project boundary refusal fails the apply job', () => {
   assert.match(workflow, /core\.setOutput\("project-refused", "true"\)/);
-  const final = workflow.split('- name: Every output was applied, or only the pull request was refused')[1];
+  const final = workflow.split('- name: Every output was applied\n')[1];
   assert.match(final, /PROJECT_REFUSED: \$\{\{ steps\.apply\.outputs\.project-refused \}\}/);
   const guard = final.split('        run: |\n')[1].split('\n')[0].trim();
   for (const [value, code] of [['true', 1], ['', 0]]) {
@@ -67,7 +67,7 @@ test('agent-board proposals pass the pinned collector and bounded project check'
     }
     const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
       ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: proposal.target_repo, OUTPUT_REPO: 'example/other',
-      BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}',
+      BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
     } });
     assert.equal(configured.status, 0, configured.stderr);
     const config = JSON.parse(readFileSync(file('handler-config.json')));
@@ -197,7 +197,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
       assert.equal(checked.status, ok ? 0 : 1, name);
       const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
         ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: repo, OUTPUT_REPO: 'owner/other',
-        BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}',
+        BASE: 'main', BRANCH_PREFIX: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
       } });
       assert.equal(configured.status, 0, configured.stderr);
       const calls = [];

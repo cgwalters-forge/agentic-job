@@ -26,7 +26,7 @@ jobs:
     permissions:
       actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
       id-token: write
-      contents: write
+      contents: read # a pull request's branch goes to a fork with the apply environment's token
       issues: write
       pull-requests: write
     with:
@@ -37,6 +37,10 @@ jobs:
         request that fixes one, or say in a comment that you found none.
       repo: ${{ github.repository }}
       outputs: create_pull_request,add_comment,noop
+      # A pull request comes from a fork of the account whose token the
+      # environment's SAFE_OUTPUTS_PAT is; the job token cannot open one, and
+      # policy refuses create_pull_request without an environment.
+      apply-environment: agent-apply
       # Where a comment goes, since no event names an item: an issue of
       # your own in place of this repository's scratch issue.
       comment-target: "64"
@@ -46,4 +50,3 @@ jobs:
       timeout: "10"
       max-requests: "0"
       budget: "100"
-      refused-pull-request: branch

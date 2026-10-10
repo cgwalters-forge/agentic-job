@@ -14,46 +14,6 @@ const event = { before: base, after: head, pull_request: { base: { sha: base }, 
 const root = path.join(__dirname, '..');
 const ci = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
 
-test('draft cleanup accepts only successful closure or confirmed closed state', () => {
-  const step = ci.split('      - name: Close the drafts\n')[1].split('      # From the scratch issue')[0];
-  const command = step.split('        run: |\n')[1].trimEnd()
-    .split('\n').map(line => line.replace(/^          /, '')).join('\n');
-  for (const [name, prs, listExit, patchExit, state, readExit, success, reads] of [
-    ['no drafts', '', 0, 0, 'open', 0, true, 0],
-    ['closed by PATCH', '12 13', 0, 0, 'open', 0, true, 0],
-    ['branch deletion raced with PATCH', '12 13', 0, 1, 'closed', 0, true, 2],
-    ['PATCH failed and still open', '12 13', 0, 1, 'open', 0, false, 1],
-    ['state read failed', '12', 0, 1, 'closed', 1, false, 1],
-    ['listing failed', '', 1, 0, 'closed', 0, false, 0],
-  ]) {
-    const mock = `gh() {
-      if [ "$1" = pr ]; then
-        printf '%s\\n' "$PRS"
-        return "$LIST_EXIT"
-      fi
-      if [ "$2" = -X ]; then
-        printf 'patch %s\\n' "$4" >&2
-        return "$PATCH_EXIT"
-      fi
-      printf 'read %s\\n' "$2" >&2
-      printf '%s\\n' "$STATE"
-      return "$READ_EXIT"
-    }`;
-    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `${mock}\n${command}`], {
-      encoding: 'utf8',
-      env: { ...process.env, GH_REPO: 'owner/repo', MINE: 'agent-run-1',
-        PRS: prs, LIST_EXIT: String(listExit), PATCH_EXIT: String(patchExit),
-        STATE: state, READ_EXIT: String(readExit) },
-    });
-    assert.ifError(result.error);
-    assert.equal(result.status === 0, success, `${name}: ${result.stderr}`);
-    assert.equal((result.stderr.match(/^read /gm) || []).length, reads, name);
-    if (!success && prs) {
-      assert.doesNotMatch(result.stderr, /issues\/13/, `${name}: must stop on a real failure`);
-    }
-  }
-});
-
 test('each CI apt operation has acquisition retries and a short step timeout', () => {
   let operations = 0;
   for (const file of ['ci.yml', 'build.yml']) {
@@ -88,6 +48,34 @@ test('only README and documentation Markdown can skip E2E', () => {
     const output = Buffer.from(names.length ? `${names.join('\0')}\0` : '');
     assert.equal(requiresE2e(event, 'pull_request', () => output), expected, JSON.stringify(names));
   }
+});
+
+test('a fork\'s pull request skips E2E, and is held back when its paths need it', () => {
+  // ci.yml decides what a fork's pull request is: this file's script runs
+  // from the pull request's own tree, and only answers for the paths.
+  const fork = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository";
+  const changes = ci.split('\n  changes:\n')[1].split(/\n  [a-z][a-z-]*:\n/)[0];
+  assert.ok(changes.includes(`\n      e2e: \${{ ${fork} && 'false' || steps.paths.outputs.e2e }}\n`));
+  // Anything but a plain "no" from the paths holds the pull request back.
+  assert.ok(changes.includes(`\n      fork-e2e: \${{ ${fork} && steps.paths.outputs.e2e != 'false' }}\n`));
+  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, 'ci-paths.cjs'), 'utf8'), /fork|full_name/);
+});
+
+test('CI gives a fork\'s pull request no trigger, secret or OIDC token', () => {
+  // A fork's pull request runs on pull_request only, with what GitHub caps
+  // for it; a job that holds a write or OIDC permission runs only on push or
+  // past the changes job, which turns a fork's pull request away above.
+  assert.match(ci, /\non:\n  pull_request:\n  push:\n    branches: \[main\]\n\n/);
+  assert.doesNotMatch(ci, /pull_request_target|workflow_run|secrets\./);
+  const jobs = ci.split('\njobs:\n')[1].split(/\n(?=  [a-z][a-z0-9-]*:\n)/);
+  let privileged = 0;
+  for (const job of jobs) {
+    // A job's permissions can be an alias of another's, which writes.
+    if (!/: write|permissions: \*/.test(job)) continue;
+    privileged++;
+    assert.match(job, /\n    if: \$\{\{ (always\(\) && )?needs\.changes\.outputs\.e2e == 'true'( && [^|\n]*)? \}\}\n|\n    if: \$\{\{ github\.event_name == 'push' \}\}\n/, job.split('\n')[0]);
+  }
+  assert.ok(privileged >= 10, String(privileged));
 });
 
 test('event SHAs are validated and diff errors run the full suite', () => {
@@ -140,14 +128,20 @@ test('required ci check permits only explicitly gated skips', () => {
   const skipped = ['e2e-full', 'e2e-limit', 'e2e-event', 'review-base', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'];
   const normal = ['changes', 'docs', 'rust', 'sandbox'];
   const needs = Object.fromEntries([...normal, ...skipped].map(key => [key, { result: 'success' }]));
-  const run = (state, e2e, installed = 'true', fork = 'false') => spawnSync('bash', ['-c', command], {
-    env: { ...process.env, NEEDS: JSON.stringify(state), E2E: e2e, REVIEW_INSTALLED: installed, FORK: fork },
+  const run = (state, e2e, installed = 'true', forkE2e = 'false') => spawnSync('bash', ['-c', command], {
+    env: { ...process.env, NEEDS: JSON.stringify(state), E2E: e2e, REVIEW_INSTALLED: installed, FORK_E2E: forkE2e },
     encoding: 'utf8',
   }).status;
   assert.equal(run(needs, 'true'), 0);
   const docsOnly = { ...needs, ...Object.fromEntries(skipped.map(key => [key, { result: 'skipped' }])) };
   assert.equal(run(docsOnly, 'false'), 0);
   for (const e2e of ['true', '', 'unknown']) assert.notEqual(run(docsOnly, e2e), 0);
+  // A fork's pull request that needs the e2e jobs skips them all and fails,
+  // as does one whose answer is missing.
+  for (const forkE2e of ['true', '', 'unknown']) {
+    assert.notEqual(run(docsOnly, 'false', 'true', forkE2e), 0, forkE2e);
+    assert.notEqual(run(needs, 'true', 'true', forkE2e), 0, forkE2e);
+  }
   for (const key of [...normal, ...skipped]) {
     for (const result of ['failure', 'cancelled']) {
       assert.notEqual(run({ ...docsOnly, [key]: { result } }, 'false'), 0, `${key}: ${result}`);
@@ -157,7 +151,6 @@ test('required ci check permits only explicitly gated skips', () => {
   assert.equal(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true', 'false'), 0);
   assert.notEqual(run({ ...needs, 'e2e-review': { result: 'skipped' } }, 'true'), 0);
   for (const key of ['e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify']) {
-    assert.equal(run({ ...needs, [key]: { result: 'skipped' } }, 'true', 'true', 'true'), 0);
     assert.notEqual(run({ ...needs, [key]: { result: 'skipped' } }, 'true'), 0);
   }
 });

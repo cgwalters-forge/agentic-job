@@ -96,7 +96,7 @@ test('issue actions keep checked repository and caps, not output-repo or event t
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source',
       OUTPUT_REPO: 'owner/other', BASE: 'main', BRANCH_PREFIX: '',
-      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}', PUSH: '{}',
+      PARTIAL: '', TITLE_PREFIX: '', COMMENT_TARGET: '99', PULL_REQUEST: '{}', PUSH: '{}', FORK: '',
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
@@ -128,7 +128,7 @@ test('a push is applied to the policy pull request, never as a pull request, nev
     const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
       GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/repo', OUTPUT_REPO: 'owner/repo',
       BASE: 'agent-run-12', BRANCH_PREFIX: 'dispatch/fix/', PARTIAL: '', TITLE_PREFIX: '[bot] ', COMMENT_TARGET: '42',
-      PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'),
+      PULL_REQUEST: stepEnv(name, 'PULL_REQUEST'), PUSH: stepEnv(name, 'PUSH'), FORK: '',
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
@@ -202,7 +202,7 @@ test('a push goes on the pinned head, is not pushed twice, and a moved branch st
 // After the handlers ran: the branch fetched back has to be one commit
 // on the pinned head with the checked tree, whatever gh-aw counted.
 test('a push is verified on the branch it went to: one commit on the pinned head, with the checked tree', () => {
-  const name = 'Every output was applied, or only the pull request was refused';
+  const name = 'Every output was applied';
   const run = tip => {
     const root = mkdtempSync(join(homedir(), 'apply-test-'));
     try {
@@ -238,7 +238,7 @@ test('a push is verified on the branch it went to: one commit on the pinned head
       writeFileSync(join(tmp, 'applied.json'), JSON.stringify({ pull_request: null, refused: false }));
       const result = command(work, 'bash', ['-euo', 'pipefail', '-c', step(name)], {
         GH_AW_TMP: tmp, BASE: 'agent-run-12', OUTPUT_REPO: 'owner/repo', TREE: tree,
-        MODE: 'fail', OUTCOME: 'success', FAILED: '0', PUSHES_FAILED: '0', PROJECT_REFUSED: 'false',
+        OUTCOME: 'success', FAILED: '0', PROJECT_REFUSED: 'false',
       });
       return { status: result.status, out: result.stdout + result.stderr };
     } finally {
@@ -654,7 +654,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 // Runs the guard against a forge holding `posted`, by whoever posted it,
 // with the job token or, with `pat`, a PAT that /user names as `me`.
-async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '' } = {}) {
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '', fork = 'bot/repo' } = {}) {
   const dir = mkdtempSync(join(homedir(), 'apply-test-'));
   try {
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
@@ -677,7 +677,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
       },
     };
     const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', GITHUB_RUN_ID: run,
-      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat) };
+      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat), FORK: fork };
     // gh-aw's normalize_branch_name.cjs, as far as these prefixes go.
     const normalizeBranchName = name => name.replace(/[^a-zA-Z0-9\-_/.]+/g, '-');
     const fakeRequire = path => path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
@@ -735,7 +735,7 @@ test('nothing applied yet: every created thing is named in its body, the rest pa
     }
   }
   assert.deepEqual(queries.map(([kind]) => kind), ['comments', 'pulls', 'search']);
-  assert.deepEqual(queries[1], ['pulls', 'owner:e2e/agent-run-7']);
+  assert.deepEqual(queries[1], ['pulls', 'bot:e2e/agent-run-7']);
 });
 
 test('the name is stable across attempts and differs by run, call, place and content', async () => {
@@ -854,10 +854,146 @@ test('a comment is looked for where it goes, and not where none can be found', a
   assert.equal(nowhere.kept.length, 1);
 });
 
-test("the pull request is looked for from the branch gh-aw names, prefix normalized", async () => {
+test("the pull request is looked for from the branch gh-aw names in the fork, prefix normalized", async () => {
   const { queries } = await leaveOutApplied([pull], [], { prefix: 'bot run/' });
-  assert.deepEqual(queries, [['pulls', 'owner:bot-run/agent-run-7']]);
-  assert.deepEqual((await leaveOutApplied([pull], [], { prefix: '' })).queries, [['pulls', 'owner:agent-run-7']]);
+  assert.deepEqual(queries, [['pulls', 'bot:bot-run/agent-run-7']]);
+  assert.deepEqual((await leaveOutApplied([pull], [], { prefix: '' })).queries, [['pulls', 'bot:agent-run-7']]);
+  // Never the output repository's own branch, which an earlier version pushed to.
+  assert.deepEqual((await leaveOutApplied([pull], [{ head: 'owner:e2e/agent-run-7', state: 'open', user: actions,
+    body: sent((await leaveOutApplied([pull], [])).kept[0].body), html_url: 'u' }])).skipped, []);
+});
+
+test('a pull request without a fork to open it from stops the guard', async () => {
+  await assert.rejects(leaveOutApplied([pull], [], { fork: '' }), /no fork/);
+  assert.equal((await leaveOutApplied([comment()], [], { fork: '' })).kept.length, 1);
+});
+
+// Runs the fork step against a forge where the token is `me`'s and git
+// reaches the fork after `reachable` tries.
+// `actions` is what the fork's Actions settings do: turn off, refuse to,
+// or stay on whatever is asked.
+async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/repo', reachable = 1, made = 'bot/repo', answer = {}, actions = 'off' } = {}) {
+  const dir = mkdtempSync(join(homedir(), 'fork-test-'));
+  try {
+    writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
+    const outputs = {}, forked = [], tries = [], settings = [];
+    let on = true;
+    const core = { setOutput: (key, value) => { outputs[key] = value; } };
+    const github = { rest: {
+      actions: {
+        setGithubActionsPermissionsRepository: async params => {
+          settings.push(['set', params]);
+          if (actions === 'refused') throw new Error('403');
+          if (actions === 'off') on = params.enabled;
+        },
+        getGithubActionsPermissionsRepository: async params => {
+          settings.push(['get', params]);
+          return { data: actions === 'unknown' ? {} : { enabled: on } };
+        },
+      },
+      users: { getAuthenticated: async () => { if (me === null) throw new Error('403'); return { data: { login: me } }; } },
+      repos: { createFork: async params => {
+        forked.push(params);
+        return { data: { full_name: made, fork: true, owner: { login: made.split('/')[0] }, ...answer } };
+      } },
+    } };
+    const exec = { getExecOutput: async (program, args, options) => {
+      tries.push([program, ...args]);
+      assert.equal(options.ignoreReturnCode, true);
+      // A fork the forge has made and not filled yet has no branch.
+      return tries.length >= reachable ? { exitCode: 0, stdout: `${'c'.repeat(40)}\trefs/heads/main\n` }
+        : { exitCode: tries.length % 2 ? 128 : 0, stdout: '' };
+    } };
+    await new AsyncFunction('require', 'process', 'core', 'github', 'exec', 'setTimeout', script('Fork the output repository for the pull request'))(
+      require, { env: { GH_AW_TMP: dir, OUTPUT_REPO: output, REPO: repo } }, core, github, exec, resolve => resolve());
+    return { outputs, forked, tries, settings };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('a pull request is opened from a fork the token owns, made if missing and reached by git', async () => {
+  const { outputs, forked, tries, settings } = await fork([comment(), pull], { reachable: 3, made: 'bot/repo-1' });
+  assert.deepEqual(forked, [{ owner: 'owner', repo: 'repo', default_branch_only: true }]);
+  assert.deepEqual(tries, Array(3).fill(['git', 'ls-remote', '--heads', 'https://github.com/bot/repo-1.git']));
+  // Actions are turned off on the fork, and that is read back.
+  assert.deepEqual(settings, [['set', { owner: 'bot', repo: 'repo-1', enabled: false }], ['get', { owner: 'bot', repo: 'repo-1' }]]);
+  assert.deepEqual(outputs, { repo: 'bot/repo-1' });
+  // Only a pull request needs one.
+  assert.deepEqual(await fork([comment()], { me: null }), { outputs: {}, forked: [], tries: [], settings: [] });
+  for (const [name, options, error] of [
+    ['a token /user does not name', { me: null }, /GET \/user names none/],
+    ["the output repository's owner", { me: 'Owner' }, /owns owner\/repo/],
+    ['a fork git never reaches', { reachable: 31 }, /still not there after 30 tries/],
+    // What the forge answers with is the user's repository in the network.
+    ['a repository that is not a fork', { answer: { fork: false } }, /not bot's own fork/],
+    ["another user's repository", { made: 'other/repo' }, /not bot's own fork/],
+    ["the caller's repository, a fork the user owns", { repo: 'Bot/Repo' }, /not bot's own fork/],
+    ['the output repository itself', { made: 'bot/repo', output: 'bot2/x', answer: { full_name: 'Bot2/X' } }, /not bot's own fork/],
+    // A push with a PAT would run the fork's workflows, with its secrets.
+    ['a token that may not turn Actions off', { actions: 'refused' }, /Actions could not be turned off on the fork bot\/repo/],
+    ['a fork whose Actions stay on', { actions: 'on' }, /Actions could not be turned off/],
+    ['an answer that does not say', { actions: 'unknown' }, /Actions could not be turned off/],
+  ]) {
+    await assert.rejects(fork([pull], options), error, name);
+  }
+  // Before anything is pushed, a fork's base branch included.
+  assert.ok(workflow.indexOf('- name: Fork the output repository for the pull request\n') <
+    workflow.indexOf("- name: Fetch the target's base branch, and bring a fork's up to it\n"));
+  assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' \}\}\n/);
+});
+
+test("a pull request's handler pushes only to the fork, and there is none without one", () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ create_pull_request: { max: 1, draft: true }, noop: { max: 1 } }));
+    const handlers = (forked, { partial = '', title = '', branch = 'p/' } = {}) => {
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step("Write the handlers' configuration")], {
+        GH_AW_TMP: root, GITHUB_ENV: join(root, 'env'), REPO: 'owner/source', OUTPUT_REPO: 'owner/other', BASE: 'main',
+        BRANCH_PREFIX: branch, PARTIAL: partial, TITLE_PREFIX: title, COMMENT_TARGET: '', PULL_REQUEST: '{"fallback_as_issue": false}', PUSH: '{}', FORK: forked,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(readFileSync(join(root, 'handler-config.json'), 'utf8'));
+    };
+    assert.deepEqual(handlers('bot/other').create_pull_request, {
+      max: 1, draft: true, fallback_as_issue: false, 'target-repo': 'owner/other', base_branch: 'main',
+      branch_prefix: 'p/', title_prefix: '', 'head-repo': 'bot/other', allowed_repos: ['bot/other'],
+    });
+    assert.deepEqual(handlers(''), { noop: { max: 1 } });
+    // A quote of each kind, and what a shell or jq would read as its own,
+    // reach the handlers as they are, each one string, adding no key.
+    const keys = Object.keys(handlers('bot/other').create_pull_request);
+    for (const title of [`e2e "full" it's:`, '$(id) `id` \\n %s ${X}', '" + {"x": 1} + "']) {
+      const config = handlers('bot/other', { partial: '[partial: stopped at a limit] ', title, branch: `b'"/` });
+      assert.equal(config.create_pull_request.title_prefix, `[partial: stopped at a limit] ${title}`);
+      assert.equal(config.create_pull_request.branch_prefix, `b'"/`);
+      assert.deepEqual(Object.keys(config.create_pull_request), keys);
+      assert.equal(readFileSync(join(root, 'env'), 'utf8').trimEnd().split('\n').pop(),
+        `GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG=${JSON.stringify(config)}`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the job fails unless every output was applied and a pull request asked for was opened', () => {
+  const root = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    for (const [outcome, asked, opened, refused, expected] of [
+      ['success', false, false, '', 0], ['success', true, true, '', 0],
+      // The forge refused the pull request, or the handler had no fork to push to.
+      ['success', true, false, '', 1], ['failure', true, false, '', 1], ['failure', false, false, '', 1],
+      ['success', false, false, 'true', 1],
+    ]) {
+      writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: asked ? [pull] : [comment()] }));
+      writeFileSync(join(root, 'applied.json'), JSON.stringify({ pull_request: opened ? { number: 1 } : null }));
+      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
+        { GH_AW_TMP: root, OUTCOME: outcome, FAILED: '', OUTPUT_REPO: 'owner/repo', PROJECT_REFUSED: refused });
+      assert.equal(result.status, expected, `${outcome} ${asked} ${opened} ${refused}: ${result.stdout}`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('closing an issue again posts nothing: its handler is told to drop any body', () => {
@@ -868,7 +1004,7 @@ test('closing an issue again posts nothing: its handler is told to drop any body
 for (const [state, merged, left] of [['open', null, true], ['closed', '2026-10-01T00:00:00Z', true], ['closed', null, false]]) {
   test(`a pull request ${state}${merged ? ' and merged' : ''} from the run's branch ${left ? 'is left out' : 'is not'}`, async () => {
     const first = (await leaveOutApplied([pull], [])).kept[0];
-    const posted = [{ head: 'owner:e2e/agent-run-7', state, merged_at: merged, number: 39,
+    const posted = [{ head: 'bot:e2e/agent-run-7', state, merged_at: merged, number: 39,
       user: actions, body: sent(first.body), html_url: 'https://forge/pull/39' }];
     const { kept, skipped, outputs } = await leaveOutApplied([pull], posted);
     assert.equal(kept.length, left ? 0 : 1);
@@ -898,7 +1034,7 @@ test("a pull request's name holds the checked patch; a comment's does not", asyn
 for (const [state, merged] of [['open', null], ['closed', '2026-10-01T00:00:00Z']]) {
   test(`a different patch with the same request is not taken for the ${state} pull request`, async () => {
     const first = (await leaveOutApplied([pull], [])).kept[0];
-    const posted = [{ head: 'owner:e2e/agent-run-7', state, merged_at: merged, number: 39,
+    const posted = [{ head: 'bot:e2e/agent-run-7', state, merged_at: merged, number: 39,
       user: actions, body: sent(first.body), html_url: 'https://forge/pull/39' }];
     const { kept, skipped, outputs } = await leaveOutApplied([pull], posted, { patch: 'other\n' });
     // Applied as new: the handler then stops at the branch already there.

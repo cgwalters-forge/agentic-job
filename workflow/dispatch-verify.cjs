@@ -4,7 +4,7 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 
-const { GH_REPO: repo, RUN: run, PR: pr, REVIEW_HEAD: head, GITHUB_RUN_ID: id, RESULT: result,
+const { GH_REPO: repo, RUN: run, PR: pr, REVIEW_HEAD: head, RESULT: result,
   COMPOSE_RESULT: composed } = process.env;
 assert.equal(result, 'success', 'all shipped dispatch profiles must succeed');
 assert.equal(composed, 'success', 'the composed example must succeed');
@@ -23,16 +23,4 @@ if (pr) {
   if (repo === 'cgwalters-forge/agentic-job') {
     assert.match(verdicts[0].body, /\nToolchain: cargo \d/, 'the review sandbox must have a working cargo');
   }
-}
-const branch = `dispatch/implement/agent-run-${id}`;
-const commit = api(`repos/${repo}/commits/${branch}`)[0];
-assert.deepEqual(commit.files.map(file => file.filename), ['DISPATCH-TRIAL.md']);
-assert.equal(commit.parents.length, 1);
-const pulls = api(`repos/${repo}/pulls?head=${encodeURIComponent(repo.split('/')[0] + ':' + branch)}&state=all`);
-for (const pull of pulls) {
-  assert.equal(pull.draft, true);
-  // Found from the issue: the draft refers to it, and the issue links to the draft once.
-  assert.ok(pull.body.includes(`\n\nRefs ${repo}#64`), pull.body);
-  assert.equal(comments(64).filter(comment => comment.body.includes(pull.html_url) &&
-    comment.body.includes('<!-- agentic-job-linked: ')).length, 1);
 }

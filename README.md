@@ -94,10 +94,11 @@ fenced off as data. See [docs/events.md](docs/events.md).
 ## Try it
 
 [`example.yml`](.github/workflows/example.yml) is a complete caller with
-a scripted agent, so it needs no model and no secret. The scripted agent
-tries the things it must not be able to do and changes one file, and the
-change comes back as a draft pull request, or as a pushed branch where
-Actions is not allowed to open pull requests.
+a scripted agent, so it needs no model. The scripted agent tries the
+things it must not be able to do and changes one file, and the change
+comes back as a draft pull request from a fork owned by the bot account
+whose PAT an `agent-apply` environment holds: apply never pushes an
+agent's commit to the repository itself.
 The scripted agent ignores the task text. The [dispatch trial](docs/dispatch.md)
 includes editable sessions for patches, comments and reviews without a model.
 
@@ -113,6 +114,11 @@ Then make three edits:
 - in `example.yml`, set the default of the `repo` input to your
   repository;
 - in `allow.toml`, set `repos` to your repository.
+
+Create an `agent-apply` environment limited to your default branch, and
+store in it as `SAFE_OUTPUTS_PAT` the classic `repo` PAT of a dedicated bot
+account that does not own the repository and has write access to nothing
+else ([pull requests come from a fork](docs/workflow.md#pull-requests-come-from-a-fork)).
 
 Recent main commits normally have a prebuilt binary, published automatically
 from their source without a pin PR. If you start before that build finishes,
