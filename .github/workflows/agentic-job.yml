@@ -801,7 +801,7 @@ jobs:
     environment: ${{ inputs.apply-environment }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      pull-request: ${{ steps.apply.outputs.created_pr_number }}
+      pull-request: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
     env:
       OUTPUT_REPO: ${{ inputs.output-repo || github.repository }}
       REPO: ${{ inputs.repo }}
@@ -924,6 +924,101 @@ jobs:
             '(.items[] | select(.type == "create_pull_request" or .type == "add_comment" or .type == "create_issue") | .body) |= "\($note)\n\n\(.)"' \
             "$GH_AW_TMP/agent_output.json" > "$RUNNER_TEMP/marked.json"
           mv "$RUNNER_TEMP/marked.json" "$GH_AW_TMP/agent_output.json"
+      # A re-run of this job applies check's accepted outputs again, and
+      # gh-aw's handlers would post each comment, issue and pull request
+      # again. Each is named by this run, its place and its digest, the
+      # digest over the artifact prefix too: the calls of one run share its
+      # ID, and two may hand back the same request. The name goes last in
+      # the body, after the first line a verdict or a partial run's note
+      # needs, and the next step hides it in what it posts; one whose name is
+      # already posted is left out, the others are applied, so a re-run
+      # completes what an earlier attempt did not. A pull request's name
+      # holds the checked patch too, so a different patch is not taken for
+      # one applied before. Only what this job's token posts counts (the job
+      # token's github-actions[bot], or the user /user names for the PAT;
+      # with a PAT that names nobody, nothing counts), only the last
+      # name in a body, and check refuses requests holding the name: neither
+      # the agent nor a commenter can make a request look applied, not even
+      # with text the handlers decode into a name. Closing an issue (without
+      # a comment: `allow_body` is false), adding labels and
+      # setting a project field are the same done twice and are left alone.
+      - name: Leave out what an earlier attempt applied
+        id: applied
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          COMMENT_TARGET: ${{ needs.policy.outputs.comment-target }}
+          BRANCH_PREFIX: ${{ inputs.branch-prefix }}
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+          # Whether the token below is the PAT; the secret itself stays there.
+          TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            const fs = require('node:fs');
+            const { createHash } = require('node:crypto');
+            const file = `${process.env.GH_AW_TMP}/agent_output.json`;
+            const output = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const [owner, repo] = process.env.OUTPUT_REPO.split('/');
+            // The job token posts as github-actions[bot] and cannot read
+            // /user; a PAT posts as the user it names. Any other bot's post
+            // is not this token's. A PAT that /user does not name (an app's
+            // token) has no one here, and nothing posted counts as applied.
+            const me = process.env.TOKEN_IS_PAT === 'true'
+              ? await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null)
+              : 'github-actions[bot]';
+            if (me === null) core.warning('GET /user does not name the SAFE_OUTPUTS_PAT token, so nothing posted before counts as applied, and a re-run posts again');
+            const ours = user => me !== null && user?.login === me;
+            // The patch check accepted is what a pull request applies.
+            const patch = () => {
+              const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+              if (!report.patch?.file) throw new Error('a pull request is to be opened, and check accepted no patch');
+              return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
+            };
+            const kept = [], skipped = [];
+            for (const [index, item] of output.items.entries()) {
+              if (!['add_comment', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
+              // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
+              const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
+              if (item.type === 'create_pull_request') hash.update('\0').update(patch());
+              const name = `agentic-job-applied: ${process.env.GITHUB_RUN_ID}/${index}/${hash.digest('hex').slice(0, 16)}`;
+              // The last name in a body is the one put there after what was asked.
+              const marked = found => ours(found.user) &&
+                [...String(found.body).matchAll(/<!-- (agentic-job-applied: \d+\/\d+\/[0-9a-f]{16}) -->/g)].at(-1)?.[1] === name;
+              let found;
+              if (item.type === 'add_comment') {
+                const target = /^\d+$/.test(process.env.COMMENT_TARGET) ? process.env.COMMENT_TARGET : item.item_number;
+                if (/^\d+$/.test(String(target))) {
+                  const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: Number(target), per_page: 100 });
+                  found = comments.find(marked);
+                }
+              } else if (item.type === 'create_pull_request') {
+                // The branch is this run's, checked above; the handler names it so.
+                const { normalizeBranchName } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/normalize_branch_name.cjs`);
+                const prefix = normalizeBranchName(process.env.BRANCH_PREFIX);
+                const branch = prefix && !item.branch.startsWith(prefix) ? prefix + item.branch : item.branch;
+                const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, head: `${owner}:${branch}`, state: 'all', per_page: 100 });
+                found = pulls.find(pull => marked(pull) && (pull.state === 'open' || pull.merged_at));
+                if (found) {
+                  core.setOutput('pull-request-number', found.number);
+                  core.setOutput('pull-request-url', found.html_url);
+                }
+              } else {
+                // gh-aw finds its own marked issues the same way; search lags seconds behind.
+                const { data } = await github.rest.search.issuesAndPullRequests({ q: `repo:${owner}/${repo} is:issue in:body "${name}"`, per_page: 100 });
+                found = data.items.find(marked);
+              }
+              if (found) {
+                skipped.push({ type: item.type, name, url: found.html_url });
+              } else {
+                kept.push({ ...item, body: `${item.body ?? ''}\n\n${name}` });
+              }
+            }
+            fs.writeFileSync(file, JSON.stringify({ ...output, items: kept }));
+            fs.writeFileSync(`${process.env.GH_AW_TMP}/skipped.json`, JSON.stringify(skipped));
+            if (skipped.length) {
+              await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
+                .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
+            }
       # Where the forge refuses the pull request to Actions, gh-aw's
       # handler opens an issue in its place before it looks at
       # `fallback_as_issue`: it knows that refusal by its words. So the
@@ -1056,6 +1151,11 @@ jobs:
               }
               client.hook.before("request", options => {
                 if (creates(options, "issues") && issues <= 0) throw new Error("no issue beyond this run's create_issue outputs is opened");
+                // The handlers strip HTML comments from bodies; the name the
+                // step before put last in a body is hidden only as it is sent.
+                if (typeof options.body === "string") {
+                  options.body = options.body.replace(/^(agentic-job-applied: \d+\/\d+\/[0-9a-f]{16})$(?![\s\S]*^agentic-job-applied:)/m, "<!-- $1 -->");
+                }
               });
               client.hook.after("request", (response, options) => {
                 if (creates(options, "issues")) issues -= 1;
@@ -1079,15 +1179,16 @@ jobs:
       - name: Write applied.json
         if: ${{ always() && steps.apply.outcome != 'skipped' }}
         env:
-          PR: ${{ steps.apply.outputs.created_pr_number }}
-          PR_URL: ${{ steps.apply.outputs.created_pr_url }}
+          PR: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+          PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
           REFUSED: ${{ steps.apply.outputs.refused == 'true' }}
           EXIT: ${{ inputs.proposals-artifact != '' && '0' || needs.agent.outputs.exit }}
         run: |
           touch "$MADE"
           jq -n --slurpfile made "$MADE" --slurpfile handlers "$GH_AW_TMP/handler-config.json" --arg repo "$OUTPUT_REPO" \
-            --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$REFUSED" '
+            --slurpfile skipped "$GH_AW_TMP/skipped.json" --arg pr "$PR" --arg url "$PR_URL" --arg exit "$EXIT" --argjson refused "$REFUSED" '
             {schema: "agentic-job-applied/v1", repo: $repo, partial: ($exit != "0"), made: $made, refused: $refused,
+             already_applied: $skipped[0],
              pull_request: (if $pr == "" then null else {number: ($pr | tonumber), url: $url} end),
              handlers: $handlers[0]}' | tee "$GH_AW_TMP/applied.json"
       - id: upload

@@ -257,3 +257,267 @@ test('handler cannot follow a renamed file into a protected path', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function script(name) {
+  const section = workflow.split(`- name: ${name}\n`)[1].split(/\n      - /)[0];
+  return section.split('script: |\n')[1].split('\n')
+    .filter(line => line.startsWith('            ')).map(line => line.slice(12)).join('\n');
+}
+
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+// Runs the guard against a forge holding `posted`, by whoever posted it,
+// with the job token or, with `pat`, a PAT that /user names as `me`.
+async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 'diff\n', target = '64', run = '7', prefix = 'e2e/', artifacts = '' } = {}) {
+  const dir = mkdtempSync(join(homedir(), 'apply-test-'));
+  try {
+    writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
+    const file = `aw-agent-run-${run}.patch`;
+    writeFileSync(join(dir, 'report.json'), JSON.stringify({ patch: patch === null ? null : { file } }));
+    if (patch !== null) writeFileSync(join(dir, file), patch);
+    const outputs = {}, summary = [], warnings = [];
+    const core = { setOutput: (key, value) => { outputs[key] = value; }, warning: text => { warnings.push(text); },
+      summary: { addHeading: text => { summary.push(text); return core.summary; },
+        addList: list => { summary.push(...list); return core.summary; }, write: async () => {} } };
+    const queries = [];
+    const github = {
+      paginate: async (method, params) => method(params),
+      rest: {
+        users: { getAuthenticated: async () => { if (me === null) throw new Error('403'); return { data: { login: me } }; } },
+        issues: { listComments: params => { queries.push(['comments', params.issue_number]); return posted.filter(p => p.on === params.issue_number); } },
+        pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); } },
+        search: { issuesAndPullRequests: async params => { queries.push(['search', params.q]);
+          return { data: { items: posted.filter(p => p.issue && params.q.includes(p.body.match(/<!-- (.*) -->/)?.[1])) } }; } },
+      },
+    };
+    const env = { GH_AW_TMP: dir, REPORT: join(dir, 'report.json'), OUTPUT_REPO: 'owner/repo', GITHUB_RUN_ID: run,
+      COMMENT_TARGET: target, BRANCH_PREFIX: prefix, ARTIFACT_PREFIX: artifacts, RUNNER_TEMP: '/runner', TOKEN_IS_PAT: String(pat) };
+    // gh-aw's normalize_branch_name.cjs, as far as these prefixes go.
+    const normalizeBranchName = name => name.replace(/[^a-zA-Z0-9\-_/.]+/g, '-');
+    const fakeRequire = path => path === '/runner/gh-aw/actions/normalize_branch_name.cjs' ? { normalizeBranchName } : require(path);
+    await new AsyncFunction('require', 'process', 'core', 'github', script('Leave out what an earlier attempt applied'))(
+      fakeRequire, { env }, core, github);
+    const kept = JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
+    const skipped = JSON.parse(readFileSync(join(dir, 'skipped.json'), 'utf8'));
+    return { kept, skipped, outputs, summary, queries, warnings };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// What the handlers send, after the request hook hides the name.
+function sent(body) {
+  const line = workflow.split('\n').find(text => text.includes('options.body = options.body.replace('));
+  const options = { body };
+  new Function('options', line)(options);
+  return options.body;
+}
+
+const comment = (body = 'first') => ({ type: 'add_comment', body });
+// The name the guard put in a body it kept: its last line.
+const nameIn = item => item.body.split('\n').at(-1);
+const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 'agent-run-7' };
+
+test('a posted body hides the name the guard put last, and only that name', () => {
+  const name = 'agentic-job-applied: 7/0/0123456789abcdef';
+  const other = 'agentic-job-applied: 7/1/fedcba9876543210';
+  assert.equal(sent(`hello\n\n${name}`), `hello\n\n<!-- ${name} -->`);
+  // A handler's footer may follow the name.
+  assert.equal(sent(`hello\n\n${name}\n\n> footer`), `hello\n\n<!-- ${name} -->\n\n> footer`);
+  // A line the handlers decoded into a name before the guard's stays as it is.
+  assert.equal(sent(`${other}\n\n${name}`), `${other}\n\n<!-- ${name} -->`);
+  for (const body of ['hello', `say ${name}`, 'agentic-job-applied: 7/0/0123', 'agentic-job-applied: 7/0/0123456789ABCDEF']) {
+    assert.equal(sent(body), body);
+  }
+});
+
+test('nothing applied yet: every created thing is named in its body, the rest pass as they are', async () => {
+  const items = [comment(), pull, { type: 'create_issue', title: 'i', body: 'b' },
+    { type: 'close_issue', item_number: 3, body: 'done' }, { type: 'add_labels', labels: ['x'] },
+    { type: 'update_project', project: 'p', fields: { Status: 'Done' } }, { type: 'noop', message: 'n' }];
+  const { kept, skipped, summary, queries } = await leaveOutApplied(items, []);
+  assert.deepEqual(skipped, []);
+  assert.deepEqual(summary, []);
+  assert.equal(kept.length, items.length);
+  for (const [index, item] of kept.entries()) {
+    if (index < 3) {
+      assert.match(item.body, new RegExp(`^${items[index].body}\n\nagentic-job-applied: 7/${index}/[0-9a-f]{16}$`));
+      assert.deepEqual({ ...item, body: items[index].body }, items[index]);
+    } else {
+      // Closing, labelling and setting a field again leave the forge as it was.
+      assert.deepEqual(item, items[index]);
+    }
+  }
+  assert.deepEqual(queries.map(([kind]) => kind), ['comments', 'pulls', 'search']);
+  assert.deepEqual(queries[1], ['pulls', 'owner:e2e/agent-run-7']);
+});
+
+test('the name is stable across attempts and differs by run, call, place and content', async () => {
+  const name = async (items, run, artifacts = '') => nameIn((await leaveOutApplied(items, [], { run, artifacts })).kept[0]);
+  assert.equal(await name([comment()], '7'), await name([comment()], '7'));
+  assert.equal(await name([comment()], '7', 'dispatch-triage-'), await name([comment()], '7', 'dispatch-triage-'));
+  assert.notEqual(await name([comment()], '7'), await name([comment()], '8'));
+  assert.notEqual(await name([comment()], '7', 'dispatch-triage-'), await name([comment()], '7', 'dispatch-research-'));
+  assert.notEqual(await name([comment()], '7'), await name([comment()], '7', 'full-'));
+  assert.notEqual(await name([comment()], '7'), await name([comment('other')], '7'));
+  const both = (await leaveOutApplied([comment(), comment()], [])).kept.map(nameIn);
+  assert.notEqual(both[0], both[1]);
+});
+
+// CI run 38018010779: the triage and research calls of one run post the
+// same comment on the same issue; the second was taken for applied.
+test('another call of the same run posting the same comment does not leave it out', async () => {
+  const shipped = readFileSync(join(__dirname, 'dispatch-comment.sh'), 'utf8');
+  const output = JSON.parse(JSON.parse(shipped.split("<<'JSON'\n")[1].split('\nJSON')[0])
+    .find(step => step.write?.path.endsWith('safe-outputs.jsonl')).write.content);
+  const triage = (await leaveOutApplied([output], [], { artifacts: 'dispatch-triage-' })).kept[0];
+  const posted = [{ on: 64, user: actions, body: sent(triage.body), html_url: 'u' }];
+  const research = await leaveOutApplied([output], posted, { artifacts: 'dispatch-research-' });
+  assert.deepEqual(research.skipped, []);
+  assert.equal(research.kept.length, 1);
+  const again = await leaveOutApplied([output], posted, { artifacts: 'dispatch-triage-' });
+  assert.equal(again.kept.length, 0);
+});
+
+// CI run 38018010779 too: a verdict must stay the first line of what is posted.
+for (const body of [
+  'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123',
+  '**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nrest',
+]) {
+  test(`the posted body keeps its first line: ${body.split('\n')[0].slice(0, 20)}`, async () => {
+    const [kept] = (await leaveOutApplied([comment(body)], [])).kept;
+    const posted = sent(`${kept.body}\n\n> footer`);
+    assert.ok(posted.startsWith(`${body}\n\n<!-- agentic-job-applied: 7/0/`), posted);
+  });
+}
+
+const actions = { login: 'github-actions[bot]', type: 'Bot' };
+const app = { login: 'unrelated-app[bot]', type: 'Bot' };
+const maintainer = { login: 'maintainer', type: 'User' };
+const mallory = { login: 'mallory', type: 'User' };
+
+// Who posted the named comment, and with which token apply runs: the job
+// token (`pat` false), a PAT /user names (`me`), or a token in
+// SAFE_OUTPUTS_PAT that /user does not name, as an app's.
+for (const [name, user, token, left] of [
+  ['the job token, with the job token', actions, {}, true],
+  ['an unrelated bot, with the job token', app, {}, false],
+  ['a commenter, with the job token', mallory, {}, false],
+  ['a user called github-actions, with the job token', { login: 'github-actions', type: 'User' }, {}, false],
+  ['the PAT, with the PAT', maintainer, { pat: true, me: 'maintainer' }, true],
+  ['an unrelated bot, with a PAT', app, { pat: true, me: 'maintainer' }, false],
+  ['the job token, with a PAT', actions, { pat: true, me: 'maintainer' }, false],
+  ['a commenter, with a PAT', mallory, { pat: true, me: 'maintainer' }, false],
+  ['an unrelated bot, with an app token', app, { pat: true }, false],
+  ['the job token, with an app token', actions, { pat: true }, false],
+]) {
+  test(`a comment named by ${name} ${left ? 'is left out' : 'does not count'}`, async () => {
+    const first = (await leaveOutApplied([comment()], [], token)).kept[0];
+    const posted = [{ on: 64, user, body: sent(first.body), html_url: 'https://forge/c/1' }];
+    const { kept, skipped, summary } = await leaveOutApplied([comment()], posted, token);
+    assert.equal(kept.length, left ? 0 : 1);
+    assert.equal(skipped.length, left ? 1 : 0);
+    if (left) assert.deepEqual(summary, ['Already applied by an earlier attempt, so left out', 'add_comment: https://forge/c/1']);
+  });
+}
+
+test('a PAT that /user does not name finds nothing applied, and says so', async () => {
+  const { warnings } = await leaveOutApplied([comment()], [], { pat: true });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /nothing posted before counts as applied/);
+  assert.deepEqual((await leaveOutApplied([comment()], [])).warnings, []);
+  assert.deepEqual((await leaveOutApplied([comment()], [], { pat: true, me: 'maintainer' })).warnings, []);
+});
+
+
+test('a name the handlers decoded into a posted body does not leave another request out', async () => {
+  const items = [comment('one'), comment('two')];
+  const first = (await leaveOutApplied(items, [])).kept;
+  // What check saw as entities or invisible characters, decoded by the
+  // handlers' sanitizer into the second request's name, hidden or not,
+  // before the first's.
+  for (const decoded of [`\`\`\`\n<!-- ${nameIn(first[1])} -->\n\`\`\``, nameIn(first[1])]) {
+    const forged = `one\n${decoded}\n\n${nameIn(first[0])}`;
+    const posted = [{ on: 64, user: actions, body: sent(forged), html_url: 'u' }];
+    const { kept, skipped } = await leaveOutApplied(items, posted);
+    assert.equal(skipped.length, 1);
+    assert.deepEqual(kept, first.slice(1));
+  }
+});
+
+test('a re-run after a half-applied attempt applies only what was not', async () => {
+  const items = [comment('one'), comment('two'), { type: 'add_labels', labels: ['x'] }];
+  const first = (await leaveOutApplied(items, [])).kept;
+  // The first attempt posted the first comment and failed before the second.
+  const posted = [{ on: 64, user: actions, body: sent(first[0].body), html_url: 'u' }];
+  const { kept, skipped } = await leaveOutApplied(items, posted);
+  assert.deepEqual(skipped.map(item => item.name), [nameIn(first[0])]);
+  assert.deepEqual(kept, first.slice(1));
+});
+
+test('a comment is looked for where it goes, and not where none can be found', async () => {
+  const item = { ...comment(), item_number: 12 };
+  assert.deepEqual((await leaveOutApplied([item], [], { target: 'triggering' })).queries, [['comments', 12]]);
+  assert.deepEqual((await leaveOutApplied([item], [], { target: '64' })).queries, [['comments', 64]]);
+  const nowhere = await leaveOutApplied([comment()], [], { target: '*' });
+  assert.deepEqual(nowhere.queries, []);
+  assert.equal(nowhere.kept.length, 1);
+});
+
+test("the pull request is looked for from the branch gh-aw names, prefix normalized", async () => {
+  const { queries } = await leaveOutApplied([pull], [], { prefix: 'bot run/' });
+  assert.deepEqual(queries, [['pulls', 'owner:bot-run/agent-run-7']]);
+  assert.deepEqual((await leaveOutApplied([pull], [], { prefix: '' })).queries, [['pulls', 'owner:agent-run-7']]);
+});
+
+test('closing an issue again posts nothing: its handler is told to drop any body', () => {
+  assert.match(step("Write the handlers' configuration"),
+    /\(select\(has\("close_issue"\)\)\.close_issue\) \+= \{[^}]*allow_body: false\}/);
+});
+
+for (const [state, merged, left] of [['open', null, true], ['closed', '2026-10-01T00:00:00Z', true], ['closed', null, false]]) {
+  test(`a pull request ${state}${merged ? ' and merged' : ''} from the run's branch ${left ? 'is left out' : 'is not'}`, async () => {
+    const first = (await leaveOutApplied([pull], [])).kept[0];
+    const posted = [{ head: 'owner:e2e/agent-run-7', state, merged_at: merged, number: 39,
+      user: actions, body: sent(first.body), html_url: 'https://forge/pull/39' }];
+    const { kept, skipped, outputs } = await leaveOutApplied([pull], posted);
+    assert.equal(kept.length, left ? 0 : 1);
+    assert.deepEqual(skipped.map(item => item.url), left ? ['https://forge/pull/39'] : []);
+    assert.deepEqual(outputs, left ? { 'pull-request-number': 39, 'pull-request-url': 'https://forge/pull/39' } : {});
+  });
+}
+
+test('an issue an earlier attempt opened is found by its name and left out', async () => {
+  const issue = { type: 'create_issue', title: 'i', body: 'b' };
+  const first = (await leaveOutApplied([issue], [])).kept[0];
+  const posted = [{ issue: true, user: actions, body: sent(first.body), html_url: 'https://forge/issues/5' }];
+  const { kept, skipped, queries } = await leaveOutApplied([issue], posted);
+  assert.equal(kept.length, 0);
+  assert.equal(skipped[0].url, 'https://forge/issues/5');
+  assert.match(queries[0][1], /^repo:owner\/repo is:issue in:body "agentic-job-applied: 7\/0\/[0-9a-f]{16}"$/);
+});
+
+test("a pull request's name holds the checked patch; a comment's does not", async () => {
+  const name = async (items, patch) => nameIn((await leaveOutApplied(items, [], { patch })).kept[0]);
+  assert.equal(await name([pull], 'diff\n'), await name([pull], 'diff\n'));
+  assert.notEqual(await name([pull], 'diff\n'), await name([pull], 'other\n'));
+  assert.equal(await name([comment()], 'diff\n'), await name([comment()], 'other\n'));
+});
+
+for (const [state, merged] of [['open', null], ['closed', '2026-10-01T00:00:00Z']]) {
+  test(`a different patch with the same request is not taken for the ${state} pull request`, async () => {
+    const first = (await leaveOutApplied([pull], [])).kept[0];
+    const posted = [{ head: 'owner:e2e/agent-run-7', state, merged_at: merged, number: 39,
+      user: actions, body: sent(first.body), html_url: 'https://forge/pull/39' }];
+    const { kept, skipped, outputs } = await leaveOutApplied([pull], posted, { patch: 'other\n' });
+    // Applied as new: the handler then stops at the branch already there.
+    assert.equal(kept.length, 1);
+    assert.deepEqual(skipped, []);
+    assert.deepEqual(outputs, {});
+  });
+}
+
+test('a pull request without a checked patch stops the guard', async () => {
+  await assert.rejects(leaveOutApplied([pull], [], { patch: null }), /check accepted no patch/);
+  assert.equal((await leaveOutApplied([comment()], [], { patch: null })).kept.length, 1);
+});
