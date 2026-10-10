@@ -61,7 +61,11 @@ output: the run makes the push from its outcome, so that case needs no
 profile of its own.
 
 Pull requests from a fork ([#340](https://github.com/cgwalters-forge/agentic-job/issues/340))
-have run only against a stand-in for the forge. CI needs an end-to-end
+have run live from one caller, with a classic PAT that has the `repo` and
+`workflow` scopes; without `workflow`, a push to a fork that is behind in
+a workflow file is untried
+([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)). CI
+does not run them: it needs an end-to-end
 job that opens one from a fork again, with a bot PAT held in an
 environment that a fork's pull request cannot reach. The recommended
 credential is a classic `repo` PAT of a dedicated account; a fine-grained
