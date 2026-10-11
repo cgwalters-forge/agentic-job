@@ -1053,8 +1053,8 @@ fn a_signal_during_the_hand_back_publishes_nothing() {
 
 /// What the agent chooses to say, to call its tools, to print or to name
 /// its files reaches the job's log, and none of it as a command to the
-/// runner that shows the log (agentic-job#3): no line starts with `::`,
-/// and none holds `##[`.
+/// runner that shows the log (agentic-job#3): no line holds `::` or
+/// `##[`, which are broken up wherever they are in a line.
 #[test]
 fn agent_text_is_no_command_to_the_job_log() {
     let Some((user, _turn)) = sandbox_user() else {
@@ -1083,11 +1083,11 @@ fn agent_text_is_no_command_to_the_job_log() {
     let got = job.run(&config(&user, &plain(&proxy)));
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
     // The agent's words are shown, so this test has something to find.
-    for want in ["add-mask", "stop-commands", "::error::a name"] {
+    for want in ["add-mask", "stop-commands", ": :error: :a name"] {
         assert!(got.stdout.contains(want), "{want}: {}", got.all());
     }
     for line in got.stdout.lines().chain(got.stderr.lines()) {
-        assert!(!line.trim_start().starts_with("::"), "{line:?}");
+        assert!(!line.contains("::"), "{line:?}");
         assert!(!line.contains("##["), "{line:?}");
         assert!(!line.contains('\r') && !line.contains('\u{1b}'), "{line:?}");
     }

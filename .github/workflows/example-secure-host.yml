@@ -24,6 +24,8 @@ jobs:
     # systemd 257 or later, for run0: ubuntu-24.04 is too old.
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    outputs:
+      mask-probe: ${{ steps.trusted-log.outputs.mask-probe }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,6 +78,41 @@ jobs:
         run: |
           state=0; agentic-job sandbox exec -- sh -c 'exit 7' || state=$?
           test "$state" = 7
+      # These are hostile log bytes, not requests to the runner. Exercise
+      # both readers and an unterminated line; no new token is needed.
+      - name: Sandbox output cannot command the runner
+        id: hostile-log
+        shell: agentic-job sandbox exec --stdin {0} -- bash -eo pipefail -s
+        run: |
+          printf '::set-output name=forged::stdout\n::add-mask::sandbox-mask-probe\n'
+          printf '::set-output name=forged_stderr::stderr\n::add-mask::sandbox-mask-probe\n' >&2
+          printf '::set-env name=FORGED_ENV::bad\n##[warning]not an annotation\n' >&2
+          printf 'partial\r'
+      # Two streams on one log: B starts while A has commands stopped and
+      # prints after A has resumed them. B must not get raw stdout then.
+      - name: Overlapping sandbox output cannot command the runner
+        id: hostile-overlap
+        run: |
+          agentic-job sandbox exec -- sleep 4 & a=$!
+          sleep 1
+          agentic-job sandbox exec -- sh -c 'sleep 6; printf "::set-output name=forged_overlap::x\n::add-mask::sandbox-mask-probe\n"'
+          wait "$a"
+      # A positive control: without it, the checks below would also pass
+      # if the runner stopped honouring set-output at all.
+      - name: Trusted output can command the runner
+        id: control
+        run: echo '::set-output name=control::honoured'
+      - name: Trusted outputs are unchanged
+        id: trusted-log
+        env:
+          CONTROL: ${{ steps.control.outputs.control }}
+          FORGED_STDOUT: ${{ steps.hostile-log.outputs.forged }}
+          FORGED_STDERR: ${{ steps.hostile-log.outputs.forged_stderr }}
+          FORGED_OVERLAP: ${{ steps.hostile-overlap.outputs.forged_overlap }}
+        run: |
+          test "$CONTROL" = honoured
+          test -z "$FORGED_STDOUT$FORGED_STDERR$FORGED_OVERLAP${FORGED_ENV:-}"
+          echo 'mask-probe=sandbox-mask-probe' >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: secure-host-report
@@ -86,3 +123,15 @@ jobs:
       # the job did, the host is still what it proved.
       - name: The host is still secure
         run: agentic-job sandbox check
+
+  # The runner refuses to export a masked job output. This checks add-mask
+  # without fetching logs or giving either job a write-capable credential.
+  log-commands:
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Sandbox did not install a mask
+        env:
+          MASK_PROBE: ${{ needs.build.outputs.mask-probe }}
+        run: test "$MASK_PROBE" = sandbox-mask-probe
