@@ -35,6 +35,21 @@ const DECOY_TRIES: u32 = 50;
 /// known.
 const LIST_OR_ENTER: &str = r#"ls -- "$1" >/dev/null 2>&1 || cd -- "$1""#;
 
+/// Either enumeration, directory access, or a known-PID command-line read
+/// exposes the other user's process. hidepid=1 is not sufficient.
+const PROC_VISIBLE: &str = r#"for pid do
+    for path in /proc/[0-9]*; do
+        [ "$path" != "/proc/$pid" ] || exit 0
+    done
+    ls -- "/proc/$pid" >/dev/null 2>&1 && exit 0
+    cat -- "/proc/$pid/cmdline" >/dev/null 2>&1 && exit 0
+done
+exit 1"#;
+
+/// By `/proc/self`, not `$$`: as a unit's command line, which the user
+/// manager's entry makes of this, systemd reads `$$` as one `$`.
+const PROC_SELF: &str = "ls /proc/self >/dev/null && cat /proc/self/cmdline >/dev/null";
+
 /// Where a CI system says the job's files are. A work or temporary
 /// directory outside the runner's home is one more place to close; these
 /// are GitHub's and Forgejo's names for them.
@@ -43,6 +58,12 @@ const WORK_DIR_VARS: &[&str] = &["RUNNER_TEMP", "RUNNER_WORKSPACE", "GITHUB_WORK
 /// Where tailscaled listens, on runners that joined a tailnet. The socket
 /// itself is open to all; its directory is root's only, by setup.
 const TAILSCALE_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
+
+/// Stat the directory, not its protected socket or a hidepid-hidden process.
+/// Only ENOENT rules it out; permission and other errors require the probes.
+fn tailscale_directory_may_exist(result: std::io::Result<std::fs::Metadata>) -> bool {
+    !matches!(result, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
 
 const LOCALAPI_STATUS: &str = "http://local-tailscaled.sock/localapi/v0/status";
 
@@ -265,6 +286,75 @@ impl Checker<'_> {
     pub(super) fn environments(&mut self) -> Result<Vec<u8>> {
         let user = self.user().to_owned();
         let decoy = Decoy::start(&self.canary)?;
+        self.report.expect(
+            Want::Succeed,
+            "proc-control-runner",
+            "the runner reads its live decoy's command line (control)",
+            std::fs::read(format!("/proc/{}/cmdline", decoy.pid()))
+                .is_ok_and(|cmdline| contains(&cmdline, b"sleep")),
+        );
+        let mut entries: Vec<(&str, &[&str])> = vec![
+            ("session", &[]),
+            (
+                "user-manager",
+                &[
+                    "systemd-run",
+                    "--user",
+                    "--pipe",
+                    "--wait",
+                    "--collect",
+                    "--quiet",
+                ],
+            ),
+        ];
+        // Owned: the report is written while the entries are used.
+        let host_container: Vec<String> = self
+            .container_with(&["--pid=host"], &[])
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let host_container: Vec<&str> = host_container.iter().map(String::as_str).collect();
+        if self.has_podman() {
+            entries.push(("podman-userns", &["podman", "unshare"]));
+            entries.push(("podman-host-pid", &host_container));
+        }
+        let checker_pid = std::process::id().to_string();
+        let decoy_pid = decoy.pid().to_string();
+        for (name, prefix) in entries {
+            let control_id = format!("proc-control-sandbox-{name}");
+            let control = self.sandbox_diagnosed(
+                &control_id,
+                &[prefix, &["sh", "-c", PROC_SELF]].concat(),
+                b"",
+            )?;
+            self.report.expect(
+                Want::Succeed,
+                &control_id,
+                format!("{user} lists and reads its own process via {name} (control)"),
+                control,
+            );
+            let got = self.sandbox_succeeds(
+                &[
+                    prefix,
+                    &[
+                        "sh",
+                        "-c",
+                        PROC_VISIBLE,
+                        "sh",
+                        "1",
+                        &checker_pid,
+                        &decoy_pid,
+                    ],
+                ]
+                .concat(),
+            )?;
+            self.report.expect(
+                Want::Fail,
+                &format!("proc-other-users:{name}"),
+                format!("{user} cannot list or read other users' processes via {name}"),
+                got,
+            );
+        }
         let targets = [
             (std::process::id(), "environ-self", "this process's"),
             (decoy.pid(), "environ-runner", "another runner process's"),
@@ -720,7 +810,11 @@ impl Checker<'_> {
             "Podman's nested user and mount namespaces still work",
             namespaces,
         );
-        let pam = self.sandbox_succeeds(&["python3", "-I", "-c", include_str!("pam.py")])?;
+        let pam = self.sandbox_diagnosed(
+            "filesystem-view-pam",
+            &["python3", "-I", "-c", include_str!("pam.py")],
+            b"",
+        )?;
         self.report.expect(
             Want::Succeed,
             "filesystem-view-pam",
@@ -920,11 +1014,15 @@ impl Checker<'_> {
     /// for anyone, whatever the packet filter says.
     pub(super) fn tailscaled(&mut self) -> Result<()> {
         let user = self.user().to_owned();
-        // Its socket is in a directory setup closed, so the daemon is
-        // looked for by its process, which any user sees.
-        if !host::succeeds(Command::new("pgrep").args(["-x", "tailscaled"])) {
+        // hidepid hides root's daemon from the runner. The directory itself
+        // can still be statted even when setup has closed its contents.
+        // Do not skip probes if its absence cannot be established.
+        let directory = Path::new(TAILSCALE_SOCKET)
+            .parent()
+            .context("a socket path has a directory")?;
+        if !tailscale_directory_may_exist(std::fs::metadata(directory)) {
             self.report
-                .note("no tailscaled on this host, so no LocalAPI to reach");
+                .note("no tailscale socket directory on this host, so no LocalAPI to reach");
             return Ok(());
         }
         self.report.expect(
@@ -964,6 +1062,30 @@ impl Checker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tailscale_detection_does_not_depend_on_process_visibility() {
+        let directory = tempfile::tempdir().unwrap();
+        for (result, probe) in [
+            (std::fs::metadata(directory.path()), true),
+            (std::fs::metadata(directory.path().join("absent")), false),
+            (Err(std::io::ErrorKind::PermissionDenied.into()), true),
+            (Err(std::io::ErrorKind::Other.into()), true),
+        ] {
+            assert_eq!(tailscale_directory_may_exist(result), probe);
+        }
+    }
+
+    #[test]
+    fn proc_visibility_probe_detects_a_live_process() {
+        for (pid, visible) in [(std::process::id().to_string(), true), ("0".into(), false)] {
+            let output = Command::new("sh")
+                .args(["-c", PROC_VISIBLE, "sh", &pid])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), visible, "{pid}: {output:?}");
+        }
+    }
 
     #[test]
     fn variables_are_named_and_their_values_are_not() {

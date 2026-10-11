@@ -39,7 +39,7 @@ use std::time::Duration;
 use agentic_job::config::{self, Config};
 use agentic_job::sandbox::check::{self, RunToken};
 use agentic_job::sandbox::enter::Entry;
-use agentic_job::sandbox::host::User;
+use agentic_job::sandbox::host::{self, User};
 use agentic_job::sandbox::{egress, network, setup};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
@@ -780,6 +780,26 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
             },
         ));
     }
+    for (name, hidepid) in [("proc hidepid=0", "0"), ("proc hidepid=1", "1")] {
+        let mut ids = vec!["proc-other-users:session", "proc-other-users:user-manager"];
+        if host::has_program("podman") {
+            ids.extend([
+                "proc-other-users:podman-userns",
+                "proc-other-users:podman-host-pid",
+            ]);
+        }
+        cases.push(Case::new(name, &ids, move || {
+            Removed::by(
+                &[&[
+                    "mount",
+                    "-o",
+                    &format!("remount,hidepid={hidepid},gid=0"),
+                    "/proc",
+                ]],
+                &[&["mount", "-o", "remount,hidepid=invisible,gid=0", "/proc"]],
+            )
+        }));
+    }
     cases.push(Case::new(
         "ptrace of any process of one's uid",
         &["ptrace-scope"],
@@ -1182,21 +1202,49 @@ fn each_probe_fails_when_its_protection_is_removed() {
     if !config.sandbox.world_write_walk {
         let killed = entry.run(&["python3", "-I", "-c", r#"
 import os, pathlib, subprocess, time
+
+def is_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+# The handler is this process's child. hidepid hides it even from its own
+# uid, as nondumpable after its credential change, so it is found among the
+# children too, and is then the one /proc does not show.
+me = os.getpid()
+try:
+    children = {int(pid) for pid in pathlib.Path(f'/proc/{me}/task/{me}/children').read_text().split()}
+except OSError:
+    children = set()
+listed = {int(directory.name) for directory in pathlib.Path('/proc').iterdir() if directory.name.isdecimal()}
 helpers = []
-for directory in pathlib.Path('/proc').iterdir():
-    if not directory.name.isdecimal():
-        continue
+for pid in sorted(children | listed):
+    directory = pathlib.Path('/proc', str(pid))
     try:
         comm = (directory / 'comm').read_text().strip()
         status = dict(line.split(':', 1) for line in (directory / 'status').read_text().splitlines() if ':' in line)
-        if comm == '(sd-pam)' and int(status['PPid']) == os.getpid():
-            helpers.append(int(directory.name))
-    except FileNotFoundError:
-        pass
+    except OSError:
+        if pid in children:
+            helpers.append(pid)
+        continue
+    if comm == '(sd-pam)' and int(status['PPid']) == me:
+        helpers.append(pid)
 assert len(helpers) == 1, helpers
 subprocess.run(['kill', '-TERM', str(helpers[0])], check=True)
 time.sleep(0.2)
-assert not pathlib.Path('/proc', str(helpers[0])).exists() or (pathlib.Path('/proc') / str(helpers[0]) / 'stat').read_text().split(') ')[1].startswith('Z')
+# Dead: collected as this process's child, gone, or a zombie. A process
+# that /proc merely hides is not gone.
+try:
+    gone = os.waitpid(helpers[0], os.WNOHANG)[0] == helpers[0]
+except ChildProcessError:
+    gone = False
+try:
+    zombie = pathlib.Path('/proc', str(helpers[0]), 'stat').read_text().split(') ')[1].startswith('Z')
+except OSError:
+    zombie = False
+assert gone or zombie or not is_alive(helpers[0]), 'the PAM handler survived SIGTERM'
 try:
     fd = os.open('/etc/agentic-job/write-probe/after-pam-kill', os.O_WRONLY | os.O_CREAT, 0o600)
 except PermissionError:

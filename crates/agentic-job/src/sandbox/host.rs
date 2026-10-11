@@ -85,6 +85,16 @@ pub fn is_root() -> bool {
     rustix::process::geteuid().is_root()
 }
 
+/// A process that is root's on every host this runs on.
+const ROOT_PROCESS: &str = "/proc/1/stat";
+
+/// Whether this process sees other users' processes in `/proc`. Not under
+/// the `hidepid` setup puts on the host, unless root: there, a process
+/// that is not listed is not one that is gone.
+pub fn sees_other_users_processes() -> bool {
+    std::fs::read(ROOT_PROCESS).is_ok()
+}
+
 /// The path of `program`, if the host has it.
 pub fn find_program(program: &str) -> Option<PathBuf> {
     PATH_DIRS

@@ -356,6 +356,11 @@ impl Drop for Script {
 
 /// What the sandbox user is still running.
 fn processes_of(user: &str) -> String {
+    // Not "none" where /proc hides them.
+    assert!(
+        agentic_job::sandbox::host::sees_other_users_processes(),
+        "/proc hides {user}'s processes from this test"
+    );
     let out = Command::new("pgrep")
         .args(["-l", "-u", user])
         .output()

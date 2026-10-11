@@ -3,7 +3,7 @@
 //! thrown away after the job.
 //!
 //! The boundary is the separate uid: it cannot read another uid's
-//! `/proc/PID/environ` or memory, and has no sudo. The rest closes what
+//! processes through `/proc` or memory, and has no sudo. The rest closes what
 //! runner images leave open to every local user, which starts to matter
 //! once something runs as a user other than the runner's.
 //!
@@ -233,6 +233,12 @@ const IMAGE_ENV_VARS: &[&str] = &["XDG_RUNTIME_DIR"];
 
 const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
+/// The one group `hidepid` lets see every process is root's (gid 0),
+/// which the sandbox user may not be in. Root's daemons without
+/// CAP_SYS_PTRACE (logind for one) see other users' processes only
+/// through it.
+const PROC_OPTIONS: &str = "remount,hidepid=invisible,gid=0";
+
 const SUBUID: &str = "/etc/subuid";
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
@@ -343,6 +349,8 @@ fn setup(args: &Args) -> Result<Exit> {
             .with_context(|| format!("setting the mode of {CONFIG_DIR}"))?;
         create_user(&config, &runner, existing)
     })?;
+    // Before any sandbox mount view or user manager inherits /proc.
+    timed_setup("proc-hidepid", hide_other_processes)?;
     if !config.sandbox.world_write_walk {
         timed_setup("filesystem-view", || install_filesystem_view(&sandbox))?;
     }
@@ -1336,6 +1344,14 @@ fn restrict_ptrace() -> Result<()> {
     Ok(())
 }
 
+/// Apply to the host, not just one entry path. Reset any image-provided
+/// exemption to root's group, which the sandbox user cannot belong to.
+fn hide_other_processes() -> Result<()> {
+    host::run(Command::new("mount").args(["-o", PROC_OPTIONS, "/proc"]))
+        .context("hiding other users' processes on the host /proc")?;
+    Ok(())
+}
+
 fn stop_services(units: &[String]) -> Result<()> {
     let (present, absent): (Vec<&String>, Vec<&String>) = units.iter().partition(|unit| {
         host::succeeds(Command::new("systemctl").args(["cat", "--", unit.as_str()]))
@@ -1641,6 +1657,12 @@ mod tests {
                 "/srv/work"
             ]
         );
+    }
+
+    #[test]
+    fn proc_exemption_is_a_forbidden_group() {
+        assert!(PROC_OPTIONS.ends_with(",gid=0"));
+        assert!(Sandbox::FORBIDDEN_GROUPS.contains(&"root"));
     }
 
     #[test]

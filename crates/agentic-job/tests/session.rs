@@ -811,6 +811,11 @@ fn run0(user: &str, cwd: &Path) -> Vec<String> {
 }
 
 fn processes_of(user: &str) -> String {
+    // Not "none" where /proc hides them.
+    assert!(
+        agentic_job::sandbox::host::sees_other_users_processes(),
+        "/proc hides {user}'s processes from this test"
+    );
     let out = Command::new("pgrep")
         .args(["-l", "-u", user])
         .output()
@@ -860,14 +865,14 @@ fn nothing_survives_the_session() {
     };
     let whoami = std::fs::read_to_string(r.path("work/whoami")).unwrap();
     assert!(
-        !session::process::is_running(pid("stray")),
+        !session::process::is_running(pid("stray")).unwrap(),
         "the background process survived"
     );
     match &sandbox_user {
         Some(user) => {
             assert_eq!(whoami.trim(), user, "the agent did not run as {user}");
             assert!(
-                !session::process::is_running(pid("escaped")),
+                !session::process::is_running(pid("escaped")).unwrap(),
                 "the process that left its session survived"
             );
             assert_eq!(processes_of(user), "", "processes of {user} survived");
@@ -878,7 +883,7 @@ fn nothing_survives_the_session() {
         None => {
             let escaped = pid("escaped");
             assert!(
-                session::process::is_running(escaped),
+                session::process::is_running(escaped).unwrap(),
                 "the process that left its session was killed with the group"
             );
             let _ = Command::new("kill")

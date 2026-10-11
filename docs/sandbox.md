@@ -90,6 +90,10 @@ their units. They remain governed by kernel and ordinary permissions, not
 an exception for arbitrary host storage. `/dev/shm` is shared temporary storage.
 Device access, including KVM, remains subject to ordinary permissions. The
 view does not grant permissions or make a read-only filesystem writable.
+Setup unconditionally remounts host `/proc` with `hidepid=invisible,gid=0`
+to hide other users' process directories and command lines. This is not a
+promise to hide every PID: world-readable `cgroup.procs` files under
+`/sys/fs/cgroup` can still list PIDs, but do not expose their command lines.
 No `PrivateUsers`, `PrivateDevices`, mount syscall filter or `NoNewPrivileges`
 is added: those would hide KVM or break Podman's subordinate-id helpers.
 

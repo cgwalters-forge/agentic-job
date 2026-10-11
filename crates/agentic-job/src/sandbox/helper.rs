@@ -402,8 +402,13 @@ fn sessions(uid: u32) -> Vec<String> {
 }
 
 /// The processes of the user UID that are still there, as pgrep lists
-/// them; `None` for none. Any user may ask.
+/// them; `None` for none. Refused where `/proc` hides other users'
+/// processes from this one, where none would prove nothing.
 pub fn survivors(uid: u32) -> Result<Option<String>> {
+    ensure!(
+        host::sees_other_users_processes(),
+        "/proc hides other users' processes from this one, so pgrep cannot tell whether uid {uid} still runs any"
+    );
     let pgrep = trusted_program("pgrep")?;
     let out = Command::new(pgrep)
         .args(["-l", "-u", &uid.to_string()])

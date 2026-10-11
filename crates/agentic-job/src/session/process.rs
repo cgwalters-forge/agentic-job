@@ -226,17 +226,22 @@ impl SandboxUser {
 }
 
 /// Whether process PID exists and is more than a zombie nobody has
-/// collected yet. For tests of what a session leaves behind.
-pub fn is_running(pid: u32) -> bool {
+/// collected yet. For tests of what a session leaves behind; refused
+/// where `/proc` hides other users' processes, as setup makes it.
+pub fn is_running(pid: u32) -> Result<bool> {
+    ensure!(
+        crate::sandbox::host::sees_other_users_processes(),
+        "/proc hides other users' processes from this one, so process {pid} may run unseen"
+    );
     // The state follows the command name, which is in parentheses and may
     // itself hold any character.
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    Ok(std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|stat| {
             let (_, after) = stat.rsplit_once(')')?;
             after.split_whitespace().next().map(|state| state != ZOMBIE)
         })
-        .unwrap_or(false)
+        .unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -299,12 +304,12 @@ mod tests {
             pid.push(char::from(byte[0]));
         }
         let pid: u32 = pid.parse().unwrap();
-        assert!(is_running(pid), "no process {pid}");
+        assert!(is_running(pid).unwrap(), "no process {pid}");
         agent.kill_group();
         agent.gone().await;
         // The group is killed at once, but a signal takes a moment.
         for _ in 0..SURVIVOR_POLLS {
-            if !is_running(pid) {
+            if !is_running(pid).unwrap() {
                 return;
             }
             tokio::time::sleep(SURVIVOR_POLL).await;

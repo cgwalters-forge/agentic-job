@@ -420,12 +420,17 @@ impl Checker<'_> {
     }
 
     fn container<'a>(&'a self, argv: &[&'a str]) -> Vec<&'a str> {
+        self.container_with(&[], argv)
+    }
+
+    /// [`Self::container`], with `options` for `podman run` too.
+    fn container_with<'a>(&'a self, options: &[&'a str], argv: &[&'a str]) -> Vec<&'a str> {
         let mount: &[&str] = if self.config.egress.proxy {
             &["--security-opt", "label=disable", "-v", CA_MOUNT]
         } else {
             &[]
         };
-        let parts: [&[&str]; 4] = [
+        let parts: [&[&str]; 5] = [
             &[
                 "podman",
                 "run",
@@ -435,6 +440,7 @@ impl Checker<'_> {
                 CONTAINER_UID,
             ],
             mount,
+            options,
             &[self.config.sandbox.check.container_image.as_str()],
             argv,
         ];

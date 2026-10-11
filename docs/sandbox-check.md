@@ -81,6 +81,7 @@ matches on them.
 | `groups` | (none: lists its groups) be in a group that is root by another name, such as `docker` or `adm` | it lists its groups | setup gives it none of them, and refuses an image's user that has one |
 | `linger` | keep its user manager alive after its sessions (`loginctl enable-linger`) | logind lists its sessions | the polkit rule |
 | `environ-self`, `environ-runner` | read the environment of the checking process, and of a second process of the runner's that holds a canary | the runner reads the canary there | the separate uid |
+| `proc-other-users:ENTRY` | enumerate or list PID 1, the checker or its live runner-owned decoy, or read their `/proc/PID/cmdline` even with the PID known, via a session, user service, `podman unshare` and a rootless `--pid=host` container if installed | the runner reads the live decoy; each entry lists and reads its own process, with failure diagnostics | host `/proc` with `hidepid=invisible` |
 | `environ-canary`, `environ-job-variables` | find the canary, or `ACTIONS_` in any variable, in any environment it can read | it reads its own processes' environments | `run0` passes on none of the caller's environment |
 | `env-job-variables`, `oidc-value:NAME` | see `ACTIONS_*` variables in its own environment, or the values of the identity-token request variables in any process it can read | it runs `env`; the checking process has the variables | the same, and refusal by name |
 | `private-dir:DIR` | list or enter the runner's home, `/opt/hca`, tailscaled's socket directory, each of `sandbox.private-dirs`, and the job's work directories if they are elsewhere | the runner lists its home | mode 0700 |
@@ -95,7 +96,7 @@ matches on them.
 | `cron`, `at` | install a crontab; use `at` | the runner's user may | `/etc/cron.deny`, `/etc/at.deny` |
 | `service:UNIT` | (none: asks systemd) | journald is active | `sandbox.stop-services` |
 | `local-sockets`, `local-tcp` | connect to every listening Unix socket and local TCP port | it finds and reaches two listeners opened for it | stopping the daemon, or naming the socket as allowed |
-| `tailscale-status`, `tailscale-localapi` | use tailscaled's LocalAPI | root can | its socket directory is closed |
+| `tailscale-status`, `tailscale-localapi` | use tailscaled's LocalAPI, wherever tailscaled's socket directory exists (a host with tailscale installed but its daemon stopped fails the control rather than skipping) | root can | its socket directory is closed |
 | `token-runner-file` | read the runner's copy of the run token | the runner reads it | the runner's home is closed |
 | `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration must be its own, mode 600, in a directory of mode 700) | the configuration holds the token | `run` writes it so |
 | `token-files`, `token-processes` | find the token in any other file it can write, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
