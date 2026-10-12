@@ -186,19 +186,25 @@ command = ["opencode", "acp"]
     /// are sent notices.
     #[test]
     fn notices() {
-        for (agent, want) in [("opencode", true), ("fake", true), ("claude", false)] {
+        for (agent, want) in [
+            ("opencode", true),
+            ("fake", true),
+            ("claude", false),
+            ("vibe", false),
+        ] {
             assert_eq!(builtin(agent).unwrap().notices, want, "{agent}");
         }
         assert!(!parse(REGISTRY, "opencode").unwrap().notices);
     }
 
-    /// Claude Code runs Opus unless the run names a model; opencode's is
-    /// a session option, so its command never carries one.
+    /// Claude Code runs Opus unless the run names a model; opencode's and
+    /// Vibe's are a session option, so their commands never carry one.
     #[test]
     fn builtin_models() {
         let wrapper = strings(&["sudo", "run0", "--"]);
-        let cases: [(&str, Option<&str>, &[&str]); 3] = [
+        let cases: [(&str, Option<&str>, &[&str]); 4] = [
             ("opencode", Some("provider/m"), &["env", "opencode", "acp"]),
+            ("vibe", Some("glm-5-3"), &["env", "vibe-acp"]),
             (
                 "claude",
                 None,

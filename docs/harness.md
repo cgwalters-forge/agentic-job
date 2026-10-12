@@ -46,7 +46,9 @@ has a closed `Kind` enum and agent-specific configuration and launcher
 code. ACP makes the session transport common, not provider setup.
 `claude` is Claude Code through `claude-agent-acp`, `opencode` is
 `opencode acp`, and `fake` is `fake-agent demo`, which plays a recorded
-session and needs no model.
+session and needs no model. `vibe` is Mistral Vibe's `vibe-acp`: an entry
+only, the first step of the recipe below, which `run` does not accept as
+an `[agent] name`.
 
 `run` does not start the first two by those commands. It starts
 `agentic-job launch-agent NAME`, a hidden command that runs as the

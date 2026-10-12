@@ -25,6 +25,17 @@ env = { ANTHROPIC_MODEL = "opus" }
 command = ["opencode", "acp"]
 notices = true
 
+# Mistral Vibe speaks ACP natively (`vibe-acp`, of the mistral-vibe Python
+# package; checked against 2.26.1). Its model is the `model` session config
+# option, like opencode's. Not an `[agent] name` of `run` yet: nothing here
+# pins its provider or gives it the run token (see "Adding an ACP agent to
+# run" in docs/harness.md).
+#
+# No `notices`: what it does with a prompt sent during a turn is not
+# established.
+[vibe]
+command = ["vibe-acp"]
+
 # A scripted agent with no model behind it (src/bin/fake-agent.rs), for
 # runs without inference: it plays fake-agent-demo.json.
 [fake]
