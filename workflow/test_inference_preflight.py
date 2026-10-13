@@ -64,7 +64,7 @@ class PreflightTests(unittest.TestCase):
             (root / "bin/agentic-job").chmod(0o755)
             env = dict.fromkeys([
                 "CONFIG", "MODEL", "CONFIG_REPO", "CONFIG_REF", "CONFIG_PATH",
-                "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "TIMEOUT",
+                "SKILLS", "URL", "REGISTER", "AUDIENCE", "TOKEN_FILE", "TIMEOUT",
                 "MAX_REQUESTS", "MAX_TASKS", "BUDGET", "PACKAGES", "NPM", "SETUP",
             ], "")
             env.update(JOB_DIR=str(root), PATH="/usr/bin:/bin", AGENT="fake", REPO="example/repo")
