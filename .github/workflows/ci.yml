@@ -869,7 +869,7 @@ jobs:
       # posted, and the comment is there once. The handlers that would post again are not run here; that
       # they post only what the guard keeps is apply.test.cjs's to show.
       # Where apply has gh-aw's scripts: the guard names the branch with them.
-      - uses: github/gh-aw/actions/setup@c227508baacbbe271be6c5a4f303936840b3c813 # v0.90.1-13
+      - uses: github/gh-aw/actions/setup@d6c3458b08d7586f0a086130e4f88ee9865e6e35 # v0.90.1-13
         if: ${{ always() && needs.e2e-full.result == 'success' }}
         with:
           destination: ${{ runner.temp }}/gh-aw/actions
