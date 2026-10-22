@@ -9,6 +9,10 @@ import subprocess
 import tempfile
 
 
+# Looser than zizmor's own syntax, so a near miss fails too.
+IGNORE = re.compile(r"zizmor\s*:\s*ignore", re.IGNORECASE)
+
+
 def git(repo, *args):
     return subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), *args], check=True,
                           capture_output=True).stdout
@@ -20,27 +24,33 @@ def check(repo, base, head):
     ancestor = git(repo, "merge-base", base, head).decode().strip()
     names = git(repo, "diff", "--no-ext-diff", "--no-renames", "--name-only",
                 "-z", ancestor, head, "--").decode().split("\0")
-    changed = [name for name in names if name.startswith(".github/")
+    changed = [name for name in names if name == ".github" or name.startswith(".github/")
                or Path(name).name in ("action.yml", "action.yaml")]
     if not changed:
         return True
     failed = False
     with tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP", Path.home())) as temp:
         for name in changed:
-            if not (re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", name)
-                    or Path(name).name in ("action.yml", "action.yaml")):
-                continue
             entry = git(repo, "ls-tree", "-z", head, "--", name)
             if not entry:  # Deleted definitions have nothing to lint.
                 continue
             mode, kind, oid = entry.split(b"\t", 1)[0].split()
             if mode not in (b"100644", b"100755") or kind != b"blob":
-                raise ValueError(f"not a regular workflow/action: {name!r}")
+                raise ValueError(f"not a regular file: {name!r}")
+            if not (re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", name)
+                    or Path(name).name in ("action.yml", "action.yaml")):
+                continue
             if int(git(repo, "cat-file", "-s", oid.decode())) > 1024 * 1024:
                 raise ValueError(f"workflow/action exceeds 1 MiB: {name!r}")
             source = Path(temp) / Path(name).name
             source.write_bytes(git(repo, "cat-file", "blob", oid.decode()))
             print(f"Checking {name!r}", flush=True)
+            # An ignore switches a finding off, so the change it vets cannot add one.
+            patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames",
+                        "-U0", ancestor, head, "--", name).decode(errors="replace")
+            if any(line.startswith("+") and IGNORE.search(line) for line in patch.splitlines()):
+                print(f"New or changed zizmor ignore in {name!r}: a maintainer must land new exemptions.")
+                failed = True
             commands = [[os.environ.get("ZIZMOR", "zizmor"), "--offline", "--no-config",
                          "--strict-collection", "--no-progress", str(source)]]
             if name.startswith(".github/workflows/"):

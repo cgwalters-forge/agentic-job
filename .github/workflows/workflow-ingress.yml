@@ -1,9 +1,8 @@
-# zizmor: ignore[cache-poisoning] PR blobs are only parsed; no PR code runs or caches are restored.
-# Only default-branch code runs here; proposed files are Git blobs, not actions.
+# Only base-branch code runs here; proposed files are Git blobs, not actions.
 name: workflow-ingress
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] Read-only, default-branch checker; PR blobs are data only.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Read-only, base-branch checker; PR blobs are data only.
     types: [opened, synchronize, reopened, edited]
     paths: ['.github/**', '**/action.yml', '**/action.yaml']
 
