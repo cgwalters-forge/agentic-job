@@ -26,7 +26,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::Egress;
 use crate::host::{self, User};
-use crate::proxy::policy::{ECOSYSTEMS, normalize_host};
+use crate::proxy::policy::{ECOSYSTEMS, Policy, normalize_host};
 
 /// The addon and what it needs, as they are in `egress/`: the binary
 /// carries them, since it is all a runner gets.
@@ -622,6 +622,16 @@ pub fn check_installed_front(hosts: &[(String, u16)]) -> Result<()> {
         hosts,
     )
     .with_context(|| format!("in {}", path.display()))
+}
+
+/// The policy this machine's proxy enforces, root's copy that `sandbox
+/// setup` installed, parsed as the proxy parses it. The threat feed is
+/// left out: what `sandbox check` derives from this expects the proxy to
+/// admit at most what the policy does, and a host the feed refuses as
+/// well fails that check rather than passing it.
+pub fn installed_policy() -> Result<Policy> {
+    let path = Path::new(POLICY_DIR).join("policy.toml");
+    Policy::load(&path, None).context("`sandbox setup` installs the egress policy there")
 }
 
 /// How many domains a feed's text holds.

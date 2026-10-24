@@ -4,10 +4,11 @@
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 use super::{Attempt, CONTAINER_UID, Checker, Want};
 use crate::sandbox::enter::Output;
+use crate::sandbox::proxy::policy::{Policy, Request};
 use crate::sandbox::{egress, host, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
@@ -36,12 +37,21 @@ const WIRESERVER_DNS_PORT: u16 = 53;
 const WIRESERVER_CONNECT_SECONDS: &str = "5";
 
 /// With the egress proxy: a write it must refuse, on a host that would
-/// take it; a push; and a repository to fetch from.
+/// take it; and a push.
 const WRITE_URL: &str = "https://example.com/";
 
 const PUSH_URL: &str = "https://github.com/bootc-dev/bootc.git/git-receive-pack";
 
-const FETCH_REPO: &str = "https://github.com/bootc-dev/bootc";
+/// What `cargo fetch` and `npm install` read through the proxy: crates.io's
+/// sparse index and its downloads, and npm's registry, which also serves
+/// the tarballs. npm's audit POST is left out: its refusal is a warning,
+/// not a failed install.
+const CARGO_READS: &[&str] = &[
+    "https://index.crates.io/config.json",
+    "https://static.crates.io/",
+];
+
+const NPM_READS: &[&str] = &["https://registry.npmjs.org/is-number"];
 
 const PUBLIC_DNS: &str = "8.8.8.8";
 
@@ -94,7 +104,106 @@ fn metadata_attempts(user: &str, metadata: &[&str]) -> [Attempt; 2] {
     ]
 }
 
+/// A request of a probe's that the egress policy refuses, which the
+/// proxy itself must then refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Refusal {
+    method: &'static str,
+    url: String,
+}
+
+/// What the probes that fetch through the egress proxy expect of the
+/// policy it enforces: for each, `None` where the policy admits every
+/// request the probe makes, which must then succeed, or the first it
+/// refuses. A tight allowlist is tested as it is, rather than having to
+/// admit the hosts of a fixed fetch for the check to pass.
+#[derive(Debug, PartialEq, Eq)]
+struct Expected {
+    git: Option<Refusal>,
+    cargo: Option<Refusal>,
+    npm: Option<Refusal>,
+}
+
+/// [`Expected`] of `policy`, `git` fetching from `fetch_repo`. An error
+/// where `policy` refuses a read of `control_url`: it is the control of
+/// the probes that expect a connection to fail, and one the proxy
+/// refuses too would make those refusals show nothing.
+fn expected(policy: &Policy, control_url: &str, fetch_repo: &str) -> Result<Expected> {
+    ensure!(
+        first_refused(policy, &[("GET", control_url.to_owned())]).is_none(),
+        "the egress policy refuses a read of [sandbox.check] control-url {control_url:?}, the \
+         control of the egress probes: name a URL the policy admits"
+    );
+    // `git ls-remote` over smart HTTP: the refs advertised, and with
+    // protocol version 2, git's default, a POST that lists them.
+    let repo = fetch_repo.trim_end_matches('/');
+    let git = [
+        ("GET", format!("{repo}/info/refs?service=git-upload-pack")),
+        ("POST", format!("{repo}/git-upload-pack")),
+    ];
+    let reads = |urls: &[&str]| -> Vec<(&'static str, String)> {
+        urls.iter().map(|&url| ("GET", url.to_owned())).collect()
+    };
+    Ok(Expected {
+        git: first_refused(policy, &git),
+        cargo: first_refused(policy, &reads(CARGO_READS)),
+        npm: first_refused(policy, &reads(NPM_READS)),
+    })
+}
+
+/// The first of `requests`, each a method and a URL, that `policy`
+/// refuses, whether at the tunnel or at the request itself.
+fn first_refused(policy: &Policy, requests: &[(&'static str, String)]) -> Option<Refusal> {
+    requests
+        .iter()
+        .find(|(method, url)| {
+            let host = url_host(url);
+            let request = Request {
+                method,
+                host,
+                path: url_path(url),
+                has_body: *method != "GET",
+                ..Request::default()
+            };
+            !(policy.connect(host).allowed && policy.request(&request).allowed)
+        })
+        .map(|(method, url)| Refusal {
+            method,
+            url: url.clone(),
+        })
+}
+
+/// The probes that pull or run an image, which `[sandbox.check]
+/// containers = false` skips: those of the egress proxy and the tailnet
+/// where they are made at all.
+fn skipped_containers(egress: bool, tailnet: bool) -> Vec<&'static str> {
+    let mut ids = vec![
+        "container-pull",
+        "container-build",
+        "container-built-run",
+        "container-control",
+        "container-metadata",
+    ];
+    if egress {
+        ids.extend([
+            "egress-container-direct",
+            "egress-container-own-network",
+            "egress-container-post",
+        ]);
+    }
+    if tailnet {
+        ids.extend(["tailnet-container-direct", "tailnet-container:*"]);
+    }
+    ids
+}
+
 impl Checker<'_> {
+    /// Whether the probes run containers: there is podman, and
+    /// `[sandbox.check] containers` leaves them on.
+    fn runs_containers(&self) -> bool {
+        self.config.sandbox.check.containers && self.has_podman()
+    }
+
     /// The network as the sandbox user has it, on the host and from a
     /// rootless container: no cloud metadata service, and then what the
     /// egress proxy and the direct endpoints add.
@@ -103,6 +212,19 @@ impl Checker<'_> {
         let url = self.config.sandbox.check.control_url.clone();
         let image = self.config.sandbox.check.container_image.clone();
         let egress = self.config.egress.proxy;
+        let tailnet = !self.config.egress.direct.is_empty();
+        // Before any probe: a policy that cannot be read, or that refuses
+        // the control, stops the check rather than skipping probes.
+        let expected = if egress {
+            let policy = egress::installed_policy()?;
+            Some(expected(
+                &policy,
+                &url,
+                &self.config.sandbox.check.fetch_repo,
+            )?)
+        } else {
+            None
+        };
         let got = self.sandbox_succeeds(&curl(&[&url]))?;
         self.report.expect(
             Want::Succeed,
@@ -149,6 +271,12 @@ impl Checker<'_> {
         if !self.has_podman() {
             self.report
                 .note("no podman on this host, so no container to probe from");
+        } else if !self.config.sandbox.check.containers {
+            self.report.note(&format!(
+                "[sandbox.check] containers = false: not run, not passed: {}; the sandbox user \
+                 can still run rootless Podman, whose subordinate uids' network goes unprobed",
+                skipped_containers(egress, tailnet).join(", ")
+            ));
         } else {
             let got = self.sandbox_succeeds(&["podman", "pull", "-q", &image])?;
             self.report.expect(
@@ -225,13 +353,13 @@ impl Checker<'_> {
                 got,
             );
         }
-        if egress {
-            self.timed("egress", |this| this.egress())?;
+        if let Some(expected) = &expected {
+            self.timed("egress", |this| this.egress(expected))?;
         }
         if self.config.egress.write_policy {
             self.timed("write-policy", |this| this.write_policy())?;
         }
-        if !self.config.egress.direct.is_empty() {
+        if tailnet {
             self.timed("tailnet", |this| this.tailnet())?;
         }
         Ok(())
@@ -280,8 +408,9 @@ impl Checker<'_> {
     /// The egress proxy: the toolchains fetch through it, it refuses
     /// writes to unlisted endpoints (with its own header, so the refusal
     /// is the proxy's), going around it fails, and it reaches nothing the
-    /// sandbox may not, from a container either.
-    fn egress(&mut self) -> Result<()> {
+    /// sandbox may not, from a container either. A fetch the policy does
+    /// not admit (`expected`) is expected to meet the proxy's refusal.
+    fn egress(&mut self, expected: &Expected) -> Result<()> {
         let user = self.user()?.to_owned();
         let url = self.config.sandbox.check.control_url.clone();
         let proxy = self.proxy_url();
@@ -297,7 +426,9 @@ impl Checker<'_> {
             got,
         );
         self.sandbox(&["rm", "-rf", &work], b"")?;
-        if self.sandbox_has("cargo")? {
+        if let Some(refusal) = &expected.cargo {
+            self.expect_refusal("egress-cargo-refused", "cargo", refusal)?;
+        } else if self.sandbox_has("cargo")? {
             let manifest = format!("{work}/crate/Cargo.toml");
             self.sandbox(&["mkdir", "-p", &format!("{work}/crate/src")], b"")?;
             self.sandbox(&["tee", &manifest], CARGO_TOML.as_bytes())?;
@@ -316,7 +447,9 @@ impl Checker<'_> {
             self.report
                 .note("no cargo for the sandbox user, so no crate to fetch");
         }
-        if self.sandbox_has("npm")? {
+        if let Some(refusal) = &expected.npm {
+            self.expect_refusal("egress-npm-refused", "npm", refusal)?;
+        } else if self.sandbox_has("npm")? {
             let prefix = format!("{work}/npm");
             self.sandbox(&["mkdir", "-p", &prefix], b"")?;
             let got = self.sandbox_succeeds(&[
@@ -338,14 +471,20 @@ impl Checker<'_> {
                 .note("no npm for the sandbox user, so no package to install");
         }
         self.sandbox(&["rm", "-rf", &work], b"")?;
-        let got =
-            self.sandbox_succeeds(&["timeout", "60", "git", "ls-remote", FETCH_REPO, "HEAD"])?;
-        self.report.expect(
-            Want::Succeed,
-            "egress-git",
-            format!("{user} fetches from git (POST git-upload-pack)"),
-            got,
-        );
+        if let Some(refusal) = &expected.git {
+            self.expect_refusal("egress-git-refused", "git", refusal)?;
+        } else {
+            let repo = &self.config.sandbox.check.fetch_repo;
+            // `--` keeps the repository an operand, whatever it says.
+            let got =
+                self.sandbox_succeeds(&["timeout", "60", "git", "ls-remote", "--", repo, "HEAD"])?;
+            self.report.expect(
+                Want::Succeed,
+                "egress-git",
+                format!("{user} fetches from {repo} with git (POST git-upload-pack)"),
+                got,
+            );
+        }
 
         let post = head(&["-X", "POST", "-d", "egress-check", WRITE_URL]);
         let got = refused(self.sandbox(&post, b"")?);
@@ -480,7 +619,7 @@ impl Checker<'_> {
             ));
         }
         let image = self.config.sandbox.check.container_image.clone();
-        if self.has_podman() {
+        if self.runs_containers() {
             let own_network = [&["podman", "run", "--rm", image.as_str()][..], &around].concat();
             attempts.extend([
                 Attempt::refused_in_container(
@@ -499,7 +638,7 @@ impl Checker<'_> {
         }
         self.attempts(&attempts)?;
 
-        if self.has_podman() {
+        if self.runs_containers() {
             let post = head(&[
                 "--cacert",
                 CONTAINER_CA,
@@ -585,6 +724,29 @@ impl Checker<'_> {
         );
     }
 
+    /// That the proxy itself refuses the sandbox user `refusal`, the
+    /// request of the `tool` probe's that the policy does not admit: in
+    /// place of the fetch, which would only fail, the probe then shows
+    /// the policy is the one enforced. It needs curl, not `tool`.
+    fn expect_refusal(&mut self, id: &str, tool: &str, refusal: &Refusal) -> Result<()> {
+        let Refusal { method, url } = refusal;
+        let argv = if *method == "GET" {
+            head(&[url])
+        } else {
+            head(&["-X", method, "-d", "0000", url])
+        };
+        let got = refused_by_proxy(&String::from_utf8_lossy(&self.sandbox(&argv, b"")?.stdout));
+        self.report.expect(
+            Want::Succeed,
+            id,
+            format!(
+                "the proxy refuses {tool}'s {method} {url}, which the egress policy does not admit"
+            ),
+            got,
+        );
+        Ok(())
+    }
+
     /// Whether the sandbox user has `program` on its path.
     fn sandbox_has(&self, program: &str) -> Result<bool> {
         self.sandbox_succeeds(&["sh", "-c", "command -v \"$1\" >/dev/null", "sh", program])
@@ -631,7 +793,7 @@ impl Checker<'_> {
                 format!("{user} reaches {url} on the tailnet"),
                 got,
             );
-            if self.has_podman() {
+            if self.runs_containers() {
                 let got = self.in_container(&curl(&[&url]))?;
                 self.report.expect(
                     Want::Succeed,
@@ -671,7 +833,7 @@ impl Checker<'_> {
                         &probe,
                     ),
                 ]);
-                if self.has_podman() {
+                if self.runs_containers() {
                     attempts.push(Attempt::refused_in_container(
                         format!("tailnet-container:{target}"),
                         format!(
@@ -761,6 +923,13 @@ pub(super) fn url_host(url: &str) -> &str {
         .map_or(host, |(host, _)| host)
 }
 
+/// The path of an http or https URL, with its query: `/` where it has
+/// none.
+fn url_path(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.find(['/', '?', '#']).map_or("/", |at| &rest[at..])
+}
+
 /// The tailnet IPv6 address of the peer whose IPv4 address is `addr`.
 fn tailnet_v6(status: &serde_json::Value, addr: &str) -> Option<String> {
     status.get("Peer")?.as_object()?.values().find_map(|peer| {
@@ -844,15 +1013,157 @@ mod tests {
     }
 
     #[test]
-    fn hosts_of_urls() {
+    fn hosts_and_paths_of_urls() {
         let cases = [
-            ("https://github.com/", "github.com"),
-            ("http://example.com:8080/a?b", "example.com"),
-            ("https://user@example.org", "example.org"),
-            ("http://100.101.102.103:18080/v1", "100.101.102.103"),
+            ("https://github.com/", "github.com", "/"),
+            ("http://example.com:8080/a?b", "example.com", "/a?b"),
+            ("https://user@example.org", "example.org", "/"),
+            ("https://example.org?q", "example.org", "?q"),
+            ("http://100.101.102.103:18080/v1", "100.101.102.103", "/v1"),
         ];
-        for (url, host) in cases {
+        for (url, host, path) in cases {
             assert_eq!(url_host(url), host, "{url}");
+            assert_eq!(url_path(url), path, "{url}");
+        }
+    }
+
+    /// Each probe through the proxy follows the policy it enforces: what
+    /// the policy admits must succeed, what it does not must meet the
+    /// proxy's refusal, and a control it refuses stops the check.
+    #[test]
+    fn egress_probes_follow_the_policy() {
+        use crate::sandbox::proxy::policy::ECOSYSTEMS;
+        let shipped = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../egress/policy.toml"),
+        )
+        .unwrap();
+        // An allowlist that admits no GitHub host.
+        let allowlist = "[egress]\nmode = \"allowlist\"\nallow = [\"rust\", \"registry.npmjs.org\", \"example.org\"]\n";
+        let reads_anywhere = "[egress]\nmode = \"reads-anywhere\"\n";
+        let repo = "https://github.com/bootc-dev/bootc";
+        let git_post = Refusal {
+            method: "POST",
+            url: format!("{repo}/git-upload-pack"),
+        };
+        let git_get = Refusal {
+            method: "GET",
+            url: format!("{repo}/info/refs?service=git-upload-pack"),
+        };
+        let npm = Refusal {
+            method: "GET",
+            url: NPM_READS[0].to_owned(),
+        };
+        // (policy, control URL, fetched repository, what it expects or
+        // the error).
+        let cases: &[(&str, &str, &str, Result<Expected, &str>)] = &[
+            (
+                &shipped,
+                "https://github.com/",
+                repo,
+                Ok(Expected {
+                    git: None,
+                    cargo: None,
+                    npm: None,
+                }),
+            ),
+            // A fetch from a host without the write rule.
+            (
+                &shipped,
+                "https://github.com/",
+                "https://git.example.org/a/b/",
+                Ok(Expected {
+                    git: Some(Refusal {
+                        method: "POST",
+                        url: "https://git.example.org/a/b/git-upload-pack".to_owned(),
+                    }),
+                    cargo: None,
+                    npm: None,
+                }),
+            ),
+            (
+                reads_anywhere,
+                "https://github.com/",
+                repo,
+                Ok(Expected {
+                    git: Some(git_post),
+                    cargo: None,
+                    npm: None,
+                }),
+            ),
+            (
+                allowlist,
+                "https://example.org/",
+                repo,
+                Ok(Expected {
+                    git: Some(git_get),
+                    cargo: None,
+                    npm: None,
+                }),
+            ),
+            (
+                "[egress]\nmode = \"allowlist\"\nallow = [\"crates.io\", \"example.org\"]\n",
+                "https://www.example.org/",
+                repo,
+                Ok(Expected {
+                    git: Some(Refusal {
+                        method: "GET",
+                        url: format!("{repo}/info/refs?service=git-upload-pack"),
+                    }),
+                    cargo: None,
+                    npm: Some(npm),
+                }),
+            ),
+            (
+                allowlist,
+                "https://github.com/",
+                repo,
+                Err("control-url \"https://github.com/\""),
+            ),
+            (
+                allowlist,
+                "https://notexample.org/",
+                repo,
+                Err("control-url \"https://notexample.org/\""),
+            ),
+        ];
+        for (policy, control, fetch, want) in cases {
+            let parsed = Policy::parse(policy, ECOSYSTEMS).unwrap();
+            let got = expected(&parsed, control, fetch);
+            match (got, want) {
+                (Ok(got), Ok(want)) => assert_eq!(&got, want, "{policy} {control} {fetch}"),
+                (Err(err), Err(want)) => {
+                    assert!(err.to_string().contains(want), "{err:#}");
+                }
+                (got, _) => panic!("{policy} {control} {fetch}: {got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn containers_off_names_every_probe_that_runs_one() {
+        let base = [
+            "container-pull",
+            "container-build",
+            "container-built-run",
+            "container-control",
+            "container-metadata",
+        ];
+        let egress = [
+            "egress-container-direct",
+            "egress-container-own-network",
+            "egress-container-post",
+        ];
+        let tailnet = ["tailnet-container-direct", "tailnet-container:*"];
+        for (with_egress, with_tailnet) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let want: Vec<&str> = base
+                .iter()
+                .chain(egress.iter().filter(|_| with_egress))
+                .chain(tailnet.iter().filter(|_| with_tailnet))
+                .copied()
+                .collect();
+            assert_eq!(skipped_containers(with_egress, with_tailnet), want);
         }
     }
 

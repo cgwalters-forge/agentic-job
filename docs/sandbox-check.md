@@ -59,6 +59,39 @@ caller job that runs repository code as the runner's user before `run`
 (`make check`, say) should
 give secure-host `check: false`, so that `run` probes after that code.
 
+## The egress policy and containers
+
+With `egress.proxy`, the check reads the policy the proxy enforces,
+`/opt/egress-proxy/policy/policy.toml` as `sandbox setup` installed it,
+with the Rust proxy's parser (mitmproxy's `egress/policy.py` decides
+alike), and fails before any probe if it cannot read or parse it. For
+`egress-git` (`git ls-remote` of `[sandbox.check] fetch-repo`, by
+default `https://github.com/bootc-dev/bootc`), `egress-cargo` and
+`egress-npm` it asks the policy whether it admits the requests each
+makes. Where it does, the fetch must succeed. Where it does not, the
+probe becomes `egress-git-refused`, `egress-cargo-refused` or
+`egress-npm-refused`: the first refused request, made with curl, must
+meet the proxy's own 403 (`X-Egress-Denied`). So an allowlist that
+admits no GitHub host is tested as it is, not loosened for the check.
+`[sandbox.check] control-url` is the control of the probes that expect
+a refusal, and the check fails, naming that key, if the policy refuses
+a read of it. The threat feed is not consulted: a host on it fails the
+probe that expected success, rather than passing.
+
+`[sandbox.check] containers = false` skips every probe that pulls or
+runs `container-image`: `container-pull`, `container-build`,
+`container-built-run`, `container-control`, `container-metadata`, the
+`egress-container-*` and `tailnet-container*` probes, and in `run` the
+`token-container-*` and `broker-egress-container` probes. Each skipped
+probe is named in a note and none counts as passed. The `podman
+unshare` probes of the filesystem view pull nothing and stay. The
+consequence: rootless Podman stays usable to the sandbox user, and
+whether its subordinate uids are held by the network rules (no
+metadata service, nothing around the proxy) and kept from the run
+token goes unprobed. A host that does not want that should remove
+podman rather than turn the probes off; turning them off is accepting
+it.
+
 ## `run`'s token probes
 
 `sandbox check` has no run token, so it makes none of these. They are
@@ -79,7 +112,7 @@ matches on them.
 | `token-runner-file` | read the runner's copy of the run token, under `register = "token-file"` | `run` read it | the runner's home is closed |
 | `token-config-mode`, `token-config-dir-mode` | (none: the agent's configuration, and a child agent's, must be its own, mode 600, in a directory of mode 700) | `token-config-control`: the configuration holds the token | `run` writes it so |
 | `token-files`, `token-processes` | find the token in any other file under its home, `/run/user/UID`, `/tmp`, `/var/tmp` or `/dev/shm`, or in any environment or command line it can read | as above | `run` hands the token over on standard input only |
-| `token-container-subuid` | read the configuration from a rootless container as a subordinate uid, with `[sandbox.check] before-agent`, which names the image | `token-container-control`, `token-container-subuid-control`: the container's root reads it, the subordinate uid reads `/etc/os-release` | the modes above |
+| `token-container-subuid` | read the configuration from a rootless container as a subordinate uid, with `[sandbox.check] before-agent`, which names the image, unless `containers = false` | `token-container-control`, `token-container-subuid-control`: the container's root reads it, the subordinate uid reads `/etc/os-release` | the modes above |
 
 ## The helper
 
