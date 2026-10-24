@@ -13,6 +13,7 @@ fn downloaded_artifacts_are_audited_without_being_applied() {
             "agent-run/summary.json",
             json!({"schema": "agent-run-summary/v1", "run_id": 7,
             "result": "success", "aic": 2.5, "aic_budget": 100,
+            "cost": {"usd": 0.03, "basis": "list", "source": "metered"},
             "tools": {"Bash": {"calls": 1, "errors": 0}},
             "egress_denied": [{"domain": "example.org", "count": 2}]}),
         ),

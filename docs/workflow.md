@@ -1908,8 +1908,16 @@ successfully even when it reports refusals; malformed input is an error.
 This is an offline inspection, not another check or an attestation: it
 executes nothing from the artifacts and does not apply a patch. Tool
 counts and denials come from `summary.json`; it does not replay the
-transcript. Cost is agent-reported and unverified, even when token counts
-come from the inference proxy. Unknown cost is not zero. `summary.md`,
+transcript. Cost is in dollars at API list prices, whether the pool is
+metered or a subscription: the inference proxy's token counts by the
+model upstream named, each at its rates in a pinned, dated table
+(`crates/agentic-job/src/run/prices.toml`), never fetched at run time.
+A model the table lacks or a response without usage makes it "at least"
+that figure. With no model priced it is Claude Code's own
+list-price figure, marked agent-reported and unverified, or unknown;
+opencode's own figure is not used, since it has no prices for the
+proxy's provider. The budget still caps the agent's own figure, in AIC.
+Unknown cost is not zero. `summary.md`,
 which the workflow appends to the step summary, includes the cost line.
 OTLP export is deferred: no collector endpoint or telemetry credentials
 are configured, and audit does not send artifact data anywhere.

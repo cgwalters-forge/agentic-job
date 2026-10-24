@@ -1,0 +1,50 @@
+# API list prices of the models runs use, in USD per million tokens, as
+# the providers published them on `date` (see prices.rs). Pinned here and
+# never fetched at run time: a run's cost is then the same figure however
+# often it is read, and a change of price is a reviewed change.
+#
+# Sources: https://platform.claude.com/docs/en/about-claude/pricing and
+# https://developers.openai.com/api/docs/pricing, standard tier.
+#
+# Only the base tier of each model: the proxy counts a run's tokens, not
+# each request's prompt size, so the long-prompt rates (Claude Haiku 5.5
+# over 100,000 tokens, OpenAI's over 272,000) and cache-write premiums,
+# which the proxy does not count, are left out. A figure is therefore a
+# lower bound for runs that use them. A model not listed is unpriced, not
+# free.
+#
+# Names are matched after the provider prefix (`praxis/`) and a date
+# suffix (`-20251101`) are dropped and dots read as dashes, so
+# `claude-sonnet-4.5` is `claude-sonnet-4-5`.
+
+date = "2026-10-24"
+
+[models]
+"claude-fable-5-1" = { input = 10.0, cached-input = 0.25, output = 50.0 }
+"claude-fable-5" = { input = 10.0, cached-input = 1.0, output = 50.0 }
+"claude-opus-5-5" = { input = 4.0, cached-input = 0.20, output = 20.0 }
+"claude-opus-5" = { input = 5.0, cached-input = 0.50, output = 25.0 }
+"claude-opus-4-8" = { input = 5.0, cached-input = 0.50, output = 25.0 }
+"claude-opus-4-7" = { input = 5.0, cached-input = 0.50, output = 25.0 }
+"claude-opus-4-6" = { input = 5.0, cached-input = 0.50, output = 25.0 }
+"claude-opus-4-5" = { input = 5.0, cached-input = 0.50, output = 25.0 }
+"claude-opus-4-1" = { input = 15.0, cached-input = 1.50, output = 75.0 }
+"claude-sonnet-5-5" = { input = 2.0, cached-input = 0.10, output = 10.0 }
+"claude-sonnet-5" = { input = 2.0, cached-input = 0.20, output = 10.0 }
+"claude-sonnet-4-6" = { input = 3.0, cached-input = 0.30, output = 15.0 }
+"claude-sonnet-4-5" = { input = 3.0, cached-input = 0.30, output = 15.0 }
+"claude-haiku-5-5" = { input = 0.10, cached-input = 0.01, output = 0.50 }
+"claude-haiku-4-5" = { input = 1.0, cached-input = 0.10, output = 5.0 }
+"gpt-5.6-sol" = { input = 4.0, cached-input = 0.40, output = 20.0 }
+"gpt-5.6-terra" = { input = 2.0, cached-input = 0.20, output = 12.0 }
+"gpt-5.6-luna" = { input = 0.20, cached-input = 0.02, output = 1.20 }
+"gpt-5.5" = { input = 5.0, cached-input = 0.50, output = 30.0 }
+"gpt-5.4" = { input = 2.50, cached-input = 0.25, output = 15.0 }
+"gpt-5.4-mini" = { input = 0.75, cached-input = 0.075, output = 4.50 }
+"gpt-5.4-nano" = { input = 0.20, cached-input = 0.02, output = 1.25 }
+"gpt-5.3-codex" = { input = 1.75, cached-input = 0.175, output = 14.0 }
+"gpt-5.2" = { input = 1.75, cached-input = 0.175, output = 14.0 }
+"gpt-5.1" = { input = 1.25, cached-input = 0.125, output = 10.0 }
+"gpt-5" = { input = 1.25, cached-input = 0.125, output = 10.0 }
+"gpt-5-mini" = { input = 0.25, cached-input = 0.025, output = 2.0 }
+"gpt-5-nano" = { input = 0.05, cached-input = 0.005, output = 0.40 }

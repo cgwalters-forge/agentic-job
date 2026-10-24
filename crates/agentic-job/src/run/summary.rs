@@ -17,6 +17,8 @@ use serde_json::{Map, Value, json};
 
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
+use super::prices::{Prices, Tokens};
+use crate::session::budget::AIC_PER_USD;
 use crate::session::digest::{Digest, Dir, EDIT_KINDS, cut};
 use crate::session::provider::Class;
 use crate::session::{Outcome, Record, RunResult, STALLED};
@@ -31,6 +33,21 @@ const TOKENS_UNVERIFIED: &str = "unverified";
 /// The fields of the proxy's record that the summary keeps: numbers and
 /// fixed words only, fit for a footer on a pull request.
 const PRAXIS_FIELDS: &[&str] = &["schema", "state", "requests", "unmetered", "tokens"];
+/// `cost.source`: the proxy's token counts at the pinned list prices, or
+/// the agent's own figure, which is only its word.
+const COST_METERED: &str = "metered";
+const COST_AGENT: &str = "agent-reported, unverified";
+/// The `aic_pricing` of agents whose own cost is at list prices: Claude
+/// Code's, and the fake agent's made-up one. opencode's is not: it has
+/// no prices for the proxy's provider.
+const AGENT_LIST_PRICINGS: &[&str] = &["api-equivalent", "mock"];
+/// `cost.usd` is kept to a hundredth of a cent.
+const USD_ROUNDING: f64 = 10_000.0;
+/// At most this many models are priced and listed in `cost.models`; a
+/// figure without the rest is partial.
+const MAX_COST_MODELS: usize = 16;
+/// `cost.prices`, a date: `2026-10-24`.
+const PRICES_DATE_CHARS: usize = 10;
 /// At most this many of the slowest tool calls are listed.
 const MAX_SLOWEST: usize = 10;
 /// The fields `--meta` gives: on GitHub the run's id, attempt and URL,
@@ -151,6 +168,49 @@ fn praxis_summary(record: &Value) -> Value {
         .map(|key| ((*key).to_owned(), record[*key].clone()))
         .collect();
     Value::Object(fields)
+}
+
+/// The run's cost at API list prices: the proxy's token counts by the
+/// model upstream named (the record's `models`), each at its rates in the
+/// price table, never at a model the agent names. Without one priced,
+/// the agent's own figure where that is a list price too (`aic_pricing`),
+/// else null. A metered figure is `partial`, a lower bound, when a model
+/// is unpriced or a response's usage never arrived (`unmetered`).
+fn list_cost(record: Option<&Value>, agent_usd: Option<f64>, pricing: &str) -> Value {
+    let prices = Prices::builtin().ok();
+    let round = |usd: f64| (usd * USD_ROUNDING).round() / USD_ROUNDING;
+    let by_model = record.and_then(|r| r["models"].as_object());
+    let mut models = Map::new();
+    let mut total = 0.0;
+    // Fails closed: an `unmetered` that is not a count may hide usage.
+    let mut partial = record.is_some_and(|r| r["unmetered"].as_u64() != Some(0))
+        || by_model.is_some_and(|m| m.len() > MAX_COST_MODELS);
+    for (name, tokens) in by_model.into_iter().flatten().take(MAX_COST_MODELS) {
+        let count = |key: &str| tokens[key].as_u64();
+        let cost = (|| {
+            let tokens = Tokens {
+                input: count("input")?,
+                cached: count("cache_read")?,
+                output: count("output")?,
+            };
+            Some(prices.as_ref()?.rates(name)?.cost(tokens))
+        })();
+        partial |= cost.is_none();
+        total += cost.unwrap_or(0.0);
+        models.insert(cut(name), json!(cost.map(round)));
+    }
+    let priced = models.values().any(|usd| !usd.is_null());
+    let (usd, source) = match agent_usd {
+        _ if priced => (Some(total), json!(COST_METERED)),
+        Some(usd) if AGENT_LIST_PRICINGS.contains(&pricing) => (Some(usd), json!(COST_AGENT)),
+        _ => (None, Value::Null),
+    };
+    json!({
+        "usd": usd.map(round), "basis": "list", "source": source,
+        "prices": prices.map(|p| p.date),
+        "partial": priced && partial,
+        "models": if priced { Value::Object(models) } else { Value::Null },
+    })
 }
 
 /// Token counts from the `session/prompt` response (a draft ACP field).
@@ -361,6 +421,13 @@ pub fn summarize(inputs: &Inputs) -> Value {
     // USD to AIC (1 AIC = $0.01), to a tenth.
     let aic = digest.cost_usd.map(|usd| (usd * 1000.0).round() / 10.0);
     s.insert("aic".into(), json!(aic));
+    let record = inputs
+        .usage
+        .filter(|record| record["schema"] == RECORD_SCHEMA);
+    s.insert(
+        "cost".into(),
+        list_cost(record, digest.cost_usd, measured.aic_pricing),
+    );
     s.insert("tools".into(), Value::Object(tools));
     s.insert("slowest".into(), json!(slowest));
     s.insert("failures".into(), json!(failures));
@@ -488,18 +555,43 @@ fn row(cells: &[String]) -> String {
     format!("| {} |", cells.join(" | "))
 }
 
-/// Cost is the agent's estimate, not the inference proxy's token count.
+/// Dollars to the cent, or `?`.
+fn usd(v: &Value) -> String {
+    v.as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map_or_else(|| "?".to_owned(), |n| format!("${n:.2}"))
+}
+
+/// The run's cost at list prices and where it comes from. The budget
+/// still holds the agent's own figure, in AIC (hundredths of a dollar),
+/// as the session reads it.
 pub fn cost_line(s: &Value) -> String {
-    let number = |key: &str| {
-        s[key]
-            .as_f64()
-            .filter(|n| n.is_finite() && *n >= 0.0)
-            .map_or_else(|| "unknown".to_owned(), |n| n.to_string())
+    let cost = &s["cost"];
+    // `audit` prints this line from a downloaded summary: only a date of
+    // its words, never text that could be a CI command.
+    let date = cost["prices"]
+        .as_str()
+        .filter(|d| {
+            d.len() <= PRICES_DATE_CHARS && d.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        })
+        .unwrap_or("?");
+    let source = if cost["source"] == COST_METERED {
+        format!("metered tokens, prices of {date}")
+    } else if cost["source"] == COST_AGENT {
+        COST_AGENT.to_owned()
+    } else {
+        "unpriced".to_owned()
     };
+    let at_least = if cost["partial"] == true {
+        "at least "
+    } else {
+        ""
+    };
+    let budget = s["aic_budget"].as_f64().map(|aic| json!(aic / AIC_PER_USD));
     format!(
-        "Cost: {} AIC (agent-reported, unverified); budget: {} AIC.",
-        number("aic"),
-        number("aic_budget")
+        "Cost: {at_least}{} at API list prices ({source}); budget: {}, capping the agent's own figure.",
+        usd(&cost["usd"]),
+        usd(budget.as_ref().unwrap_or(&Value::Null))
     )
 }
 
@@ -540,7 +632,7 @@ pub fn markdown(s: &Value) -> String {
         String::new(),
         cost_line(s),
         String::new(),
-        row(&["Duration", "Turns", "Tokens in/out", "Est. AIC"].map(str::to_owned)),
+        row(&["Duration", "Turns", "Tokens in/out", "List cost"].map(str::to_owned)),
         "|---|---|---|---|".to_owned(),
         row(&[
             human_duration(&s["duration_s"]),
@@ -555,12 +647,7 @@ pub fn markdown(s: &Value) -> String {
                     ""
                 }
             ),
-            format!(
-                "{} of {} ({})",
-                or(&s["aic"], "?"),
-                or(&s["aic_budget"], "?"),
-                text(&s["aic_pricing"])
-            ),
+            usd(&s["cost"]["usd"]),
         ]),
     ];
     if s["stopped_early"] == true {
@@ -866,15 +953,126 @@ mod tests {
 
     #[test]
     fn cost_is_not_verified_or_invented() {
-        for (aic, expected) in [
-            (json!(2.5), "2.5"),
-            (Value::Null, "unknown"),
-            (json!(-1), "unknown"),
-            (json!("free"), "unknown"),
+        for (cost, budget, expected) in [
+            (
+                json!({"usd": 0.7912, "source": COST_METERED, "prices": "2026-10-24"}),
+                json!(500),
+                "$0.79 at API list prices (metered tokens, prices of 2026-10-24); budget: $5.00",
+            ),
+            (
+                json!({"usd": 0.5, "source": COST_METERED, "prices": "2026-10-24", "partial": true}),
+                json!(500),
+                "at least $0.50 at API list prices (metered tokens, prices of 2026-10-24); budget: $5.00",
+            ),
+            (
+                json!({"usd": 1, "source": COST_METERED, "prices": "\n::error::x"}),
+                json!(500),
+                "$1.00 at API list prices (metered tokens, prices of ?); budget: $5.00",
+            ),
+            (
+                json!({"usd": 2.5, "source": COST_AGENT}),
+                Value::Null,
+                "$2.50 at API list prices (agent-reported, unverified); budget: ?",
+            ),
+            (
+                json!({"usd": null, "source": null}),
+                json!(100),
+                "? at API list prices (unpriced); budget: $1.00",
+            ),
+            (
+                json!({"usd": -1, "source": "free"}),
+                json!("x"),
+                "? at API list prices (unpriced); budget: ?",
+            ),
+            (
+                Value::Null,
+                Value::Null,
+                "? at API list prices (unpriced); budget: ?",
+            ),
         ] {
             assert_eq!(
-                cost_line(&json!({"aic": aic})),
-                format!("Cost: {expected} AIC (agent-reported, unverified); budget: unknown AIC.")
+                cost_line(&json!({"cost": cost, "aic_budget": budget})),
+                format!("Cost: {expected}, capping the agent's own figure.")
+            );
+        }
+    }
+
+    /// The proxy's tokens at the pinned list prices, else the agent's
+    /// figure only where it is a list price too.
+    #[test]
+    fn list_cost_sources() {
+        let date = Prices::builtin().unwrap().date;
+        let tokens = json!({"input": 1_000_000, "cache_read": 2_000_000, "output": 100_000});
+        let unpriced = json!({"devstral-2": tokens});
+        for (record, agent, pricing, want) in [
+            // gpt-5.5: $5 + 2 × $0.50 + 0.1 × $30; claude-opus-5-5:
+            // $4 + 2 × $0.20 + 0.1 × $20.
+            (
+                Some(json!({"unmetered": 0,
+                    "models": {"gpt-5.5": tokens, "claude-opus-5-5": tokens}})),
+                Some(0.0),
+                "subscription",
+                json!({"usd": 15.4, "source": COST_METERED, "partial": false,
+                    "models": {"gpt-5.5": 9.0, "claude-opus-5-5": 6.4}}),
+            ),
+            // A model the table lacks, or a response without usage: a
+            // lower bound.
+            (
+                Some(json!({"unmetered": 0, "models": {"gpt-5.5": tokens, "devstral-2": tokens}})),
+                None,
+                "unpriced",
+                json!({"usd": 9.0, "source": COST_METERED, "partial": true,
+                    "models": {"gpt-5.5": 9.0, "devstral-2": null}}),
+            ),
+            (
+                Some(json!({"unmetered": 1, "models": {"gpt-5.5": tokens}})),
+                None,
+                "subscription",
+                json!({"usd": 9.0, "source": COST_METERED, "partial": true,
+                    "models": {"gpt-5.5": 9.0}}),
+            ),
+            // No count of responses without usage is no proof there were none.
+            (
+                Some(json!({"models": {"gpt-5.5": tokens}})),
+                None,
+                "subscription",
+                json!({"usd": 9.0, "source": COST_METERED, "partial": true,
+                    "models": {"gpt-5.5": 9.0}}),
+            ),
+            // Nothing priced: Claude Code's own list-price figure.
+            (
+                Some(json!({"models": unpriced})),
+                Some(1.25),
+                "api-equivalent",
+                json!({"usd": 1.25, "source": COST_AGENT, "partial": false, "models": null}),
+            ),
+            (
+                Some(json!({"tokens": tokens})),
+                Some(1.25),
+                "api-equivalent",
+                json!({"usd": 1.25, "source": COST_AGENT, "partial": false, "models": null}),
+            ),
+            // opencode's own figure is no list price.
+            (
+                None,
+                Some(0.0),
+                "subscription",
+                json!({"usd": null, "source": null, "partial": false, "models": null}),
+            ),
+            (
+                Some(json!({"models": {"gpt-5.5": {"input": 1, "output": 1}}})),
+                None,
+                "api-equivalent",
+                json!({"usd": null, "source": null, "partial": false, "models": null}),
+            ),
+        ] {
+            let mut want = want;
+            want["basis"] = json!("list");
+            want["prices"] = json!(date);
+            assert_eq!(
+                list_cost(record.as_ref(), agent, pricing),
+                want,
+                "{record:?}"
             );
         }
     }
@@ -906,6 +1104,7 @@ mod tests {
             "cores": 4, "result": "failure", "duration_s": 75, "turns": null,
             "tokens": {"input": 1500, "output": null}, "aic": 1.0, "aic_budget": 500,
             "aic_pricing": "mock", "outcome": {"url": null},
+            "cost": {"usd": 0.01, "basis": "list", "source": COST_AGENT},
             "tools": {"Read": {"calls": 1, "errors": 0, "duration_s": 0},
                       "Bash": {"calls": 2, "errors": 1, "duration_s": 3}},
             "slowest": [{"tool": "Bash", "summary": "a | b `c`", "duration_s": 3}],
@@ -922,11 +1121,11 @@ mod tests {
 
 fake/default, 4 cores: **failure**
 
-Cost: 1 AIC (agent-reported, unverified); budget: 500 AIC.
+Cost: $0.01 at API list prices (agent-reported, unverified); budget: $5.00, capping the agent's own figure.
 
-| Duration | Turns | Tokens in/out | Est. AIC |
+| Duration | Turns | Tokens in/out | List cost |
 |---|---|---|---|
-| 1m | ? | 1k / ? | 1.0 of 500 (mock) |
+| 1m | ? | 1k / ? | $0.01 |
 
 No change handed back: `the change is over 64 bytes`
 
@@ -1188,7 +1387,7 @@ Redacted 1 string(s).
             );
             // The budget is a whole number, and reads as one.
             assert_eq!(s["aic_budget"].to_string(), "500");
-            assert!(markdown(&s).contains(" of 500 (mock)"), "{}", markdown(&s));
+            assert!(markdown(&s).contains("budget: $5.00,"), "{}", markdown(&s));
             // Every field the old tree's summary took from its supervisor.
             for key in [
                 "run_id",

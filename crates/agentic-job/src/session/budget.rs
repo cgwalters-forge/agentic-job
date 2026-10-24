@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::config;
 
 /// One AIC is a hundredth of a dollar.
-const AIC_PER_USD: f64 = 100.0;
+pub const AIC_PER_USD: f64 = 100.0;
 const SECONDS_PER_MINUTE: u64 = 60;
 
 /// What stops a session. `harness.json` records it.
