@@ -377,6 +377,15 @@ pub struct SandboxCheck {
     pub control_url: String,
     /// A small image that has `curl`, for the probes from a container.
     pub container_image: String,
+    /// Whether the probes pull and run `container-image`. Off, rootless
+    /// Podman stays usable to the sandbox user, but what its subordinate
+    /// uids reach on the network, and whether they read the run token,
+    /// goes unprobed: each skipped probe is named in the check's notes.
+    /// A host that does not accept that should remove podman instead.
+    pub containers: bool,
+    /// A repository the egress probes fetch from with `git ls-remote`,
+    /// or expect the proxy to refuse that fetch where its policy does.
+    pub fetch_repo: String,
     /// Unix sockets the sandbox user may connect to, besides the host's
     /// own (`sandbox::check` has that list): a path, a directory ending
     /// in `/` for everything under it, a path ending in `*` for every
@@ -400,11 +409,33 @@ impl SandboxCheck {
     pub const DEFAULT_CONTAINER_IMAGE: &'static str =
         "registry.access.redhat.com/ubi10/ubi-minimal";
 
+    pub const DEFAULT_FETCH_REPO: &'static str = "https://github.com/bootc-dev/bootc";
+
     fn validate(&self) -> Result<()> {
+        for (key, url) in [
+            ("control-url", &self.control_url),
+            ("fetch-repo", &self.fetch_repo),
+        ] {
+            ensure!(
+                url.starts_with("https://") || url.starts_with("http://"),
+                "sandbox.check.{key}: {url:?} is not an http or https URL"
+            );
+        }
+        // git appends its own paths to it, which the check judges against
+        // the egress policy: a query or fragment would put them after it,
+        // and credentials would be printed with every probe.
+        let rest = self
+            .fetch_repo
+            .split_once("://")
+            .map_or("", |(_, rest)| rest);
         ensure!(
-            self.control_url.starts_with("https://") || self.control_url.starts_with("http://"),
-            "sandbox.check.control-url: {:?} is not an http or https URL",
-            self.control_url
+            !rest.is_empty()
+                && !rest.starts_with('/')
+                && !rest.contains(['?', '#', '@'])
+                && !rest.chars().any(char::is_whitespace),
+            "sandbox.check.fetch-repo: {:?} must be a repository URL with a host, and no \
+             credentials, query or fragment",
+            self.fetch_repo
         );
         ensure!(
             !self.container_image.is_empty() && !self.container_image.starts_with('-'),
@@ -426,6 +457,8 @@ impl Default for SandboxCheck {
         Self {
             control_url: Self::DEFAULT_CONTROL_URL.to_owned(),
             container_image: Self::DEFAULT_CONTAINER_IMAGE.to_owned(),
+            containers: true,
+            fetch_repo: Self::DEFAULT_FETCH_REPO.to_owned(),
             allow_sockets: Vec::new(),
             allow_tcp_ports: Vec::new(),
             before_agent: false,
@@ -899,6 +932,8 @@ mod tests {
             allow-sockets = ["/run/snapd.socket", "/run/pcscd/", "@ISCSIADM_ABSTRACT_NAMESPACE"]
             allow-tcp-ports = [3128]
             before-agent = true
+            containers = false
+            fetch-repo = "https://git.example.org/a/b"
             [setup]
             packages = ["just", "gcc-c++"]
             npm = ["opencode-ai@1.2.3", "@agentclientprotocol/claude-agent-acp@0.4.0-beta.1"]
@@ -907,6 +942,16 @@ mod tests {
         let config = Config::parse(good).unwrap();
         assert!(config.sandbox.check.before_agent);
         assert!(!Config::default().sandbox.check.before_agent);
+        assert!(!config.sandbox.check.containers);
+        assert!(Config::default().sandbox.check.containers);
+        assert_eq!(
+            config.sandbox.check.fetch_repo,
+            "https://git.example.org/a/b"
+        );
+        assert_eq!(
+            Config::default().sandbox.check.fetch_repo,
+            SandboxCheck::DEFAULT_FETCH_REPO
+        );
         config.sandbox.validate().unwrap();
         config.setup.validate().unwrap();
         assert_eq!(config.sandbox.groups(), ["kvm", "render"]);
@@ -947,6 +992,14 @@ mod tests {
             "[sandbox]\nenv = { \"A=B\" = \"x\" }",
             "[sandbox]\nenv = { A = \"x\\ny\" }",
             "[sandbox.check]\ncontrol-url = \"ftp://example.com\"",
+            "[sandbox.check]\nfetch-repo = \"git@github.com:a/b\"",
+            "[sandbox.check]\nfetch-repo = \"--upload-pack=x\"",
+            "[sandbox.check]\nfetch-repo = \"https://\"",
+            "[sandbox.check]\nfetch-repo = \"https:///a/b\"",
+            "[sandbox.check]\nfetch-repo = \"https://h/a/b?x\"",
+            "[sandbox.check]\nfetch-repo = \"https://h/a/b#x\"",
+            "[sandbox.check]\nfetch-repo = \"https://user:pass@h/a/b\"",
+            "[sandbox.check]\nfetch-repo = \"https://h/a b\"",
             "[sandbox.check]\ncontainer-image = \"--privileged\"",
             "[sandbox.check]\nallow-sockets = [\"run/x\"]",
             "[setup]\npackages = [\"--installroot=/\"]",

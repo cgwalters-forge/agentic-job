@@ -170,8 +170,10 @@ struct Plan {
     /// under `inference.front` may be no address of the broker's.
     direct: Vec<crate::sandbox::network::Direct>,
     /// The image `[sandbox.check]` names, which under `inference.front`
-    /// the probes of the broker run a container of.
-    container_image: String,
+    /// the probes of the broker run a container of, and with
+    /// `before-agent` those of the run token: none with `containers =
+    /// false`, which `run` notes, and those probes are not made.
+    container_image: Option<String>,
     /// Who may attach to the session, for a conversation.
     session: Option<Listen>,
     /// The run's item, as the session watches it for the agent.
@@ -733,7 +735,11 @@ impl Plan {
             limits,
             endpoint,
             direct: host.direct,
-            container_image: config.sandbox.check.container_image.clone(),
+            container_image: config
+                .sandbox
+                .check
+                .containers
+                .then(|| config.sandbox.check.container_image.clone()),
             session: host.session,
             watch,
             identity: Identity {
@@ -978,10 +984,13 @@ impl Plan {
             if has_child {
                 files.push(agent::CHILD_VIBE_CONFIG_FILE);
             }
-            let image = self
-                .recheck
-                .as_ref()
-                .map(|config| config.sandbox.check.container_image.as_str());
+            if self.recheck.is_some() && self.container_image.is_none() {
+                eprintln!(
+                    "note: [sandbox.check] containers = false: not run, not passed: \
+                     token-container-control, token-container-subuid-control, token-container-subuid"
+                );
+            }
+            let image = self.recheck.as_ref().and(self.container_image.as_deref());
             probe::require(sandbox, run.agent_token(), &files, given, image)?;
         }
         if let Some(key) = &self.identity.api_key {
@@ -1004,6 +1013,12 @@ impl Plan {
             let proxy = run
                 .proxy_address()
                 .context("a fronted run has no proxy of its own")?;
+            if self.container_image.is_none() {
+                eprintln!(
+                    "note: [sandbox.check] containers = false: not run, not passed: \
+                     broker-egress-container"
+                );
+            }
             probe::require_unreachable(
                 sandbox,
                 &probe::Broker {
@@ -1013,7 +1028,7 @@ impl Plan {
                 },
                 proxy,
                 &probe::egress_proxy(),
-                Some(&self.container_image),
+                self.container_image.as_deref(),
             )?;
         }
         // Served from here, after the probes of the sandbox that would
