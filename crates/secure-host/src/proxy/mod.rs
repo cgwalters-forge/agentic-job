@@ -462,14 +462,17 @@ where
 /// The destinations of `--refuse`, which the sandbox user's requests may
 /// not reach whatever the policy allows: under `inference.front` the
 /// broker, where the agent would otherwise register runs of its own. A
-/// request is refused when it names one's host (or an address of it in
-/// any of its spellings), and a connection when any address the proxy
-/// resolved for it is one's, so that another name for the broker, or a
-/// name that resolves to it only when the proxy connects, is refused
-/// too. Each is refused at every port, not only its own: a server there
-/// may serve the broker at another. The port given is where the name is
-/// resolved. The runner's own connections (the transparent listener) are
-/// not held to this; `inference.front` refuses `egress.write-policy`.
+/// request is refused when it names one's host, or an address of it or
+/// one its name has resolved to, in any spelling [`std::net::IpAddr`]
+/// parses (before the policy, so that an allowlist does not give its
+/// own reason), and a connection when any address the proxy resolved
+/// for it is one's, so that another name for the broker, a shorthand
+/// such as `127.1`, or a name that resolves to it only when the proxy
+/// connects, is refused too. Each is refused at every port, not only
+/// its own: a server there may serve the broker at another. The port
+/// given is where the name is resolved. The runner's own connections
+/// (the transparent listener) are not held to this; `inference.front`
+/// refuses `egress.write-policy`.
 #[derive(Debug, Default)]
 struct Refused {
     /// Each destination's host, normalized, an address canonical
@@ -485,6 +488,14 @@ struct Refused {
 /// ADDRESS's IP as one spelling: an IPv4-mapped IPv6 address as IPv4.
 fn canonical(address: SocketAddr) -> std::net::IpAddr {
     address.ip().to_canonical()
+}
+
+/// HOST, as a request names it, as a canonical address if it is one.
+fn address(host: &str) -> Option<std::net::IpAddr> {
+    policy::normalize_host(host)
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_canonical())
 }
 
 impl Refused {
@@ -521,11 +532,8 @@ impl Refused {
 
     /// Whether HOST, as a request names it, is a destination's.
     fn names(&self, host: &str) -> bool {
+        let address = address(host);
         let host = policy::normalize_host(host);
-        let address = host
-            .parse::<std::net::IpAddr>()
-            .ok()
-            .map(|ip| ip.to_canonical());
         self.destinations.iter().any(|(refused, _)| {
             *refused == host
                 || address.is_some_and(|ip| refused.parse::<std::net::IpAddr>().ok() == Some(ip))
@@ -731,7 +739,7 @@ impl Proxy {
         let port = authority.port_u16().unwrap_or(HTTPS_PORT);
         // A name is resolved only once the policy would let the tunnel
         // open: a refused one is never looked up.
-        let decision = match self.refused.names(&host) {
+        let decision = match self.refuses(&host).await {
             true => Decision::deny(REFUSED_DESTINATION),
             false => self.policy.connect(&host),
         };
@@ -963,7 +971,7 @@ impl Proxy {
             .collect();
         let websocket = only_websocket(headers);
         let has_body = has_body_headers(headers) || !request.body().is_end_stream();
-        let decision = if !target.transparent && self.refused.names(&target.host) {
+        let decision = if !target.transparent && self.refuses(&target.host).await {
             Decision::deny(REFUSED_DESTINATION)
         } else if hosts.len() > 1 {
             // Which one a server reads is its own choice: the one the
@@ -1159,6 +1167,21 @@ impl Proxy {
             }
         }
         lock(&self.refused.addresses).clone()
+    }
+
+    /// Whether HOST, as a request names it, is a refused destination's
+    /// ([`Refused::names`]) or one of [`Self::refused_addresses`]: only
+    /// the refused names are looked up for it, never HOST.
+    async fn refuses(&self, host: &str) -> bool {
+        if self.refused.names(host) {
+            return true;
+        }
+        match address(host) {
+            Some(ip) if !self.refused.destinations.is_empty() => {
+                self.refused_addresses().await.contains(&ip)
+            }
+            _ => false,
+        }
     }
 
     /// Whether HOST at PORT resolves now to a refused destination's
