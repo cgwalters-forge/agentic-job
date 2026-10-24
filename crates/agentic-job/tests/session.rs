@@ -43,6 +43,10 @@ const OPERATOR: &str = "operator@github";
 const ORIGIN: &str = "https://review.example.ts.net";
 /// What `tailscale serve` passes on for the operator at that page.
 const ADMITTED: Headers = &[(bridge::LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)];
+/// The app capability a test's session also lets in, and what serve
+/// passes on for a node the tailnet policy grants it.
+const CAPABILITY: &str = "example.com/cap/agentic-job-session";
+const GRANTED: &str = r#"{"example.com/cap/agentic-job-session":[{}]}"#;
 
 /// Where the condensed log of a session under test goes.
 #[derive(Clone, Default)]
@@ -85,6 +89,11 @@ struct Setup<'a> {
     client: Option<(Play, Duration)>,
     /// Handshakes that client's thread makes first, each to be refused.
     refused_first: &'static [Headers],
+    /// Standard input for `agentic-job session connect --json`, which
+    /// then is the client in place of the one played, through a stand-in
+    /// for serve that passes on `GRANTED`; what it prints is what the
+    /// client was sent.
+    connect: Option<&'static str>,
     /// Session config options set after the model.
     config_options: &'a [(&'a str, &'a str)],
     /// The model the session selects.
@@ -129,7 +138,9 @@ impl Client {
             .unwrap();
         let mut request = format!("ws://{address}/").into_client_request().unwrap();
         for (name, value) in headers {
-            request.headers_mut().append(*name, value.parse().unwrap());
+            // Bytes, so that a value need not be visible ASCII.
+            let value = tungstenite::http::HeaderValue::from_bytes(value.as_bytes()).unwrap();
+            request.headers_mut().append(*name, value);
         }
         match tungstenite::client(request, stream) {
             Ok((socket, _)) => Ok(Self {
@@ -216,6 +227,7 @@ fn bridge_and_client(
     play: Play,
     idle: Duration,
     refused: &'static [Headers],
+    connect: Option<&'static str>,
 ) -> (Bridge, std::thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -223,6 +235,7 @@ fn bridge_and_client(
         listen: Listen {
             operators: vec![OPERATOR.to_owned()],
             origins: vec![ORIGIN.to_owned()],
+            capability: Some(CAPABILITY.to_owned()),
             idle,
         },
         listener,
@@ -236,11 +249,65 @@ fn bridge_and_client(
                 "{headers:?}"
             );
         }
+        if let Some(stdin) = connect {
+            return connect_through_serve(&address, stdin);
+        }
         let mut client = Client::connect(&address, ADMITTED).unwrap();
         play(&mut client);
         client.got
     });
     (bridge, thread)
+}
+
+/// Runs `session connect --json` with STDIN against the bridge at
+/// ADDRESS, through a stand-in for `tailscale serve` that adds what serve
+/// would for a node granted `CAPABILITY`; what it printed, which must be
+/// one JSON message a line.
+fn connect_through_serve(address: &str, stdin: &str) -> Vec<Value> {
+    use std::io::BufRead;
+
+    let serve = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}/", serve.local_addr().unwrap());
+    let address = address.to_owned();
+    std::thread::spawn(move || {
+        let (client, _) = serve.accept().unwrap();
+        let mut from_client = std::io::BufReader::new(client.try_clone().unwrap());
+        let mut bridge = TcpStream::connect(address).unwrap();
+        // The request's head, with the header before its blank line.
+        loop {
+            let mut line = String::new();
+            from_client.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                let header = bridge::CAPABILITIES_HEADER;
+                write!(bridge, "{header}: {GRANTED}\r\n\r\n").unwrap();
+                break;
+            }
+            bridge.write_all(line.as_bytes()).unwrap();
+        }
+        let mut to_client = client;
+        let mut from_bridge = bridge.try_clone().unwrap();
+        std::thread::spawn(move || std::io::copy(&mut from_bridge, &mut to_client));
+        let _ = std::io::copy(&mut from_client, &mut bridge);
+        let _ = bridge.shutdown(std::net::Shutdown::Write);
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["session", "connect", "--json", &endpoint])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    out.stdout
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect()
 }
 
 struct Run {
@@ -363,7 +430,7 @@ fn run(mode: &[&str], setup: Setup) -> Run {
     let (count, requests) = watch::channel(Some(0));
     let (bridge, client) = setup
         .client
-        .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first))
+        .map(|(client, idle)| bridge_and_client(client, idle, setup.refused_first, setup.connect))
         .unzip();
     let options = Options {
         name: "fake".to_owned(),
@@ -2588,6 +2655,7 @@ fn a_port_that_is_taken_is_refused() {
     let listen = Listen {
         operators: vec![OPERATOR.to_owned()],
         origins: vec![ORIGIN.to_owned()],
+        capability: None,
         idle: Duration::from_secs(60),
     };
     let err = Bridge::bind(listen, Arc::new(str::to_owned)).err().unwrap();
@@ -2638,12 +2706,85 @@ fn only_the_operator_attaches() {
                     (bridge::LOGIN_HEADER, OPERATOR),
                     ("Origin", "https://evil.example"),
                 ],
+                // A node without the capability, with it twice or
+                // malformed, or a browser lending it to another site.
+                &[],
+                &[(
+                    bridge::CAPABILITIES_HEADER,
+                    r#"{"example.com/cap/other":[{}]}"#,
+                )],
+                &[
+                    (bridge::CAPABILITIES_HEADER, GRANTED),
+                    (bridge::CAPABILITIES_HEADER, GRANTED),
+                ],
+                &[(bridge::CAPABILITIES_HEADER, CAPABILITY)],
+                &[(
+                    bridge::CAPABILITIES_HEADER,
+                    r#"["example.com/cap/agentic-job-session"]"#,
+                )],
+                &[(
+                    bridge::CAPABILITIES_HEADER,
+                    r#"{"example.com/cap/agentic-job-session":["é"]}"#,
+                )],
+                &[
+                    (bridge::CAPABILITIES_HEADER, GRANTED),
+                    ("Origin", "https://evil.example"),
+                ],
             ],
             ..Setup::default()
         },
     );
     assert_result(&r, 0, "success");
     assert_eq!(r.result["message"], "the client left", "{}", r.log);
+}
+
+/// `session connect`, as a tagged node the capability lets in with no
+/// `Origin`: it attaches, waits out the task's turn, sends each line as a
+/// prompt once the one before is answered, prints every message as one
+/// line of JSON, and leaves at the end of its input, which ends the
+/// session.
+#[test]
+fn session_connect_drives_the_session() {
+    let r = run(
+        SCRIPT_AND_LATER,
+        Setup {
+            files: &[
+                ("script.json", r#"[{"sleep": 1}, {"say": "Task done."}]"#),
+                ("later.json", LATER),
+            ],
+            timeout_s: 60,
+            client: Some((|_| {}, Duration::from_secs(60))),
+            refused_first: &[&[]],
+            connect: Some("Hello, agent.\n\nAgain.\n"),
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 0, "success");
+    assert_eq!(r.result["message"], "the client left", "{}", r.log);
+    let stops: Vec<&Value> = r
+        .client
+        .iter()
+        .map(|m| &m["result"]["stopReason"])
+        .filter(|stop| !stop.is_null())
+        .collect();
+    assert_eq!(stops.len(), 2, "{:#?}", r.client);
+    assert!(stops.iter().all(|stop| **stop == "end_turn"));
+    let said: String = r
+        .client
+        .iter()
+        .filter(|m| m["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert_eq!(said.matches("Answered [REDACTED].").count(), 2, "{said}");
+    // The blank line was no prompt.
+    let prompts: Vec<&Value> = r
+        .records
+        .iter()
+        .filter(|x| x["dir"] == "send" && x["msg"]["method"] == "session/prompt")
+        .map(|x| &x["msg"]["params"]["prompt"][0]["text"])
+        .collect();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert_eq!(prompts[1..], ["Hello, agent.", "Again."]);
 }
 
 /// A client's cancel reaches the agent's turn, and a second prompt while

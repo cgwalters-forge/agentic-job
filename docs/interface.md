@@ -23,6 +23,7 @@ builds that source. `build-binary: true` forces a build.
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
 | `workflows check [--root DIR] [--exemptions FILE]` | anyone | Refuses workflow files whose jobs neither run secure-host nor call the reusable workflow, and the other shapes in [workflows-check.md](workflows-check.md). Exit 1 names each file, job and step. |
 | `acp-drive start\|prompt\|events\|cancel\|status\|stop` | a run's agent | Starts the run's child agent and drives it over ACP ([harness.md](harness.md#a-second-agent)). |
+| `session connect ENDPOINT [--json]` | an operator or their agent | Joins a session run's conversation: each line of standard input is a prompt, and it prints what the agent says, or with `--json` each message from the bridge as one line ([session runs](../specs/session.md#wire)). |
 | `audit DIR [--json]` | anyone | Inspects downloaded artifacts offline. Findings do not cause a refusal exit code. See [workflow.md](workflow.md#auditing-downloaded-artifacts). |
 
 Internal commands are hidden: `launch-agent`
@@ -84,7 +85,7 @@ holds no secret.
 | `[child-agent]` | `name` (only `vibe`) and `model` of a [second agent](harness.md#a-second-agent) the agent may drive; needs `limits.max-requests` and a sandbox user (`run --runner-home` refuses it) |
 | `[limits]` | `timeout-minutes`, `max-requests`, `max-tasks`, `budget`, `uncapped`; `max-repeats` ([repeated tool calls](harness.md#limits), off by default) |
 | `[mcp.NAME]` | `url`, `secret` (only `MCP_TOKEN`) and `allowed` of one remote [MCP server](mcp.md) `run` serves the agent with a credential it never holds |
-| `[session]` | `listen`, `operators`, `origins` and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default) |
+| `[session]` | `listen`, `operators`, `origins`, `capability` (a Tailscale app capability that lets tagged nodes in) and `idle-minutes` for a [conversation](interactive.md); `watch-item` and `watch-seconds` to send the agent [updates of the run's item](harness.md#updates-of-the-runs-item) (off by default) |
 | `[commit]` | `author` and `trailers` of the hand-back's commit; a bounds file's `commit_author` ([safe outputs](safe-outputs.md#the-bounds-and-the-policy)) takes the place of `author` |
 
 `[limits]` without a timeout is refused, and so is one that caps neither

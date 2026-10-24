@@ -799,6 +799,11 @@ pub struct Session {
     /// The `Origin`s a client may connect from, such as the review
     /// board's `https://NAME.TAILNET.ts.net`.
     pub origins: Vec<String>,
+    /// A Tailscale app capability, such as
+    /// `example.com/cap/agentic-job-session`, that lets a node in without
+    /// a login, such as a tagged agent host: the tailnet policy's grants
+    /// decide who holds it. Empty for none.
+    pub capability: String,
     /// How long the session waits for the client's next prompt. Zero
     /// means the default.
     pub idle_minutes: u64,

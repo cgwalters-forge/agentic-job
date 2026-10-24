@@ -18,7 +18,8 @@ the forge, not from an old transcript.
 
 It is off by default. Only a configuration with `[session] listen = true`, from
 the reusable workflow's `session` input, turns it on. The caller's file names
-`operators` and `origins` once; without `listen` they are inert.
+`operators`, `origins` and an optional `capability` once; without `listen` they
+are inert.
 
 **Breaking change to unreleased behaviour**: the first version of this slice
 dialled out to a relay. `[session] relay` and `audience`, and the workflows'
@@ -47,7 +48,8 @@ cancels it has the session go on to its prompts.
 ```text
 review board (browser, ACP client pane), on the operator's tailnet device
    │ wss://RUNNER.TAILNET.ts.net/: TLS from serve, the operator's identity
-tailscale serve on the runner, which adds Tailscale-User-Login
+tailscale serve on the runner, which adds Tailscale-User-Login or
+   │ Tailscale-App-Capabilities
    │ http://127.0.0.1:7790, loopback
 bridge, inside `run`, as the runner's user, outside the sandbox
    │ stdio through run0
@@ -75,7 +77,9 @@ the port, its root helper holds a duplicate listener and enables
 `tailscale serve --bg --https=443 http://127.0.0.1:7790`. A private control socket
 ties that helper to the supervisor's lifetime. On normal cleanup or supervisor
 exit, including a crash, it disables that HTTPS mapping before releasing the
-listener. A mapping that "does not exist" is already off. If disabling fails,
+listener. With `[session] capability` set, the helper adds
+`--accept-app-caps=CAPABILITY`, read from root's copy of the configuration,
+never from its caller. A mapping that "does not exist" is already off. If disabling fails,
 root retains the port, even when reaping the sandbox user's processes failed,
 and retries ten times before only holding it until the host ends the job.
 
@@ -109,17 +113,54 @@ replaced in each string, as in the job log. The task's turn may still run when
 the client attaches. Its prompts are refused until that turn ends, so it
 cancels the turn or waits for it.
 
-The handshake is refused with HTTP 403 unless both of these hold:
+The handshake is refused with HTTP 403 unless it is let in by a login or by a
+capability. By a login, both of these hold:
 
 - `Tailscale-User-Login` is there once and is one of `[session] operators`.
   `tailscale serve` sets it to the login of the user whose device connects, and
-  drops one the client sent. A tagged device gets none, so it is refused.
+  drops one the client sent. A tagged device gets none.
 - `Origin` is there once and is one of `[session] origins`, compared as a
   browser sends it (`https://review.example.ts.net`).
 
-`operators` and `origins` come from the caller's configuration file, which the
-calling repository owns, never from a workflow input a dispatcher sets. A
-refused handshake leaves the bridge listening. The first client let in is the
+A tagged device, such as the operator's agent host, is let in by a capability
+instead, where `[session] capability` names one, such as
+`example.com/cap/agentic-job-session`. Serve then forwards
+`Tailscale-App-Capabilities`, a JSON object of the node's accepted capabilities
+that the tailnet policy's grants give it, and drops one the client sent. Both
+of these hold:
+
+- `Tailscale-App-Capabilities` is there once, printable ASCII of at most
+  4 KiB, and a JSON object with the capability as a key. Anything else is
+  refused with its own reason. Tailscale encodes a value that is not ASCII
+  as RFC 2047, which is not decoded, so it is refused as not JSON.
+- `Origin` is absent, as from a client that is no browser, or there once and
+  one of `[session] origins`. A browser on that device always sends one, so
+  a page of another site cannot use the device's capability.
+
+A login with no `Origin` is still refused: only the capability takes a client
+without one. `operators`, `origins` and `capability` come from the caller's
+configuration file, which the calling repository owns, never from a workflow
+input a dispatcher sets. `operators` may be empty when `capability` is set.
+Who holds the capability is the tailnet policy's to decide, in a grant such as:
+
+```json
+{"src": ["tag:agent-host"], "dst": ["tag:ci-runner"],
+ "app": {"example.com/cap/agentic-job-session": [{}]}}
+```
+
+Its source must not include the tag CI runners join with. Otherwise another
+job's steps on another runner could attach to the session. A refused handshake
+leaves the bridge listening.
+
+`agentic-job session connect ENDPOINT` is a client for a terminal or another
+agent. It sends `initialize` and `session/new`, then each line of standard
+input as a `session/prompt`, waiting for that turn's answer before the next.
+It sends a prompt again while the task's turn runs. It prints the agent's
+`agent_message_chunk` text with control characters replaced, so the agent
+cannot drive the operator's terminal. With `--json` it prints each message
+from the bridge as one line of JSON instead. It checks serve's certificate
+against Mozilla's roots, and takes `ws://` only to loopback. At the end of its
+input it leaves, which ends the session. The first client let in is the
 only one: later connections are closed unanswered, and when that client leaves
 the session ends.
 
@@ -143,9 +184,16 @@ stops one thing:
 
 - The login check keeps out every other tailnet device and user the tailnet's
   access rules let reach the runner.
+- The capability check does the same for tagged devices, which have no login:
+  only a node the tailnet policy grants `[session] capability` gets in. The
+  grant, not the repository, then decides which nodes may attach. A grant
+  whose source includes the CI runners' tag would let any job's steps on a
+  runner attach. The agent cannot use its own runner's grant, because the
+  network rules below keep it from the tailnet.
 - The `Origin` check keeps out a page of another site open in the operator's
   browser. That page's connection would otherwise carry the operator's tailnet
-  identity (cross-site WebSocket hijacking).
+  identity (cross-site WebSocket hijacking). It holds on the capability path
+  too whenever there is an `Origin`, which a browser always sends.
 - The network rules keep the sandbox user from port 7790 on loopback and from
   the node's own tailnet addresses ([network.rs](../crates/secure-host/src/network.rs)).
   Without them, the agent could connect to the bridge with a forged
@@ -176,14 +224,17 @@ also works the same, whether a turn is running or the session is idle. The idle
 timeout is `session.idle-minutes`: 10 by default, at most 60. It runs from the
 end of the task's turn whether or not a client has come. A runner waiting
 for nobody still costs minutes. Hosted jobs end after six hours. At most 16
-operators and 16 origins are taken. Up to 16 handshakes run concurrently, each
+operators and 16 origins are taken, and one capability.
+`Tailscale-App-Capabilities` is taken up to 4 KiB. Up to 16 handshakes run concurrently, each
 with a 10-second deadline. At capacity a new connection replaces the oldest
 pending handshake, so parked sockets cannot reserve every slot. This does not
 prevent sustained connection flooding. Messages from the client are capped at
 512 KiB, twice the largest task. A longer message ends the connection. At most four client requests wait for the session at once. At most
 8 MiB of lines wait to be sent to the client. A response waits for room, so the
 bridge stops reading a client that does not read. An agent's notification that
-finds no room ends the connection, and the agent goes on.
+finds no room ends the connection, and the agent goes on. `session connect`
+takes messages of up to 8 MiB, the most the bridge queues, and refuses an
+input line or prompt over the bridge's 512 KiB.
 
 ## Writes during a session: proposed, not built
 
@@ -216,20 +267,25 @@ This is the main open question. It needs a TLA+ step beside
 
 ## The first slice
 
-The slice built here has five parts:
+The slice built here has six parts:
 
-- `[session] listen`, `operators`, `origins` and `idle-minutes`; the reusable
-  workflow's `session` and `idle-minutes` inputs set the first and the last;
+- `[session] listen`, `operators`, `origins`, `capability` and `idle-minutes`;
+  the reusable workflow's `session` and `idle-minutes` inputs set the first and
+  the last;
 - the root helper serving the bridge's port with `tailscale serve`, the network
   rules that keep the sandbox user from it, and the endpoint published by
   the run action;
 - the bridge;
 - the conversation loop in the session driver;
+- `session connect`, a terminal's or another agent's client;
 - tests in [session.rs](../crates/agentic-job/tests/session.rs). In them a
   scripted WebSocket client on loopback, with the headers serve would add, is
-  refused without a login, with another login and with a bad `Origin`. Then the
+  refused without a login, with another login, with a bad `Origin`, and with a
+  missing, other, duplicated or malformed capability. Then the
   operator attaches, is refused what the bridge does not serve, sends a prompt
   and reads the reply, cancels a turn, and goes quiet until the idle timeout.
+  `session connect` attaches over `ws://` through a stand-in for serve that
+  adds the capability, and drives two turns.
   With `AGENTIC_JOB_TEST_SANDBOX_USER` set, the conversation test runs the
   agent as a second user entered through run0; CI no longer sets it, and
   covers that user with a whole run instead (`e2e-sandbox`).
@@ -239,7 +295,10 @@ No forge writes happen during the session. Still to do:
 - a `sandbox check` probe that the sandbox user cannot reach the bridge, beside
   the ruleset's unit test;
 - a run of `tailscale serve` on a real runner, including what it does when the
-  tailnet has no HTTPS certificates (setup gives it 60 seconds);
+  tailnet has no HTTPS certificates (setup gives it 60 seconds), and whether
+  `--accept-app-caps` forwards `Tailscale-App-Capabilities` as expected
+  (Tailscale 1.92 or later; the tailnet-join action installs 1.94.2);
+- `session connect` against a real `wss://` endpoint;
 - the chat pane;
 - a caller's `workflow_dispatch` in tracker, with a wrapper that posts the
   endpoint to the dispatch issue;

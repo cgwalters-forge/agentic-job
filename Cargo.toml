@@ -52,7 +52,10 @@ toml = "1"
 unicode-normalization = "0.1"
 # The session's bridge (specs/session.md): a WebSocket server behind
 # `tailscale serve`, which terminates TLS, so only the handshake and
-# framing, without TLS or a client's connector.
+# framing, without TLS or a client's connector. `session connect`, its
+# client, puts the same handshake over tokio-rustls with the egress
+# proxy's client configuration, rather than enabling tungstenite's own
+# rustls, which would add a second webpki-roots.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # The run API of the inference proxy, and the CI system's identity token,
 # which is fetched over TLS. Blocking, and far smaller than a client on
