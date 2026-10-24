@@ -124,6 +124,15 @@ the user or shape it (`setup.tools`, `setup.script`, an agent,
 and a host where that user already exists, which nothing would confine.
 `sandbox check` then probes only the runner's user and the host.
 
+useradd makes the user from an empty, root-only skeleton in `/tmp` rather
+than the image's `/etc/skel`. Under SELinux that directory takes the
+label of `/etc/skel` first, since `useradd_t` may not read the caller's
+tmp type; a missing label on `/etc/skel` fails setup. CI has no
+SELinux-enforcing image, so this is verified by hand: on a RHEL-family
+host with SELinux enforcing, run `sandbox setup` once from a systemd
+service and once from a root shell, then `ausearch -m AVC,USER_AVC -ts recent`
+should show no `useradd_t` denial.
+
 ### The read-only view
 
 The view is opt-in, `sandbox.filesystem-view = true`, on top of the
