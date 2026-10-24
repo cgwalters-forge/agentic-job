@@ -630,6 +630,9 @@ fn a_run_from_clone_to_the_end_of_its_run() {
     assert_eq!(summary["agent"], "fake");
     assert_eq!(summary["aic_pricing"], "mock");
     assert_eq!(summary["aic"], 1.0);
+    // No model to price the proxy's tokens at: the fake agent's figure.
+    assert_eq!(summary["cost"]["usd"], 0.01);
+    assert_eq!(summary["cost"]["source"], "agent-reported, unverified");
     assert_eq!(summary["files"], json!(["FAKE.md"]));
     assert_eq!(summary["praxis"]["state"], "finished");
     assert_eq!(summary["tokens_source"], "praxis");

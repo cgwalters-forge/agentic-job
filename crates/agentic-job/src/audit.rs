@@ -132,13 +132,14 @@ pub fn inspect(dir: &Path) -> Result<Value> {
     if !s["patch"]["error"].is_null() {
         finding("patch_dropped", s["patch"]["error"].clone());
     }
-    if s["aic"].is_null() {
+    // At list prices: the agent's own figure (`aic`) may be none.
+    if s["cost"]["usd"].is_null() {
         finding("cost_unknown", Value::Null);
     }
     Ok(json!({
         "schema": "agentic-job-audit/v1", "run_id": s["run_id"], "result": s["result"],
-        "cost": {"aic": s["aic"], "budget": s["aic_budget"], "pricing": s["aic_pricing"],
-            "source": "agent-reported, unverified"},
+        "cost": {"list": s["cost"], "aic": s["aic"], "budget": s["aic_budget"],
+            "pricing": s["aic_pricing"], "source": "agent-reported, unverified"},
         "tokens": s["tokens"], "tokens_source": s["tokens_source"],
         "requests": s["praxis"]["requests"], "turns": s["turns"], "duration_s": s["duration_s"],
         "tools": s["tools"], "permissions": s["permissions"], "egress_denied": s["egress_denied"],
@@ -162,7 +163,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         println!(
             "{}",
             summary::cost_line(
-                &json!({"aic": report["cost"]["aic"], "aic_budget": report["cost"]["budget"]})
+                &json!({"cost": report["cost"]["list"], "aic_budget": report["cost"]["budget"]})
             )
         );
         for key in [
@@ -201,7 +202,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("summary.json"), json!({"schema": summary::SCHEMA,
                 "tools": {"Bash": {"calls": 2}}, "egress_denied": [{"domain": "example.org", "count": 1}],
-                "aic": 3.5}).to_string()).unwrap();
+                "aic": 3.5, "cost": {"usd": 0.04, "source": "metered"}}).to_string()).unwrap();
             if refused {
                 std::fs::write(
                     dir.path().join("report.json"),
@@ -212,6 +213,7 @@ mod tests {
             let audit = inspect(dir.path()).unwrap();
             assert_eq!(audit["tools"]["Bash"]["calls"], 2);
             assert_eq!(audit["cost"]["aic"], 3.5);
+            assert_eq!(audit["cost"]["list"]["usd"], 0.04);
             let expected = if refused {
                 "check_refused"
             } else {

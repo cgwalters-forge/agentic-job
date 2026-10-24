@@ -48,6 +48,7 @@ pub mod key_check;
 pub mod launch;
 pub mod log;
 pub mod mcp;
+mod prices;
 pub mod probe;
 pub mod register;
 mod session_markdown;
