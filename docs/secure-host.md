@@ -91,6 +91,34 @@ next image release:
   ([what it adds](sandbox.md#what-the-sandbox-user-adds)); the pinned
   image predates the key and always makes the user.
 
+## On a host that is not a GitHub Actions runner
+
+A self-hosted CI job, or a VM of its own, secures its host with the
+binary alone, as root and then as the user the later steps run as:
+
+```sh
+sudo agentic-job sandbox setup --config FILE
+agentic-job sandbox check
+```
+
+Neither needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
+`Runner.Worker` process. What changes without them:
+
+- With no `Runner.Worker`, `sandbox.unlink-worker-diagnostics` has no
+  socket to unlink: setup prints that it skipped the step and why, and
+  `sandbox check` notes the same rather than passing a probe. With one or
+  more Workers, both behave as on a GitHub runner.
+- The runner-read rule exempts exactly one `Runner.Worker`, so where the
+  secure-host image's loader runs, a host without one sets
+  `sandbox.deny-runner-reads = false`; the loader refuses it otherwise
+  and names this key. `sandbox setup` alone never loads the rule.
+- The check record that lets a later check in the same job skip its
+  probes ([sandbox-check.md](sandbox-check.md)) needs `RUNNER_TEMP` and
+  `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and `GITHUB_JOB`. Without them
+  there is no record, and every check makes its probes.
+- `sandbox timed` is the GitHub action's wrapper, which times setup and
+  the probes for the job summary; a plain host does not need it.
+
 ## The agent job
 
 The agent job (`agent.yml`, which `agentic-job.yml` and `review.yml`
