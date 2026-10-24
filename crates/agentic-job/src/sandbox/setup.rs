@@ -861,6 +861,11 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir()
         .context("creating empty user skeleton")?;
+    label_like(
+        Path::new(SKEL),
+        skeleton.path(),
+        Path::new(SELINUX_ENFORCE).exists(),
+    )?;
     let mut useradd = useradd_command(config, skeleton.path());
     timed_setup("create-user-useradd", || {
         host::run(&mut useradd).map(|_| ())
@@ -870,6 +875,37 @@ fn create_user(config: &Config, runner: &User, existing: Option<User>) -> Result
     })?;
     ensure_distinct(&user, runner)?;
     Ok(user)
+}
+
+/// The skeleton useradd would otherwise copy, whose label ours takes.
+const SKEL: &str = "/etc/skel";
+/// Present when selinuxfs is mounted, that is, SELinux is enabled.
+const SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
+const SELINUX_XATTR: &str = "security.selinux";
+/// Larger than any SELinux context a policy writes.
+const SELINUX_LABEL_MAX: usize = 4096;
+
+/// Give `target` the SELinux label of `source` when `selinux` is set. A directory
+/// made in /tmp takes the caller's tmp type (`initrc_tmp_t` when setup
+/// runs from a service), which `useradd_t` may not read, so useradd is
+/// denied its skeleton (cgwalters-forge/agentic-job#1813). Labelled like
+/// /etc/skel, the directory is one it may read; its owner and mode stay.
+/// An SELinux host without that label is refused rather than skipped.
+fn label_like(source: &Path, target: &Path, selinux: bool) -> Result<()> {
+    if !selinux {
+        return Ok(());
+    }
+    let mut label = [0u8; SELINUX_LABEL_MAX];
+    let len = rustix::fs::getxattr(source, SELINUX_XATTR, &mut label[..])
+        .with_context(|| format!("reading the SELinux label of {}", source.display()))?;
+    ensure!(len > 0, "{} has an empty SELinux label", source.display());
+    rustix::fs::lsetxattr(
+        target,
+        SELINUX_XATTR,
+        &label[..len],
+        rustix::fs::XattrFlags::empty(),
+    )
+    .with_context(|| format!("labelling {} like {}", target.display(), source.display()))
 }
 
 fn useradd_command(config: &Config, skeleton: &Path) -> Command {
@@ -2118,6 +2154,36 @@ mod tests {
             }
             assert!(!manager.refresh_before(1));
             assert!(manager.refresh_before(2));
+        }
+    }
+
+    /// Without SELinux the skeleton is left alone; with it, a source with
+    /// no label is refused, not skipped. The tempdir source is unlabelled
+    /// only on a host without SELinux, as CI's; a missing one never is.
+    #[test]
+    fn skeleton_takes_the_label_of_etc_skel_only_under_selinux() {
+        let source = tempfile::tempdir().unwrap();
+        let missing = source.path().join("missing");
+        let target = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        for (source, selinux, wanted) in [
+            (source.path(), false, Ok(())),
+            (missing.as_path(), false, Ok(())),
+            (source.path(), true, Err("reading the SELinux label of")),
+            (missing.as_path(), true, Err("reading the SELinux label of")),
+        ] {
+            let labelled = label_like(source, target.path(), selinux);
+            match wanted {
+                Ok(()) => assert!(labelled.is_ok(), "{source:?}: {labelled:?}"),
+                Err(message) => {
+                    let error = format!("{:#}", labelled.unwrap_err());
+                    assert!(error.starts_with(message), "{source:?}: {error}");
+                }
+            }
+            let mode = std::fs::metadata(target.path()).unwrap().mode() & 0o7777;
+            assert_eq!(mode, 0o700);
         }
     }
 
