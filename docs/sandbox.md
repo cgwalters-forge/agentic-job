@@ -79,6 +79,26 @@ unconditionally
 the image the action pins refuses it only with
 `sandbox.deny-runner-metadata`.
 
+Past DNS, the egress proxy never connects to the ranges in
+`PROXY_DENIED_V4` and `PROXY_DENIED_V6`
+(`crates/secure-host/src/network.rs`): loopback, the private ranges,
+link-local, the tailnet, multicast, some reserved ranges and Azure's
+WireServer. The rules for its uid refuse them whatever a name resolves
+to, so a name that resolves there gets a 502 from the proxy, as an
+in-cluster inference name does
+([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810)).
+Under an `[egress]` allowlist the policy refuses an address literal
+anyway, unless `--refuse` refuses it first. An inference broker is
+reached outside the egress proxy: by the sandbox user at its tailnet
+IPv4 address in `egress.direct`, or, under `inference.front`, by `run`
+as the runner's user at an address neither on loopback nor in
+`egress.direct` ([inference](inference.md)). A forge on a private network has no way
+in: `run` clones the target as the sandbox user through the proxy, from
+the `https://` (or `allow_http`) URL `policy` admitted for a host of the
+caller's bounds, and nothing prepares a clone for it before network
+lockdown. Whether to allow a named private destination is open
+([#1812](https://github.com/cgwalters-forge/agentic-job/issues/1812)).
+
 Every command in the sandbox is then started through the root-owned
 helper, which invokes `run0 --pipe --user=…`. This creates a transient
 service with its own PAM session

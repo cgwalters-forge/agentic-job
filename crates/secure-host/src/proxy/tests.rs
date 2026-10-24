@@ -518,10 +518,12 @@ async fn redirected_connections() {
 }
 
 /// `--refuse`'s destinations, as `sandbox setup` passes the broker under
-/// `inference.front`: refused to the sandbox user whatever the policy
-/// says, which here admits every read and write to them, by any method,
-/// in a URL or a CONNECT, by name, address spelling or another name that
-/// resolves to the broker, at any port; but not to the runner's own
+/// `inference.front`: refused to the sandbox user with their own reason
+/// whatever the policy says, whether it admits every read and write to
+/// them or is an allowlist that names neither the broker nor its
+/// addresses, by any method, in a URL or a CONNECT, by name, address
+/// spelling, an address the broker's name resolves to or another name
+/// that resolves to the broker, at any port; but not to the runner's own
 /// redirected connections. Without `--refuse` the same requests reach the broker:
 /// the control that the refusal, not the policy, is what stops them.
 #[tokio::test]
@@ -536,13 +538,21 @@ hosts = ["broker.test", "alias.test", "127.0.0.1", "::1"]
 methods = ["POST", "PUT", "DELETE"]
 paths = ["/**"]
 "#;
-    let refuse = [
-        "broker.test:18080",
-        "127.0.0.1:18080",
-        "[::1]:18080",
-        "BROKER.test.:443",
-    ]
-    .map(str::to_owned);
+    // Only another name that happens to resolve to the broker.
+    const ALLOWLIST: &str = r#"
+[egress]
+mode = "allowlist"
+allow = ["alias.test"]
+
+[[write]]
+name = "an alias"
+hosts = ["alias.test"]
+methods = ["POST", "PUT", "DELETE"]
+paths = ["/**"]
+"#;
+    // 127.0.0.1, where every name resolves here, is refused only as an
+    // address broker.test resolved to.
+    let refuse = ["broker.test:18080", "[::1]:18080", "BROKER.test.:443"].map(str::to_owned);
     // (method, URL); each is 403 with --refuse and reaches the broker
     // without it
     let cases = [
@@ -552,9 +562,13 @@ paths = ["/**"]
         // another name for the broker: refused at its address
         ("POST", "http://alias.test:18080/v1/runs"),
     ];
-    for refusing in [true, false] {
+    for (name, text, refusing) in [
+        ("reads-anywhere", OPEN, true),
+        ("an allowlist", ALLOWLIST, true),
+        ("reads-anywhere", OPEN, false),
+    ] {
         let fixture = Fixture::start_with(|proxy| {
-            proxy.policy = Policy::parse(OPEN, policy::ECOSYSTEMS).unwrap();
+            proxy.policy = Policy::parse(text, policy::ECOSYSTEMS).unwrap();
             proxy.runner_policy = proxy.policy.with_runner_writes().unwrap();
             let plain = proxy.origins[0].1;
             proxy.origins.push(("broker.test".to_owned(), plain));
@@ -573,7 +587,7 @@ paths = ["/**"]
                 assert_eq!(
                     (status, denied.as_deref()),
                     (403, Some(REFUSED_DESTINATION)),
-                    "{method} {url}"
+                    "{method} {url} under {name}"
                 );
             } else {
                 assert_eq!((status, denied), (200, None), "{method} {url}");
@@ -586,26 +600,43 @@ paths = ["/**"]
         }
         assert!(reached.is_empty(), "{reached:?}");
         // Addresses in every spelling, refused before the policy, which
-        // would let them through; and the broker's tunnel.
-        for url in [
-            "http://127.0.0.1:18080/v1/runs",
-            "http://[::ffff:127.0.0.1]:18080/v1/runs",
-            "http://[0:0::1]:18080/v1/runs",
+        // would let them through or refuse them for its own reason; and
+        // the broker's tunnel: `run`'s front probe sends all three forms.
+        for (method, url) in [
+            ("GET", "http://127.0.0.1:18080/v1/runs/self"),
+            ("POST", "http://127.0.0.1:18080/v1/runs"),
+            ("POST", "http://[::ffff:127.0.0.1]:18080/v1/runs"),
+            ("POST", "http://[0:0::1]:18080/v1/runs"),
         ] {
             let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
             let host = url.parse::<Uri>().unwrap().authority().unwrap().to_string();
-            let (status, denied, _) = send(&mut sender, request("POST", url, &host, "{}")).await;
+            let body = if method == "POST" { "{}" } else { "" };
+            let (status, denied, _) = send(&mut sender, request(method, url, &host, body)).await;
             assert_eq!(
                 (status, denied.as_deref()),
                 (403, Some(REFUSED_DESTINATION)),
-                "{url}"
+                "{method} {url} under {name}"
             );
         }
-        for authority in ["broker.test:18080", "broker.test:443", "[::1]:18080"] {
+        // An address no refused name resolves to is the policy's.
+        if text == ALLOWLIST {
+            let url = "http://127.0.0.2:18080/v1/runs/self";
+            let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
+            let (status, denied, _) =
+                send(&mut sender, request("GET", url, "127.0.0.2:18080", "")).await;
+            assert_eq!((status, denied.as_deref()), (403, Some(policy::NOT_ALLOWED)));
+        }
+        for authority in [
+            "broker.test:18080",
+            "broker.test:443",
+            "[::1]:18080",
+            "127.0.0.1:18080",
+            "[::ffff:127.0.0.1]:18080",
+        ] {
             assert_eq!(
                 fixture.tunnel(authority).await.unwrap_err(),
                 (403, REFUSED_DESTINATION.to_owned()),
-                "{authority}"
+                "{authority} under {name}"
             );
         }
         // Another port of the broker's host, which may serve it too.
@@ -616,18 +647,21 @@ paths = ["/**"]
             assert_eq!(
                 (status, denied.as_deref()),
                 (403, Some(REFUSED_DESTINATION)),
-                "{url}"
+                "{url} under {name}"
             );
         }
-        // The runner's own connections reach the broker: `run` does.
-        let mut sender = client(TcpStream::connect(fixture.transparent).await.unwrap()).await;
-        let (status, _, _) = send(
-            &mut sender,
-            request("GET", "/v1/runs/self", "broker.test:18080", ""),
-        )
-        .await;
-        assert_eq!(status, 200);
-        assert_eq!(fixture.plain.take(), ["GET /v1/runs/self"]);
+        // The runner's own connections reach the broker under a policy
+        // that admits it: `run`'s does.
+        if text == OPEN {
+            let mut sender = client(TcpStream::connect(fixture.transparent).await.unwrap()).await;
+            let (status, _, _) = send(
+                &mut sender,
+                request("GET", "/v1/runs/self", "broker.test:18080", ""),
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(fixture.plain.take(), ["GET /v1/runs/self"]);
+        }
         let log = fixture.log_lines();
         assert!(
             log.iter()
