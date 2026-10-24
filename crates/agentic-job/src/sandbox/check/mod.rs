@@ -1175,6 +1175,34 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_is_no_github_runner_has_no_record() {
+        // Whatever else a plain host sets, without RUNNER_TEMP there is no
+        // record; with it but no run identity, a path to clear and nothing
+        // to take or leave. Either way every check makes its probes.
+        for (vars, file) in [
+            (&[][..], false),
+            (
+                &[("HOME", "/root"), ("TMPDIR", "/tmp"), ("CI", "true")][..],
+                false,
+            ),
+            (&[("RUNNER_TEMP", "/w/_temp"), ("CI", "true")][..], true),
+        ] {
+            let env = |name: &str| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            };
+            assert_eq!(record::path(env).is_some(), file, "{vars:?}");
+            let record = job_record(|| Ok("0.1 ab".to_owned()), env, "");
+            assert_eq!(record.is_some(), file, "{vars:?}");
+            assert!(
+                record.is_none_or(|record| record.content.is_none()),
+                "{vars:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_flags_choose_what_a_check_does_with_the_record() {
         #[derive(clap::Parser)]
         struct Command {

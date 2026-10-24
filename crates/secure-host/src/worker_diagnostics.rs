@@ -78,10 +78,20 @@ fn socket_paths(net_unix: &str, pids: &[u32]) -> Vec<PathBuf> {
     paths
 }
 
-/// The Workers' diagnostic sockets that a step could still connect to:
-/// those whose path is still a socket.
-pub fn linked_sockets() -> Result<Vec<PathBuf>> {
-    let pids = worker_pids()?;
+/// Why there is nothing to unlink, given [`worker_pids`]: a host that is
+/// no GitHub runner has no Worker, and so no socket to hide. With one or
+/// more Workers, None: their sockets are looked for.
+pub fn skipped(pids: &[u32]) -> Option<String> {
+    pids.is_empty().then(|| {
+        format!(
+            "skipped sandbox.unlink-worker-diagnostics: no {WORKER_COMM} runs on this host, so it has no .NET diagnostic socket"
+        )
+    })
+}
+
+/// The diagnostic sockets of the Workers `pids` that a step could still
+/// connect to: those whose path is still a socket.
+pub fn linked_sockets(pids: &[u32]) -> Result<Vec<PathBuf>> {
     if pids.is_empty() {
         return Ok(Vec::new());
     }
@@ -96,7 +106,7 @@ pub fn linked_sockets() -> Result<Vec<PathBuf>> {
         "{PROC_NET_UNIX} is over {MAX_NET_UNIX_BYTES} bytes"
     );
     let mut linked = Vec::new();
-    for path in socket_paths(&text, &pids) {
+    for path in socket_paths(&text, pids) {
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_socket() => linked.push(path),
             Ok(_) => {}
@@ -110,7 +120,12 @@ pub fn linked_sockets() -> Result<Vec<PathBuf>> {
 /// Unlinks every Worker's diagnostic socket; the Worker keeps listening
 /// on a socket no one can name.
 pub fn unlink() -> Result<()> {
-    let linked = linked_sockets()?;
+    let pids = worker_pids()?;
+    if let Some(why) = skipped(&pids) {
+        println!("{why}");
+        return Ok(());
+    }
+    let linked = linked_sockets(&pids)?;
     for path in &linked {
         fs::remove_file(path).with_context(|| format!("unlinking {}", path.display()))?;
     }
@@ -153,5 +168,17 @@ mod tests {
             [PathBuf::from("/tmp/dotnet-diagnostic-7-2-socket")]
         );
         assert!(socket_paths(&twice, &[]).is_empty());
+    }
+
+    #[test]
+    fn only_a_host_without_a_worker_skips() {
+        for (pids, skips) in [
+            (&[][..], true),
+            (&[2041][..], false),
+            (&[2041, 7][..], false),
+        ] {
+            assert_eq!(skipped(pids).is_some(), skips, "{pids:?}");
+        }
+        assert!(skipped(&[]).unwrap().contains(WORKER_COMM));
     }
 }

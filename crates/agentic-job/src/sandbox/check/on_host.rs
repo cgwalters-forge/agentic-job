@@ -575,25 +575,33 @@ impl Checker<'_> {
         );
         if self.config.sandbox.unlink_worker_diagnostics() {
             // As the Worker's user, which every later step is: setup's
-            // unlinking proved by no path left to connect to.
-            let linked = match worker_diagnostics::linked_sockets() {
-                Ok(found) => found.iter().map(|p| p.display().to_string()).collect(),
-                Err(err) => vec![format!("{err:#}")],
-            };
-            self.report.expect(
-                Want::Fail,
-                "worker-diagnostics",
-                format!(
-                    "no .NET diagnostic socket of {} is linked (sandbox.unlink-worker-diagnostics){}",
-                    worker_diagnostics::WORKER_COMM,
-                    if linked.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", linked.join(", "))
-                    }
-                ),
-                !linked.is_empty(),
-            );
+            // unlinking proved by no path left to connect to. A host with
+            // no Worker has no such socket: a note, not a pass. Failing to
+            // list processes is still a failure.
+            let pids = worker_diagnostics::worker_pids();
+            if let Some(why) = pids.as_deref().ok().and_then(worker_diagnostics::skipped) {
+                self.report.note(&format!("worker-diagnostics: {why}"));
+            } else {
+                let linked = pids.and_then(|pids| worker_diagnostics::linked_sockets(&pids));
+                let linked = match linked {
+                    Ok(found) => found.iter().map(|p| p.display().to_string()).collect(),
+                    Err(err) => vec![format!("{err:#}")],
+                };
+                self.report.expect(
+                    Want::Fail,
+                    "worker-diagnostics",
+                    format!(
+                        "no .NET diagnostic socket of {} is linked (sandbox.unlink-worker-diagnostics){}",
+                        worker_diagnostics::WORKER_COMM,
+                        if linked.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", linked.join(", "))
+                        }
+                    ),
+                    !linked.is_empty(),
+                );
+            }
         }
 
         // Any user could weaken what ssh and TLS accept host-wide. Setup
