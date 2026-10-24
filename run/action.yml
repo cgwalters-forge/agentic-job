@@ -80,7 +80,8 @@ runs:
     # A session run's (`[session] listen`): where its operator connects,
     # which setup served on the runner's tailnet name. Outputs and the
     # summary resolve when the job ends; setup's log line is live. Only
-    # the operators the configuration names are let in there. First, as
+    # the operators the configuration names, or nodes the tailnet policy
+    # grants its `capability`, are let in there. First, as
     # it was in secure-host, before the probes.
     - name: The session's endpoint
       id: session

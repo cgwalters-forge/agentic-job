@@ -3,7 +3,8 @@
 //! limits. It came from the old tree's `harness/` (`bot-harness`) in
 //! step 3 of docs/plan.md.
 //!
-//! It is a library with no command of its own: `run` drives it with
+//! It is a library whose one command, `session connect` ([`connect`]),
+//! is a client of the bridge, not a session: `run` drives it with
 //! [`run()`], which
 //!
 //! - starts the agent ([`agents`]) behind the caller's wrapper, with its
@@ -35,6 +36,7 @@ pub mod bridge;
 pub mod budget;
 pub mod clients;
 pub mod compaction;
+pub mod connect;
 pub mod digest;
 mod driver;
 pub mod permission;
@@ -54,3 +56,17 @@ pub use driver::{
 pub use permission::Policy;
 pub use process::Launch;
 pub use transcript::{ACP_LOG, Log, Record, STDERR_LOG};
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Join a session run's conversation from a terminal or another agent: each line of standard input is a prompt
+    Connect(connect::Args),
+}
+
+impl Command {
+    pub fn run(&self) -> anyhow::Result<crate::exit::Exit> {
+        match self {
+            Self::Connect(args) => connect::run(args),
+        }
+    }
+}

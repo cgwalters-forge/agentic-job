@@ -78,7 +78,9 @@ impl Guard {
 
 /// Only the fixed endpoint is configurable here. Stdin is the already bound
 /// listener; stdout is a private lifetime/acknowledgement socket, not a log.
-pub(super) fn serve() -> Result<()> {
+/// CAPABILITY, from root's configuration, is the app capability serve
+/// forwards in `Tailscale-App-Capabilities`.
+pub(super) fn serve(capability: Option<&str>) -> Result<()> {
     let listener = TcpListener::from(rustix::io::dup(std::io::stdin().as_fd())?);
     ensure!(
         listener.local_addr()? == (Ipv4Addr::LOCALHOST, PORT).into(),
@@ -90,10 +92,14 @@ pub(super) fn serve() -> Result<()> {
         .peer_addr()
         .context("session serve needs a control socket")?;
     let target = format!("http://127.0.0.1:{PORT}");
+    let accept = capability.map(|capability| format!("--accept-app-caps={capability}"));
+    let mut start = vec!["--bg", "--yes", "--https=443"];
+    start.extend(accept.as_deref());
+    start.push(&target);
     serve_with(
         listener,
         control,
-        || serve_command(&["--bg", "--yes", "--https=443", &target]).and_then(|out| started(&out)),
+        || serve_command(&start).and_then(|out| started(&out)),
         || serve_command(&["--https=443", "off"]).and_then(|out| revoked(&out)),
     )
 }

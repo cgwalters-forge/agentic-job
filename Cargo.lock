@@ -78,6 +78,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "toml",
  "unicode-normalization",

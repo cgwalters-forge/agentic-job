@@ -145,8 +145,11 @@ pub fn run(op: &Op) -> Result<Exit> {
         }
         Op::TailscaleStatus => passthrough(&exec, &["tailscale", "status", "--json"]),
         Op::SessionServe => {
-            ensure!(config.session.listen, "session serve needs session.listen");
-            super::session::serve().map(|()| Exit::Success)
+            // Root's own copy decides what serve accepts, checked as `run`
+            // checks it: the runner's user passes no arguments here.
+            let listen = crate::session::bridge::Listen::from_config(&config.session)?
+                .context("session serve needs session.listen")?;
+            super::session::serve(listen.capability.as_deref()).map(|()| Exit::Success)
         }
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
         Op::DisableLinger => {

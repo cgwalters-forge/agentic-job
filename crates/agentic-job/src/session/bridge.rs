@@ -11,7 +11,14 @@
 //! the client sent, must be one of `session.operators`. `Origin` must be
 //! one of `session.origins`, so that a page of another site the
 //! operator's browser has open cannot use the operator's tailnet identity
-//! to attach (cross-site WebSocket hijacking). A refused handshake leaves
+//! to attach (cross-site WebSocket hijacking). A tagged device has no
+//! login; it is let in instead where `session.capability` is set and
+//! serve, which then forwards it, names that app capability among the
+//! node's in `Tailscale-App-Capabilities`. Such a client need not send an
+//! `Origin`, since it is no browser, but one it sends must be allowed: a
+//! browser on that device would otherwise lend the capability to any
+//! site. The tailnet policy's grant, not this repository, then decides
+//! which nodes may attach. A refused handshake leaves
 //! the bridge listening; the first client let in is the only one, and
 //! when it leaves the session ends.
 //!
@@ -53,6 +60,22 @@ pub const ENDPOINT_FILE: &str = "/etc/agentic-job/session-endpoint";
 /// What `tailscale serve` sets to the tailnet login of a user's device
 /// (`tailscale serve --help`); it drops one the client sent.
 pub const LOGIN_HEADER: &str = "Tailscale-User-Login";
+/// What `tailscale serve --accept-app-caps` sets to a JSON object of the
+/// connecting node's capabilities among those accepted; it drops one the
+/// client sent. Tailscale encodes a value that is not ASCII as RFC 2047,
+/// which is never decoded here: it is refused as not JSON.
+pub const CAPABILITIES_HEADER: &str = "Tailscale-App-Capabilities";
+/// The longest `Tailscale-App-Capabilities` taken, in bytes: serve
+/// forwards only the one accepted capability, with the grant's values.
+const MAX_CAPABILITIES_BYTES: usize = 4096;
+const NO_LOGIN: &str = "no tailnet login: not through tailscale serve, or from a tagged device";
+const NO_CAPABILITY: &str = "no tailnet login or app capability: not through tailscale serve, \
+                             or the tailnet policy grants this device no session.capability";
+const CAPABILITIES_TWICE: &str = "Tailscale-App-Capabilities more than once";
+const CAPABILITIES_NOT_ASCII: &str =
+    "Tailscale-App-Capabilities is not plain ASCII within its limit";
+const CAPABILITIES_NOT_OBJECT: &str = "Tailscale-App-Capabilities is not a JSON object";
+const CAPABILITY_NOT_GRANTED: &str = "the app capabilities do not include session.capability";
 /// How long the session waits for a prompt unless `session.idle-minutes`
 /// says otherwise: a runner waiting for nobody still costs its minutes.
 const DEFAULT_IDLE_MINUTES: u64 = 10;
@@ -69,7 +92,7 @@ const MAX_HANDSHAKES: usize = 16;
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// The longest message taken from the client: a prompt as large as the
 /// largest task, with room for its JSON. A longer one ends the bridge.
-const MAX_MESSAGE_BYTES: usize = 2 * crate::run::MAX_TASK_BYTES as usize;
+pub(super) const MAX_MESSAGE_BYTES: usize = 2 * crate::run::MAX_TASK_BYTES as usize;
 /// The client's requests that wait for the session at once: the reading
 /// stops beyond them.
 const INBOX: usize = 4;
@@ -80,7 +103,7 @@ const PENDING_ANSWERS: usize = INBOX;
 /// read is not to fill the memory of the process that holds the run: an
 /// agent's notification that finds no room hangs up on the client, and a
 /// response to the client waits for room, which stops the reading.
-const MAX_QUEUED_BYTES: usize = 8 << 20;
+pub(super) const MAX_QUEUED_BYTES: usize = 8 << 20;
 const PROTOCOL_VERSION: u64 = 1;
 const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -95,6 +118,8 @@ pub type Redact = Arc<dyn Fn(&str) -> String + Send + Sync>;
 pub struct Listen {
     pub operators: Vec<String>,
     pub origins: Vec<String>,
+    /// The Tailscale app capability that lets a node in without a login.
+    pub capability: Option<String>,
     pub idle: Duration,
 }
 
@@ -105,6 +130,7 @@ impl Listen {
             listen,
             operators,
             origins,
+            capability,
             idle_minutes,
             ..
         } = table;
@@ -114,12 +140,26 @@ impl Listen {
         if !listen {
             return Ok(None);
         }
-        for (key, list) in [("operators", operators), ("origins", origins)] {
-            // Empty would let nobody in: a session nobody can reach is a
-            // runner spent for nothing.
+        let capability = (!capability.is_empty()).then(|| capability.clone());
+        if let Some(capability) = &capability {
             ensure!(
-                (1..=MAX_ALLOWED).contains(&list.len()),
-                "session.{key} needs 1 to {MAX_ALLOWED} entries with session.listen"
+                is_capability(capability),
+                "session.capability: {capability:?} is not a Tailscale app capability: \
+                 DOMAIN/cap/NAME, with DOMAIN in lower case"
+            );
+        }
+        // Empty would let nobody in: a session nobody can reach is a
+        // runner spent for nothing. Operators may be empty where the
+        // capability lets someone in; origins still bound browsers on
+        // either path.
+        let fewest_operators = usize::from(capability.is_none());
+        for (key, list, fewest) in [
+            ("operators", operators, fewest_operators),
+            ("origins", origins, 1),
+        ] {
+            ensure!(
+                (fewest..=MAX_ALLOWED).contains(&list.len()),
+                "session.{key} needs {fewest} to {MAX_ALLOWED} entries with session.listen"
             );
         }
         for login in operators {
@@ -150,25 +190,32 @@ impl Listen {
         Ok(Some(Self {
             operators: operators.clone(),
             origins: origins.clone(),
+            capability,
             idle: Duration::from_secs(minutes * 60),
         }))
     }
 
     /// Why REQUEST, a client's handshake, is refused; `None` to let it
     /// in. Each header must be there once, so that no proxy and no
-    /// client can disagree about which counts.
+    /// client can disagree about which counts. A client is let in by its
+    /// login or, where `session.capability` is set, by its capability;
+    /// the capability's refusal is the one given once serve sent it.
     fn refusal(&self, request: &Request) -> Option<&'static str> {
-        let one = |name: &str| {
-            let mut values = request.headers().get_all(name).iter();
-            match (values.next(), values.next()) {
-                (Some(value), None) => value.to_str().ok(),
-                _ => None,
+        // None: let in by its login.
+        let by_login = self.login_refusal(request)?;
+        match &self.capability {
+            Some(capability) if request.headers().contains_key(CAPABILITIES_HEADER) => {
+                self.capability_refusal(capability, request)
             }
-        };
-        match (one(LOGIN_HEADER), one("Origin")) {
-            (None, _) => {
-                Some("no tailnet login: not through tailscale serve, or from a tagged device")
-            }
+            Some(_) if by_login == NO_LOGIN => Some(NO_CAPABILITY),
+            _ => Some(by_login),
+        }
+    }
+
+    /// Why REQUEST is not let in by its tailnet login.
+    fn login_refusal(&self, request: &Request) -> Option<&'static str> {
+        match (one(request, LOGIN_HEADER), one(request, "Origin")) {
+            (None, _) => Some(NO_LOGIN),
             (Some(login), _) if !self.operators.iter().any(|o| o == login) => {
                 Some("the tailnet login is not one of session.operators")
             }
@@ -179,6 +226,69 @@ impl Listen {
             _ => None,
         }
     }
+
+    /// Why REQUEST is not let in by CAPABILITY, which serve names among
+    /// the node's: a JSON object keyed by capability, with the grant's
+    /// values, which are not looked at.
+    fn capability_refusal(&self, capability: &str, request: &Request) -> Option<&'static str> {
+        let mut values = request.headers().get_all(CAPABILITIES_HEADER).iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            return Some(CAPABILITIES_TWICE);
+        };
+        let bytes = value.as_bytes();
+        if bytes.len() > MAX_CAPABILITIES_BYTES
+            || !bytes.iter().all(|b| *b == b' ' || b.is_ascii_graphic())
+        {
+            return Some(CAPABILITIES_NOT_ASCII);
+        }
+        let Ok(Value::Object(granted)) = serde_json::from_slice::<Value>(bytes) else {
+            return Some(CAPABILITIES_NOT_OBJECT);
+        };
+        if !granted.contains_key(capability) {
+            return Some(CAPABILITY_NOT_GRANTED);
+        }
+        // No Origin is a client that is no browser. A browser always
+        // sends one, so a page of another site is still kept out.
+        let allowed = |origin: &[u8]| self.origins.iter().any(|o| o.as_bytes() == origin);
+        let mut origins = request.headers().get_all("Origin").iter();
+        match (origins.next(), origins.next()) {
+            (None, _) => None,
+            (Some(origin), None) if allowed(origin.as_bytes()) => None,
+            (Some(_), None) => Some("the Origin is not one of session.origins"),
+            (Some(_), Some(_)) => Some("Origin more than once"),
+        }
+    }
+}
+
+/// The value of REQUEST's header NAME where it is there once.
+fn one<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    let mut values = request.headers().get_all(name).iter();
+    match (values.next(), values.next()) {
+        (Some(value), None) => value.to_str().ok(),
+        _ => None,
+    }
+}
+
+/// Whether TEXT is a Tailscale app capability name, `DOMAIN/cap/NAME`
+/// (`example.com/cap/agentic-job-session`), narrowly enough that it is
+/// one argument of `tailscale serve --accept-app-caps`, which takes a
+/// comma-separated list.
+fn is_capability(text: &str) -> bool {
+    let mut parts = text.split('/');
+    let (Some(domain), Some("cap"), Some(name), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let domain_ok = domain.contains('.')
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b));
+    let name_ok = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    text.len() <= MAX_NAME_BYTES && domain_ok && name_ok
 }
 
 /// Whether TEXT is an origin as a browser sends it: a scheme, a host and
@@ -722,10 +832,13 @@ async fn read_lines(
 
 #[cfg(test)]
 mod tests {
+    use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+
     use super::*;
 
     const OPERATOR: &str = "operator@github";
     const ORIGIN: &str = "https://review.example.ts.net";
+    const CAPABILITY: &str = "example.com/cap/agentic-job-session";
 
     #[tokio::test]
     async fn stalled_handshake_does_not_block_the_operator() {
@@ -779,6 +892,14 @@ mod tests {
         }
     }
 
+    /// TABLE with `session.capability = CAPABILITY`.
+    fn with_capability(table: config::Session, capability: &str) -> config::Session {
+        config::Session {
+            capability: capability.to_owned(),
+            ..table
+        }
+    }
+
     #[test]
     fn sessions_that_are_taken() {
         for off in [
@@ -810,11 +931,28 @@ mod tests {
                 ),
                 60 * 60,
             ),
+            // The capability lets nodes in with no operator listed.
+            (
+                with_capability(table(true, &[], &[ORIGIN], 0), CAPABILITY),
+                10 * 60,
+            ),
+            (
+                with_capability(
+                    table(true, &[OPERATOR], &[ORIGIN], 0),
+                    "tailscale.example/cap/Agent_job.2",
+                ),
+                10 * 60,
+            ),
         ];
         for (table, idle_s) in cases {
             let listen = Listen::from_config(&table).unwrap().unwrap();
             assert_eq!(listen.operators, table.operators);
             assert_eq!(listen.origins, table.origins);
+            assert_eq!(
+                listen.capability.unwrap_or_default(),
+                table.capability,
+                "{table:?}"
+            );
             assert_eq!(listen.idle, Duration::from_secs(idle_s));
         }
     }
@@ -891,21 +1029,59 @@ mod tests {
                 table(true, &[OPERATOR], &[ORIGIN], MAX_IDLE_MINUTES + 1),
                 "is over",
             ),
+            (
+                with_capability(table(true, &many, &[ORIGIN], 0), CAPABILITY),
+                "session.operators needs 0 to",
+            ),
+            (
+                with_capability(table(true, &[], &[], 0), CAPABILITY),
+                "session.origins needs 1 to",
+            ),
         ];
+        let long = format!("example.com/cap/{}", "x".repeat(MAX_NAME_BYTES));
+        let mut cases = Vec::from(cases);
+        for capability in [
+            "agentic-job-session",
+            "example.com/agentic-job-session",
+            "example.com/caps/session",
+            "example.com/cap/",
+            "/cap/session",
+            "localhost/cap/session",
+            "Example.com/cap/session",
+            "example.com/cap/a/b",
+            "example.com/cap/a,example.com/cap/b",
+            "example.com/cap/a b",
+            "example.com/cap/sessi\u{f6}n",
+            " example.com/cap/session",
+            long.as_str(),
+        ] {
+            cases.push((
+                with_capability(table(true, &[], &[ORIGIN], 0), capability),
+                "is not a Tailscale app capability",
+            ));
+        }
         for (table, expected) in cases {
             let err = format!("{:#}", Listen::from_config(&table).unwrap_err());
             assert!(err.contains(expected), "{table:?}: {err}");
         }
     }
 
-    /// The handshake's headers, as `tailscale serve` passes them on.
+    /// The handshake's headers, as `tailscale serve` passes them on, to
+    /// a session that also takes CAPABILITY.
     #[test]
     fn who_is_let_in() {
-        let listen = Listen::from_config(&table(true, &[OPERATOR], &[ORIGIN], 0))
-            .unwrap()
-            .unwrap();
+        let config = with_capability(table(true, &[OPERATOR], &[ORIGIN], 0), CAPABILITY);
+        let listen = Listen::from_config(&config).unwrap().unwrap();
+        let granted = format!(r#"{{"{CAPABILITY}":[{{"to":"any"}}]}}"#);
+        let granted = granted.as_str();
+        let other = r#"{"example.com/cap/other":[{}]}"#;
+        let long = format!(
+            r#"{{"{CAPABILITY}":["{}"]}}"#,
+            "x".repeat(MAX_CAPABILITIES_BYTES)
+        );
+        let not_ascii = format!(r#"{{"{CAPABILITY}":["café"]}}"#);
         type Headers<'a> = &'a [(&'a str, &'a str)];
-        let cases: [(Headers, Option<&str>); 8] = [
+        let cases: &[(Headers, Option<&str>)] = &[
             (&[(LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)], None),
             (&[("Origin", ORIGIN)], Some("no tailnet login")),
             (
@@ -937,13 +1113,92 @@ mod tests {
                 ],
                 Some("no Origin"),
             ),
+            // A node the tailnet policy grants the capability: no
+            // browser, or a browser at an allowed page.
+            (&[(CAPABILITIES_HEADER, granted)], None),
+            (&[(CAPABILITIES_HEADER, granted), ("Origin", ORIGIN)], None),
+            (
+                &[
+                    (CAPABILITIES_HEADER, granted),
+                    ("Origin", "https://evil.example"),
+                ],
+                Some("not one of session.origins"),
+            ),
+            (
+                &[
+                    (CAPABILITIES_HEADER, granted),
+                    ("Origin", ORIGIN),
+                    ("Origin", ORIGIN),
+                ],
+                Some("Origin more than once"),
+            ),
+            (&[], Some("no tailnet login or app capability")),
+            (
+                &[(CAPABILITIES_HEADER, other)],
+                Some("do not include session.capability"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, "{}")],
+                Some("do not include session.capability"),
+            ),
+            (
+                &[
+                    (CAPABILITIES_HEADER, granted),
+                    (CAPABILITIES_HEADER, granted),
+                ],
+                Some("more than once"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, "not json")],
+                Some("not a JSON object"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, &format!("[{granted}]"))],
+                Some("not a JSON object"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, &format!(r#""{CAPABILITY}""#))],
+                Some("not a JSON object"),
+            ),
+            // How serve would encode a value that is not ASCII: not
+            // decoded.
+            (
+                &[(CAPABILITIES_HEADER, "=?utf-8?q?=7B=7D?=")],
+                Some("not a JSON object"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, &not_ascii)],
+                Some("not plain ASCII"),
+            ),
+            (
+                &[(CAPABILITIES_HEADER, &format!("{granted}\t"))],
+                Some("not plain ASCII"),
+            ),
+            (&[(CAPABILITIES_HEADER, &long)], Some("not plain ASCII")),
+            // The login path is as it was: a login with no Origin is
+            // refused, whether or not the node also has the capability.
+            (&[(LOGIN_HEADER, OPERATOR)], Some("no Origin")),
+            (
+                &[(LOGIN_HEADER, OPERATOR), (CAPABILITIES_HEADER, granted)],
+                None,
+            ),
+            (
+                &[(LOGIN_HEADER, OPERATOR), (CAPABILITIES_HEADER, other)],
+                Some("do not include session.capability"),
+            ),
         ];
-        for (headers, expected) in cases {
+        fn request(headers: Headers) -> Request {
             let mut request = Request::new(());
             for (name, value) in headers {
-                request.headers_mut().append(*name, value.parse().unwrap());
+                // Bytes, so that a value need not be visible ASCII.
+                let value = HeaderValue::from_bytes(value.as_bytes()).unwrap();
+                let name = HeaderName::try_from(*name).unwrap();
+                request.headers_mut().append(name, value);
             }
-            let refusal = listen.refusal(&request);
+            request
+        }
+        for &(headers, expected) in cases {
+            let refusal = listen.refusal(&request(headers));
             match expected {
                 None => assert_eq!(refusal, None, "{headers:?}"),
                 Some(why) => assert!(
@@ -952,6 +1207,19 @@ mod tests {
                 ),
             }
         }
+        // Without session.capability, the header lets nobody in, and the
+        // refusal is the login's.
+        let logins = Listen::from_config(&table(true, &[OPERATOR], &[ORIGIN], 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            logins.refusal(&request(&[(CAPABILITIES_HEADER, granted)])),
+            Some(NO_LOGIN)
+        );
+        assert_eq!(
+            logins.refusal(&request(&[(LOGIN_HEADER, OPERATOR), ("Origin", ORIGIN)])),
+            None
+        );
     }
 
     #[test]

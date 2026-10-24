@@ -38,6 +38,9 @@ pub enum Command {
     SecureHost(secure_host::Command),
     /// Run the agent in the sandbox and take what it hands back
     Run(run::Args),
+    /// Talk to a session run's agent over its endpoint
+    #[command(subcommand)]
+    Session(crate::session::Command),
     /// Check the provider's API key that `register = "api-key"` needs, before the host is secured
     CheckKey(run::key_check::Args),
     /// Check SAFE_OUTPUTS_PAT, from the environment, before the agent runs: it must be able to apply to the output repository
@@ -91,6 +94,7 @@ impl Command {
             Self::Sandbox(command) => command.run(),
             Self::SecureHost(command) => command.run(),
             Self::Run(args) => run::run(args),
+            Self::Session(command) => command.run(),
             Self::CheckKey(args) => run::key_check::run(args),
             Self::CheckApplyToken(args) => crate::apply_token::run(args),
             Self::Register(args) => run::register::run(args),

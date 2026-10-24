@@ -399,6 +399,21 @@ mod tests {
             session.host.session.map(|listen| listen.operators),
             Some(vec!["op@github".to_owned()])
         );
+        // A capability in place of operators; its bounds are the bridge's
+        // to test.
+        let tagged = checked(&format!(
+            "{FAKE}{CAPPED}[session]\nlisten = true\n\
+             capability = \"example.com/cap/agentic-job-session\"\n\
+             origins = [\"https://review.example.ts.net\"]\n"
+        ))
+        .unwrap()
+        .host
+        .session
+        .unwrap();
+        assert_eq!(
+            (tagged.operators.len(), tagged.capability.as_deref()),
+            (0, Some("example.com/cap/agentic-job-session"))
+        );
 
         let text = format!(
             "{CLAUDE}skills = true\n{PROXY}{OIDC}[limits]\ntimeout-minutes = 10\nmax-requests = 150\n\
@@ -569,6 +584,14 @@ mod tests {
             (
                 format!("{FAKE}{CAPPED}[session]\nlisten = true\noperators = [\"op@github\"]\n"),
                 "session.origins needs 1 to",
+            ),
+            (
+                format!(
+                    "{FAKE}{CAPPED}[session]\nlisten = true\n\
+                     capability = \"agentic-job-session\"\n\
+                     origins = [\"https://review.example.ts.net\"]\n"
+                ),
+                "is not a Tailscale app capability",
             ),
             (
                 format!("{FAKE}{CAPPED}[session]\nrelay = \"relay:7000\"\n"),

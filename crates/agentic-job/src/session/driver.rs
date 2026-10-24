@@ -125,7 +125,7 @@ const AGENT_EXITED: &str = "the agent exited";
 const CLIENT_LEFT: &str = "the client left";
 const SESSION_ENDED: &str = "the session has ended";
 const NO_CANCEL_ANSWER: &str = "the agent did not answer the cancellation";
-const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
+pub(super) const TURN_RUNNING: &str = "a turn is running: cancel it or wait for its answer";
 const REFUSED: &str = "the model provider refused the agent's request";
 const HANDING_BACK: &str = "the task's turn ended on an error: the agent is to hand back";
 /// How long the session waits after a turn that ended on an error before
