@@ -131,6 +131,23 @@ review run per finding, ten rounds on one pull request. Check does not read
 severities: refusing a mislabelled verdict would only lose its comment, and
 the status would fail as it does for CHANGES.
 
+Before correctness, `review.yml`'s standing task and the implement skill's
+[diff reviewer](../skills/agents/diff-reviewer.md), but not yet dispatch's
+inline `review` profile, ask whether the change should exist as
+written: whether it adds a mechanism where an existing one could be
+extended, configured or deleted, whether it sits in the repository and
+language the base's AGENTS.md or conventions call for, and whether it is
+the smallest change that works, lines added against lines removed: checking
+only against the issue approved well-scoped additions in the wrong place
+([#1816](https://github.com/cgwalters-forge/agentic-job/issues/1816)). A
+failure is a blocker, "should not exist as written: X instead". The project's
+own conventions, not the prompts, name the right place and language. This adds
+one blocking reason to every caller's merge gate, so expect more CHANGES and
+fix rounds; it changes no permission, token or bound and can only withhold an
+approval. Tests that only restate the implementation (unit tests of private
+helpers, mocks asserting call sequences) are important, not blockers, with a
+request for an integration test where feasible, so taste starts no fix rounds.
+
 When check refuses the output or apply fails to post it, the existing failure
 status says
 `The review did not post; see the workflow run` and links to that run.
