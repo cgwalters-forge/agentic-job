@@ -26,7 +26,8 @@ inputs:
     description: >-
       For `[inference] register = "api-key"`, the provider's API key, or with `provider = "github"`
       a GitHub token with Copilot access, never the one passed as `github-token`. Only
-      `agentic-job run` gets it, which keeps it from the agent; empty for a broker
+      `agentic-job run` gets it, which keeps it from the agent only with `agent-user: sandbox`:
+      with `runner`, `run` refuses `api-key` for now. Empty for a broker
     default: ""
   inference-run-token:
     description: >-
@@ -37,7 +38,8 @@ inputs:
   mcp-token:
     description: >-
       For an `[mcp.NAME]` server of the configuration, its credential. Only `agentic-job run`
-      gets it, which keeps it from the agent; empty for a run without one
+      gets it, which keeps it from the agent only with `agent-user: sandbox`: with `runner`,
+      `run` refuses an MCP server for now. Empty for a run without one
     default: ""
 outputs:
   exit:

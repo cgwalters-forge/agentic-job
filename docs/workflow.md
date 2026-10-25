@@ -300,7 +300,8 @@ jobs:
       task: ${{ inputs.task }}
       repo: ${{ inputs.repo }}
       allow: .github/agentic-job/allow.toml
-      config: .github/agentic-job/runner.toml
+      # The hardening for hosted ubuntu-26.04, from agentic-job at COMMIT.
+      config: .agentic-job-source/.github/agentic-job/hosted.toml
       agent: fake
       fake-profile: comment
       max-requests: "0"
@@ -923,6 +924,7 @@ jobs:
       task: ${{ inputs.task }}
       repo: ${{ inputs.repo }}
       allow: .github/agentic-job/allow.toml
+      # Yours, for the runner below: a copy of hosted.toml, adjusted.
       config: .github/agentic-job/runner.toml
       agent: claude
       agent-runner: '["self-hosted", "my-label"]'
@@ -932,6 +934,10 @@ jobs:
       apply-partial: true
 ```
 
+`runner.toml` is a file of the calling repository, not one this
+repository ships: [`hosted.toml`](../.github/agentic-job/hosted.toml) is
+for GitHub's hosted `ubuntu-26.04`, and another runner image listens on
+other sockets, each of which `agentic-job sandbox check` names.
 Name the workflow by a commit you have read, not by a branch. The binary
 is built from that same commit, so the pin covers both. Never pass
 `secrets: inherit`: pass only the declared apply credential alias you use.
