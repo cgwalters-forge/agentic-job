@@ -417,8 +417,15 @@ Those runs predate pull requests from a fork: their branches were pushed
 to the trial repository itself, a path apply no longer takes. The fork path
 has run live once, from `cgwalters-forge/tracker`
 ([what has run](docs/workflow.md#what-has-run-and-what-has-not)); the
-caller in [Try it](#try-it), from a fresh repository, has not. No caller exists in the operator's runner repository,
-`bootc-dev/cgwalters-devspace-sandbox`, yet.
+caller in [Try it](#try-it), from a fresh repository, has not.
+The operator's runner repository, `bootc-dev/cgwalters-devspace-sandbox`,
+calls the reusable workflow through `cgwalters-forge/actions`' wrapper,
+with the agent job on bootc-dev's RHEL 10 runners. A research run on 16 cores
+([39465607338](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39465607338))
+posted its result as a comment. An implement run on 4 cores
+([39456746786](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39456746786))
+ended with no result: the caller names no fork, so it could open no pull
+request. Neither run used the chat session.
 
 Claude Code and opencode have also run through the reusable workflow on
 hosted runners using its old built-in `tailscale-*` inputs to reach the
