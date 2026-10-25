@@ -86,12 +86,12 @@ fn serve(listener: TcpListener, model: Model) {
 }
 
 /// One way the detector's run can go: what the proxy and the model do,
-/// what stderr then says, and the run states and live tokens the proxy
-/// is left with.
+/// what stderr then says (nothing for a run that passes), and the run
+/// states and live tokens the proxy is left with.
 #[derive(Default)]
 struct Case {
     name: &'static str,
-    registration: Option<Fault>,
+    registration: Vec<Fault>,
     ending: Option<Fault>,
     model: Model,
     error: &'static str,
@@ -144,43 +144,67 @@ fn stub_detector_gates_and_always_ends_its_run() {
             states: finished,
             ..Case::default()
         },
+        // A proxy that restarts while the detector registers or ends its
+        // run is asked again (#1796).
         Case {
-            name: "registration refused",
-            registration: Some(Fault::Status(503, "upstream error\n")),
-            error: "registering the run",
+            name: "registration refused once",
+            registration: vec![Fault::Status(503, "upstream error\n")],
+            model: ok(clean()),
+            states: finished,
             ..Case::default()
         },
         Case {
-            name: "registration lost",
-            registration: Some(Fault::Closed),
-            error: "cannot reach the inference proxy",
+            name: "registration lost once",
+            registration: vec![Fault::Closed],
+            model: ok(clean()),
+            states: finished,
             ..Case::default()
         },
-        // The proxy registered the run, but the detector never learned
-        // its token, so cannot end it: the proxy's expiry does.
+        // The proxy registered the first run, but the detector never
+        // learned its token, so cannot end it: the proxy's expiry does.
         Case {
-            name: "registration reply lost",
-            registration: Some(Fault::LostReply),
-            error: "cannot reach the inference proxy",
-            states: &["active"],
+            name: "registration reply lost once",
+            registration: vec![Fault::LostReply],
+            model: ok(clean()),
+            states: &["active", "finished"],
             live: 1,
+            ..Case::default()
+        },
+        Case {
+            name: "ending refused once",
+            ending: Some(Fault::Status(503, "upstream error\n")),
+            model: ok(clean()),
+            states: finished,
+            ..Case::default()
+        },
+        Case {
+            name: "ending lost once",
+            ending: Some(Fault::Closed),
+            model: ok(clean()),
+            states: finished,
+            ..Case::default()
+        },
+        // A refusal that is not transient fails at once: a second try
+        // would succeed here.
+        Case {
+            name: "registration not configured",
+            registration: vec![Fault::Status(503, "run registration is not configured\n")],
+            error: "has no policy for registering runs",
+            ..Case::default()
+        },
+        // A proxy still down after every try fails the detector.
+        Case {
+            name: "registration refused every time",
+            registration: vec![Fault::Status(503, "upstream error\n"); 4],
+            error: "(HTTP 503: upstream error) (after 4 tries over",
             ..Case::default()
         },
         // A clean verdict is not enough when the run cannot be ended.
         Case {
             name: "ending refused",
-            ending: Some(Fault::Status(503, "upstream error\n")),
+            ending: Some(Fault::Status(400, "bad request\n")),
             model: ok(clean()),
-            error: "ending the run at the proxy failed",
-            states: &["active"],
-            live: 1,
-            ..Case::default()
-        },
-        Case {
-            name: "ending lost",
-            ending: Some(Fault::Closed),
-            model: ok(clean()),
-            error: "to end the run",
+            error: "ending the run at the proxy failed: HTTP 400",
             states: &["active"],
             live: 1,
             ..Case::default()
@@ -359,7 +383,11 @@ fn stub_detector_gates_and_always_ends_its_run() {
             ),
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.success(), case == "clean", "{case}: {stderr}");
+        assert_eq!(
+            output.status.success(),
+            error.is_empty(),
+            "{case}: {stderr}"
+        );
         assert!(stderr.contains(error), "{case}: {stderr}");
         assert_eq!(proxy.run_states(), states, "{case}");
         assert_eq!(proxy.live_tokens().len(), live, "{case}");
