@@ -23,20 +23,17 @@ if (createHash('sha256').update(readFileSync(jar)).digest('hex') !== sha256) {
   throw new Error('tla2tools.jar checksum mismatch; refusing to execute it');
 }
 
-const cases = [
-  ['Pipeline', null],
-  ['BrokenGuard', 'AtMostOnce'],
-  ['BrokenMarker', 'NoFalseSkip'],
-  ['BrokenName', 'AcceptedOnly'],
-  ['BrokenWiring', 'AcceptedOnly'],
-  ['BrokenCredential', 'CredentialIsolation'],
-  ['BrokenBranch', 'BranchOnce'],
-];
-for (const [config, invariant] of cases) {
+const cases = Object.entries({
+  Pipeline: [['Pipeline', null], ['BrokenGuard', 'AtMostOnce'], ['BrokenMarker', 'NoFalseSkip'], ['BrokenName', 'AcceptedOnly'],
+    ['BrokenWiring', 'AcceptedOnly'], ['BrokenCredential', 'CredentialIsolation'], ['BrokenBranch', 'BranchOnce']],
+  Session: [['Session', null], ['BrokenSessionInputs', 'AcceptedOnly'], ['BrokenSessionGuard', 'AtMostOnce'],
+    ['BrokenSessionName', 'AtMostOnce'], ['BrokenSessionCeiling', 'Ceiling'], ['BrokenSessionCredential', 'CredentialIsolation']],
+}).flatMap(([module, configs]) => configs.map(([config, invariant]) => [module, config, invariant]));
+for (const [module, config, invariant] of cases) {
   const run = spawnSync(process.env.JAVA_BIN || 'java', [
     '-XX:+UseParallelGC', '-Xmx512m', '-cp', jar, 'tlc2.TLC',
     '-workers', '1', '-seed', '1', '-fp', '0', '-config', join(directory, `${config}.cfg`),
-    '-metadir', join(results, config), join(directory, 'Pipeline.tla'),
+    '-metadir', join(results, config), join(directory, `${module}.tla`),
   ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   const output = (run.stdout || '') + (run.stderr || '');
   writeFileSync(join(results, `${config}.log`), output);
