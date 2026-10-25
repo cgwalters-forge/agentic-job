@@ -66,6 +66,28 @@ Besides the host's setup, `sandbox setup`:
   (below) on the user's manager and every `run0` command;
 - runs `setup.script` as the sandbox user, never as root.
 
+Start setup from a root shell, or from a systemd unit after boot, such
+as:
+
+```ini
+[Unit]
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agentic-job sandbox setup --config /etc/agentic-job-setup.toml
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Not from cloud-init's `runcmd`: on CentOS Stream 10, setup started there
+failed when `run0` could not start a transient service unit to run
+`setup.script` as the sandbox user, while the same setup worked from a
+unit like the one above. Why is not yet known
+([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810));
+setup does not refuse cloud-init, but that failure's message says this.
+
 `egress.direct` lists endpoints the sandbox user reaches without the
 proxy, each an IPv4 address and port on the tailnet; it is for the
 [inference proxy](inference.md), so that the run token never crosses the
