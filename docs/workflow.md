@@ -603,8 +603,22 @@ Read this before relying on it.
   opened pull requests [#1](https://github.com/cgwalters-bot/agentic-job-trial/pull/1)
   and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2) there.
   [Issue #59](https://github.com/cgwalters-forge/agentic-job/issues/59)
-  records these deployments. No caller exists in the operator's runner
-  repository, `bootc-dev/cgwalters-devspace-sandbox`, yet.
+  records these deployments. The operator's runner repository,
+  `bootc-dev/cgwalters-devspace-sandbox`, calls the reusable workflow
+  through `cgwalters-forge/actions`' `cgwalters-agentic-job.yml` wrapper,
+  choosing the agent job's runner among bootc-dev's RHEL 10 runners with a
+  `cores` input (4, 16 or 64). Claude Code ran in both runs below, with all 105 sandbox checks
+  passing; each run registered with the inference proxy and ended its
+  registration with a request count. Research run
+  [39465607338](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39465607338)
+  (16 cores) posted its result as a
+  [comment](https://github.com/bootc-dev/cgwalters-devspace-sandbox/issues/22#issuecomment-6297801550).
+  Implement run
+  [39456746786](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39456746786)
+  (4 cores) succeeded but handed back only a `missing_tool`: its task
+  asked for a pull request against `bootc-dev/bootc`, and with no fork
+  configured the run could open no pull request, nor comment. Neither run
+  used the chat session, whose job was skipped.
   Claude Code and opencode have also run through the reusable workflow on
   GitHub-hosted runners using its old built-in `tailscale-*` inputs, including
   agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).

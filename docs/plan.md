@@ -9,9 +9,15 @@ evidence that every runner image or caller configuration works.
 
 ## Deployment and cutover
 
-Finish validating the operator's caller on RHEL 10: inference registration,
-request accounting, cleanup, fork apply and homegit's run readers.
-Compare representative tasks with the old runner before switching the
+The operator's caller in `bootc-dev/cgwalters-devspace-sandbox` has run
+on RHEL 10 ([what has run](workflow.md#what-has-run-and-what-has-not),
+part of [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)).
+Its research and implement runs show sandbox setup and checks on 4 and 16
+cores, inference registration, request accounting and ending the
+registration, and a comment applied in that repository. They do not show a
+pull request applied from a fork, including into the `cgwalters-forge`
+midstream forks; the chat session on RHEL; a 64-core run; or homegit's run
+readers. Finish validating those. Compare representative tasks with the old runner before switching the
 default dispatch path. Keep the old path available for rollback; remove
 it only after the replacement has enough successful runs.
 
