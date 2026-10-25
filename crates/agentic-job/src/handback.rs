@@ -185,19 +185,23 @@ impl RunFile {
 }
 
 /// The content of [`RUN_FILE`] for the run of POLICY that started its
-/// agent in CHECKOUT. Its clone URLs are no business of the agent's, and
-/// nothing of the check reads them.
+/// agent in CHECKOUT. Its clone URLs, the secondary repository's
+/// included, are no business of the agent's, and nothing of the check
+/// reads them.
 pub fn run_file(
     policy: &Policy,
     checkout: &Checkout,
     run_id: &str,
     commit: &config::Commit,
 ) -> Result<String> {
-    let policy = Policy {
+    let mut policy = Policy {
         clone_url: String::new(),
         context: Vec::new(),
         ..policy.clone()
     };
+    if let Some(secondary) = &mut policy.secondary_pull_request {
+        secondary.clone_url = String::new();
+    }
     let mut file = json!({
         "policy": policy,
         "checkout": checkout.dir,
@@ -419,7 +423,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
             report
                 .problems
                 .extend(over_handler_limits(&collected.items));
-            let verdict = check::check_outputs(&outputs, &path, policy)?;
+            let verdict = check::check_run_outputs(&outputs, &path, policy, &run.run_id)?;
             report
                 .problems
                 .extend(verdict.errors.iter().map(|error| Problem {
@@ -1081,7 +1085,7 @@ mod tests {
         let collected = copy.path().join("collected.json");
         let result = collect::collect_dir(&outputs, &run.policy).unwrap();
         std::fs::write(&collected, serde_json::to_string(&result).unwrap()).unwrap();
-        check::check_outputs(&outputs, &collected, &run.policy)
+        check::check_run_outputs(&outputs, &collected, &run.policy, &run.run_id)
             .unwrap()
             .errors
     }
@@ -1120,6 +1124,10 @@ mod tests {
         let text = run_file(&run.policy, &run.checkout(), "7", &run.commit).unwrap();
         let read: RunFile = serde_json::from_str(&text).unwrap();
         assert_eq!(read.checkout(), run.checkout());
+        // Neither clone URL is the agent's to see, and the check below
+        // works from the file without them.
+        assert!(!text.contains("example.invalid"), "{text}");
+        let run = read;
         std::fs::write(
             dir.path().join(AGENT_OUTCOME),
             "{\"summary\": \"Done.\", \"tests\": []}",
