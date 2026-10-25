@@ -58,7 +58,7 @@ fn policy_dispatch_uses_a_validated_target_and_returns_only_the_exact_sha() {
 }
 
 #[test]
-fn the_task_command_appends_the_base_merge_policy_and_admit_narrows_the_event() {
+fn the_task_command_appends_the_base_merge_policy() {
     let dir = tempfile::tempdir().unwrap();
     let task = || {
         Command::new(env!("CARGO_BIN_EXE_agentic-job"))
@@ -103,24 +103,89 @@ fn the_task_command_appends_the_base_merge_policy_and_admit_narrows_the_event() 
     assert!(!refused.status.success());
     assert!(refused.stdout.is_empty());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("may hold only"));
+}
 
-    let decision = dir.path().join("event.json");
-    let admit = |base: &str| {
-        let got = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
-            .args(["review", "admit", "--base", base, "--decision"])
-            .arg(&decision)
-            .output()
-            .unwrap();
-        assert!(got.status.success(), "{got:?}");
-        serde_json::from_slice::<Value>(&got.stdout).unwrap()
-    };
-    let event = json!({"admitted":true, "reason":"member", "event":"pull_request", "action":"opened",
-        "item":{"kind":"pull_request", "number":147}, "base":"main", "head":{"sha":"a".repeat(40)}});
-    std::fs::write(&decision, event.to_string()).unwrap();
-    assert_eq!(admit("main"), event);
-    let refused = admit("other");
-    assert_eq!(refused["admitted"], false);
-    assert_eq!(refused["head"], event["head"]);
+/// The policy job's event step: the outputs later jobs route by, one line
+/// each whatever the reason holds, and no task left beside a refusal.
+#[test]
+fn admit_writes_the_event_outputs_and_narrows_a_review() {
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NARROWED: &str = concat!(
+        "review requires an admitted pull request on the configured base, ",
+        "at an exact commit"
+    );
+    const NARROWED_REFUSAL: &str = concat!(
+        "Review refused by policy: review requires an admitted pull request ",
+        "on the configured base, at an exact commit"
+    );
+    // A reason can name what the event says; a line break in it must not
+    // add an output, nor its text be live in the refusal comment.
+    const REFUSED: &str = "@a [push](url) refusal=x";
+    const REFUSED_REFUSAL: &str = "Review refused by policy: \\@a \\[push\\]\\(url\\) refusal=x";
+    let event = json!({"schema":"agentic-job-event/v1", "admitted":true, "reason":"member",
+        "event":"pull_request", "action":"opened", "actor":"octocat",
+        "item":{"kind":"pull_request", "number":147}, "base":"main", "head":{"sha":SHA}});
+    let refused = json!({"schema":"agentic-job-event/v1", "admitted":false,
+        "reason":"@a [push](url)\nrefusal=x", "event":"push"});
+    // The decision, the review's base, and the reason, item, review head
+    // and refusal written.
+    let cases = [
+        (&event, None, "member", "147", "", None),
+        (&event, Some("main"), "member", "147", SHA, None),
+        (
+            &event,
+            Some("other"),
+            NARROWED,
+            "",
+            "",
+            Some(NARROWED_REFUSAL),
+        ),
+        (&refused, None, REFUSED, "", "", None),
+        (
+            &refused,
+            Some("main"),
+            REFUSED,
+            "",
+            "",
+            Some(REFUSED_REFUSAL),
+        ),
+    ];
+    for (decision, base, reason, item, head, refusal) in cases {
+        let admitted = !item.is_empty();
+        let mut want =
+            format!("admitted={admitted}\nreason={reason}\nitem={item}\nreview-head={head}\n");
+        if let Some(refusal) = refusal {
+            want.push_str(&format!("refusal={refusal}\n"));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("event.json");
+        let task = dir.path().join("task.md");
+        let output = dir.path().join("output");
+        std::fs::write(&file, decision.to_string()).unwrap();
+        std::fs::write(&task, "the task\n").unwrap();
+        std::fs::write(&output, "").unwrap();
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_agentic-job"));
+        cli.args(["review", "admit", "--decision"])
+            .arg(&file)
+            .arg("--output")
+            .arg(&output);
+        if let Some(base) = base {
+            cli.args(["--base", base]);
+        }
+        let got = cli.output().unwrap();
+        assert!(got.status.success(), "{base:?}: {got:?}");
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), want, "{base:?}");
+        assert_eq!(task.exists(), admitted, "{base:?}");
+        let word = if admitted { "admitted" } else { "refused" };
+        assert_eq!(
+            String::from_utf8(got.stdout).unwrap(),
+            format!("agentic-job event: {word}, {reason}\n")
+        );
+        // A review's narrowing is what later steps read of the decision.
+        let written: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(written["admitted"], admitted, "{base:?}");
+        assert_eq!(written["head"], decision["head"], "{base:?}");
+    }
 }
 
 /// A pull request the dispatch in `review` accepts.
@@ -203,15 +268,5 @@ fn check_gets_one_verdict_word_or_a_refusal_report_and_the_folded_output() {
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&report).unwrap()).unwrap(),
         json!({"ok": false, "errors": ["Review must return exactly one comment or noop"]})
-    );
-
-    let refusal = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
-        .args(["review", "refusal"])
-        .env("REASON", "a\n@user [link](url)")
-        .output()
-        .unwrap();
-    assert_eq!(
-        refusal.stdout,
-        b"Review refused by policy: a \\@user \\[link\\]\\(url\\)\n"
     );
 }

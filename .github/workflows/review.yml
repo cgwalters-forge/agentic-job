@@ -138,7 +138,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           ITEM: ${{ github.event.pull_request.number || github.event.issue.number }}
-          # The reason as one inert line (`agentic-job review refusal`).
+          # The reason as one inert line (`agentic-job review admit`).
           TEXT: ${{ needs.policy.outputs.refusal }}
         run: node .agentic-job-source/workflow/status.cjs
 

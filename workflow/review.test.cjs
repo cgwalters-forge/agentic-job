@@ -239,7 +239,7 @@ test('target events read workflow policy without changing the trusted review bas
 
 test('refused event reviews update one author-owned bounded status comment', () => {
   const { upsert, MARKER } = require('./status.cjs');
-  // As `agentic-job review refusal` writes it in the policy job.
+  // As `agentic-job review admit` writes it in the policy job.
   const reason = 'the bounds do not allow forks';
   const comments = [{ id: 1, user: { login: 'attacker' }, body: `copied\n\n${MARKER}` }];
   const calls = [];
@@ -267,7 +267,7 @@ test('refused event reviews update one author-owned bounded status comment', () 
   assert.match(refusal, /TEXT: \$\{\{ needs.policy.outputs.refusal \}\}/);
   assert.match(refusal, /run: node .agentic-job-source\/workflow\/status.cjs/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /core.setOutput\('refusal', execFileSync\(process.env.JOB_DIR \+ '\/bin\/agentic-job', \['review', 'refusal'\]/);
+  assert.match(policy, /review admit --decision "\$JOB_DIR\/event\.json" --output "\$GITHUB_OUTPUT"/);
   assert.match(refusal, /group: agentic-job-status-/);
 });
 
