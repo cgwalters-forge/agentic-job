@@ -2,7 +2,9 @@
 //! not GitHub, from a job of its own that holds the write token. GitHub's
 //! apply is still gh-aw's handlers in apply.yml; this is the first slice
 //! of moving publishing behind [`Publisher`] (#1346), for Forgejo, and
-//! for two outputs only: `add_comment` and `create_pull_request`.
+//! for two outputs only: `add_comment` and `create_pull_request`. On
+//! GitHub, [`secondary`] opens the policy's secondary pull request after
+//! the handlers.
 //!
 //! The input is the check job's upload: check's `report.json` and the
 //! patch beside it. That upload went through a machine other than the
@@ -13,9 +15,11 @@
 //! write ([`plan`]), so a refusal leaves the forge as it was.
 
 pub mod forgejo;
+mod git;
 pub mod issue_reference;
 mod mentions;
 pub mod replacement;
+pub mod secondary;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -151,6 +155,9 @@ struct Report {
     errors: Vec<String>,
     items: Vec<Map<String, Value>>,
     patch: Option<ReportPatch>,
+    /// The policy's secondary pull request's patch: [`secondary`]'s alone.
+    #[serde(default)]
+    secondary_patch: Option<ReportPatch>,
     #[serde(default)]
     checkpoint: Option<Value>,
 }
@@ -253,6 +260,10 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
         .any(|item| check::item_type(item) == CREATE_PULL_REQUEST);
     if report.patch.is_some() && !carried {
         errors.push("a patch without a create_pull_request".to_owned());
+    }
+    // The policy has no secondary pull request off GitHub.
+    if report.secondary_patch.is_some() {
+        errors.push("a secondary pull request off GitHub".to_owned());
     }
     if errors.is_empty() {
         // The pull request first: its push makes the last checks, against
@@ -855,6 +866,18 @@ mod tests {
                     std::fs::write(dir.join(REPORT_FILE), report.to_string()).unwrap();
                 },
                 "a patch without a create_pull_request",
+            ),
+            (
+                &[comment_item()],
+                |dir, _, _| {
+                    let mut report: Value =
+                        serde_json::from_slice(&std::fs::read(dir.join(REPORT_FILE)).unwrap())
+                            .unwrap();
+                    report["secondary_patch"] = json!({"file": "aw-o-tool-x.patch", "bytes": 1,
+                        "base_commit": BASE, "files": ["x"]});
+                    std::fs::write(dir.join(REPORT_FILE), report.to_string()).unwrap();
+                },
+                "a secondary pull request off GitHub",
             ),
             (
                 &[

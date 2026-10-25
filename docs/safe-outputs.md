@@ -830,15 +830,16 @@ unknown key. Destinations stay fixed by the caller
 chosen per type or by the agent, and a patch that touches a protected file
 is refused rather than sent for review or turned into an issue.
 
-### A secondary pull request (not yet active: apply has no pass for it)
+### A secondary pull request (not yet active)
 
 A `[secondary_pull_request]` table names one further, fixed repository
 that a run is to be able to propose one pull request to, without making
 the repositories in `repos` writable
 ([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
-`run`, the hand-back and `check` hold a patch to it, but apply routing
-([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286))
-does not exist yet, so `policy` refuses every run that would open one.
+`run`, the hand-back and `check` hold a patch to it, and apply's pass
+opens it, but apply.yml does not run that pass yet
+([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286)),
+so `policy` refuses every run that would open one.
 Bounds without it are unaffected.
 
 ```toml
@@ -882,6 +883,25 @@ patch on apart, in `secondary/` of its artifact, so that apply's trial of
 the run's own patch never takes it. A request naming any other repository
 is refused as before.
 
+`agentic-job secondary-pull-request --policy FILE --checked DIR --run-id ID
+--run-url URL` is apply's pass for it, to run after gh-aw's handlers have
+applied the run's own outputs, with `SAFE_OUTPUTS_PAT` in its
+environment. It holds check's report and the patch in `secondary/` to the
+policy again, as the Forgejo apply does: the repository, base, prefix and
+budgets are the policy's, and the branch must be this run's under the
+prefix, so a request can choose only the title and body. Then, as
+apply.yml does for the run's own pull request, it forks the repository
+into the token's account (never the repository itself, an owner's, or the
+run's own repository should that be the token's fork of it), waits
+until git reaches the fork, turns the fork's Actions off and reads that
+back, pushes the branch to the fork only if it does not exist yet, and
+opens the pull request as a draft. A refusal or failure is an `error:`
+line naming the secondary pull request and a failed exit, with nothing
+written to the forge for a refusal. It has no recovery as the Forgejo apply
+has: when the pull request cannot be opened after the push, the error
+names the pushed commit and branch, which stays in the fork until someone
+opens the pull request from it or deletes it.
+
 ## What the agent does
 
 The producer need not be an agent. Any caller job can upload `outputs.jsonl`
@@ -899,7 +919,7 @@ sandbox user: `git format-patch` of one commit against the commit the
 run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`, and for a
-[secondary pull request](#a-secondary-pull-request-not-yet-active-apply-has-no-pass-for-it)
+[secondary pull request](#a-secondary-pull-request-not-yet-active)
 its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 

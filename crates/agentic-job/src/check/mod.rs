@@ -339,7 +339,10 @@ pub(crate) fn map_holds_marker(map: &Map<String, Value>) -> bool {
 
 /// The policy's secondary pull request, if ITEM is the request for it: a
 /// `create_pull_request` whose `repo` is that repository, exactly.
-fn secondary_target<'a>(item: &Map<String, Value>, policy: &'a Policy) -> Option<&'a Secondary> {
+pub(crate) fn secondary_target<'a>(
+    item: &Map<String, Value>,
+    policy: &'a Policy,
+) -> Option<&'a Secondary> {
     policy.secondary_pull_request.as_ref().filter(|target| {
         item_type(item) == CREATE_PULL_REQUEST
             && item.get("repo").and_then(Value::as_str) == Some(target.repo.as_str())
@@ -922,10 +925,10 @@ pub fn is_patch_file_name(name: &str) -> bool {
 }
 
 /// How `run` names a run's branch: this, then its identifier.
-const RUN_BRANCH_PREFIX: &str = "agent-run-";
+pub(crate) const RUN_BRANCH_PREFIX: &str = "agent-run-";
 
 /// Whether BRANCH is a run's own, as `run` names it (`agent-run-ID`).
-fn is_run_branch(branch: &str) -> bool {
+pub(crate) fn is_run_branch(branch: &str) -> bool {
     branch
         .strip_prefix(RUN_BRANCH_PREFIX)
         .is_some_and(|id| (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))
