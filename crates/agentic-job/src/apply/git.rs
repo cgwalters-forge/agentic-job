@@ -21,7 +21,7 @@ const COMMITTER: (&str, &str) = ("agentic-job", "agentic-job@invalid");
 /// Git's environment, which this sets afresh for each command, the
 /// variables that could point it at another repository or configuration,
 /// and those that would have it print the authorization header, which
-/// only [`shown`] scrubs, and only in the form of the raw token.
+/// only [`shown`] scrubs, and only in the forms [`Git::secrets`] names.
 const GIT_ENV_REMOVED: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -34,10 +34,16 @@ const GIT_ENV_REMOVED: &[&str] = &[
     "GIT_CURL_VERBOSE",
 ];
 
-/// TEXT as an error shows it: without TOKEN, then cut, so that no part of
-/// a token is left where the cut falls in it.
-pub(super) fn shown(token: &str, text: &str) -> String {
-    text.replace(token, "[token]")
+/// TEXT as an error shows it: without any of SECRETS, replaced in their
+/// order, then cut, so that no part of a secret is left where the cut
+/// falls in it.
+pub(super) fn shown(secrets: &[&str], text: &str) -> String {
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_owned(), |text, secret| {
+            text.replace(secret, "[token]")
+        })
         .chars()
         .take(SHOWN_CHARS)
         .collect()
@@ -67,6 +73,17 @@ pub(super) struct Push<'a> {
 }
 
 impl Git<'_> {
+    /// What git's errors are scrubbed of, longest first: the whole header
+    /// value, its credential (the base64 of a `Basic` one, which a server
+    /// error may echo and anyone can decode), and the raw token.
+    fn secrets(&self) -> [&str; 3] {
+        let credential = self
+            .authorization
+            .split_once(' ')
+            .map_or(self.authorization.as_str(), |(_, credential)| credential);
+        [&self.authorization, credential, self.token]
+    }
+
     /// Runs git in DIR with only the configuration given here: not the
     /// job's (a credential helper, a URL rewrite), no hooks, no redirect.
     pub fn run(&self, dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
@@ -114,7 +131,7 @@ impl Git<'_> {
         let output = child.wait_with_output().context("running git")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git {}: {}", args[0], shown(self.token, stderr.trim()));
+            bail!("git {}: {}", args[0], shown(&self.secrets(), stderr.trim()));
         }
         written.context("writing to git")?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -217,5 +234,55 @@ impl Git<'_> {
             None,
         )?;
         Ok(commit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    use super::*;
+
+    /// Neither the raw token nor any header form of it, as each publisher
+    /// sends it, survives an error, wherever the cut falls.
+    #[test]
+    fn shown_scrubs_the_authorization() {
+        // Synthetic, built at run time so no token-shaped literal is kept.
+        let token = ["ghs", "_", &"Ab9".repeat(12)].concat();
+        let basic = BASE64.encode(format!("x-access-token:{token}"));
+        let cases = [
+            ("GitHub secondary", format!("Basic {basic}"), basic.clone()),
+            ("Forgejo", format!("token {token}"), token.clone()),
+        ];
+        for (publisher, authorization, credential) in cases {
+            let git = Git {
+                authorization: authorization.clone(),
+                token: &token,
+            };
+            let echoes = [
+                format!("Authorization: {authorization}"),
+                credential.clone(),
+                token.clone(),
+            ];
+            for echo in &echoes {
+                // Put the echo at every offset around the cut.
+                for pad in SHOWN_CHARS.saturating_sub(echo.len() + 2)..SHOWN_CHARS + 2 {
+                    let text = format!("{}{echo} 403", "x".repeat(pad));
+                    let got = shown(&git.secrets(), &text);
+                    assert!(got.chars().count() <= SHOWN_CHARS, "{publisher}");
+                    // No piece long enough to identify the secret remains.
+                    for secret in [token.as_str(), basic.as_str()] {
+                        for window in secret.as_bytes().windows(8) {
+                            let window = std::str::from_utf8(window).unwrap();
+                            assert!(
+                                !got.contains(window),
+                                "{publisher}, pad {pad}: {window:?} in {got:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
