@@ -710,7 +710,7 @@ jobs:
       setup: .github/agentic-job/e2e/full.sh
       timeout: "5"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"
       comment-target: "64"
       artifact-prefix: full-
 
@@ -741,7 +741,7 @@ jobs:
       timeout: "10"
       max-requests: "0"
       max-tasks: "2"
-      budget: "100"
+      budget-usd: "1"
       apply-partial: true
       artifact-prefix: limit-
       # So that both ways to the binary run here once a release is pinned.
@@ -775,7 +775,7 @@ jobs:
       egress-write-policy: true
       timeout: "5"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"
       comment-target: "64"
       artifact-prefix: write-policy-
 
@@ -808,7 +808,7 @@ jobs:
       setup: .github/agentic-job/e2e/sandbox.sh
       timeout: "5"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"
       comment-target: "64"
       artifact-prefix: sandbox-
 
@@ -848,7 +848,7 @@ jobs:
       setup: .github/agentic-job/e2e/event.sh
       timeout: "5"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"
       artifact-prefix: event-
 
   # An analysis of the topic branch comments on the named scratch issue and
@@ -884,7 +884,7 @@ jobs:
       setup: .github/agentic-job/e2e/analysis.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: analysis-
 
   # Same read-only analysis, but hostile output names another item. Check
@@ -918,7 +918,7 @@ jobs:
       setup: .github/agentic-job/e2e/misdirected.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: analysis-refused-
 
   # A write-capable fixture job, never the agent's token. Each run owns its
@@ -1003,7 +1003,7 @@ jobs:
       setup: .github/agentic-job/e2e/people.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: people-
 
   # A check run on the head of the pull request this run is for (or the
@@ -1039,7 +1039,7 @@ jobs:
       setup: .github/agentic-job/e2e/check-run.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: check-run-
 
   # Exercise the shipped caller, not a separately maintained imitation.
@@ -1114,7 +1114,7 @@ jobs:
       setup: .github/agentic-job/e2e/review.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: review-
 
   # Scratch items for e2e-items: a sub-issue to link under the scratch
@@ -1195,7 +1195,7 @@ jobs:
       setup: .github/agentic-job/e2e/items.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: items-
 
   # A scratch draft pull request for e2e-threads, from a branch of this run
@@ -1268,7 +1268,7 @@ jobs:
       setup: .github/agentic-job/e2e/threads.sh
       timeout: '5'
       max-requests: '0'
-      budget: '100'
+      budget-usd: '1'
       artifact-prefix: threads-
 
   # Proposed verifier code may read dispatch results, and the full run's

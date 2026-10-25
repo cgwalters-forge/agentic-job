@@ -104,12 +104,12 @@ jobs:
       inference-provider: ${{ vars.INFERENCE_PROVIDER }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       # What one review may spend, stated here rather than inherited: model
-      # requests, AIC (hundredths of a dollar; under the broker's `plain`
+      # requests, US dollars (under the broker's `plain`
       # registration only a convention) and the agent's minutes. Nothing
       # caps it per author or across pull requests; a push supersedes the
       # last review of that pull request, which has spent what it spent.
       max-requests: '150'
-      budget: '500'
+      budget-usd: '5'
       timeout: '75'
 
   # A refusal spends no inference, but must not silently leave the PR waiting.

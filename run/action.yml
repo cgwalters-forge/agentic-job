@@ -57,6 +57,9 @@ outputs:
       For a run that ended well although the cost its agent reported went over the budget, how far
       ("565.9 of 500 AIC"); empty otherwise
     value: ${{ steps.run.outputs.over-budget }}
+  cost:
+    description: Summary cost as usd=NUMBER partial=BOOLEAN; empty when unknown
+    value: ${{ steps.run.outputs.cost }}
   secret-at:
     description: >-
       For a run that uploaded nothing because a secret or a private key was in what it would have
@@ -222,6 +225,11 @@ runs:
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        # Scalar fields only, never agent text or a missing cost turned into zero.
+        # Rounded to 1/10000 dollar and bounded, so jq prints plain decimals
+        # (no exponent or 17-digit fraction) that the status grammar accepts.
+        [ ! -e "$JOB_DIR/out/run/summary.json" ] ||
+          jq -r '.cost | select((.usd | type) == "number" and .usd >= 0 and .usd < 1e12 and (.partial | type) == "boolean") | "cost=usd=\(.usd * 10000 | round / 10000) partial=\(.partial)"' "$JOB_DIR/out/run/summary.json" >> "$GITHUB_OUTPUT" || true
         # The cost is reported after each reply, so the last one can cross
         # the budget of a turn that then ends well: a warning, not a failure.
         over=

@@ -69,7 +69,7 @@ jobs:
       config: .github/agentic-job/hosted.toml
       agent: fake
       timeout: "10"
-      budget: "100"
+      budget-usd: "1"
       # Nothing counts model requests without an inference proxy, and a
       # cap that nothing counts is refused.
       max-requests: "0"

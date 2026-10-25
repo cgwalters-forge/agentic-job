@@ -5,8 +5,7 @@ const { appendFileSync } = require('node:fs');
 const MARKER = '<!-- agentic-job-status -->';
 const MAX_PAGES = 20;
 const RUN_MARKER = /\n\n<!-- agentic-job-run: ([1-9][0-9]*) -->\n\n<!-- agentic-job-status -->$/;
-// One whole hidden comment per line, nothing visible around it: a caller's
-// `<!-- tag: {...} -->` state. Not ours, so a status never keeps its own markers.
+// Preserve only caller markers, not our own state.
 const CALLER_MARKER = /^<!--(?!\s*agentic-job-)(?:(?!-->).)*-->$/;
 
 // A slower older run must not replace the current run's status.
@@ -48,10 +47,11 @@ function upsert(env, api, summary = () => {}) {
     throw new Error('status requires a caller repository and numeric item');
   }
   if (!/^[1-9][0-9]*$/.test(run ?? '')) throw new Error('status requires a numeric Actions run ID');
-  // Apply already bounded, sanitized and quoted this text. Decode only here,
-  // after it has crossed shell/job outputs as a single JSON string.
+  // Decode apply's sanitized JSON only after crossing job outputs.
   const reason = env.NO_RESULT_REASON ? ` Its reason:\n\n${JSON.parse(env.NO_RESULT_REASON)}` : '';
-  const body = `${text}${reason}\n\n<!-- agentic-job-run: ${run} -->\n\n${MARKER}`;
+  const cost = /^usd=[0-9]{1,16}(?:\.[0-9]{1,16})? partial=(?:true|false)(?![\s\S])/.test(env.COST ?? '')
+    ? `\n\n<!-- agentic-job-cost: ${run} ${env.COST} -->` : '';
+  const body = `${text}${reason}${cost}\n\n<!-- agentic-job-run: ${run} -->\n\n${MARKER}`;
   const crossRepo = repo.toLowerCase() !== (env.GITHUB_REPOSITORY ?? repo).toLowerCase();
   if (crossRepo && !env.STATUS_TOKEN) {
     summary('Status comment skipped: cross-repository target requires the caller-supplied SAFE_OUTPUTS_PAT.');

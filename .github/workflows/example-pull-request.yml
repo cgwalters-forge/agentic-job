@@ -61,4 +61,4 @@ jobs:
       setup: .github/agentic-job/e2e/event.sh
       timeout: "10"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"

@@ -182,8 +182,12 @@ on:
         description: The most subagent tasks the agent may start (0 for no such cap)
         type: string
         default: "4"
+      budget-usd:
+        description: The most the run may spend, in US dollars (0 for no such cap; rounded down to cents); overrides budget
+        type: string
+        default: ""
       budget:
-        description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
+        description: Deprecated for one release, used while budget-usd is empty; the most the run may spend in AIC (hundredths of a dollar)
         type: string
         default: "500"
       session:
@@ -438,6 +442,7 @@ jobs:
       timeout: ${{ inputs.timeout }}
       max-requests: ${{ inputs.max-requests }}
       max-tasks: ${{ inputs.max-tasks }}
+      budget-usd: ${{ inputs.budget-usd }}
       budget: ${{ inputs.budget }}
       session: ${{ inputs.session }}
       idle-minutes: ${{ inputs.idle-minutes }}
