@@ -82,10 +82,9 @@ pub fn run(args: &Args) -> Result<Exit> {
         !matches!(endpoint.mode, Mode::TokenFile { .. } | Mode::ApiKey { .. }),
         "detector needs run registration"
     );
-    let retry = Retry {
-        attempts: 1,
-        delay: Duration::ZERO,
-    };
+    // Registering and ending are retried through a proxy restart, as `run`
+    // does: a detector that fails blocks apply, losing a finished run
+    // (#1796). A refusal that is not transient still fails at once.
     let run = Run::register(
         &endpoint,
         &Identity {
@@ -97,7 +96,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             )),
             ..Identity::default()
         },
-        retry,
+        Retry::default(),
         120,
         NEVER,
     )?;
@@ -144,7 +143,7 @@ pub fn run(args: &Args) -> Result<Exit> {
                 .context("missing detector verdict")?,
         )
     })();
-    let ended = run.end(retry);
+    let ended = run.end(Retry::end_of_run());
     result?;
     ended?;
     Ok(Exit::Success)

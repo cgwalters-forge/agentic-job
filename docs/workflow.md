@@ -95,9 +95,10 @@ proxy using the policy's configuration (`github-oidc` or `plain`, not
 `token-file` or `api-key`, which fail). That proxy must be reachable from the hosted detector runner.
 It sends the task, checked outputs and patches as untrusted evidence to one
 OpenAI-compatible chat-completions request, capped at 2 MiB of evidence, 256
-output tokens and 120 seconds. There are no retries or tool continuations.
-Any threat, malformed/truncated verdict, unavailable model, registration or
-cleanup error blocks release of the checked artifact and therefore apply.
+output tokens and 120 seconds. That request has no retries or tool continuations;
+registering and ending the run are retried through a proxy restart, as `run` does.
+Any threat, malformed/truncated verdict, unavailable model, or registration or
+cleanup error left after those retries blocks release of the checked artifact and therefore apply.
 Expected deterministic refusals do not run detection. The ordinary apply
 conclusion/status path is unchanged. Composed callers must use check.yml's
 returned artifact ID, not discover the internal pre-detection upload by name.
