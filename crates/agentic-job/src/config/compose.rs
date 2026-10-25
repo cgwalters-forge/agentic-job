@@ -45,6 +45,10 @@ pub struct Args {
     /// Set a whole number likewise
     #[arg(long, value_name = "KEY=VALUE", value_parser = Setting::parse, allow_hyphen_values = true)]
     pub integer: Vec<Setting>,
+    /// Workflow budget in dollars, converted down to whole AIC (cents).
+    /// Empty leaves limits.budget unchanged; zero removes that cap.
+    #[arg(long, allow_hyphen_values = true)]
+    pub budget_usd: Option<String>,
     /// Set a list of strings likewise, from words with spaces or newlines between them
     #[arg(long, value_name = "KEY=VALUE", value_parser = Setting::parse, allow_hyphen_values = true)]
     pub list: Vec<Setting>,
@@ -227,6 +231,34 @@ fn set(table: &mut Table, path: &[String], value: Value) -> Result<()> {
     Ok(())
 }
 
+/// Convert decimal dollars without floating-point rounding increasing the cap.
+/// The configuration and broker protocol still use whole AIC (one cent).
+fn dollar_budget(text: &str) -> Result<u32> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    ensure!(
+        !whole.is_empty()
+            && whole.bytes().all(|c| c.is_ascii_digit())
+            && fraction.bytes().all(|c| c.is_ascii_digit()),
+        "budget: {text:?} is not nonnegative decimal dollars"
+    );
+    let whole: u32 = whole
+        .parse()
+        .context("budget: dollar amount is too large")?;
+    let cents = fraction.bytes().take(2).enumerate().fold(0, |sum, (i, c)| {
+        sum + u32::from(c - b'0') * if i == 0 { 10 } else { 1 }
+    });
+    let aic = whole
+        .checked_mul(100)
+        .and_then(|n| n.checked_add(cents))
+        .context("budget: dollar amount is too large")?;
+    ensure!(
+        aic != 0 || fraction.bytes().all(|c| c == b'0'),
+        "budget: a positive amount must be at least $0.01"
+    );
+    Ok(aic)
+}
+
 /// `--inference-address`: the broker's URL with ADDRESS for its name
 /// ([`with_address`]). Only under
 /// `github-oidc`, the broker that admits a run by the job's identity, not
@@ -281,6 +313,13 @@ fn compose(args: &Args) -> Result<String> {
         }
     }
     repo_packages(&mut table, args.repo.as_deref())?;
+    if let Some(usd) = args.budget_usd.as_deref().filter(|s| !s.trim().is_empty()) {
+        set(
+            &mut table,
+            &["limits".into(), "budget".into()],
+            Value::Integer(dollar_budget(usd)?.into()),
+        )?;
+    }
     // Before `egress.direct` is defaulted, which then opens the address.
     if let Some(address) = &args.inference_address {
         inference_address(&mut table, address)?;
@@ -372,6 +411,7 @@ mod tests {
             from: from.map(PathBuf::from),
             string: settings(string),
             integer: settings(integer),
+            budget_usd: None,
             list: settings(list),
             boolean: Vec::new(),
             host: false,
@@ -397,6 +437,52 @@ mod tests {
     fn composed(args: &Args) -> Config {
         let text = compose(args).unwrap_or_else(|err| panic!("{args:?}: {err:#}"));
         Config::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn workflow_budget_is_decimal_dollars() {
+        for (text, expected) in [
+            ("5", 500),
+            ("1.23", 123),
+            ("1.2399", 123),
+            ("0", 0),
+            ("0.00", 0),
+            ("0.01", 1),
+            (" 2.5 ", 250),
+            ("42949672.95", u32::MAX),
+        ] {
+            assert_eq!(dollar_budget(text).unwrap(), expected, "{text}");
+            let mut args = args(None, RUN, LIMITS, &[]);
+            if expected == 0 {
+                args.boolean = settings(&["limits.uncapped=true"]);
+            }
+            args.budget_usd = Some(text.into());
+            let table: Table = toml::from_str(&compose(&args).unwrap()).unwrap();
+            assert_eq!(
+                table["limits"]["budget"].as_integer(),
+                Some(expected.into())
+            );
+        }
+        for text in [
+            "-1",
+            "NaN",
+            "inf",
+            "1e2",
+            "1\n2",
+            ".5",
+            "1.2.3",
+            "0.001",
+            "42949672.96",
+        ] {
+            assert!(dollar_budget(text).is_err(), "{text}");
+        }
+        let mut args = args(None, RUN, LIMITS, &[]);
+        args.budget_usd = Some(String::new());
+        assert!(compose(&args).unwrap().contains("budget = 100"));
+        // The transition workflow forwards an unchanged legacy budget as
+        // --integer, with no dollar override: 500 AIC must still cap at $5.
+        args.integer = settings(&["limits.timeout-minutes=10", "limits.budget=500"]);
+        assert!(compose(&args).unwrap().contains("budget = 500"));
     }
 
     #[test]

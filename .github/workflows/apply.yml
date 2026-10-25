@@ -1320,6 +1320,7 @@ jobs:
           # Only with `notify: comment`: a missing-data status otherwise keeps to the marked comment.
           STATUS_COMMENT: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).status-comment || '' }}
           TEXT: ${{ steps.ended.outputs.text }}
+          COST: ${{ fromJSON(inputs.agent).outputs.cost }}
           NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
         run: |
           node "$GITHUB_WORKSPACE/.agentic-job-source/workflow/status.cjs"

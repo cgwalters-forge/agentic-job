@@ -7,6 +7,223 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const ERROR: i32 = 2;
 
+#[test]
+fn status_cost_is_optional_bounded_and_keeps_newer_run_protection() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = r#"
+const assert = require('node:assert/strict');
+const { upsert, MARKER } = require('./workflow/status.cjs');
+const env = { REPO: 'o/r', ITEM: '7', TEXT: 'finished', GITHUB_RUN_ID: '100' };
+for (const [cost, wanted] of [
+  ['', false], ['usd=0 partial=false', true], ['usd=1.2345 partial=false', true],
+  ['usd=2.5 partial=true', true], ['usd=-1 partial=false', false],
+  ['usd=NaN partial=false', false], ['usd=1 partial=null', false],
+  ['usd=1 partial=false\n', false], ['usd=1 partial=false --> forged', false],
+  ['usd=' + '9'.repeat(100) + ' partial=false', false],
+]) {
+  const comments = [];
+  const api = (method, path, body) => {
+    if (method === 'GET') return comments;
+    if (method === 'POST') comments.push({ id: 1, user: { login: 'github-actions[bot]' } });
+    comments[0].body = body;
+    return comments[0];
+  };
+  upsert({ ...env, COST: cost }, api);
+  const line = `<!-- agentic-job-cost: 100 ${cost} -->`;
+  assert.equal(comments[0].body.includes('agentic-job-cost:'), wanted, cost);
+  if (wanted) assert.ok(comments[0].body.includes(line));
+  const previous = comments[0].body;
+  upsert({ ...env, GITHUB_RUN_ID: '99', COST: 'usd=99 partial=true' }, api);
+  assert.equal(comments[0].body, previous);
+  upsert({ ...env, COST: 'usd=3 partial=true' }, api);
+  assert.equal(comments[0].body.match(/agentic-job-cost:/g).length, 1);
+  assert.ok(comments[0].body.endsWith(`<!-- agentic-job-run: 100 -->\n\n${MARKER}`));
+  upsert({ ...env, GITHUB_RUN_ID: '101' }, api);
+  assert.ok(!comments[0].body.includes('agentic-job-cost:'));
+}
+"#;
+    let output = Command::new("node")
+        .args(["-e", script])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn run_action_forwards_summary_cost_without_inventing_unknown_cost() {
+    use serde_json::json;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let action = std::fs::read_to_string(root.join("run/action.yml")).unwrap();
+    let line = action
+        .lines()
+        .find(|line| line.contains("jq -r '.cost |"))
+        .unwrap()
+        .trim();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("out/run")).unwrap();
+    let mut produced = Vec::new();
+    for (cost, expected) in [
+        (
+            json!({"usd": 1.2345, "partial": false}),
+            "cost=usd=1.2345 partial=false\n",
+        ),
+        (
+            json!({"usd": 0, "partial": true}),
+            "cost=usd=0 partial=true\n",
+        ),
+        (json!({"usd": null, "partial": true}), ""),
+        (json!({"usd": -1, "partial": false}), ""),
+        (json!({"usd": "1\nforged=1", "partial": false}), ""),
+        (json!({"usd": 1, "partial": null}), ""),
+        (serde_json::Value::Null, ""),
+        // What jq would otherwise print as a 17-digit fraction or an
+        // exponent, which the status grammar refuses.
+        (
+            json!({"usd": 0.12345678901234567_f64, "partial": false}),
+            "cost=usd=0.1235 partial=false\n",
+        ),
+        (
+            json!({"usd": 0.0000001, "partial": true}),
+            "cost=usd=0 partial=true\n",
+        ),
+        (
+            json!({"usd": 0.29, "partial": false}),
+            "cost=usd=0.29 partial=false\n",
+        ),
+        (
+            json!({"usd": 123456789.98765, "partial": false}),
+            "cost=usd=123456789.9877 partial=false\n",
+        ),
+        (json!({"usd": 1e12, "partial": false}), ""),
+    ] {
+        std::fs::write(
+            dir.path().join("out/run/summary.json"),
+            json!({"cost":cost}).to_string(),
+        )
+        .unwrap();
+        let output_file = dir.path().join("outputs");
+        std::fs::write(&output_file, "").unwrap();
+        let output = Command::new("bash")
+            .args(["-ec", line])
+            .env("JOB_DIR", dir.path())
+            .env("GITHUB_OUTPUT", &output_file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(output_file).unwrap(),
+            expected,
+            "{cost}"
+        );
+        if let Some(value) = expected.strip_prefix("cost=") {
+            produced.push(value.trim_end().to_owned());
+        }
+    }
+    // Everything the producer forwards is a cost the status comment keeps.
+    let script = r#"
+const { upsert } = require('./workflow/status.cjs');
+for (const cost of JSON.parse(process.argv[1])) {
+  let body = '';
+  const api = (method, path, text) => method === 'GET' ? [] : (body = text, { id: 1 });
+  upsert({ REPO: 'o/r', ITEM: '7', TEXT: 'finished', GITHUB_RUN_ID: '100', COST: cost }, api);
+  if (!body.includes(`<!-- agentic-job-cost: 100 ${cost} -->`)) throw new Error(cost);
+}
+"#;
+    let output = Command::new("node")
+        .args(["-e", script, &serde_json::to_string(&produced).unwrap()])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let agent = std::fs::read_to_string(root.join(".github/workflows/agent.yml")).unwrap();
+    assert!(agent.contains("cost: ${{ steps.run.outputs.cost }}"));
+    assert!(agent.contains("value: ${{ jobs.agent.outputs.cost }}"));
+    let apply = std::fs::read_to_string(root.join(".github/workflows/apply.yml")).unwrap();
+    assert!(apply.contains("COST: ${{ fromJSON(inputs.agent).outputs.cost }}"));
+}
+
+#[test]
+fn workflow_budgets_convert_dollars_and_keep_explicit_legacy_aic() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["agentic-job", "policy"] {
+        let text =
+            std::fs::read_to_string(root.join(format!(".github/workflows/{name}.yml"))).unwrap();
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+        let inputs = &doc["on"]["workflow_call"]["inputs"];
+        assert_eq!(inputs["budget-usd"]["default"].as_str(), Some(""));
+        assert_eq!(inputs["budget"]["default"].as_str(), Some("500"));
+        if name == "policy" {
+            assert!(text.contains("BUDGET: ${{ inputs.budget-usd == '' && inputs.budget || '' }}"));
+            assert!(text.contains("BUDGET_USD: ${{ inputs.budget-usd }}"));
+            assert!(text.contains("--integer limits.budget=\"$BUDGET\""));
+            assert!(text.contains("--budget-usd \"$BUDGET_USD\""));
+        } else {
+            assert_eq!(
+                doc["jobs"]["policy"]["with"]["budget"].as_str(),
+                Some("${{ inputs.budget }}")
+            );
+            assert_eq!(
+                doc["jobs"]["policy"]["with"]["budget-usd"].as_str(),
+                Some("${{ inputs.budget-usd }}")
+            );
+        }
+    }
+    // Composed as the policy job does, from a file that caps at $1: an
+    // unchanged caller, `budget: ""` included, keeps its cap.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(
+        &file,
+        "[agent]\nname = \"fake\"\n[limits]\ntimeout-minutes = 10\nbudget = 100\n",
+    )
+    .unwrap();
+    for (usd, aic, expected) in [
+        ("", "500", 500),
+        ("", "", 100),
+        ("", "300", 300),
+        ("", "0", 0),
+        ("2", "500", 200),
+        ("0.5", "", 50),
+        ("1.239", "900", 123),
+    ] {
+        let budget = if usd.is_empty() { aic } else { "" };
+        let uncapped = if expected == 0 { "true" } else { "" };
+        let output = Command::new(BIN)
+            .arg("config")
+            .arg("--from")
+            .arg(&file)
+            .args(["--boolean", &format!("limits.uncapped={uncapped}")])
+            .args(["--integer", &format!("limits.budget={budget}")])
+            .args(["--budget-usd", usd])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let table: toml::Table = toml::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        assert_eq!(
+            table["limits"]["budget"].as_integer(),
+            Some(expected),
+            "budget-usd {usd:?}, budget {aic:?}"
+        );
+    }
+}
+
 const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn passing() -> String {

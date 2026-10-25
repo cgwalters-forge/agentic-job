@@ -43,7 +43,7 @@ The agent starts in the base checkout with the exact admitted head SHA fetched
 beside it, inside the sandbox and with no credential: the head is data, and
 nothing outside the sandbox checks it out or runs it. That is what makes forks
 safe to admit. One review's inference is bounded in `review.yml` by
-`max-requests: '150'`, `budget: '500'` (AIC, hundredths of a dollar) and
+`max-requests: '150'`, `budget-usd: '5'` (US dollars) and
 `timeout: '75'` minutes. Under the broker's `plain` registration the per-run
 cap is only a convention ([inference.md](inference.md)); what then bounds
 spending is the broker's aggregate cap, which every caller shares. Nothing

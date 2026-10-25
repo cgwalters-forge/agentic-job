@@ -170,8 +170,12 @@ on:
         description: The most subagent tasks the agent may start (0 for no such cap)
         type: string
         default: "4"
+      budget-usd:
+        description: The most the run may spend, in US dollars (0 for no such cap; rounded down to cents); overrides budget
+        type: string
+        default: ""
       budget:
-        description: The most the run may spend, in AIC (hundredths of a dollar; 0 for no such cap)
+        description: Deprecated for one release, used while budget-usd is empty; the most the run may spend in AIC (hundredths of a dollar)
         type: string
         default: "500"
       session:
@@ -824,7 +828,10 @@ jobs:
           TIMEOUT: ${{ inputs.timeout }}
           MAX_REQUESTS: ${{ inputs.max-requests }}
           MAX_TASKS: ${{ inputs.max-tasks }}
-          BUDGET: ${{ inputs.budget }}
+          # An unchanged caller's `budget`, its default or an empty one that
+          # keeps the file's cap, stands until it sets `budget-usd`.
+          BUDGET: ${{ inputs.budget-usd == '' && inputs.budget || '' }}
+          BUDGET_USD: ${{ inputs.budget-usd }}
           # Off sets nothing, so the caller's file stands.
           SESSION: ${{ inputs.session && 'true' || '' }}
           IDLE_MINUTES: ${{ inputs.idle-minutes }}
@@ -850,6 +857,7 @@ jobs:
             --string inference.provider="$PROVIDER" \
             --integer limits.timeout-minutes="$TIMEOUT" --integer limits.max-requests="$MAX_REQUESTS" \
             --integer limits.max-tasks="$MAX_TASKS" --integer limits.budget="$BUDGET" \
+            --budget-usd "$BUDGET_USD" \
             --boolean session.listen="$SESSION" --integer session.idle-minutes="$IDLE_MINUTES" \
             --list setup.packages="$PACKAGES" --list setup.npm="$NPM" \
             --list setup.agents="$AGENTS" --string setup.script="$SETUP" \

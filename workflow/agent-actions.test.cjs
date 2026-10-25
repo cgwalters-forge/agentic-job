@@ -562,7 +562,7 @@ test('the policy job writes the configuration with its own binary, and not for p
     mkdirSync(join(directory, 'bin'));
     writeFileSync(join(directory, 'bin/agentic-job'), '#!/bin/sh\necho "$@"\n', { mode: 0o755 });
     const env = Object.fromEntries(['CONFIG', 'MODEL', 'CONFIG_REPO', 'CONFIG_REF', 'CONFIG_PATH', 'SKILLS', 'URL',
-      'REGISTER', 'AUDIENCE', 'TOKEN_FILE', 'PROVIDER', 'TIMEOUT', 'MAX_REQUESTS', 'MAX_TASKS', 'BUDGET', 'PACKAGES',
+      'REGISTER', 'AUDIENCE', 'TOKEN_FILE', 'PROVIDER', 'TIMEOUT', 'MAX_REQUESTS', 'MAX_TASKS', 'BUDGET', 'BUDGET_USD', 'PACKAGES',
       'NPM', 'AGENTS', 'SETUP', 'SESSION', 'IDLE_MINUTES', 'WRITE_POLICY'].map(name => [name, '']));
     // A workflow's step, two levels deeper than an action's.
     const body = policy.split('- name: Write the configuration\n')[1].split('        run: |\n')[1];

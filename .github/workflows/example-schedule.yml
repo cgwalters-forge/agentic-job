@@ -50,4 +50,4 @@ jobs:
       agent: fake
       timeout: "10"
       max-requests: "0"
-      budget: "100"
+      budget-usd: "1"

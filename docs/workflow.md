@@ -318,6 +318,7 @@ jobs:
       exit: ${{ steps.run.outputs.exit }}
       failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
+      cost: ${{ steps.run.outputs.cost }}
       secret-at: ${{ steps.run.outputs.secret-at }}
       safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
       safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
@@ -1919,6 +1920,26 @@ opencode's own figure is not used, since it has no prices for the
 proxy's provider. The budget still caps the agent's own figure, in AIC.
 Unknown cost is not zero. `summary.md`,
 which the workflow appends to the step summary, includes the cost line.
+An opted-in item status comment also includes
+`<!-- agentic-job-cost: RUN_ID usd=1.23 partial=false -->`, from
+`summary.json`'s `cost.usd` and `cost.partial`. Unknown or missing cost
+omits the marker, not a zero-cost claim. A partial figure is a lower bound.
+The existing status author and newer-run checks still apply; no token
+permissions change. Like the summary, this is accounting from the agent
+machine, not a security attestation. A composed agent job must forward the
+run action's `cost` output alongside `exit` for conclude to receive it.
+
+The `agentic-job.yml` and `policy.yml` workflow `budget-usd` input takes
+US dollars (zero disables this cap). Decimal amounts round
+down to whole cents; positive amounts below $0.01 are refused rather than
+disabling the cap. The configuration's `[limits] budget` and the broker
+protocol remain in AIC (cents). For one transition release, the deprecated
+`budget` input keeps its AIC meaning and its default of 500 and is used
+while `budget-usd` is empty, so an unchanged caller keeps its cap, including
+`budget: ""` inheriting the configuration file's. A nonempty `budget-usd`
+overrides it. To migrate, replace `budget` with `budget-usd` and divide its
+value by 100.
+
 OTLP export is deferred: no collector endpoint or telemetry credentials
 are configured, and audit does not send artifact data anywhere.
 
