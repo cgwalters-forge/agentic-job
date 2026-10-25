@@ -273,7 +273,11 @@ callers that pass it still parse, and give it to no job.
 list of models with it, retried as a registration is. A missing key, one
 that is not a key, and one the provider refuses (401 or 403) stop the
 run before the agent starts, with the variable's name and the provider's
-answer, the key cut out of it. Then `run` listens on a loopback port and
+answer, the key cut out of it. `agentic-job check-key --config FILE`
+makes the same check, so that a step before `sandbox setup` can fail on
+a bad key in seconds rather than after the minutes of setup; it is no
+control, as `run` checks again, and the reusable workflow does not run
+it while it refuses the mode. Then `run` listens on a loopback port and
 gives the agent that address and a token it made for the run, in the
 same places a broker's would go. The sandbox user reaches loopback
 without the egress proxy. For each request the proxy:

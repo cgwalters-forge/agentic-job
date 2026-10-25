@@ -86,10 +86,8 @@ jobs:
       #   inference-url: ${{ vars.INFERENCE_URL }}
       #   inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       #   max-requests: "150"
-      # or, with a provider's API key in place of a proxy (docs/inference.md):
-      #   inference-url: https://api.anthropic.com
-      #   inference-register: api-key
-      #   inference-provider: anthropic
+      # Not a provider's API key: the admit step below refuses it for now
+      # (docs/inference.md#a-provider-api-key).
       max-requests: "0"
       artifact-prefix: compose-
 

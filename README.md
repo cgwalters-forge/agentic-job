@@ -53,10 +53,10 @@ what is not.
 **An agent run with no write credential in reach.** The reusable
 workflow runs Claude Code, opencode or Vibe on that hardened runner, as
 the runner's user, on a task you give it. The agent holds no model key and no token that can write
-to the forge. It reaches the model through a proxy that holds the key:
-one `run` serves on the runner with a provider API key the caller passes
-as a secret, or a credential broker on another machine, which also caps
-what the run can spend ([inference, below](#inference)). The agent cannot push, comment or
+to the forge. It reaches the model through a credential broker on
+another machine, which holds the key and caps what the run can spend
+([inference, below](#inference)); on main that is the only way the
+workflow gives a real agent a model. The agent cannot push, comment or
 open anything. It leaves a file of requests ("open a pull request with
 this patch", "comment on this issue"), which a second job checks on a
 clean machine and a third applies. The jobs that hold a write token,
@@ -74,7 +74,7 @@ rendering. See [reading a session](docs/harness.md#reading-a-session-in-the-summ
 | Where | What it holds |
 | --- | --- |
 | The agent | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](docs/workflow.md#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
-| The runner's user in the agent job | the agent itself: so no agent job passes on a model key or MCP credential, and `run` refuses `api-key` and MCP servers ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a later step can still do](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)) |
+| The runner's user in the agent job | the agent itself: so the reusable workflow's agent job passes on no model key or MCP credential, and `run --runner-home` refuses `api-key` and MCP servers ([the agent job](docs/workflow.md#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](docs/workflow.md#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a later step can still do](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)) |
 | `policy`, `check` | the job token with `contents` and `actions` read; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
 | `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](docs/workflow.md#the-apply-job-and-its-token)) |
 | `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; notify and conclude prefer `SAFE_OUTPUTS_PAT` for status comments whenever supplied, including same-repository items |
@@ -95,23 +95,22 @@ jobs:
       outputs: create_pull_request,noop
       allow: .github/agentic-job/allow.toml   # what a run may ask for at all
       agent: claude
-      model: claude-sonnet-4.5   # a name GitHub's model list offers
-      inference-provider: github
-    secrets:
-      INFERENCE_API_KEY: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      inference-url: ${{ vars.INFERENCE_URL }}   # the broker's root
+      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      agent-runner: ${{ vars.AGENT_RUNNER }}     # a runner that reaches it
 ```
 
 That is the shape, not the whole call: a caller also grants the job its
-permissions. [Try it](#try-it) has a whole caller. On main the agent job
-refuses GitHub's billing and any API key for now, so a real agent needs a
-broker ([inference](#inference)).
-`COMMIT` may also be a released version's tag, such as `v0.5.2`, the
-first with API-key mode, which Dependabot can then upgrade: see
+permissions. [Try it](#try-it) has a whole caller, first with the
+scripted agent, which needs no model. The call passes no model key: the
+agent job refuses a provider's API key and GitHub's billing for now
+([refused for now](#refused-for-now-a-key-in-the-reusable-workflow)).
+`COMMIT` may also be a released version's tag, such as `v0.6.4`, which
+Dependabot can then upgrade: see
 [versions to pin](docs/workflow.md#things-a-caller-should-know).
 The docs describe main: a tag lacks what was merged after it (after
-`v0.5.2`: threat detection that a key skips rather than fails, and an
-agent job that, running the agent as the runner's user, refuses a key
-for now: [inference](#inference)). The [releases page](https://github.com/cgwalters-forge/agentic-job/releases)
+`v0.6.4`, for example, the `budget-usd` input). `v0.6.4` refuses a key in
+the agent job as main does. The [releases page](https://github.com/cgwalters-forge/agentic-job/releases)
 also lists a `build-DIGEST` release per source; those carry prebuilt
 binaries for commit pins and are not versions.
 
@@ -154,52 +153,18 @@ How the agent job uses the action is in
 ## Inference
 
 A real agent needs a model, and never holds the key that pays for it.
-There are three ways to give it one ([docs/inference.md](docs/inference.md)).
+On main the reusable workflow gives it one through a credential broker
+alone ([docs/inference.md](docs/inference.md)): a key in the workflow is
+[refused for now](#refused-for-now-a-key-in-the-reusable-workflow).
 The scripted agent (`agent: fake`) needs none.
 
-For now no agent job takes a key: the agent is the runner's user, which
-could read one from `run`, so `run` refuses `api-key` (GitHub's billing
-included) and MCP credentials until the host keeps the runner's processes
-from reading each other.
-
-**GitHub's billing** (`inference-provider: github`) is the simplest,
-as gh-aw's Copilot engine is there. The caller stores a
-fine-grained personal access token with the Copilot Requests permission
-as a secret, `COPILOT_GITHUB_TOKEN` above, and passes it as
-`INFERENCE_API_KEY`; GitHub bills that account's Copilot. The run takes
-it the way it takes a provider's key, below: `run` checks it, serves the
-agent a loopback proxy that puts it in place of a token of the run's,
-and counts the requests. GitHub's API serves both Claude Code and
-opencode; `model` is a name from its model list. The organization's
-billing, through a job token with `copilot-requests: write`, needs an
-agent job of the caller's own: the called workflow cannot ask for that
-permission without every caller granting it, and its agent's GitHub
-token is the job's ([GitHub billing](docs/inference.md#github-billing)).
-
-**A provider API key** (`inference-register: api-key`) is the simple
-one. The caller stores the key in a repository secret and passes it as
-`INFERENCE_API_KEY`; `inference-url` is the provider's API root and
-`inference-provider` the API it speaks: `anthropic` for Claude Code
-(`https://api.anthropic.com`) or `openai` for opencode, at a provider
-that serves OpenAI's Responses API (`https://api.openai.com/v1`).
-opencode also needs `model`, the model's name as the provider serves it:
-there is no default, and the policy job refuses a run without one. In an
-agent job of your own, only the step that runs `agentic-job run` should
-get the key. `run` checks
-it with the provider, then serves the agent a proxy on loopback that takes a token
-made for the run and puts the key in its place, so the key is in no file,
-variable or answer of the agent's. The proxy forwards model requests
-only and counts them, so `max-requests` binds as with a broker. What
-nothing in the job bounds is the key itself: it is long-lived, and the
-spending limits are the ones the provider sets on it.
-
-**A credential broker** is for a deployment that wants no long-lived key
-in its repositories: a
+**A credential broker** is a
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)
 that the agent's runner can reach, which registers each run with the
-job's identity token, and caps and ends it. (`inference-register:
-token-file` hands `run` a token for some other proxy, but nothing then
-counts or ends the run, and nothing here makes such a token.)
+job's identity token, and caps and ends it. No long-lived key is in the
+calling repository. (`inference-register: token-file` hands `run` a
+token for some other proxy, but nothing then counts or ends the run, and
+nothing here makes such a token.)
 
 What the broker has to provide:
 
@@ -223,6 +188,34 @@ broker, goes through the egress proxy, whose write rules refuse the
 agent's requests to it with a 403. The runner joins that network in a
 privileged step before `secure-host`; GitHub's hosted runners cannot
 reach a private broker without one.
+
+### Refused for now: a key in the reusable workflow
+
+**Do not use these modes with `agentic-job.yml` on main: its agent job
+refuses them.** By default the agent there is the runner's user, which
+could read a key from `run`: `run --runner-home` refuses `api-key` and MCP
+servers, and with either `agent-user` the workflow passes
+`INFERENCE_API_KEY` and `MCP_TOKEN` to no job. Lifting the refusal for
+the runner's user waits on
+[#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618).
+
+What the binary does with them, in an agent job of your own that runs
+the agent as the sandbox user (`run` without `--runner-home`), and only
+the step that runs `agentic-job run` gets the key:
+
+- **A provider API key** (`register = "api-key"`): `url` is the
+  provider's API root and `provider` the API it speaks, `anthropic` for
+  Claude Code or `openai` for opencode. `run` checks the key with the
+  provider, then serves the agent a loopback proxy that takes a token
+  made for the run and puts the key in its place, forwarding model
+  requests only and counting them for `max-requests`. Nothing in the job
+  bounds the key itself: it is long-lived, and its spending limits are
+  the provider's. Enabled threat detection fails closed in this mode
+  ([a provider API key](docs/inference.md#a-provider-api-key)).
+- **GitHub's billing** (`register = "api-key"`, `provider = "github"`): the same proxy with a
+  GitHub token as the key, a fine-grained token with the Copilot Requests
+  permission or a job token with `copilot-requests: write`, never the
+  agent's own GitHub token ([GitHub billing](docs/inference.md#github-billing)).
 
 ## Try it
 
@@ -322,42 +315,13 @@ a notice and builds locally (about two minutes). Downloads are verified
 against a source-matching attested manifest; see
 [where the binary comes from](docs/workflow.md#things-a-caller-should-know).
 
-**A real agent** (on main, with a broker only for now:
-[inference](#inference)) replaces `agent: fake` with `claude`, drops
-`max-requests: "0"` (the default caps at 150 requests), and adds
-GitHub's billing ([inference](#inference)), with a fine-grained token
-with the Copilot Requests permission stored as the repository secret
-`COPILOT_GITHUB_TOKEN`:
+**A real agent** needs a credential broker ([inference](#inference)).
+The caller replaces `agent: fake` with `claude`, drops
+`max-requests: "0"` (the default caps at 150 requests, which the broker
+counts), and adds the broker, with no secret beyond `SAFE_OUTPUTS_PAT`:
 
 ```yaml
-    secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
-      INFERENCE_API_KEY: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-    with:
-      # ...
       agent: claude
-      model: claude-sonnet-4.5
-      inference-provider: github
-```
-
-With a provider's key instead, stored as `ANTHROPIC_API_KEY`:
-
-```yaml
-    secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
-      INFERENCE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    with:
-      # ...
-      agent: claude
-      inference-url: https://api.anthropic.com
-      inference-register: api-key
-      inference-provider: anthropic
-```
-
-The hosted `ubuntu-26.04` runner reaches GitHub and the provider as it
-is. With a broker instead, it adds:
-
-```yaml
       inference-url: ${{ vars.INFERENCE_URL }}
       inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
       agent-runner: ${{ vars.AGENT_RUNNER }}
@@ -365,7 +329,9 @@ is. With a broker instead, it adds:
 
 with three repository variables: `INFERENCE_URL` and
 `INFERENCE_AUDIENCE` from the broker's operator ([inference](#inference)),
-and `AGENT_RUNNER`, a runner label as JSON. The broker's admission entry
+and `AGENT_RUNNER`, a runner label as JSON. A runner other than hosted
+`ubuntu-26.04` also needs a `config` of its own in place of `hosted.toml`
+([a caller](docs/workflow.md#a-caller)). The broker's admission entry
 and the network route to it are the deployment's, not agentic-job's. In
 this project's own deployment the broker is on a tailnet, and the route is
 either a disposable self-hosted runner on it or a hosted `ubuntu-26.04`
@@ -486,12 +452,12 @@ the issue that tracks it, where one is filed.
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
   ([CI's controls](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
   not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
-- With `inference-register: api-key`, nothing outside the provider caps
-  what the long-lived key spends; the run's request cap and timeout bound
-  one run (no issue yet). GitHub billing is the same with a token.
-- GitHub billing through the job token needs an agent job of the
-  caller's own, without `github-reads`
-  ([GitHub billing](docs/inference.md#github-billing)).
+- The reusable workflow takes no model key or MCP credential, so a real
+  agent needs a broker, until the runner's processes are kept from
+  reading `run`'s environment and memory ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618);
+  [refused for now](#refused-for-now-a-key-in-the-reusable-workflow)).
+  Where an agent job of your own uses a key, nothing outside the provider
+  caps what it spends.
 - A broker admits an agent job of the caller's own only by repository,
   any workflow of it ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
 - A missing, empty or owner's `SAFE_OUTPUTS_PAT` fails only in apply,
@@ -499,8 +465,7 @@ the issue that tracks it, where one is filed.
   ([checking the token first](docs/workflow.md#checking-the-token-before-the-agent)).
 - A push to a stale fork with a PAT lacking the `workflow` scope is
   untried ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)).
-- A run at a version tag may still compile the binary ([#606](https://github.com/cgwalters-forge/agentic-job/issues/606)),
-  and setup takes minutes ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
+- Setup takes minutes ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
 
 ## Where to read more
 

@@ -152,14 +152,16 @@ on:
         type: string
         default: ""
       inference-register:
-        description: "How the run announces itself to the proxy named by `inference-url`: `github-oidc`, `plain`, `token-file` or `api-key`"
+        description: >-
+          How the run announces itself to the proxy named by `inference-url`: `github-oidc`, `plain`,
+          `token-file` or `api-key`, which the agent job refuses for now
         type: string
         default: github-oidc
       inference-provider:
         description: >-
           For `api-key`, the API the key is for: `anthropic` (claude), `openai` (opencode), or
-          `github` (either), which is GitHub's billing with a GitHub token as INFERENCE_API_KEY and
-          needs no other inference input (docs/inference.md)
+          `github` (either), GitHub's billing, which implies `api-key`. The agent job refuses both
+          for now: it passes INFERENCE_API_KEY to no job (docs/inference.md#a-provider-api-key)
         type: string
         default: ""
       inference-audience:

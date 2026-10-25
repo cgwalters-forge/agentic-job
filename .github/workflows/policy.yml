@@ -146,8 +146,9 @@ on:
       inference-provider:
         description: >-
           For `api-key`, the API the key is for: `anthropic` (claude), `openai` (opencode), or
-          `github` (either), which is GitHub's billing with a GitHub token as INFERENCE_API_KEY and
-          needs no other inference input (docs/inference.md)
+          `github` (either), GitHub's billing, which implies `api-key`. agentic-job.yml's agent job
+          refuses both for now; an agent job of the caller's own needs the sandbox user for them
+          (docs/inference.md#a-provider-api-key)
         type: string
         default: ""
       inference-audience:
