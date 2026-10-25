@@ -155,6 +155,83 @@ for (const cost of JSON.parse(process.argv[1])) {
     assert!(apply.contains("COST: ${{ fromJSON(inputs.agent).outputs.cost }}"));
 }
 
+/// check.yml hands apply the patches check reported, each by its name:
+/// the secondary pull request's apart, in `secondary/`, so that apply's
+/// trial of the run's own patch, which takes the one `check` reported,
+/// never applies it.
+#[test]
+fn the_secondary_patch_is_handed_on_apart() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join(".github/workflows/check.yml")).unwrap();
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let steps = doc["jobs"]["check"]["steps"].as_vec().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let script = step("Put the patch beside the ingested outputs")["run"]
+        .as_str()
+        .unwrap();
+    let uploaded = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("upload"))
+        .unwrap()["with"]["path"]
+        .as_str()
+        .unwrap();
+    assert!(uploaded.contains("${{ env.GH_AW_TMP }}/secondary/aw-*.patch\n"));
+    const OWN: &str = "aw-agent-run-7.patch";
+    const TOOL: &str = "aw-o-tool-agentic-job-agent-run-7.patch";
+    for (report, own, tool) in [
+        (
+            serde_json::json!({"items": [], "patch": {"file": OWN},
+                "secondary_patch": {"file": TOOL}}),
+            true,
+            true,
+        ),
+        (
+            serde_json::json!({"items": [], "secondary_patch": {"file": TOOL}}),
+            false,
+            true,
+        ),
+        (
+            serde_json::json!({"items": [], "patch": {"file": OWN}}),
+            true,
+            false,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, tmp) = (dir.path().join("job"), dir.path().join("gh-aw"));
+        std::fs::create_dir_all(job.join("safe-outputs")).unwrap();
+        std::fs::create_dir(&tmp).unwrap();
+        for name in [OWN, TOOL] {
+            std::fs::write(job.join("safe-outputs").join(name), name).unwrap();
+        }
+        std::fs::write(tmp.join("report.json"), report.to_string()).unwrap();
+        let output = Command::new("bash")
+            .args(["-e", "-c", script])
+            .env("JOB_DIR", &job)
+            .env("GH_AW_TMP", &tmp)
+            .env("RUNNER_TEMP", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(tmp.join(OWN).exists(), own, "{report}");
+        assert!(!tmp.join(TOOL).exists(), "{report}");
+        assert_eq!(tmp.join("secondary").join(TOOL).exists(), tool, "{report}");
+    }
+    // Apply's trial takes the one patch check reported for the run's own
+    // request, not every file a glob matches.
+    let apply = std::fs::read_to_string(root.join(".github/workflows/apply.yml")).unwrap();
+    assert!(apply.contains(r#"am --keep-cr "$GH_AW_TMP/$(jq -er '.patch.file' "$REPORT")""#));
+    assert!(!apply.contains("aw-*.patch"));
+}
+
 #[test]
 fn workflow_budgets_convert_dollars_and_keep_explicit_legacy_aic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

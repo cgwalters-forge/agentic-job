@@ -417,7 +417,7 @@ jobs:
           git merge-base --is-ancestor "$base" refs/agentic-job/target-base ||
             { echo "::error::the patch starts from $base, which is not a commit of the $BASE fetched above"; exit 1; }
           git worktree add --quiet --detach "$RUNNER_TEMP/trial" "$base"
-          git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP"/aw-*.patch
+          git -C "$RUNNER_TEMP/trial" am --keep-cr "$GH_AW_TMP/$(jq -er '.patch.file' "$REPORT")"
           git -C "$RUNNER_TEMP/trial" -c core.quotePath=false diff --name-only --no-renames "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
           jq -er '.patch.files | select(type == "array" and length > 0) | .[]' "$REPORT" | LC_ALL=C sort > "$RUNNER_TEMP/checked-files"
           diff "$RUNNER_TEMP/actual-files" "$RUNNER_TEMP/checked-files"

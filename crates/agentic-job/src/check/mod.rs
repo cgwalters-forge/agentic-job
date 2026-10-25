@@ -94,6 +94,10 @@ pub struct Args {
     /// Fixed issue or pull request number for comments
     #[arg(long, requires = "comment_repo", value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
     pub comment_target: Option<u64>,
+    /// The identifier `run` was given (`--meta`'s `run_id`): the only run
+    /// whose branch a secondary pull request may be on
+    #[arg(long, value_name = "ID")]
+    pub run_id: Option<String>,
 }
 
 /// What `check` decided. `--report` holds this as JSON.
@@ -917,10 +921,13 @@ pub fn is_patch_file_name(name: &str) -> bool {
     PATCH_FILE_RE.is_match(name)
 }
 
+/// How `run` names a run's branch: this, then its identifier.
+const RUN_BRANCH_PREFIX: &str = "agent-run-";
+
 /// Whether BRANCH is a run's own, as `run` names it (`agent-run-ID`).
 fn is_run_branch(branch: &str) -> bool {
     branch
-        .strip_prefix("agent-run-")
+        .strip_prefix(RUN_BRANCH_PREFIX)
         .is_some_and(|id| (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -945,7 +952,18 @@ fn for_file_name(value: &str) -> String {
 /// directory or the collector's result; whatever is wrong with the
 /// hand-back is a refusal, in the verdict.
 pub fn check_outputs(dir: &Path, collected: &Path, policy: &Policy) -> Result<Verdict> {
-    check_outputs_to(dir, collected, policy, None)
+    check_outputs_to(dir, collected, policy, None, None)
+}
+
+/// The same, for the run RUN_ID, the only one whose branch a secondary
+/// pull request may be on.
+pub fn check_run_outputs(
+    dir: &Path,
+    collected: &Path,
+    policy: &Policy,
+    run_id: &str,
+) -> Result<Verdict> {
+    check_outputs_to(dir, collected, policy, None, Some(run_id))
 }
 
 fn check_outputs_to(
@@ -953,8 +971,9 @@ fn check_outputs_to(
     collected: &Path,
     policy: &Policy,
     comment: Option<(&str, u64)>,
+    run_id: Option<&str>,
 ) -> Result<Verdict> {
-    let mut verdict = verdict_of(dir, collected, policy, comment)?;
+    let mut verdict = verdict_of(dir, collected, policy, comment, run_id)?;
     verdict.blocked = verdict.is_blocked();
     Ok(verdict)
 }
@@ -964,6 +983,7 @@ fn verdict_of(
     collected: &Path,
     policy: &Policy,
     comment: Option<(&str, u64)>,
+    run_id: Option<&str>,
 ) -> Result<Verdict> {
     let mut errors = Vec::new();
     let mut names = std::fs::read_dir(dir)
@@ -1129,7 +1149,9 @@ fn verdict_of(
     });
     // Its branch names its patch, so that is the run's under the prefix,
     // as `run` writes it: never a name that gh-aw's handler could take for
-    // the run's own pull request's patch (`Secondary::branch`).
+    // the run's own pull request's patch (`Secondary::branch`). It is this
+    // run's, not one an agent could take from an earlier run to push over
+    // that run's open pull request, so check must be told which run it is.
     let secondary = policy.secondary_pull_request.as_ref().and_then(|target| {
         let item = items
             .iter()
@@ -1138,10 +1160,21 @@ fn verdict_of(
             .get("branch")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if run_id.is_none() {
+            errors.push(format!(
+                "a {CREATE_PULL_REQUEST} for {} without the run's identifier to hold its \
+                 branch to (`check --run-id`)",
+                target.repo
+            ));
+        }
         let own = request.and_then(|item| item.get("branch").and_then(Value::as_str));
         let run_branch = branch
             .strip_prefix(target.branch_prefix.as_str())
-            .filter(|run| is_run_branch(run) && own.is_none_or(|own| own == *run));
+            .filter(|run| {
+                is_run_branch(run)
+                    && own.is_none_or(|own| own == *run)
+                    && run_id.is_some_and(|id| run.strip_prefix(RUN_BRANCH_PREFIX) == Some(id))
+            });
         if run_branch.is_none() {
             errors.push(format!(
                 "a {CREATE_PULL_REQUEST} for {} on branch {branch:?}, which is not the run's \
@@ -1349,7 +1382,13 @@ fn verdict_of(
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
     let comment = args.comment_repo.as_deref().zip(args.comment_target);
-    let verdict = check_outputs_to(&args.outputs, &args.collected, &policy, comment)?;
+    let verdict = check_outputs_to(
+        &args.outputs,
+        &args.collected,
+        &policy,
+        comment,
+        args.run_id.as_deref(),
+    )?;
     if let Some(report) = &args.report {
         let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;
         std::fs::write(report, json + "\n")
@@ -1380,6 +1419,7 @@ mod tests {
     use crate::policy::tests::policy;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
+    const RUN_ID: &str = "7";
     const BRANCH: &str = "agent-run-7";
     const PATCH_NAME: &str = "aw-agent-run-7.patch";
 
@@ -1492,6 +1532,8 @@ mod tests {
         /// Append, to the collector's items only, the incomplete report
         /// it adds of its own.
         incomplete: bool,
+        /// Check it without the run's identifier, [`RUN_ID`].
+        no_run_id: bool,
     }
 
     impl Handback {
@@ -1533,7 +1575,11 @@ mod tests {
             items.extend(self.incomplete.then(incomplete));
             let result = json!({"items": items, "errors": self.refused});
             std::fs::write(&collected, result.to_string()).unwrap();
-            check_outputs(&out, &collected, policy).unwrap()
+            if self.no_run_id {
+                check_outputs(&out, &collected, policy).unwrap()
+            } else {
+                check_run_outputs(&out, &collected, policy, RUN_ID).unwrap()
+            }
         }
     }
 
@@ -1664,6 +1710,36 @@ mod tests {
                 with_item(json!({"branch": "agentic-job/docs-agent-run-7"})),
                 &policy,
                 "which is not the run's branch",
+            ),
+            // Alone, there is no run's own request to compare it with:
+            // an earlier run's branch, whose open pull request it would
+            // push to, is refused all the same.
+            (
+                "alone, another run's branch",
+                Handback {
+                    items: vec![json!({"type": "create_pull_request", "repo": "o/tool",
+                        "title": "Fix the tool", "body": "Why.",
+                        "branch": "agentic-job/agent-run-8"})],
+                    ..both()
+                        .with(PATCH_NAME, None)
+                        .with(BASE_FILE, None)
+                        .with(TOOL_PATCH, None)
+                        .with(
+                            "aw-o-tool-agentic-job-agent-run-8.patch",
+                            Some(patch_of("tool.rs")),
+                        )
+                },
+                &policy,
+                "on branch \"agentic-job/agent-run-8\", which is not the run's branch",
+            ),
+            (
+                "without the run's identifier",
+                Handback {
+                    no_run_id: true,
+                    ..both()
+                },
+                &policy,
+                "without the run's identifier to hold its branch to (`check --run-id`)",
             ),
             (
                 "its patch, over its budget",

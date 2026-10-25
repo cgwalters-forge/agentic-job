@@ -2546,7 +2546,8 @@ mod tests {
                 json!({"items": items, "errors": []}).to_string(),
             )
             .unwrap();
-            check::check_outputs(&self.path("safe-outputs"), &collected, policy).unwrap()
+            check::check_run_outputs(&self.path("safe-outputs"), &collected, policy, RUN_ID)
+                .unwrap()
         }
     }
 

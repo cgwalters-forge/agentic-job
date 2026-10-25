@@ -874,10 +874,13 @@ prefix, and its patch is named as gh-aw's handler looks for it first when
 a request names a `repo` (`aw-OWNER-NAME-agentic-job-agent-run-ID.patch`),
 never as the run's own. Check counts that request against the secondary's
 own `max` (the collector is given the sum of both), and holds it to the
-secondary's base, to being a draft and to that branch, and its patch to
-its own base file, budgets and protected files and to the bounds'
-`commit_author`. A request naming any other repository is refused as
-before.
+secondary's base, to being a draft and to that branch of this run
+(`check --run-id`, never an earlier run's branch, whose open pull request
+it would push to), and its patch to its own base file, budgets and
+protected files and to the bounds' `commit_author`. check.yml hands that
+patch on apart, in `secondary/` of its artifact, so that apply's trial of
+the run's own patch never takes it. A request naming any other repository
+is refused as before.
 
 ## What the agent does
 

@@ -1318,7 +1318,7 @@ fn a_secondary_change_is_handed_back_beside_the_runs_own() {
         .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
         .arg("--collected")
         .arg(&collected)
-        .args(["--report", "verdict.json"])
+        .args(["--report", "verdict.json", "--run-id", "4242"])
         .current_dir(&job.dir)
         .output()
         .unwrap();

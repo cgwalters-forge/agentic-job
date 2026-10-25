@@ -943,7 +943,7 @@ for (const [name, filename, files, unrelated, expected] of [
         git(repo, 'update-ref', 'refs/agentic-job/target-base', 'HEAD');
       }
       const report = join(root, 'report.json');
-      writeFileSync(report, JSON.stringify({ patch: { base_commit: base, files } }));
+      writeFileSync(report, JSON.stringify({ patch: { file: 'aw-test.patch', base_commit: base, files } }));
       const configured = command(repo, 'bash', ['-euo', 'pipefail', '-c', step('Configure git')]);
       assert.equal(configured.status, 0, configured.stderr);
       assert.equal(git(repo, 'config', 'merge.renames'), 'false');
