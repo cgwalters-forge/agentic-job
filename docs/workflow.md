@@ -554,7 +554,7 @@ action's own refusals are its documentation's.
 | policy / Check that the repositories are public | `repo`, `agent-config-repo`, `item-repo`, their visibility | `policy.yml` | a target, configuration or item repository that is not public (a private target only as the private calling repository) | yes |
 | policy / Decide whether the event may start a run | the bounds' `[trigger]`, the event, the actor's role | `src/event/` (`event::run`, `decide`, `check_actor`, `guards::check`) | an event, actor, label, command, fork or base the trigger does not admit; a deadline passed (a soft refusal: `admitted=false`) | yes |
 | policy / Refuse unsupported routing, Resolve a dispatched review, Resolve the pull request a run pushes to | the event, `review`, `base`, `push-item`, the pull request from the API | `workflow/activation.cjs`, `workflow/review.cjs`, `workflow/push.cjs` | a discussion; a review off the configured base or without an exact head; a push whose pull request is not open or whose base is not a commit | yes |
-| policy / Check the request against the caller's bounds | `issue`, `item-repo`, `event`, `review*`, `push-item`, `context`, the bounds, the in-flight runs (with `dedupe`) | `policy.yml`; `src/policy.rs` `Bounds::compile`, `intersect`, `check_context`; `src/policy/dispatch.rs` `admission` | a non-numeric `issue`; an item repository with an event, review or push; a repository, base, kind, branch, output, output repository, push or `max-outputs` outside the bounds; `secondary_pull_request`; a context repository outside the bounds; an overlapping dispatch | yes |
+| policy / Check the request against the caller's bounds | `issue`, `item-repo`, `event`, `review*`, `push-item`, `context`, the bounds, the in-flight runs (with `dedupe`) | `policy.yml`; `src/policy.rs` `Bounds::compile`, `intersect`, `check_context`; `src/policy/dispatch.rs` `admission` | a non-numeric `issue`; an item repository with an event, review or push; a repository, base, kind, branch, output, output repository, push or `max-outputs` outside the bounds; a `secondary_pull_request` on the run's own or output repository; a context repository outside the bounds; an overlapping dispatch | yes |
 | policy / Write the configuration | the configuration file and the inputs | `src/config/compose.rs` `compose`, `src/config/checked.rs` `check` | an agent without inference; a `max-requests` nothing counts; Vibe or a child agent without one; `inference.front` and egress conflicts; a provider the agent cannot use; an MCP server the configuration cannot carry | yes |
 | policy / Write the task and the run's settings | `fake-profile`, `agent`, `setup`, the event's task | `policy.yml` | `fake-profile` without `agent: fake` or with a setup; an unknown profile; an event run with no task | yes |
 | apply-token / Check SAFE_OUTPUTS_PAT | `require-safe-outputs-pat`, the secret, `output-repo` | `workflow/apply-token.cjs` | a missing or unusable PAT, before the agent runs | yes |
@@ -1465,6 +1465,28 @@ anything when `GET /user` names nobody (an App's token), or when that
 user owns the output repository and so has no fork of it (but see below), or when what
 the forge answers is not that user's own fork (the user's repository in
 the network can be its root, or the caller's repository).
+
+### A secondary pull request
+
+A caller whose runs are to propose one pull request to a second, fixed
+repository as well (a shared tool the change needs, say) adds a
+`[secondary_pull_request]` table to its bounds file
+([syntax](safe-outputs.md#a-secondary-pull-request)); there is no input
+for it. It is for a `branch` run that opens its own pull request, on
+GitHub. The agent gets a clone of that repository beside its checkout,
+and the change there goes on as a pull request of its own only when a
+`create_pull_request` names that repository as its `repo`.
+
+Apply opens it after the handlers have applied everything else, with
+`SAFE_OUTPUTS_PAT` alone (the job token cannot fork), and in the same
+way as the run's own: from the token user's fork of the secondary
+repository, with that fork's Actions turned off first. So the token
+needs to fork that repository, push to its fork and open a pull
+request there, and to turn the fork's Actions off: for the classic PAT
+[above](#pull-requests-come-from-a-fork) that is the same `repo` scope,
+and the bot account must not own the secondary repository. Nothing
+else is asked of the secondary repository: the token needs no write
+access to it, and its CI runs the change as a fork's pull request.
 
 ### A repository the applying account owns
 

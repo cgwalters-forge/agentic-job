@@ -102,11 +102,11 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
     /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
     'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event',
-    'e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
+    'e2e-analysis', 'e2e-analysis-refused', 'e2e-secondary', 'e2e-secondary-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
   ]);
   for (const [, name, caller] of callers) {
     assert.doesNotMatch(caller, /^    secrets:|\bsecrets\./m, name);
-    assert.doesNotMatch(caller, /^      apply-environment:/m, name);
+    if (/^      apply-environment:/m.test(caller)) assert.match(caller, /^      apply-staged: true$/m, name);
   }
   for (const name of ['e2e-analysis', 'e2e-analysis-refused', 'e2e-people', 'e2e-check-run', 'e2e-compose', 'e2e-review']) {
     const caller = callers.find(([, jobName]) => jobName === name)[2];

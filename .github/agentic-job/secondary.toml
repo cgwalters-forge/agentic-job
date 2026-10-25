@@ -1,0 +1,22 @@
+# Bounds of CI's end-to-end secondary pull request runs (ci.yml's
+# e2e-secondary and e2e-secondary-refused): a pull request here and one
+# in misctool, a public repository the runs only clone. Apply is staged,
+# so neither is opened: CI holds no SAFE_OUTPUTS_PAT to fork with.
+hosts = ["github.com"]
+repos = ["cgwalters-forge/agentic-job"]
+bases = ["main"]
+max_outputs = 2
+max_patch_bytes = 65536
+max_patch_files = 2
+
+[outputs]
+create_pull_request = { max = 1 }
+noop = { max = 1 }
+
+[secondary_pull_request]
+repo = "cgwalters-forge/misctool"
+base = "main"
+branch_prefix = "agentic-job/"
+max = 1
+max_patch_bytes = 65536
+max_patch_files = 2

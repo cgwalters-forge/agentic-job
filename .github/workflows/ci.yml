@@ -921,6 +921,75 @@ jobs:
       budget-usd: '1'
       artifact-prefix: analysis-refused-
 
+  # A run that hands back a pull request here and one in the bounds'
+  # secondary repository (.github/agentic-job/secondary.toml), through
+  # policy, run, check and a staged apply: CI holds no SAFE_OUTPUTS_PAT,
+  # which apply forks with, so neither is opened. A pull request needs an
+  # apply environment; this one, which GitHub makes on first use, holds
+  # no secret. e2e-verify looks at what check handed apply.
+  e2e-secondary:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: read # the agent job's GitHub reads
+      pull-requests: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the register job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-secondary-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
+      task: Propose a change here and one in misctool.
+      repo: ${{ github.repository }}
+      base: main
+      outputs: create_pull_request,noop
+      max-outputs: '2'
+      notify: none
+      allow: .github/agentic-job/secondary.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/secondary.sh
+      apply-environment: e2e-staged
+      apply-staged: true
+      timeout: '5'
+      max-requests: '0'
+      budget-usd: '1'
+      artifact-prefix: secondary-
+
+  # The same bounds, and a secondary request without its change: check
+  # refuses the whole hand-back, and apply never runs.
+  e2e-secondary-refused:
+    needs: [changes, static]
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: read # the agent job's GitHub reads
+      pull-requests: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # the register job asks for it, for a proxy this run has none of
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      id: e2e-secondary-refused-${{ github.run_id }}
+      secure-host-image-artifact-id: ${{ needs.static.outputs.secure-host-image-artifact-id }}
+      expect-check-refusal: true
+      task: Ask for a secondary pull request without changing misctool.
+      repo: ${{ github.repository }}
+      base: main
+      outputs: create_pull_request,noop
+      max-outputs: '2'
+      notify: none
+      allow: .github/agentic-job/secondary.toml
+      config: .github/agentic-job/hosted.toml
+      agent: fake
+      setup: .github/agentic-job/e2e/secondary-refused.sh
+      apply-environment: e2e-staged
+      apply-staged: true
+      timeout: '5'
+      max-requests: '0'
+      budget-usd: '1'
+      artifact-prefix: secondary-refused-
+
   # A write-capable fixture job, never the agent's token. Each run owns its
   # branch and PR; cleanup must not close another merge-group run's fixture.
   # Like e2e-verify it checks nothing out: a merge group's proposed code
@@ -1410,7 +1479,7 @@ jobs:
 
   e2e-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
-    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
+    needs: [changes, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -1496,6 +1565,30 @@ jobs:
       - name: The handlers are those of the outputs asked for
         run: |
           jq -e '.partial == false and .fork == null and .pull_request == null and (.handlers | keys) == ["add_comment", "noop"] and (.handlers.add_comment | keys) == ["max", "target", "target-repo"]' "$RUNNER_TEMP/full/applied.json"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.e2e-secondary.result == 'success' }}
+        with:
+          name: secondary-checked-outputs
+          path: ${{ runner.temp }}/secondary
+      # Check accepted both requests and both patches, and handed apply's
+      # handlers the run's own alone, the secondary's patch apart; the
+      # request without its change was refused before apply.
+      - name: Check handed on the secondary pull request apart, and refused one without its change
+        env:
+          RESULT: ${{ needs.e2e-secondary.result }}
+          SECONDARY_REFUSED: ${{ needs.e2e-secondary-refused.result }}
+          SECONDARY_REFUSAL: ${{ needs.e2e-secondary-refused.outputs.check-refusal }}
+          SECONDARY_APPLIED: ${{ needs.e2e-secondary-refused.outputs.applied-artifact-id }}
+          PATCH: aw-cgwalters-forge-misctool-agentic-job-agent-run-${{ github.run_id }}.patch
+        run: |
+          test "$RESULT/$SECONDARY_REFUSED" = success/success
+          dir=$RUNNER_TEMP/secondary
+          jq -e '[.items[] | select(.type == "create_pull_request")] | length == 2' "$dir/report.json"
+          jq -e --arg patch "$PATCH" '.secondary_patch.file == $patch and .patch != null' "$dir/report.json"
+          jq -e '[.items[] | select(.type == "create_pull_request")] | length == 1 and all(has("repo") | not)' "$dir/agent_output.json"
+          test -s "$dir/secondary/$PATCH"
+          grep -F 'needs its patch' <<< "$SECONDARY_REFUSAL"
+          test -z "$SECONDARY_APPLIED"
       # The comments of this run among those of the runs beside it.
       - name: The topic-branch analysis posted one comment on the named issue
         env:
@@ -2039,7 +2132,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -2063,7 +2156,7 @@ jobs:
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
             ($host == "false" and (.key | IN("sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-secondary", "e2e-secondary-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-
