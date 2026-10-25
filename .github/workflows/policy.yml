@@ -622,44 +622,26 @@ jobs:
           "$JOB_DIR/bin/agentic-job" event --allow "$ALLOW" --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" \
             --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --task "$RUNNER_TEMP/task.md" --out "$JOB_DIR" "$@" || state=$?
           case "$state" in 0 | 1) ;; *) echo "::error::agentic-job event ended with exit state $state"; exit "$state" ;; esac
+      # The binary writes the outputs, each on one line: a reason can name
+      # event fields, and no text of the decision passes through the shell.
+      # A review is narrowed to an exact pull request head first.
       - name: Refuse unsupported routing before any item number is consumed
         id: event
         if: ${{ inputs.event }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REVIEW: ${{ inputs.review }}
           BASE: ${{ inputs.base }}
-        with:
-          script: |
-            const fs = require('node:fs');
-            const { execFileSync } = require('node:child_process');
-            const path = process.env.JOB_DIR + '/event.json';
-            let decision = JSON.parse(fs.readFileSync(path, 'utf8'));
-            fs.writeFileSync(path, JSON.stringify(decision));
-            if (process.env.REVIEW === 'true') {
-              decision = JSON.parse(execFileSync(process.env.JOB_DIR + '/bin/agentic-job',
-                ['review', 'admit', '--decision', path, '--base', process.env.BASE], { encoding: 'utf8' }));
-              fs.writeFileSync(path, JSON.stringify(decision));
-              // What review.yml's refusal job posts: reasons can name event
-              // fields, so the binary keeps them inert and on one line.
-              if (!decision.admitted) {
-                core.setOutput('refusal', execFileSync(process.env.JOB_DIR + '/bin/agentic-job', ['review', 'refusal'],
-                  { encoding: 'utf8', env: { ...process.env, REASON: String(decision.reason ?? '') } }).trim());
-              }
-            }
-            if (!decision.admitted) fs.rmSync(process.env.JOB_DIR + '/task.md', { force: true });
-            core.setOutput('admitted', String(decision.admitted));
-            core.setOutput('reason', decision.reason);
-            core.setOutput('item', decision.admitted ? decision.item?.number ?? '' : '');
-            core.setOutput('review-head', process.env.REVIEW === 'true' && decision.admitted ? decision.head.sha : '');
-            await core.summary.addRaw(`agentic-job event: ${decision.admitted ? 'admitted' : 'refused'}, ${decision.reason}`).write();
+        run: |
+          [ "$REVIEW" != true ] || set -- --base "$BASE"
+          "$JOB_DIR/bin/agentic-job" review admit --decision "$JOB_DIR/event.json" --output "$GITHUB_OUTPUT" "$@" >> "$GITHUB_STEP_SUMMARY"
       # Operator dispatch has no event admission; resolve the head here with
       # read-only API access, never from agent text or the caller's task.
+      # The binary checks the request before the call and prints only a SHA.
       - name: Resolve a dispatched review
         id: dispatch-review
         if: ${{ inputs.review-item != '' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          GH_TOKEN: ${{ github.token }}
           REVIEW: ${{ inputs.review }}
           EVENT: ${{ inputs.event }}
           KIND: ${{ inputs.kind }}
@@ -672,18 +654,11 @@ jobs:
           BASE: ${{ inputs.base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
-        with:
-          script: |
-            const fs = require('node:fs');
-            const path = require('node:path');
-            const { execFileSync } = require('node:child_process');
-            const binary = path.join(process.env.JOB_DIR, 'bin/agentic-job');
-            const target = JSON.parse(execFileSync(binary, ['review', 'dispatch-target'], { encoding: 'utf8' }));
-            const { data } = await github.rest.pulls.get(target);
-            const file = path.join(process.env.RUNNER_TEMP, 'dispatch-review.json');
-            fs.writeFileSync(file, JSON.stringify(data));
-            const head = execFileSync(binary, ['review', 'resolve-dispatch', '--pull-request', file], { encoding: 'utf8' }).trim();
-            core.setOutput('review-head', head);
+        run: |
+          target=$("$JOB_DIR/bin/agentic-job" review dispatch-target)
+          gh api "$(jq -r '"repos/\(.owner)/\(.repo)/pulls/\(.pull_number)"' <<< "$target")" > "$RUNNER_TEMP/dispatch-review.json"
+          head=$("$JOB_DIR/bin/agentic-job" review resolve-dispatch --pull-request "$RUNNER_TEMP/dispatch-review.json")
+          echo "review-head=$head" >> "$GITHUB_OUTPUT"
       # A run that pushes to a pull request starts from its branch at the
       # head read here with the read-only token, never from agent text or
       # the caller's task; the binary checks the branch against the bounds

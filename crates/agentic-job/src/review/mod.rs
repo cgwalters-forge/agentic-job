@@ -4,8 +4,10 @@
 //! reads the forge, then bind the returned PR to the requested repository and
 //! base. Only its exact commit may reach the sandbox, not a fork's branch name.
 //!
-//! An event review is admitted by `event` first; `admit` only narrows that
-//! decision, and `task` writes the reviewer's task from the trusted checkout
+//! An event review is admitted by `event` first; `admit` narrows that
+//! decision, never widening it, and writes any event decision's outputs for
+//! the policy job.
+//! `task` writes the reviewer's task from the trusted checkout
 //! of the default branch, with the owner's merge policy after it.
 //!
 //! After the agent, `verdict` and `fold` read check's output (verdict.rs),
@@ -67,14 +69,20 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         pull_request: PathBuf,
     },
-    /// Narrow an event's admission decision to a review of an exact pull request head
+    /// Append an event decision's outputs to OUTPUT and print its summary
+    /// line, removing the task beside a refused decision; with `--base`,
+    /// first narrow the decision, in place, to a review of an exact pull
+    /// request head
     Admit {
         /// The decision `agentic-job event` wrote
         #[arg(long, value_name = "FILE")]
         decision: PathBuf,
-        /// The configured base branch
+        /// A review's configured base branch
         #[arg(long)]
-        base: String,
+        base: Option<String>,
+        /// The step's $GITHUB_OUTPUT
+        #[arg(long, value_name = "FILE")]
+        output: PathBuf,
     },
     /// Check the review request in the environment and print the review task
     /// from the current directory, followed by its merge policy
@@ -82,9 +90,6 @@ pub enum Command {
         /// The task file, relative to the current directory
         file: String,
     },
-    /// Print the refused review's reason in the environment (REASON) as
-    /// one inert line for the status comment
-    Refusal,
     /// Check the collected output is one verdict comment on the target, or
     /// a noop, and print the verdict: APPROVE, CHANGES or nothing
     Verdict {
@@ -138,13 +143,11 @@ impl Command {
                     .context("parsing dispatched review pull request")?;
                 println!("{}", request.resolve(&pull)?);
             }
-            Self::Admit { decision, base } => {
-                let bytes = files::read_regular(decision, MAX_DECISION_BYTES)
-                    .context("reading the event decision")?;
-                let decision =
-                    serde_json::from_slice(&bytes).context("parsing the event decision")?;
-                println!("{}", admit(decision, base));
-            }
+            Self::Admit {
+                decision,
+                base,
+                output,
+            } => println!("{}", admit_event(decision, base.as_deref(), output)?),
             Self::Task { file } => {
                 check_request(|key| std::env::var(key).unwrap_or_default())?;
                 let root = Path::new(".");
@@ -152,7 +155,6 @@ impl Command {
                 task.push_str(&merge_statement(merge_policy(root)?));
                 print!("{task}");
             }
-            Self::Refusal => println!("{}", verdict::refusal_text(&env("REASON"))),
             Self::Verdict {
                 collected,
                 target,
@@ -192,6 +194,61 @@ fn read_output(path: &Path) -> Result<Value> {
     let bytes = files::read_regular(path, MAX_OUTPUT_BYTES)
         .with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// The policy job's event step: the decision, narrowed where the run is a
+/// review, as the outputs later jobs route by, and its summary line. A
+/// refused decision leaves no task behind for a later step to pick up.
+fn admit_event(path: &Path, base: Option<&str>, output: &Path) -> Result<String> {
+    let bytes =
+        files::read_regular(path, MAX_DECISION_BYTES).context("reading the event decision")?;
+    let mut decision: Value =
+        serde_json::from_slice(&bytes).context("parsing the event decision as JSON")?;
+    if let Some(base) = base {
+        decision = admit(decision, base);
+        std::fs::write(path, serde_json::to_vec_pretty(&decision)?)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    let admitted = decision["admitted"] == true;
+    // A line break in a value would start another output.
+    let reason = decision["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .replace(char::is_control, " ");
+    let item = match decision["item"]["number"].as_u64() {
+        Some(number) if admitted => number.to_string(),
+        _ => String::new(),
+    };
+    // `admit` let through only a SHA.
+    let head = match decision["head"]["sha"].as_str() {
+        Some(sha) if admitted && base.is_some() => sha,
+        _ => "",
+    };
+    let mut lines =
+        format!("admitted={admitted}\nreason={reason}\nitem={item}\nreview-head={head}\n");
+    if !admitted {
+        let task = path
+            .parent()
+            .context("the event decision's directory")?
+            .join(crate::event::TASK_FILE);
+        match std::fs::remove_file(&task) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("removing {}", task.display())),
+        }
+        // What review.yml's refusal job posts: a reason can name event
+        // fields, so it is kept inert and on one line.
+        if base.is_some() {
+            lines.push_str(&format!("refusal={}\n", verdict::refusal_text(&reason)));
+        }
+    }
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(output)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()))
+        .with_context(|| format!("writing {}", output.display()))?;
+    let word = if admitted { "admitted" } else { "refused" };
+    Ok(format!("agentic-job event: {word}, {reason}"))
 }
 
 /// The decision, or the same refused: a review needs an admitted pull
