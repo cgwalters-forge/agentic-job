@@ -101,6 +101,7 @@ directory printed at the start. `TMPDIR` can move it outside the checkout.
 The script prints full TLC output and keeps each report there. No jar, generated
 trace module, or state database is committed.
 
+It checks [Session.tla](#writes-during-a-session-sessiontla) the same way.
 The good config must exit 0 with TLC's completion message. Each negative control
 must exit **12** and name its expected invariant; parse errors, Java failures,
 unexpected successes and other failures fail the script. This follows gh-aw's
@@ -197,6 +198,59 @@ State 8: <Apply>
 ```
 
 These are model traces, not live forge re-runs.
+
+## Writes during a session: Session.tla
+
+[Session.tla](Session.tla) models
+[writes during a session](session.md#writes-during-a-session-specified-not-built),
+where apply runs during the session as well as at its end. `file` is what `run`
+has read of the agent's outputs, append-only, up to three requests against an
+output ceiling `Max` of two. `Write` is the agent writing one more, a `comment`
+or an `invalid` one, while `phase` is `session`. The upload for request `n` is
+`SubSeq(file, 1, n)`: it cannot change, since `file` only grows.
+
+`InSession` is one dispatch of tracker's session apply workflow, for any
+request, at any time, during the session or after it, any number of times:
+whether the operator confirmed it does not matter to these properties. It
+checks the whole upload, adds `n` to `accepted`, and appends the request to
+`history` unless the guard finds its name there. `Stop`, `EndCheck`,
+`EndApply` and `Retry` are the end of the run, as in `Pipeline.tla`: check all
+of `file`, then apply what the guard does not find, and maybe apply again.
+Each effect in `history` is one request posted with its name, `Name(p, end)`:
+its position, since `file` is append-only, and the digest of what check
+accepted. Applies are atomic steps, as the concurrency group makes them.
+
+`Session.cfg` checks four properties: each effect is a request a check
+accepted, as `run` read it (`AcceptedOnly`); no request is applied twice across
+the session and the end (`AtMostOnce`); all effects together stay within the
+ceiling (`Ceiling`); and no writer runs the agent's code
+(`CredentialIsolation`). Each has a broken variant TLC must reject:
+
+- `BrokenSessionInputs` applies the request the dispatch inputs carry, which
+  may be anything, instead of fetching it from the run and checking it.
+- `BrokenSessionGuard` lets the end-of-run apply post again what the session
+  already posted: a comment is applied during the session, then at the end.
+- `BrokenSessionName` names a request at the end after putting a partial run's
+  note in its body, as apply's guard does today: the end does not find the
+  comment the session posted, and posts it again.
+- `BrokenSessionCeiling` checks request `n` alone instead of the upload ending
+  at it. Three comments each pass, and the session applies all three.
+- `BrokenSessionCredential` runs producer code in the writer.
+
+With TLC v1.7.4 the passing model reported 228 states generated, 100 distinct,
+depth 8. The negative controls fail at depths 3, 6, 6, 7 and 3.
+
+As in `Pipeline.tla`, `CredentialIsolation` holds by construction unless its
+constant breaks it; it records the claim rather than finding a path. The model
+does not exercise the append-only read: `file` only grows by definition, and a
+hand-back that differed from what `run` read would break `Ceiling` and
+`AtMostOnce`. It leaves out what the workflow checks before it reaches
+`check`'s code (the run's workflow, event, branch and attempt, the upload's
+name and digest), and requests with a patch or `create_issue`, which wait for
+the end. It assumes the guard sees every earlier post: the forge's search lag
+for issues, and an apply token the guard cannot name, break that, as they do
+for `Pipeline.tla`'s re-runs. Applies are atomic, so it does not show what
+the concurrency group's cancellations do, which only delays or loses writes.
 
 ## Honest scope
 
