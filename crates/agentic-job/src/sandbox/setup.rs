@@ -1748,13 +1748,38 @@ fn run_setup_script(config: &Config, script: &Path) -> Result<()> {
     std::io::stderr().write_all(
         crate::workflow_commands::escaped(&String::from_utf8_lossy(&output.stderr)).as_bytes(),
     )?;
-    ensure!(
-        output.success(),
+    if output.success() {
+        return Ok(());
+    }
+    let failed = anyhow::anyhow!(
         "setup.script failed as {} ({})",
         config.sandbox.user,
         output.status
     );
-    Ok(())
+    if String::from_utf8_lossy(&output.stderr).contains(RUN0_NO_UNIT) {
+        return Err(failed.context(run0_no_unit_hint(&config.sandbox.user)));
+    }
+    Err(failed)
+}
+
+/// What run0 prints when the system manager will not start its unit.
+const RUN0_NO_UNIT: &str = "Failed to start transient service unit";
+
+/// Why run0 may have refused, and what to do instead. Seen when setup
+/// ran from cloud-init's `runcmd` on CentOS Stream 10; the cause is not
+/// yet known (cgwalters-forge/agentic-job#1810).
+fn run0_no_unit_hint(user: &str) -> String {
+    format!(
+        "{RUN0} could not start a transient unit to run as {user}. This was seen when setup ran from cloud-init (runcmd) on CentOS Stream 10; \
+         start setup from a root shell or a systemd unit after boot instead, for example:\n\
+         [Unit]\n\
+         After=multi-user.target\n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart=/usr/local/bin/agentic-job sandbox setup --config /etc/agentic-job-setup.toml\n\
+         [Install]\n\
+         WantedBy=multi-user.target"
+    )
 }
 
 /// Installs a root-owned file with `mode`, once `validate` (a command the
@@ -1937,6 +1962,21 @@ mod tests {
         ];
         for (text, want) in cases {
             assert_eq!(systemd_version(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn run0_no_unit_hints() {
+        let hint = run0_no_unit_hint("agent");
+        for want in [
+            "run0 could not start a transient unit to run as agent",
+            "cloud-init (runcmd) on CentOS Stream 10",
+            "a root shell or a systemd unit after boot",
+            "Type=oneshot",
+            "After=multi-user.target",
+            "ExecStart=/usr/local/bin/agentic-job sandbox setup --config ",
+        ] {
+            assert!(hint.contains(want), "{want:?} not in {hint}");
         }
     }
 

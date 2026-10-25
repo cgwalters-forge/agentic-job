@@ -96,6 +96,19 @@ Under `token-file` there is nothing to end and the upload goes ahead.
 All of these requests go straight to the proxy, ignoring `HTTP_PROXY`,
 and follow no redirect.
 
+The agent's own requests go through the egress proxy unless
+`egress.direct` opens the broker. The proxy resolves names with the
+host's resolver, but the rules for its uid refuse it DNS to any but the
+configured resolvers, and loopback, private, shared (the tailnet) and
+link-local addresses: `PROXY_DENIED_V4` and `PROXY_DENIED_V6` in
+`crates/secure-host/src/network.rs`. A broker named by an in-cluster or
+tailnet name that the proxy would have to reach therefore gets a 502,
+though root on the host reaches it
+([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810)).
+Give the broker by its tailnet IPv4 address, so that `egress.direct`
+opens it, or pass that address as `inference-address`
+([workflow.md](workflow.md#what-a-caller-provides)).
+
 The host and port of `url`, `anthropic-url` and `openai-url`
 (`host:port`) are redacted from the run's logs and files as its secrets
 are, except under `api-key`, whose URL is the provider's public one. A
