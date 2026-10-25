@@ -830,17 +830,17 @@ unknown key. Destinations stay fixed by the caller
 chosen per type or by the agent, and a patch that touches a protected file
 is refused rather than sent for review or turned into an issue.
 
-### A secondary pull request (not yet active)
+### A secondary pull request
 
 A `[secondary_pull_request]` table names one further, fixed repository
-that a run is to be able to propose one pull request to, without making
+that a run may propose one pull request to, without making
 the repositories in `repos` writable
 ([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
-`run`, the hand-back and `check` hold a patch to it, and apply's pass
-opens it, but apply.yml does not run that pass yet
-([#1286](https://github.com/cgwalters-forge/agentic-job/issues/1286)),
-so `policy` refuses every run that would open one.
-Bounds without it are unaffected.
+It stops an agent from choosing where that pull request goes: the
+repository, base and branch are the bounds', and the request gives
+only the title and body. Off by default; bounds without it are
+unaffected. What the caller's `SAFE_OUTPUTS_PAT` needs for it is in
+[the workflow guide](workflow.md#a-secondary-pull-request).
 
 ```toml
 [secondary_pull_request]
@@ -874,19 +874,26 @@ is dropped with a warning. The request goes on the run's branch under the
 prefix, and its patch is named as gh-aw's handler looks for it first when
 a request names a `repo` (`aw-OWNER-NAME-agentic-job-agent-run-ID.patch`),
 never as the run's own. Check counts that request against the secondary's
-own `max` (the collector is given the sum of both), and holds it to the
+own `max` (the collector is given the sum of both), and against
+`max_outputs` like any other request, so raise that by one to leave the
+run's own requests their room; it holds it to the
 secondary's base, to being a draft and to that branch of this run
 (`check --run-id`, never an earlier run's branch, whose open pull request
 it would push to), and its patch to its own base file, budgets and
 protected files and to the bounds' `commit_author`. check.yml hands that
 patch on apart, in `secondary/` of its artifact, so that apply's trial of
-the run's own patch never takes it. A request naming any other repository
+the run's own patch never takes it, and leaves its request out of the
+requests apply's handlers get, which would refuse it; it uploads
+`policy.json` beside them. A request naming any other repository
 is refused as before.
 
 `agentic-job secondary-pull-request --policy FILE --checked DIR --run-id ID
---run-url URL` is apply's pass for it, to run after gh-aw's handlers have
-applied the run's own outputs, with `SAFE_OUTPUTS_PAT` in its
-environment. It holds check's report and the patch in `secondary/` to the
+--run-url URL` is apply's pass for it, which apply.yml runs once gh-aw's
+handlers have applied everything else, only where check reported a
+request or a patch for it, with `SAFE_OUTPUTS_PAT`, and not the job
+token, in its environment; a staged apply skips it. What it prints, its
+`error:` lines included, goes into apply's summary, and a failure fails
+apply and says so in the status comment. It holds check's report and the patch in `secondary/` to the
 policy again, as the Forgejo apply does: the repository, base, prefix and
 budgets are the policy's, and the branch must be this run's under the
 prefix, so a request can choose only the title and body. Then, as
@@ -919,7 +926,7 @@ sandbox user: `git format-patch` of one commit against the commit the
 run started from, with gh-aw's `X-GH-AW-Base-Commit` header. The
 hand-back is `outputs.jsonl`, `base.json` and at most one
 `aw-BRANCH.patch`, and for a
-[secondary pull request](#a-secondary-pull-request-not-yet-active)
+[secondary pull request](#a-secondary-pull-request)
 its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
@@ -989,7 +996,7 @@ exist, how many of each, the fields of each, and the sanitizing of their
 text. Then
 
 ```text
-agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE]
+agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE] [--run-id ID]
 ```
 
 takes the collector's result and does none of it again, except to

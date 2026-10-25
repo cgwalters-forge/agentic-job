@@ -405,6 +405,21 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                     .to_owned(),
             });
         }
+        // The second output, said where it goes, as the run's own is not:
+        // the agent could take it for part of the run's own pull request.
+        if let (Some(bytes), Some(tree), Some(target)) = (
+            change.secondary_patch["bytes"].as_u64(),
+            &checkout.secondary,
+            &policy.secondary_pull_request,
+        ) {
+            report.notes.push(format!(
+                "the change in {} ({bytes} bytes) is proposed to {} as a draft pull request of \
+                 its own, on `{}`",
+                tree.dir.display(),
+                target.repo,
+                target.base
+            ));
+        }
         if let Some(why) = change.memory_dropped {
             report.problems.push(Problem {
                 at: format!("~/{}", capture::MEMORY_DIR),
@@ -1153,6 +1168,15 @@ mod tests {
         let request = "{\"type\":\"create_pull_request\",\"repo\":\"o/tool\",\"title\":\"T\",\"body\":\"B\"}\n";
         std::fs::write(dir.path().join(AGENT_OUTPUTS), request).unwrap();
         assert_eq!(problems(&run), Vec::<String>::new());
+        let notes = validate(dir.path(), &run).unwrap().notes;
+        let proposed = "is proposed to o/tool as a draft pull request of its own, on `main`";
+        let said = format!("the change in {} (", tool.display());
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.starts_with(&said) && note.ends_with(proposed)),
+            "{notes:?}"
+        );
         sh(&tool, "echo m > go.mod");
         let protected = problems(&run);
         assert!(

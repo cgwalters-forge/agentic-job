@@ -94,6 +94,8 @@ jobs:
       blocked: ${{ steps.applied-all.outputs.blocked }}
       no-result-reason: ${{ steps.result.outputs.no-result-reason }}
       handler-errors: ${{ steps.handler-errors.outputs.reason }}
+      # `true` when the secondary pull request was asked for and not opened.
+      secondary-failed: ${{ steps.secondary.outputs.failed }}
     env:
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
       # The issue the caller made the run for, a number policy checked, and
@@ -1180,6 +1182,29 @@ jobs:
           fi
           # Only now, with nothing else wrong, is the run blocked rather than failed.
           if [ "${BLOCKED:-}" = true ]; then echo blocked=true >> "$GITHUB_OUTPUT"; fi
+      # The policy's secondary pull request (docs/safe-outputs.md), once
+      # the run's own outputs are applied, and only where check reported a
+      # request or patch for it: policy's binary holds check's report and
+      # patch to the policy again and opens it from SAFE_OUTPUTS_PAT's
+      # fork. The job token never can, so it gets none. What it printed,
+      # its `error:` lines included (each one line, escaped), goes into
+      # the summary as code; the status comment says only that it failed.
+      - name: Open the secondary pull request
+        id: secondary
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -e --slurpfile policy "$GH_AW_TMP/policy.json" '($policy[0].secondary_pull_request.repo // null) as $repo |
+            $repo != null and (.secondary_patch != null or any(.items[]; .type == "create_pull_request" and .repo == $repo))' "$REPORT" > /dev/null || exit 0
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          state=0
+          "$RUNNER_TEMP/apply-binary/agentic-job" secondary-pull-request --policy "$GH_AW_TMP/policy.json" --checked "$GH_AW_TMP" \
+            --run-id "$GITHUB_RUN_ID" --run-url "$RUN_URL" > "$RUNNER_TEMP/secondary.log" 2>&1 || state=$?
+          cat "$RUNNER_TEMP/secondary.log"
+          { printf '### The secondary pull request\n\n'; sed 's/^/    /' "$RUNNER_TEMP/secondary.log"; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$state" = 0 ] || { echo failed=true >> "$GITHUB_OUTPUT"; echo "::error::the secondary pull request was not opened; the summary says why"; exit 1; }
       # A continuation under `ready_when_complete`: once its push is on the
       # branch, the pull request is marked ready if the work is complete,
       # and made a draft again at a checkpoint. This is the one place apply
@@ -1258,6 +1283,7 @@ jobs:
           REFUSAL: ${{ fromJSON(inputs.check).outputs.refusal }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
           HANDLER_ERRORS: ${{ needs.apply.outputs.handler-errors }}
+          SECONDARY_FAILED: ${{ needs.apply.outputs.secondary-failed }}
           STAGED: ${{ fromJSON(inputs.policy).apply-staged }}
         run: |
           [[ "$EXIT" =~ ^[0-9]*$ && "$PR" =~ ^[0-9]*$ && ( -z "$PR_REPO" || "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ) ]]
@@ -1295,6 +1321,7 @@ jobs:
           [ -z "$REFUSAL" ] || text="❌ [$WORKFLOW]($RUN_URL) refused by check: $REFUSAL"
           # One line, already neutralized by apply.
           [ -z "$HANDLER_ERRORS" ] || text="$text Failed outputs: $HANDLER_ERRORS"
+          [ "$SECONDARY_FAILED" != true ] || text="$text The secondary pull request was not opened: the apply job's summary says why."
           [ -z "$RESULT_URL" ] || text="$text Result: $RESULT_URL"
           [ "${STAGED:-}" != true ] || [ "$reaction" = confused ] || text="$text Staged: nothing was applied; the apply job's summary shows what would have been."
           [ "${EXIT:-0}" = 0 ] || [ "$reaction" = confused ] || text="$text The run was stopped at a limit (exit state $EXIT${FAILURE_CLASS:+, $FAILURE_CLASS}); what it handed back is marked partial."

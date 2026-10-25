@@ -237,12 +237,17 @@ jobs:
       # Apply's handlers get the requests check accepted, and the patches
       # it checked by the names it reported. The secondary pull request's
       # goes apart, in secondary/, where neither the run's own trial nor a
-      # handler looking for the run's patch can take it.
+      # handler looking for the run's patch can take it; its request is
+      # left out of the handlers' file, and apply's `secondary-pull-request`
+      # reads it from the report, with the policy beside it.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
         run: |
-          jq '{items: .items, errors: []}' "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
+          jq --slurpfile policy "$JOB_DIR/policy.json" '($policy[0].secondary_pull_request.repo // null) as $repo |
+            {items: [.items[] | select($repo == null or .type != "create_pull_request" or .repo != $repo)], errors: []}' \
+            "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
           mv "$RUNNER_TEMP/accepted.json" "$GH_AW_TMP/agent_output.json"
+          cp "$JOB_DIR/policy.json" "$GH_AW_TMP"
           mkdir "$GH_AW_TMP/secondary"
           patch=$(jq -r '.patch.file // empty' "$GH_AW_TMP/report.json")
           [ -z "$patch" ] || cp "$JOB_DIR/safe-outputs/$patch" "$GH_AW_TMP"
@@ -268,6 +273,7 @@ jobs:
             ${{ env.GH_AW_TMP }}/agent_output.json
             ${{ env.GH_AW_TMP }}/folded.json
             ${{ env.GH_AW_TMP }}/config.json
+            ${{ env.GH_AW_TMP }}/policy.json
             ${{ env.GH_AW_TMP }}/report.json
             ${{ env.GH_AW_TMP }}/aw-*.patch
             ${{ env.GH_AW_TMP }}/replacement.json

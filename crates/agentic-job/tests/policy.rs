@@ -473,11 +473,11 @@ fn a_request_outside_the_bounds_prints_no_policy() {
     }
 }
 
-/// Bounds that configure a secondary pull request admit no run that would
-/// open one while apply.yml does not run its pass for it; a run that opens
-/// no pull request is admitted as before, without one.
+/// Bounds that configure a secondary pull request admit a run that opens
+/// one, with the secondary in its policy; a run that opens no pull request
+/// is admitted as before, without one.
 #[test]
-fn a_secondary_pull_request_is_not_yet_admitted() {
+fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     let dir = tempfile::tempdir().unwrap();
     let allow = dir.path().join("allow.toml");
     let text = std::fs::read_to_string(data("allow.toml")).unwrap();
@@ -492,11 +492,11 @@ fn a_secondary_pull_request_is_not_yet_admitted() {
     .unwrap();
     let output = policy(&allow, &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(output.stdout.is_empty());
-    assert!(
-        stderr.contains("secondary_pull_request is not yet supported by apply"),
-        "{stderr}"
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        printed["secondary_pull_request"]["repo"], "cgwalters-forge/misctool",
+        "{printed}"
     );
     let output = policy(&allow, &[("--outputs", "add_comment,noop")]);
     let stderr = String::from_utf8_lossy(&output.stderr);
