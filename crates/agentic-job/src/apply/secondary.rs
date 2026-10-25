@@ -331,7 +331,7 @@ impl Github {
     }
 
     fn shown(&self, text: &str) -> String {
-        git::shown(&self.token, text)
+        git::shown(&[&self.token], text)
     }
 
     /// Git with the token, as GitHub's git takes it.

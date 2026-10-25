@@ -205,7 +205,7 @@ impl Forgejo {
 
     /// TEXT as an error shows it: see [`git::shown`].
     fn shown(&self, text: &str) -> String {
-        git::shown(&self.token, text)
+        git::shown(&[&self.token], text)
     }
 
     /// Refuses a push repository that is not a fork of the repository, as
