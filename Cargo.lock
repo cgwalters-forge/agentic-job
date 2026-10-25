@@ -64,6 +64,7 @@ version = "0.6.4"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "flate2",

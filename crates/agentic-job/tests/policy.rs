@@ -474,7 +474,7 @@ fn a_request_outside_the_bounds_prints_no_policy() {
 }
 
 /// Bounds that configure a secondary pull request admit no run that would
-/// open one while apply has no pass of its own for it; a run that opens
+/// open one while apply.yml does not run its pass for it; a run that opens
 /// no pull request is admitted as before, without one.
 #[test]
 fn a_secondary_pull_request_is_not_yet_admitted() {

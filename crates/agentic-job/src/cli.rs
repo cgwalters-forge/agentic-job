@@ -57,6 +57,8 @@ pub enum Command {
     Apply(crate::apply::Args),
     /// Link checked pull requests to the caller's issue before publication
     LinkIssue(crate::apply::issue_reference::Args),
+    /// Open the policy's checked secondary pull request on GitHub, from SAFE_OUTPUTS_PAT's fork, after apply's handlers
+    SecondaryPullRequest(crate::apply::secondary::Args),
     /// Rebuild and push a checked replacement series of a pull request's branch
     #[command(subcommand)]
     Replacement(crate::apply::replacement::Command),
@@ -103,6 +105,7 @@ impl Command {
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
+            Self::SecondaryPullRequest(args) => crate::apply::secondary::run(args),
             Self::Replacement(command) => command.run(),
             Self::Diagnostics(command) => command.run(),
             Self::Event(args) => event::run(args),
@@ -200,6 +203,17 @@ mod tests {
             "5",
             "--push-repo",
             "bot/name",
+        ],
+        &[
+            "secondary-pull-request",
+            "--policy",
+            "p.json",
+            "--checked",
+            "dir",
+            "--run-id",
+            "7",
+            "--run-url",
+            "https://github.com/owner/name/actions/runs/7",
         ],
     ];
 
