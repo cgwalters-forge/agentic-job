@@ -125,10 +125,12 @@ and `collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`.
 ## Tests and CI
 
 Unit tests sit beside Rust code. Binary integration tests are in
-`crates/agentic-job/tests/`. Its `corpus/` directory compares policy,
-patch and network behavior with the old tree at the pin recorded in
-[plan.md](plan.md). Those Node tests require separate old-tree and gh-aw
-checkouts; their source files document the environment variables.
+`crates/agentic-job/tests/`. Its `corpus/` directory compares policy
+and patch behavior with the old tree at the pin recorded in
+[plan.md](plan.md), and runs `collect` and `check` against gh-aw's
+pinned handlers with a mocked forge. Those Node tests require separate
+old-tree and gh-aw checkouts; their source files document the
+environment variables.
 
 [ci.yml](../.github/workflows/ci.yml) runs Rust formatting, clippy and tests,
 Markdown linting and offline links, proxy tests and release-pin checks (one

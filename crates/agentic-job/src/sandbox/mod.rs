@@ -32,28 +32,9 @@ pub enum Command {
     /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
     #[command(hide = true)]
     ProbeLocal,
-    /// Print the network rules setup would load; CI compares them with the old tree's
-    #[command(hide = true)]
-    NftRules(NftRulesArgs),
     /// Run the egress proxy; `setup` starts it as its own user unless `egress.rust-proxy = false`
     #[command(hide = true)]
     EgressProxy(proxy::Args),
-}
-
-#[derive(Debug, clap::Args)]
-pub struct NftRulesArgs {
-    /// The sandbox user's uid, and each range of its subordinate uids as START-END
-    #[arg(long = "uid", value_name = "UID", required = true)]
-    pub uids: Vec<String>,
-    /// A URL reached directly, as `[egress] direct` has them
-    #[arg(long, value_name = "URL")]
-    pub direct: Vec<String>,
-    /// The egress proxy's uid; without it, the rules of a host that has no proxy
-    #[arg(long, value_name = "UID")]
-    pub proxy_uid: Option<u32>,
-    /// Literal DNS resolver allowed for the proxy
-    #[arg(long, value_name = "IP")]
-    pub resolver: Vec<std::net::IpAddr>,
 }
 
 impl Command {
@@ -64,26 +45,6 @@ impl Command {
             Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run().map(|()| Exit::Success),
             Self::EgressProxy(args) => proxy::run(args).map(|()| Exit::Success),
-            Self::NftRules(args) => {
-                let direct = args
-                    .direct
-                    .iter()
-                    .map(|url| network::Direct::parse(url))
-                    .collect::<Result<Vec<_>>>()?;
-                print!(
-                    "{}",
-                    network::rules_with_resolvers(
-                        &args.uids,
-                        &direct,
-                        args.proxy_uid,
-                        &args.resolver,
-                        &[],
-                        None,
-                        &[]
-                    )
-                );
-                Ok(Exit::Success)
-            }
         }
     }
 }

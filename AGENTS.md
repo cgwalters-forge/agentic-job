@@ -48,7 +48,6 @@ Run the narrow test covering a change first, then the applicable checks above.
 Passing the workspace suite does **not** prove the privileged integration paths:
 `run` and `probe` tests can return successfully without executing those paths,
 and `session` uses a different path without `AGENTIC_JOB_TEST_SANDBOX_USER`.
-Old-tree hand-back parity also skips without `OLD_TREE`.
 
 Other CI checks need a prepared runner; their exact setup, commands and pins
 are in [ci.yml](.github/workflows/ci.yml) and [build.yml](.github/workflows/build.yml).

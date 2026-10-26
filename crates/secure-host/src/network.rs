@@ -494,8 +494,7 @@ mod tests {
         }
     }
 
-    /// The whole text for one case; the corpus test in CI compares every
-    /// shape with the old tree's own function.
+    /// The whole text for sandbox uids, a direct endpoint and the proxy.
     #[test]
     fn ruleset_with_everything() {
         let uids = ["1002".to_owned(), "165536-231071".to_owned()];
