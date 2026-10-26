@@ -79,6 +79,104 @@ fn notify_takes_only_a_numeric_target_without_an_event() {
     }
 }
 
+/// A task passed as `task-artifact` is downloaded before the mode check,
+/// refused beside `task` or when empty, and becomes the policy's task.md;
+/// the composed example passes its task that way, as CI's e2e-compose.
+#[test]
+fn policy_takes_the_task_as_an_artifact() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join(".github/workflows/policy.yml")).unwrap();
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let steps = doc["jobs"]["policy"]["steps"].as_vec().unwrap();
+    let index = |name: &str| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let gate = index("Check the proposals mode");
+    let download = steps
+        .iter()
+        .position(|step| step["with"]["name"].as_str() == Some("${{ inputs.task-artifact }}"))
+        .unwrap();
+    assert!(download < gate);
+    assert_eq!(
+        steps[download]["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/task-artifact")
+    );
+    let script = |index: usize| steps[index]["run"].as_str().unwrap();
+    let write = index("Write the task and the run's settings");
+    // [task, task-artifact, task.md in it, proposals, event, status]
+    for (task, artifact, file, proposals, event, success) in [
+        ("", "task", Some("run\n"), "", "false", true),
+        ("", "$(exit 0)", Some("run\n"), "", "false", true),
+        ("", "task", Some("run\n"), "", "true", true),
+        ("run", "task", Some("run\n"), "", "false", false),
+        ("", "task", Some(""), "", "false", false),
+        ("", "task", Some(" \n"), "", "false", false),
+        ("", "task", None, "", "false", false),
+        ("", "task", None, "proposals", "false", false),
+        ("run", "", None, "", "false", true),
+        ("", "", None, "", "false", false),
+        ("", "", None, "proposals", "false", true),
+    ] {
+        let case = format!("{task:?} {artifact:?} {file:?} {proposals:?} {event:?}");
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(file) = file {
+            std::fs::create_dir(dir.path().join("task-artifact")).unwrap();
+            std::fs::write(dir.path().join("task-artifact/task.md"), file).unwrap();
+        }
+        let output = Command::new("bash")
+            .args(["-eo", "pipefail", "-c", script(gate)])
+            .env("RUNNER_TEMP", dir.path())
+            .env("TASK", task)
+            .env("TASK_ARTIFACT", artifact)
+            .env("PROPOSALS", proposals)
+            .env("EVENT", event)
+            .env("REVIEW", "false")
+            .env("PARTIAL", "false")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{case}: {output:?}");
+        if task.is_empty() && artifact.is_empty() && proposals.is_empty() {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("secret masker"));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("task-artifact")).unwrap();
+    std::fs::write(dir.path().join("task-artifact/task.md"), "a task\n").unwrap();
+    let status = Command::new("bash")
+        .args(["-eo", "pipefail", "-c", script(write)])
+        .env("RUNNER_TEMP", dir.path())
+        .env("JOB_DIR", dir.path())
+        .env("EVENT", "false")
+        .env("TASK", "")
+        .env("TASK_ARTIFACT", "task")
+        .env("PROFILE", "")
+        .env("ISSUE", "")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("task.md")).unwrap(),
+        "a task\n"
+    );
+    let compose =
+        std::fs::read_to_string(root.join(".github/workflows/example-compose.yml")).unwrap();
+    let compose = &yaml_rust2::YamlLoader::load_from_str(&compose).unwrap()[0];
+    let upload = &compose["jobs"]["task"]["steps"][1]["with"];
+    let policy = &compose["jobs"]["policy"];
+    assert_eq!(policy["needs"].as_str(), Some("task"));
+    assert_eq!(upload["name"].as_str(), Some("compose-task"));
+    assert_eq!(upload["path"].as_str(), Some("task/task.md"));
+    assert_eq!(
+        policy["with"]["task-artifact"].as_str(),
+        Some("compose-task")
+    );
+    assert!(policy["with"]["task"].is_badvalue());
+}
+
 #[test]
 fn run_action_forwards_summary_cost_without_inventing_unknown_cost() {
     use serde_json::json;

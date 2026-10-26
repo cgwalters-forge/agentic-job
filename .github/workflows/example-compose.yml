@@ -56,11 +56,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The task as an artifact, not a job output: the runner drops an output
+  # its secret masker changes, so a task that quotes credential-shaped
+  # text would reach policy empty.
+  task:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - env:
+          TASK: ${{ inputs.task }}
+        run: mkdir task && printf '%s\n' "$TASK" > task/task.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compose-task
+          path: task/task.md
+          if-no-files-found: error
+
   # Another repository names each piece by the commit it has read, the
   # same for all three, which also pins the binary and the agent job's
   # actions (the policy call's source-repository and source-sha):
   #   uses: cgwalters-forge/agentic-job/.github/workflows/NAME.yml@COMMIT
   policy:
+    needs: task
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     # Policy reads; activate and notify act on no event here.
     permissions:
@@ -69,7 +86,7 @@ jobs:
     with:
       id: ${{ github.repository }}#${{ inputs.item }}
       repo: ${{ github.repository }}
-      task: ${{ inputs.task }}
+      task-artifact: compose-task
       kind: analysis
       outputs: add_comment,noop
       max-outputs: "1"
