@@ -28,8 +28,7 @@ builds that source. `build-binary: true` forces a build.
 
 Internal commands are hidden: `launch-agent`
 (what `run` has the session start, as the sandbox user), `sandbox
-probe-local` (what `sandbox check` runs as the sandbox user) and one
-that prints the network rules for a test (`sandbox nft-rules`), and
+probe-local` (what `sandbox check` runs as the sandbox user), and
 `helper`, the root-owned entry point for privileged operations after setup.
 
 `sandbox check` and `run` are the supervisor. It runs as the runner's

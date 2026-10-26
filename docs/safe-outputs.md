@@ -1038,8 +1038,8 @@ git would apply each, and a reader looking for `diff --git` lines would
 miss it. `--report` is the verdict as JSON, with the paths the patch
 names. CI runs a corpus of hand-backs through the old tree's check and
 this one, which must agree but for those differences
-(`crates/agentic-job/tests/corpus`); two are the hand-backs of real
-runs.
+(`crates/agentic-job/tests/corpus`). `crates/agentic-job/tests/check.rs`
+checks the hand-backs of two real runs (`safe-outputs/fixtures`).
 
 `check` reads text, on a machine without the repository. It cannot see
 that `git am --3way` follows renames, that the base commit is only the

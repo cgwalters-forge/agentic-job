@@ -220,6 +220,80 @@ fn a_hand_back_outside_the_policy_is_refused_with_its_reasons() {
     );
 }
 
+/// The hand-backs of two real runs (`safe-outputs/fixtures`, which the
+/// safe-outputs probe also applies), each through `collect` and `check`
+/// under a policy of the kind its run had: both are accepted whole.
+#[test]
+fn the_hand_backs_of_real_runs_are_accepted() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../safe-outputs/fixtures");
+    for (name, repo, kind, outputs) in [
+        (
+            "create-pull-request",
+            "cgwalters-bot/homegit",
+            "branch",
+            "create_pull_request,noop,missing_tool",
+        ),
+        (
+            "add-comment",
+            "cgwalters-bot/homegit",
+            "analysis",
+            "add_comment,noop,missing_data",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |file: &str| dir.path().join(file);
+        let policy = Command::new(BIN)
+            .args(["policy", "--repo", repo, "--base", "main"])
+            .args(["--kind", kind])
+            .arg("--clone-url")
+            .arg(format!("https://github.com/{repo}"))
+            .args(["--outputs", outputs, "--max-outputs", "3", "--allow"])
+            .arg(data("policy/allow.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            policy.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&policy.stderr)
+        );
+        std::fs::write(path("policy.json"), policy.stdout).unwrap();
+        let from = fixtures.join(name);
+        let source: Value =
+            serde_json::from_slice(&std::fs::read(from.join("source.json")).unwrap()).unwrap();
+        std::fs::create_dir(path("out")).unwrap();
+        for file in source["files"].as_array().unwrap() {
+            let file = file.as_str().unwrap();
+            std::fs::copy(from.join(file), path("out").join(file)).unwrap();
+        }
+        for (command, written) in [("collect", "--collected"), ("check", "--report")] {
+            let mut run = Command::new(BIN);
+            run.arg(command)
+                .arg("--policy")
+                .arg(path("policy.json"))
+                .arg("--outputs")
+                .arg(path("out"));
+            if command == "check" {
+                run.arg("--collected").arg(path("collect.json"));
+            }
+            let output = run
+                .arg(written)
+                .arg(path(&format!("{command}.json")))
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{name}: {command}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let verdict: Value =
+            serde_json::from_slice(&std::fs::read(path("check.json")).unwrap()).unwrap();
+        assert_eq!(verdict["ok"], true, "{name}: {verdict}");
+        assert_eq!(verdict["items"].as_array().unwrap().len(), 1, "{name}");
+    }
+}
+
 #[test]
 fn a_check_that_cannot_be_made_is_an_error_and_writes_no_verdict() {
     let run = Run::new();

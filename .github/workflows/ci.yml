@@ -354,11 +354,11 @@ jobs:
           tool: just@1.58.0
       - run: just claude-acp-test
 
-  # The old tree's check and the new one, on the same requests and
-  # hand-backs: crates/agentic-job/tests/corpus. The old tree is fetched at
-  # the commit docs/plan.md names as the parity target, and gh-aw's
-  # collector at the commit the old tree vendored it from; neither is
-  # copied here.
+  # crates/agentic-job/tests/corpus: `collect` and `check` against gh-aw's
+  # pinned handlers, with a mocked forge, and the old tree's check and the
+  # new one on the same requests and hand-backs. The old tree is fetched
+  # at the commit docs/plan.md names, and gh-aw's scripts at the commit
+  # the old tree vendored them from; neither is copied here.
   corpus:
     needs: changes
     if: ${{ needs.changes.outputs.full == 'true' }}
@@ -400,14 +400,6 @@ jobs:
         env:
           AGENTIC_JOB: target/debug/agentic-job
           GH_AW_JS: ${{ env.GH_AW }}/actions/setup/js
-      # The network rules, and the egress proxy's files, against the old
-      # tree's.
-      - run: node --test crates/agentic-job/tests/corpus/nft.test.mjs
-        env:
-          AGENTIC_JOB: target/debug/agentic-job
-      # The old tree's handback.mjs and `run`'s hand-back, on the same
-      # checkouts: the same files, but for the commit's message.
-      - run: cargo test --locked --test handback
 
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
