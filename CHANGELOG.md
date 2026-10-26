@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `policy.yml` and `agentic-job.yml` take the task as an artifact,
+  `task-artifact`, in place of `task`: the runner drops a job output its secret masker changes, so
+  a task quoting credential-shaped text no longer reaches policy empty.
 - `budget-usd` caps a run's spend in US dollars. `budget` (AIC) is
   deprecated and used only while `budget-usd` is empty; it will be
   removed after one release. Run summaries and opted-in status comments

@@ -42,6 +42,12 @@ on:
           standing instruction the event's text follows, 64 KiB at most
         type: string
         default: ""
+      task-artifact:
+        description: >-
+          Artifact from a caller job containing task.md, the task in place of `task`: a job output
+          the runner's secret masker changes is dropped, task and all, and an artifact is not
+        type: string
+        default: ""
       proposals-artifact:
         description: Artifact from a caller job containing outputs.jsonl (and optional base.json and patch); skips the agent
         type: string
@@ -414,6 +420,7 @@ jobs:
     with:
       id: ${{ inputs.id }}
       task: ${{ inputs.task }}
+      task-artifact: ${{ inputs.task-artifact }}
       proposals-artifact: ${{ inputs.proposals-artifact }}
       review: ${{ inputs.review }}
       review-task: ${{ inputs.review-task }}

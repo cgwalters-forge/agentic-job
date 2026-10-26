@@ -24,8 +24,8 @@ called with `workflow_call`. Its `description:` fields and
 
 Inputs:
 
-- the run: `id`, `task`, `repo`, `base`, `kind`, `outputs`,
-  `max-outputs`, `allow`, `config`, `context`, `push-item`,
+- the run: `id`, `task`, `task-artifact`, `repo`, `base`, `kind`,
+  `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
   `proposals-artifact`;
 - reviews and events: `review`, `review-task`, `review-item`, `event`;
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,

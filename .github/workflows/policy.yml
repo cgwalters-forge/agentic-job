@@ -34,6 +34,12 @@ on:
           standing instruction the event's text follows, 64 KiB at most
         type: string
         default: ""
+      task-artifact:
+        description: >-
+          Artifact from a caller job containing task.md, the task in place of `task`: a job output
+          the runner's secret masker changes is dropped, task and all, and an artifact is not
+        type: string
+        default: ""
       proposals-artifact:
         description: Artifact from a caller job containing outputs.jsonl (and optional base.json and patch); skips the agent
         type: string
@@ -477,6 +483,12 @@ jobs:
       notify: ${{ inputs.notify }}
       status-comment: ${{ inputs.status-comment }}
     steps:
+      # Outside the workspace, which the checkout below empties.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ inputs.task-artifact != '' }}
+        with:
+          name: ${{ inputs.task-artifact }}
+          path: ${{ runner.temp }}/task-artifact
       - name: Check the proposals mode
         env:
           PROPOSALS: ${{ inputs.proposals-artifact }}
@@ -484,11 +496,18 @@ jobs:
           REVIEW: ${{ inputs.review }}
           PARTIAL: ${{ inputs.apply-partial }}
           TASK: ${{ inputs.task }}
+          TASK_ARTIFACT: ${{ inputs.task-artifact }}
         run: |
+          if [ -n "$TASK_ARTIFACT" ]; then
+            [ -z "$TASK" ] || { echo '::error::choose task or task-artifact, not both'; exit 1; }
+            file=$RUNNER_TEMP/task-artifact/task.md
+            [ -f "$file" ] && [ ! -L "$file" ] && grep -q '[^[:space:]]' "$file" ||
+              { echo "::error::task-artifact $TASK_ARTIFACT has no task.md, or a blank one; was it uploaded empty?"; exit 1; }
+          fi
           if [ -n "$PROPOSALS" ]; then
             [ "$EVENT/$REVIEW/$PARTIAL" = false/false/false ] || { echo '::error::proposals mode cannot use event, review or apply-partial'; exit 1; }
-          elif [ "$EVENT/$REVIEW" = false/false ]; then
-            [ -n "$TASK" ] || { echo '::error::an agent run needs a task'; exit 1; }
+          elif [ "$EVENT/$REVIEW" = false/false ] && [ -z "$TASK_ARTIFACT" ]; then
+            [ -n "$TASK" ] || { echo '::error::an agent run needs a task; an empty one is usually a job output the runner dropped because the secret masker changed it: pass the task as task-artifact'; exit 1; }
           fi
       # The calling repository, for its bounds file.
       # The agent job checks out the same commit (the `ref` output), for
@@ -599,6 +618,7 @@ jobs:
         env:
           ALLOW: ${{ inputs.allow }}
           TASK: ${{ inputs.task }}
+          TASK_ARTIFACT: ${{ inputs.task-artifact }}
           ACTOR: ${{ github.actor }}
           REVIEW: ${{ inputs.review }}
           REVIEW_TASK: ${{ inputs.review-task }}
@@ -614,7 +634,8 @@ jobs:
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
           AGENT: ${{ inputs.agent }}
         run: |
-          printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"
+          if [ -n "$TASK_ARTIFACT" ]; then cp "$RUNNER_TEMP/task-artifact/task.md" "$RUNNER_TEMP/task.md"
+          else printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"; fi
           if [ "$REVIEW" = true ]; then "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
           [ ! -e "$RUNNER_TEMP/permission.json" ] || set -- "$@" --actor-permission "$RUNNER_TEMP/permission.json"
           [ ! -e "$RUNNER_TEMP/pull.json" ] || set -- "$@" --pull-request "$RUNNER_TEMP/pull.json"
@@ -848,6 +869,7 @@ jobs:
         env:
           EVENT: ${{ inputs.event }}
           TASK: ${{ inputs.task }}
+          TASK_ARTIFACT: ${{ inputs.task-artifact }}
           ID: ${{ inputs.id }}
           REPO: ${{ inputs.repo }}
           AGENT: ${{ inputs.agent }}
@@ -867,6 +889,7 @@ jobs:
             case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
           fi
           if [ "$EVENT" = true ]; then [ -s "$JOB_DIR/task.md" ] || { echo "::error::the decision left no task for an event-triggered run"; exit 1; }
+          elif [ -n "$TASK_ARTIFACT" ]; then cp "$RUNNER_TEMP/task-artifact/task.md" "$JOB_DIR/task.md"
           else printf '%s\n' "$TASK" > "$JOB_DIR/task.md"; fi
           # The issue or pull request the run is for, which `run` watches
           # for the agent where the configuration's [session] watch-item
