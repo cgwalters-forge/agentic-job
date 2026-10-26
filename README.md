@@ -496,6 +496,9 @@ the issue that tracks it, where one is filed.
   for its agent.
 - [docs/related-projects.md](docs/related-projects.md): other projects
   in this space.
+- [docs/stable-interfaces.md](docs/stable-interfaces.md): what a caller
+  may rely on across releases, and [CHANGELOG.md](CHANGELOG.md): what
+  each release changed.
 - [docs/plan.md](docs/plan.md): what is left.
 
 ## License

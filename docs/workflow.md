@@ -2195,7 +2195,9 @@ rerunning repairs an interrupted draft. Repeated builds of the same source
 leave the first published release intact.
 
 **Versions to pin.** A version is released by hand: raise the
-workspace's version in `Cargo.toml`, merge, and run the `release`
+workspace's version in `Cargo.toml`, move
+[CHANGELOG.md](../CHANGELOG.md)'s Unreleased entries under that
+version, merge, and run the `release`
 workflow on main with that version (`0.1.0`, no `v`). It refuses a run
 off main, a version that is not `MAJOR.MINOR.PATCH`, not the workspace's
 or not newer than every `v` tag (`just release-check`), and a run whose
