@@ -665,6 +665,14 @@ pub fn claude_env(endpoint: &Endpoint, token: &Token) -> BTreeMap<&'static str, 
 /// ([`api_key::FRONT_PORT`]), which `sandbox setup` knows before any run:
 /// a target repository's settings cannot then send the conversation
 /// elsewhere.
+///
+/// They also turn off Claude Code's own credit in what the agent writes,
+/// so that the run's configured trailers are the only ones: empty
+/// `attribution.commit` and `attribution.pr` hide its `Co-Authored-By`
+/// trailer and its "Generated with Claude Code" line. The deprecated
+/// `includeCoAuthoredBy: false` (since 2.0.62) does the same for older
+/// versions, which only read that key; newer ones ignore it once
+/// `attribution` is set.
 pub fn claude_managed_settings(endpoint: &Endpoint) -> Value {
     let base = if endpoint.front {
         format!("{}{}", api_key::front_url(), api_key::FRONT_ANTHROPIC)
@@ -691,6 +699,8 @@ pub fn claude_managed_settings(endpoint: &Endpoint) -> Value {
         "allowManagedHooksOnly": true,
         "allowManagedPermissionRulesOnly": true,
         "permissions": {"defaultMode": "default", "disableBypassPermissionsMode": "disable"},
+        "attribution": {"commit": "", "pr": ""},
+        "includeCoAuthoredBy": false,
     })
 }
 
@@ -1364,11 +1374,25 @@ mod tests {
         }
     }
 
+    /// Parses CONFIGURATION's managed settings, which `run` checks,
+    /// asserting they equal those `sandbox setup` writes for CONFIGURED
+    /// and turn off Claude Code's own attribution.
+    fn written_managed_settings(configuration: &Configuration, configured: &Endpoint) -> Value {
+        let written = managed_settings(Kind::Claude, Some(configured));
+        assert_eq!(configuration.managed, written);
+        let managed: Value = serde_json::from_str(&written.unwrap().1).unwrap();
+        assert_eq!(managed["attribution"], json!({"commit": "", "pr": ""}));
+        assert_eq!(managed["includeCoAuthoredBy"], false);
+        managed
+    }
+
     /// Claude Code starts with the proxy and the run token and no other
     /// provider setting, and the token is in one file.
     #[test]
     fn claude_gets_the_proxy_and_the_token_in_one_file() {
-        let got = claude(&endpoint(Mode::Plain), &token(), &Source::default());
+        let configured = endpoint(Mode::Plain);
+        let got = claude(&configured, &token(), &Source::default());
+        written_managed_settings(&got, &configured);
         assert_eq!(
             json_file(&got, CLAUDE_ENV_FILE),
             json!({"env": {
@@ -1395,6 +1419,8 @@ mod tests {
                 "allowManagedHooksOnly": true,
                 "allowManagedPermissionRulesOnly": true,
                 "permissions": {"defaultMode": "default", "disableBypassPermissionsMode": "disable"},
+                "attribution": {"commit": "", "pr": ""},
+                "includeCoAuthoredBy": false,
             })
         );
         let holders: Vec<_> = got
@@ -1420,7 +1446,8 @@ mod tests {
             main: Some("Be brief.\n".into()),
             ..Source::default()
         };
-        let got = claude(&endpoint(mode), &token(), &source);
+        let configured = endpoint(mode);
+        let got = claude(&configured, &token(), &source);
         assert_eq!(
             json_file(&got, CLAUDE_ENV_FILE),
             json!({"env": {
@@ -1428,6 +1455,7 @@ mod tests {
                 "ANTHROPIC_AUTH_TOKEN": TOKEN,
             }})
         );
+        written_managed_settings(&got, &configured);
         let managed = &got.managed.as_ref().unwrap().1;
         assert!(!managed.contains(TOKEN) && !managed.contains("ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(file(&got, CLAUDE_INSTRUCTIONS_FILE), Some("Be brief.\n"));
@@ -1456,11 +1484,7 @@ mod tests {
             ..configured.clone()
         };
         let got = claude(&agent, &token(), &Source::default());
-        assert_eq!(
-            got.managed,
-            managed_settings(Kind::Claude, Some(&configured))
-        );
-        let managed: Value = serde_json::from_str(&got.managed.as_ref().unwrap().1).unwrap();
+        let managed = written_managed_settings(&got, &configured);
         let private = json_file(&got, CLAUDE_ENV_FILE);
         assert_eq!(managed["env"]["ANTHROPIC_BASE_URL"], agent.anthropic_url);
         assert_eq!(private["env"]["ANTHROPIC_BASE_URL"], agent.anthropic_url);
