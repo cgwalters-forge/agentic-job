@@ -26,8 +26,9 @@
 #                                       release.json for a build of this source
 #
 # The action and the reusable workflow's policy job both run `get`, the
-# workflows that publish a release run `pin`, and binary.test.mjs covers
-# verification: the rule is written once.
+# workflows that publish a release run `pin`, and
+# crates/agentic-job/tests/binary_sh.rs covers verification: the rule is
+# written once.
 
 set -euo pipefail
 shopt -s inherit_errexit

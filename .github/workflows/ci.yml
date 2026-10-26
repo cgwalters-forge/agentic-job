@@ -154,8 +154,6 @@ jobs:
           args: --offline --include-fragments --no-progress "**/*.md"
           failIfEmpty: false
           fail: true
-      # Source-addressed release selection and fail-closed verification tests.
-      - run: node --test secure-host/binary.test.mjs secure-host/refresh-feed.test.mjs
       # The digest of a checkout is the digest of the same commit as a
       # runner fetches it for an action, an archive without git.
       - name: The checkout and action archive have the same source digest

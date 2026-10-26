@@ -87,16 +87,16 @@ request's branch is deleted it opens another.
 
 ## Run it
 
-Install Java (21 works), Node 22 and curl, then from the repository root:
+Install Java (21 works), Rust and curl, then from the repository root:
 
 ```sh
 bash specs/check.sh
 ```
 
-`JAVA_BIN` can name a non-default Java executable. The four-line shell launcher
-uses [check.mjs](check.mjs) to download the official `tla2tools.jar` v1.8.0 and
-verify the SHA-256 pinned in source before execution. This pin matches the
-release API's asset digest; downloads and TLC state files stay in a temporary
+`JAVA_BIN` can name a non-default Java executable. The shell launcher runs
+[specs-check](../crates/agentic-job/src/bin/specs-check.rs) to download the official
+`tla2tools.jar` v1.7.4 and verify the SHA-256 pinned in source before execution.
+The pin is the SHA-256 of the download whose SHA-1 the release notes publish; downloads and TLC state files stay in a temporary
 directory printed at the start. `TMPDIR` can move it outside the checkout.
 The script prints full TLC output and keeps each report there. No jar, generated
 trace module, or state database is committed.
