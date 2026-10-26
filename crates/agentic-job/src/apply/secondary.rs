@@ -13,14 +13,12 @@
 //! request to the forge, so a refusal leaves it as it was.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
 
-use super::git::{self, Git, Push};
+use super::git::Push;
+pub use super::github::Github;
 use super::{COMMIT_RE, Report, footer, mentions, owner, read_report, with_footer};
 use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
@@ -31,19 +29,9 @@ use crate::policy::{CREATE_PULL_REQUEST, Forge, PatchRules, Policy, Secondary};
 /// a user's, which can fork.
 pub const TOKEN_ENV: &str = "SAFE_OUTPUTS_PAT";
 
-const API_URL_VAR: &str = "GITHUB_API_URL";
-
-const DEFAULT_API: &str = "https://api.github.com";
-
 /// Where check.yml puts the secondary's patch in its upload: apart from
 /// the run's own, which apply's handlers and trial take.
 pub const PATCH_DIR: &str = "secondary";
-
-/// How often, and how far apart, git is asked whether the fork is there:
-/// the forge makes it in the background. apply.yml's fork step waits so.
-const FORK_TRIES: u32 = 30;
-
-const FORK_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -244,186 +232,18 @@ fn pull_request(
     }
 }
 
-/// GitHub's REST API and git, with apply's token.
-pub struct Github {
-    api: String,
-    token: String,
-    http: ureq::Agent,
-    /// Between asking git whether the fork is there.
-    fork_wait: Duration,
-}
-
 impl Github {
-    /// API is GitHub's REST API, `https://api.github.com` or a server's.
-    pub fn new(api: &str, token: String) -> Result<Self> {
-        let api = api.trim_end_matches('/');
-        ensure!(
-            api.starts_with("https://") || is_loopback_http(api),
-            "{API_URL_VAR} requires HTTPS"
-        );
-        let http = ureq::Agent::config_builder()
-            .timeout_global(Some(super::forgejo::TIMEOUT))
-            .proxy(None)
-            // The token is not to follow a redirect anywhere.
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
-        Ok(Self {
-            api: api.to_owned(),
-            token,
-            http,
-            fork_wait: FORK_WAIT,
-        })
-    }
-
-    /// Sends METHOD with BODY to PATH under the API, and returns the JSON
-    /// of a successful answer (null for none).
-    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-        let url = format!("{}{path}", self.api);
-        let authorization = format!("Bearer {}", self.token);
-        let request = |builder: ureq::RequestBuilder<ureq::typestate::WithBody>| {
-            builder
-                .header("authorization", &authorization)
-                .header("accept", "application/vnd.github+json")
-                .header("user-agent", "agentic-job")
-                .header("content-type", "application/json")
-                .send(body.map(Value::to_string).unwrap_or_default().as_bytes())
-        };
-        let response = match method {
-            "GET" => self
-                .http
-                .get(&url)
-                .header("authorization", &authorization)
-                .header("accept", "application/vnd.github+json")
-                .header("user-agent", "agentic-job")
-                .call(),
-            "POST" => request(self.http.post(&url)),
-            "PUT" => request(self.http.put(&url)),
-            _ => bail!("{method} is not a method this sends"),
-        };
-        let mut response = match response {
-            Ok(response) => response,
-            Err(err) => bail!("{method} {path}: {}", self.shown(&err.to_string())),
-        };
-        let status = response.status();
-        let text = match response
-            .body_mut()
-            .with_config()
-            .limit(super::forgejo::MAX_RESPONSE)
-            .read_to_string()
-        {
-            Ok(text) => text,
-            Err(err) => bail!("{method} {path}: {}", self.shown(&err.to_string())),
-        };
-        if !status.is_success() {
-            bail!(
-                "{method} {path}: HTTP {}: {}",
-                status.as_u16(),
-                self.shown(&text)
-            );
-        }
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text)
-            .with_context(|| format!("{method} {path}: the response is not JSON"))
-    }
-
-    fn shown(&self, text: &str) -> String {
-        git::shown(&[&self.token], text)
-    }
-
-    /// Git with the token, as GitHub's git takes it.
-    fn git(&self) -> Git<'_> {
-        let basic = BASE64.encode(format!("x-access-token:{}", self.token));
-        Git {
-            authorization: format!("Basic {basic}"),
-            token: &self.token,
-        }
-    }
-
-    /// The token's own fork of REPO, made or found, with Actions off, that
-    /// git reaches at its name under SERVER. Its CI is what a push with a
-    /// user's token would start, with the fork's secrets: nothing is
-    /// pushed unless the forge says Actions are off there. The repository
-    /// itself, or another of its owner's, is never pushed to: there its
-    /// CI would run the agent's code with the repository's secrets. Nor
-    /// is OWN_REPO, the run's own, should it be the token's fork of REPO:
-    /// its Actions are its own CI, and the secondary makes it no more
-    /// writable.
-    fn fork(&self, repo: &str, own_repo: &str, server: &str) -> Result<String> {
-        let me = self.send("GET", "/user", None)?["login"]
-            .as_str()
-            .filter(|login| !login.is_empty())
-            .map(str::to_owned)
-            .with_context(|| {
-                format!("GET /user names nobody: {TOKEN_ENV} must be a user's token")
-            })?;
-        ensure!(
-            !me.eq_ignore_ascii_case(owner(repo)),
-            "{me} owns {repo} and has no fork of it to push to"
-        );
-        let fork = self.send(
-            "POST",
-            &format!("/repos/{repo}/forks"),
-            Some(&json!({"default_branch_only": true})),
-        )?;
-        let name = fork["full_name"].as_str().unwrap_or_default().to_owned();
-        let named = |value: &Value, want: &str| {
-            value
-                .as_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case(want))
-        };
-        ensure!(
-            fork["fork"] == Value::Bool(true)
-                && named(&fork["owner"]["login"], &me)
-                && owner(&name).eq_ignore_ascii_case(&me)
-                && named(&fork["parent"]["full_name"], repo),
-            "the forge answered a fork of {repo} for {me} with {name:?}, which is not {me}'s own fork of it"
-        );
-        ensure!(
-            !name.eq_ignore_ascii_case(own_repo),
-            "{me}'s fork of {repo} is {own_repo}, the run's own repository, which this does not \
-             push to"
-        );
-        let remote = format!("{server}/{name}.git");
-        let dir = tempfile::tempdir().context("making a directory for git")?;
-        let git = self.git();
-        for attempt in 1.. {
-            let heads = git.run(dir.path(), &["ls-remote", "--heads", &remote], None);
-            if heads.is_ok_and(|heads| heads.contains("\trefs/heads/")) {
-                break;
-            }
-            ensure!(
-                attempt < FORK_TRIES,
-                "the fork {name} is still not there after {attempt} tries"
-            );
-            std::thread::sleep(self.fork_wait);
-        }
-        let permissions = format!("/repos/{name}/actions/permissions");
-        let enabled = self
-            .send("PUT", &permissions, Some(&json!({"enabled": false})))
-            .and_then(|_| self.send("GET", &permissions, None))
-            .map(|answer| answer["enabled"].as_bool());
-        if !matches!(enabled, Ok(Some(false))) {
-            bail!(
-                "Actions could not be turned off on the fork {name}, which a push with {me}'s \
-                 token would run workflows in: turn them off there, and give {TOKEN_ENV} the \
-                 repo scope (or a fine-grained token Administration: write on the fork)"
-            );
-        }
-        Ok(name)
-    }
-
-    /// Forks, pushes the branch to the fork and opens the draft pull
+    /// Forks, pushes the branch to the token's own fork (see
+    /// [`Github::fork`]; the run's own repository is never the one, as
+    /// the secondary makes it no more writable) and opens the draft pull
     /// request from it. Returns its URL.
     pub fn open(&self, pr: &PullRequest) -> Result<String> {
         let server = pr
             .clone_url
             .strip_suffix(&format!("/{}", pr.repo))
             .with_context(|| format!("{} is not where git finds {}", pr.clone_url, pr.repo))?;
-        let fork = self.fork(&pr.repo, &pr.own_repo, server)?;
+        let me = self.login()?;
+        let fork = self.fork(&me, &pr.repo, &pr.own_repo, server)?;
         let pushing = || format!("pushing {} to {fork}", pr.branch);
         let commit = self
             .git()
@@ -462,14 +282,6 @@ impl Github {
     }
 }
 
-/// A plain HTTP address on a literal loopback address: the tests' forge.
-fn is_loopback_http(api: &str) -> bool {
-    api.strip_prefix("http://")
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|authority| authority.parse::<std::net::SocketAddr>().ok())
-        .is_some_and(|address| address.ip().is_loopback())
-}
-
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
     let pr = match plan(&args.checked, &policy, &args.run_id, &args.run_url) {
@@ -485,10 +297,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             return Ok(Exit::Failure);
         }
     };
-    let token = std::env::var(TOKEN_ENV).unwrap_or_default();
-    ensure!(!token.is_empty(), "{TOKEN_ENV} is not set");
-    let api = std::env::var(API_URL_VAR).unwrap_or_else(|_| DEFAULT_API.to_owned());
-    let url = Github::new(&api, token)?
+    let url = Github::from_env(TOKEN_ENV)?
         .open(&pr)
         .with_context(|| format!("the secondary pull request in {}", pr.repo))?;
     println!("{url}");
@@ -497,7 +306,10 @@ pub fn run(args: &Args) -> Result<Exit> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::super::forgejo::tests::{mock, repository, sh};
+    use super::super::github::FORK_TRIES;
     use super::*;
     use crate::check::BASE_COMMIT_HEADER;
 

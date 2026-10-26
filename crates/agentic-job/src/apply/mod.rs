@@ -16,10 +16,13 @@
 
 pub mod forgejo;
 mod git;
+mod github;
 pub mod issue_reference;
 mod mentions;
+pub mod push;
 pub mod replacement;
 pub mod secondary;
+pub mod status;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

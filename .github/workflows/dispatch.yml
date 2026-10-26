@@ -222,12 +222,12 @@ jobs:
       # is with the apply environment's token: a new pull request's branch
       # goes to a fork, or to a target the applying account owns that
       # accepts it, and a fix to a pull request's branch where that token
-      # may push and workflow/push.cjs allows. The job token pushes
-      # nothing.
+      # may push and `agentic-job push target` allows. The job token
+      # pushes nothing.
       contents: read
       issues: write
       pull-requests: write
-      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      actions: read # the agent job's GitHub reads, and apply's and conclude's look-ups of policy's and check's uploads
       # Asked for by register and check's detector. Activate, notify, apply
       # and conclude name no permissions, so they hold it too; the agent
       # job gets none (docs/workflow.md#what-a-caller-provides).

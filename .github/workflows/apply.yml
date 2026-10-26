@@ -181,9 +181,8 @@ jobs:
       - id: replacement
         run: echo "enabled=$(jq -r '.patch.commit_files != null' "$REPORT")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # The fork step checks where a patch goes with workflow/push.cjs,
-        # and the apply step escapes the handlers' log with
-        # workflow/workflow-commands.cjs for a run without a patch too.
+        # The apply step escapes the handlers' log with
+        # workflow/workflow-commands.cjs, for a run without a patch too.
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           repository: ${{ job.workflow_repository }}
@@ -204,6 +203,29 @@ jobs:
           git config merge.renames false
           git config diff.renames false
           git config am.keepcr true
+      # Policy's binary decides where a patch goes, rebuilds and later
+      # pushes a replacement series, links a pull request to its issue
+      # and says why a handler failed, with or without a patch; check
+      # already runs it, so every run has it. Never execute an artifact
+      # ID supplied by the caller without binding it to policy's upload
+      # in this run: an agent upload is executable code too.
+      - name: Require policy's binary
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}agentic-job-binary
+        run: |
+          [[ "$BINARY" =~ ^[1-9][0-9]*$ ]] || { echo '::error::the policy binary artifact ID is required'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINARY" |
+            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
+              '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        with:
+          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          path: ${{ runner.temp }}/apply-binary
+          digest-mismatch: error
       # A pull request is opened from a fork of the output repository owned
       # by whoever the token names, never from a branch of the output
       # repository: its CI then runs the agent's commit as a fork's, with a
@@ -223,8 +245,8 @@ jobs:
       # only where the repository says so: its `push` and `pull_request`
       # workflows then run the agent's commit with its secrets, a write
       # token and OIDC, which is what the fork prevents. It says so as for
-      # a push (`acceptsOwnerBranches` in workflow/push.cjs): the file
-      # OWNER_BRANCHES naming it on its default branch. The repository
+      # a push (`OWNER_BRANCHES` in crates/agentic-job/src/apply/push.rs):
+      # that file naming it on its default branch. The repository
       # carries that, not each caller's bounds, as it is its secrets that
       # are given up; a file, as only a commit to the default branch adds
       # one (reviewed and protected as that branch is, and never an
@@ -235,107 +257,26 @@ jobs:
       # A push goes to the same fork, and only to the branch of a pull
       # request apply opened from it, where the pull request is from that
       # fork. One from anywhere else goes to its head repository, whose CI
-      # then runs the agent's commit, only as `pushTarget` in
-      # workflow/push.cjs allows (#553). The handler pushes to the pull
+      # then runs the agent's commit, only as `push target` allows (#553;
+      # its rules are in push.rs). The handler pushes to the pull
       # request's head repository only if it is the one named here
       # (`head-repo` below); it is checked here too, before anything is
-      # fetched from it.
+      # fetched from it. A push with a PAT, unlike one with the job
+      # token, starts the fork's workflows on `push`, with the fork's
+      # secrets: Actions are turned off there, and nothing is pushed
+      # unless the forge then says they are off. The token goes to
+      # policy's binary alone, as it does for the secondary pull request.
       - name: Fork the output repository for the pull request
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           REPLACEMENT: ${{ steps.replacement.outputs.enabled }}
-        with:
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
-          script: |
-            const fs = require('node:fs');
-            const output = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
-            const push = output.items.some(item => item.type === 'push_to_pull_request_branch');
-            if (!push && !output.items.some(item => item.type === 'create_pull_request')) return;
-            const me = await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null);
-            if (!me) throw new Error("a pull request is opened from a fork of the identity apply holds, and GET /user names none: SAFE_OUTPUTS_PAT must be a user's token");
-            // A push to a pull request from anywhere but `me`'s fork goes to
-            // its head repository, as workflow/push.cjs checks; that fork's
-            // is checked below.
-            if (push) {
-              const { pushTarget } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
-              const target = await pushTarget(process.env, me, github);
-              if (target) {
-                if (target.base) core.setOutput('current-base', target.base);
-                core.setOutput('repo', target.repo);
-                return;
-              }
-            }
-            const [owner, repo] = process.env.OUTPUT_REPO.split('/');
-            const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8'));
-            if (owner.toLowerCase() === me.toLowerCase()) {
-              const refuse = why => {
-                throw new Error(`${me} owns ${process.env.OUTPUT_REPO} and has no fork of it to push to: ${why}`);
-              };
-              // A push to a branch of the repository itself returned above;
-              // what is left is one from `me`'s fork, which an owner has not.
-              if (push) refuse("a push goes only to a branch of the repository itself or of another's fork");
-              // A workflow file the agent wrote would run on its own branch.
-              if (config.create_pull_request?.unprotected_dot_folders?.includes('.github')) {
-                refuse('its branch is not pushed to the repository itself with .github exempted from protection');
-              }
-              const { acceptsOwnerBranches, OWNER_BRANCHES } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
-              if (!await acceptsOwnerBranches(process.env.OUTPUT_REPO, github)) {
-                refuse(`apply as an account that does not own it, or, for a new pull request, add ${OWNER_BRANCHES} naming ${process.env.OUTPUT_REPO} to its default branch`);
-              }
-              core.setOutput('repo', process.env.OUTPUT_REPO);
-              return;
-            }
-            // A push's pull request is checked before anything is forked:
-            // open, from the branch the policy names, of a fork of `me`'s.
-            let from = null, target = null;
-            if (push) {
-              ({ target } = config.push_to_pull_request_branch ?? {});
-              if (!/^[1-9][0-9]*$/.test(String(target))) throw new Error('a push is to be applied, and the policy names no pull request for it');
-              const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number: Number(target) });
-              from = String(pull.head?.repo?.full_name);
-              if (pull.state !== 'open' || pull.head?.repo?.fork !== true || String(pull.head?.repo?.owner?.login).toLowerCase() !== me.toLowerCase() ||
-                  pull.head?.ref !== process.env.BASE) {
-                throw new Error(`pull request ${target} of ${process.env.OUTPUT_REPO} is ${pull.state}, from ${from}:${pull.head?.ref}, not open from ${me}'s fork:${process.env.BASE}: ` +
-                  `a push goes only to the branch of a pull request apply opened from ${me}'s fork`);
-              }
-              if (process.env.REPLACEMENT === 'true') {
-                const { currentBase } = require(`${process.env.GITHUB_WORKSPACE}/apply-source/workflow/push.cjs`);
-                core.setOutput('current-base', await currentBase(process.env.REPO, pull, github));
-              }
-            }
-            const { data: fork } = await github.rest.repos.createFork({ owner, repo, default_branch_only: true });
-            const name = String(fork.full_name);
-            if (fork.fork !== true || String(fork.owner?.login).toLowerCase() !== me.toLowerCase() ||
-                [process.env.REPO, process.env.OUTPUT_REPO].some(other => other.toLowerCase() === name.toLowerCase())) {
-              throw new Error(`the forge answered a fork of ${process.env.OUTPUT_REPO} for ${me} with ${name}, which is not ${me}'s own fork of it`);
-            }
-            // The forge makes a fork in the background: wait until git can reach it and its branch.
-            for (let attempt = 1; ; attempt++) {
-              const { exitCode, stdout } = await exec.getExecOutput('git', ['ls-remote', '--heads', `https://github.com/${name}.git`],
-                { ignoreReturnCode: true, silent: true });
-              if (exitCode === 0 && stdout.includes('\trefs/heads/')) break;
-              if (attempt === 30) throw new Error(`the fork ${name} is still not there after ${attempt} tries`);
-              await new Promise(resolve => setTimeout(resolve, 10000));
-            }
-            // A push with a PAT, unlike one with the job token, starts the
-            // fork's workflows on `push`, with the fork's secrets: Actions
-            // are turned off there, and nothing is pushed unless the forge
-            // then says they are off.
-            const [forkOwner, forkRepo] = name.split('/');
-            const enabled = await github.rest.actions.setGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo, enabled: false })
-              .then(() => github.rest.actions.getGithubActionsPermissionsRepository({ owner: forkOwner, repo: forkRepo }))
-              .then(({ data }) => data.enabled, () => null);
-            if (enabled !== false) {
-              throw new Error(`Actions could not be turned off on the fork ${name}, which a push with ${me}'s token would run workflows in: ` +
-                "turn them off there, and give SAFE_OUTPUTS_PAT the repo scope (or a fine-grained token Administration: write on the fork)");
-            }
-            if (from !== null && from.toLowerCase() !== name.toLowerCase()) {
-              throw new Error(`pull request ${target} of ${process.env.OUTPUT_REPO} is from ${from}:${process.env.BASE}, not from ${name}: ` +
-                `a push goes only to the branch of a pull request apply opened from ${me}'s fork`);
-            }
-            core.setOutput('repo', name);
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" push target --config "$GH_AW_TMP/config.json" --outputs "$GH_AW_TMP/agent_output.json" \
+            --output-repo "$OUTPUT_REPO" --repo "$REPO" --calling-repo "$GITHUB_REPOSITORY" --base "$BASE" \
+            --server "$GITHUB_SERVER_URL" --replacement "$REPLACEMENT" >> "$GITHUB_OUTPUT"
       # The target's base branch as this job fetched it, not as anything
       # that was handed back says. Never push the target's commits to an
       # output repository: its push workflows could run with privileges.
@@ -377,29 +318,7 @@ jobs:
       # Materialize both lists so pipefail catches extraction failures;
       # process substitutions would hide them. check rejects control
       # characters in paths, and quotePath=false keeps UTF-8 names literal.
-      # A replacement series is rebuilt, and later pushed, by policy's
-      # binary, which also links a pull request to its issue below and
-      # says why a handler failed, with or without a patch; check already
-      # runs it, so every run has it. Never
-      # execute an artifact ID supplied by the caller without binding it
-      # to policy's upload in this run: an agent upload is executable code too.
-      - name: Require policy's binary
-        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
-          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}agentic-job-binary
-        run: |
-          [[ "$BINARY" =~ ^[1-9][0-9]*$ ]] || { echo '::error::the policy binary artifact ID is required'; exit 1; }
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINARY" |
-            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
-              '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
-        with:
-          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
-          path: ${{ runner.temp }}/apply-binary
-          digest-mismatch: error
+      # A replacement series is rebuilt by policy's binary.
       - name: Apply the patch on its own base, and compare what changed with what was checked
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         id: trial
@@ -1329,14 +1248,27 @@ jobs:
           [[ ! "$OVER_BUDGET" =~ ^[0-9]+(\.[0-9]+)?\ of\ [0-9]+(\.[0-9]+)?\ AIC$ ]] || [ "$reaction" = confused ] ||
             text="$text Its last reply took the agent over budget: it spent $OVER_BUDGET."
           printf '%s\n' "text=$text" "reaction=$reaction" | tee -a "$GITHUB_OUTPUT"
-      # The same bounded lookup at start and finish, including retries.
-      # Checkout only this workflow's pinned source, never the producer's tree.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The same bounded lookup at start and finish, including retries, by
+      # policy's binary, bound to this run's policy upload as the apply
+      # job binds it: the ID is the caller's, and an agent upload is
+      # executable code too. It holds the status token; nothing else here
+      # runs.
+      - name: Require policy's binary
+        if: ${{ (fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') || (needs.apply.outputs.missing-data == 'true' && fromJSON(inputs.policy).notify-item != '' && fromJSON(inputs.policy).notify-item != '*') }}
+        env:
+          BINARY: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          NAME: ${{ fromJSON(inputs.policy).artifact-prefix }}agentic-job-binary
+        run: |
+          [[ "$BINARY" =~ ^[1-9][0-9]*$ ]] || { echo '::error::the policy binary artifact ID is required'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BINARY" |
+            jq -e --arg name "$NAME" --arg run "$GITHUB_RUN_ID" \
+              '.name == $name and (.workflow_run.id | tostring) == $run' > /dev/null
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ (fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') || (needs.apply.outputs.missing-data == 'true' && fromJSON(inputs.policy).notify-item != '' && fromJSON(inputs.policy).notify-item != '*') }}
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .agentic-job-source
-          persist-credentials: false
+          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
+          path: ${{ runner.temp }}/conclude-binary
+          digest-mismatch: error
       - name: Edit the status comment
         if: ${{ (fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).notified == 'true') || (needs.apply.outputs.missing-data == 'true' && fromJSON(inputs.policy).notify-item != '' && fromJSON(inputs.policy).notify-item != '*') }}
         continue-on-error: true
@@ -1350,7 +1282,8 @@ jobs:
           COST: ${{ fromJSON(inputs.agent).outputs.cost }}
           NO_RESULT_REASON: ${{ steps.ended.outputs.no-result-reason }}
         run: |
-          node "$GITHUB_WORKSPACE/.agentic-job-source/workflow/status.cjs"
+          chmod +x "$RUNNER_TEMP/conclude-binary/agentic-job"
+          "$RUNNER_TEMP/conclude-binary/agentic-job" status
       # A notify that failed before it found what to react to leaves no
       # id: nothing is reacted to then, and notify's failure says why.
       - name: A reaction that says how it ended

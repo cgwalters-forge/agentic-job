@@ -313,11 +313,21 @@ pub(super) mod tests {
 
     /// A forge that answers each request with STATUS and BODY in turn.
     pub(in crate::apply) fn mock(answers: Vec<(u16, String)>) -> (String, mpsc::Receiver<Request>) {
+        let mut answers = answers.into_iter();
+        serve(answers.len(), move |_| answers.next().unwrap())
+    }
+
+    /// A forge that answers COUNT requests, each with the status and body
+    /// ANSWER gives for it.
+    pub(in crate::apply) fn serve(
+        count: usize,
+        mut answer: impl FnMut(&Request) -> (u16, String) + Send + 'static,
+    ) -> (String, mpsc::Receiver<Request>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
         let (sent, received) = mpsc::channel();
         std::thread::spawn(move || {
-            for (status, body) in answers {
+            for _ in 0..count {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
@@ -338,7 +348,7 @@ pub(super) mod tests {
                 }
                 let mut request = vec![0; length];
                 reader.read_exact(&mut request).unwrap();
-                sent.send(Request {
+                let request = Request {
                     line: line.trim().to_owned(),
                     authorization,
                     body: if request.is_empty() {
@@ -346,8 +356,10 @@ pub(super) mod tests {
                     } else {
                         serde_json::from_slice(&request).unwrap()
                     },
-                })
-                .unwrap();
+                };
+                let (status, body) = answer(&request);
+                // A test that stopped listening has its answer already.
+                let _ = sent.send(request);
                 let mut stream = stream;
                 write!(
                     stream,

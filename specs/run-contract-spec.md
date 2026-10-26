@@ -395,8 +395,8 @@ with no result is sanitized as the handlers sanitize a comment` and the
 capabilities and token boundary` and `the URL of what apply made is an output
 of dispatch, by way of the wrapper`; [proposals.test.cjs](../workflow/proposals.test.cjs),
 the issue and `item-repo` cases of `the policy command is told when apply holds only the job
-token`; [status.test.cjs](../workflow/status.test.cjs), `dispatch and event
-status use the same trusted helper, opt-in only`; [policy.rs](../crates/agentic-job/src/policy.rs), the `an item in ...`
+token`; [status.rs](../crates/agentic-job/src/apply/status.rs), test
+`writes`; [policy.rs](../crates/agentic-job/src/policy.rs), the `an item in ...`
 cases of `requests_against_the_bounds`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
 `titles_are_cut_between_words` and `made_up_pull_requests`.
 
@@ -446,10 +446,8 @@ Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 `push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect`,
 `push_folder_exemptions_are_repository_scoped_and_intersected` and
 `what_the_job_token_cannot_apply_is_refused`;
-[push.test.cjs](../workflow/push.test.cjs), `a push resolves an open pull
-request from any repository's branch and refuses hostile routing` and `a push
-goes to any pull request's branch apply may push to, but not a default,
-protected or unaccepted one`;
+[push.rs](../crates/agentic-job/src/apply/push.rs), `resolves`, `targets`
+and `refusals`;
 [clone.rs](../crates/agentic-job/src/run/clone.rs), `a_push_starts_from_its_pinned_head`
 and `a_push_head_is_fetched_by_its_commit_onto_the_default_branch`;
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `a_push_on_the_pinned_head_is_accepted`

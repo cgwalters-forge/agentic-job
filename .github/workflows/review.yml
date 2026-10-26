@@ -116,23 +116,22 @@ jobs:
   # Reuse the bounded, author-checked status comment, never PR-owned code.
   refusal:
     needs: policy
-    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.policy.outputs.admitted == 'false' }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.policy.outputs.admitted == 'false' && needs.policy.outputs.binary-artifact-id != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     concurrency:
       group: agentic-job-status-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: false
     permissions:
-      contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The policy job's binary of the pinned source, by ID from this
+      # file's own jobs: the `if:` above keeps an empty ID from
+      # downloading every upload.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          repository: ${{ needs.policy.outputs.source-repository }}
-          ref: ${{ needs.policy.outputs.source-sha }}
-          path: .agentic-job-source
-          sparse-checkout: workflow
-          persist-credentials: false
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
+          path: ${{ runner.temp }}/bin
       - name: Report the policy refusal in the single status comment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -140,7 +139,9 @@ jobs:
           ITEM: ${{ github.event.pull_request.number || github.event.issue.number }}
           # The reason as one inert line (`agentic-job review admit`).
           TEXT: ${{ needs.policy.outputs.refusal }}
-        run: node .agentic-job-source/workflow/status.cjs
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/agentic-job"
+          "$RUNNER_TEMP/bin/agentic-job" status
 
   # As agentic-job.yml's register job: the run's registration at the
   # inference proxy under `github-oidc`, out of the agent's job, which

@@ -277,7 +277,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: node --test workflow/status.test.cjs
       # The same digest-checked analyzers as workflow-ingress.yml, so a PR
       # that changes the checker is tested before merge. Read-only token.
       - name: Install verified static analyzers
@@ -295,7 +294,6 @@ jobs:
           ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/refusal.test.cjs
       - run: node --test workflow/review.test.cjs
-      - run: node --test workflow/push.test.cjs
       - run: node --test workflow/workflow-commands.test.cjs
       - run: node --test workflow/proposals.test.cjs
       - run: node --test workflow/agent-actions.test.cjs

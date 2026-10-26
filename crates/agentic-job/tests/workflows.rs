@@ -7,51 +7,76 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const ERROR: i32 = 2;
 
+/// The status comment keeps the agent's cost only in the run action's
+/// grammar, which cannot end the HTML comment it goes in.
 #[test]
-fn status_cost_is_optional_bounded_and_keeps_newer_run_protection() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script = r#"
-const assert = require('node:assert/strict');
-const { upsert, MARKER } = require('./workflow/status.cjs');
-const env = { REPO: 'o/r', ITEM: '7', TEXT: 'finished', GITHUB_RUN_ID: '100' };
-for (const [cost, wanted] of [
-  ['', false], ['usd=0 partial=false', true], ['usd=1.2345 partial=false', true],
-  ['usd=2.5 partial=true', true], ['usd=-1 partial=false', false],
-  ['usd=NaN partial=false', false], ['usd=1 partial=null', false],
-  ['usd=1 partial=false\n', false], ['usd=1 partial=false --> forged', false],
-  ['usd=' + '9'.repeat(100) + ' partial=false', false],
-]) {
-  const comments = [];
-  const api = (method, path, body) => {
-    if (method === 'GET') return comments;
-    if (method === 'POST') comments.push({ id: 1, user: { login: 'github-actions[bot]' } });
-    comments[0].body = body;
-    return comments[0];
-  };
-  upsert({ ...env, COST: cost }, api);
-  const line = `<!-- agentic-job-cost: 100 ${cost} -->`;
-  assert.equal(comments[0].body.includes('agentic-job-cost:'), wanted, cost);
-  if (wanted) assert.ok(comments[0].body.includes(line));
-  const previous = comments[0].body;
-  upsert({ ...env, GITHUB_RUN_ID: '99', COST: 'usd=99 partial=true' }, api);
-  assert.equal(comments[0].body, previous);
-  upsert({ ...env, COST: 'usd=3 partial=true' }, api);
-  assert.equal(comments[0].body.match(/agentic-job-cost:/g).length, 1);
-  assert.ok(comments[0].body.endsWith(`<!-- agentic-job-run: 100 -->\n\n${MARKER}`));
-  upsert({ ...env, GITHUB_RUN_ID: '101' }, api);
-  assert.ok(!comments[0].body.includes('agentic-job-cost:'));
-}
-"#;
-    let output = Command::new("node")
-        .args(["-e", script])
-        .current_dir(root)
-        .output()
-        .unwrap();
+fn status_cost_is_optional_and_bounded() {
+    use agentic_job::apply::status::{MARKER, body};
+    let long = format!("usd={} partial=false", "9".repeat(100));
+    for (cost, wanted) in [
+        ("usd=0 partial=false", true),
+        ("usd=1.2345 partial=false", true),
+        ("usd=2.5 partial=true", true),
+        ("usd=-1 partial=false", false),
+        ("usd=NaN partial=false", false),
+        ("usd=1 partial=null", false),
+        ("usd=1 partial=false\n", false),
+        ("usd=1 partial=false --> forged", false),
+        ("usd=1. partial=false", false),
+        (long.as_str(), false),
+    ] {
+        let text = body("finished", None, Some(cost), "100").unwrap();
+        let line = format!("<!-- agentic-job-cost: 100 {cost} -->");
+        assert_eq!(text.contains("agentic-job-cost:"), wanted, "{cost:?}");
+        assert_eq!(text.contains(&line), wanted, "{cost:?}");
+        assert!(text.ends_with(&format!("<!-- agentic-job-run: 100 -->\n\n{MARKER}")));
+    }
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        !body("finished", None, None, "101")
+            .unwrap()
+            .contains("agentic-job-cost:")
     );
+}
+
+/// Without an event naming the item, policy.yml's notify job comments
+/// only on a numeric comment target: never `*`, nothing, or shell text.
+#[test]
+fn notify_takes_only_a_numeric_target_without_an_event() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = std::fs::read_to_string(root.join(".github/workflows/policy.yml")).unwrap();
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let script = doc["jobs"]["notify"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("What to react to, and where to comment"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    for event in [None, Some(r#"{"item": null}"#)] {
+        for target in ["7", "*", "", "0", "$(exit 9)"] {
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join("output");
+            std::fs::write(&output, "").unwrap();
+            if let Some(event) = event {
+                std::fs::write(dir.path().join("event.json"), event).unwrap();
+            }
+            let status = Command::new("bash")
+                .args(["-eo", "pipefail", "-c", script])
+                .env("JOB_DIR", dir.path())
+                .env("TARGET", target)
+                .env("GITHUB_OUTPUT", &output)
+                .status()
+                .unwrap();
+            let numeric = target == "7";
+            assert_eq!(status.success(), numeric, "{event:?} {target:?}");
+            assert_eq!(
+                std::fs::read_to_string(&output).unwrap(),
+                if numeric { "item=7\nwhat=item\n" } else { "" },
+                "{event:?} {target:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -129,25 +154,13 @@ fn run_action_forwards_summary_cost_without_inventing_unknown_cost() {
         }
     }
     // Everything the producer forwards is a cost the status comment keeps.
-    let script = r#"
-const { upsert } = require('./workflow/status.cjs');
-for (const cost of JSON.parse(process.argv[1])) {
-  let body = '';
-  const api = (method, path, text) => method === 'GET' ? [] : (body = text, { id: 1 });
-  upsert({ REPO: 'o/r', ITEM: '7', TEXT: 'finished', GITHUB_RUN_ID: '100', COST: cost }, api);
-  if (!body.includes(`<!-- agentic-job-cost: 100 ${cost} -->`)) throw new Error(cost);
-}
-"#;
-    let output = Command::new("node")
-        .args(["-e", script, &serde_json::to_string(&produced).unwrap()])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    for cost in produced {
+        let text = agentic_job::apply::status::body("finished", None, Some(&cost), "100").unwrap();
+        assert!(
+            text.contains(&format!("<!-- agentic-job-cost: 100 {cost} -->")),
+            "{cost}"
+        );
+    }
     let agent = std::fs::read_to_string(root.join(".github/workflows/agent.yml")).unwrap();
     assert!(agent.contains("cost: ${{ steps.run.outputs.cost }}"));
     assert!(agent.contains("value: ${{ jobs.agent.outputs.cost }}"));

@@ -71,7 +71,7 @@ test('conclusion reports refusal only through the opted-in status helper', () =>
   const conclude = workflow.split('\n  conclude:')[1];
   assert.match(conclude, /fromJSON\(inputs.policy\).notify != 'none' && fromJSON\(inputs.policy\).notified == 'true'/);
   assert.match(conclude, /REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}/);
-  assert.match(conclude, /workflow\/status.cjs/);
+  assert.match(conclude, /conclude-binary\/agentic-job" status\n/);
   assert.doesNotMatch(conclude, /Post the refusal to the comment target/);
   assert.match(conclude, /STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}/);
 });
