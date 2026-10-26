@@ -1,0 +1,645 @@
+//! `agentic-job status`: the one status comment of a run on its item,
+//! written when the run starts (policy.yml's notify job) and edited when
+//! it ends (apply.yml's conclude job), or a refused review's (review.yml).
+//!
+//! The comment is found by a marker at its end, and only among the
+//! comments of the token's own user, so that a marker someone copied
+//! cannot redirect the edit; a caller's comment named by id
+//! (`STATUS_COMMENT`) is edited only where it is that user's, on this
+//! item. The lookup is bounded and fails rather than post a duplicate,
+//! and a slower older run does not overwrite a newer run's status.
+//!
+//! It reads the environment the workflow steps set: `REPO`, `ITEM`,
+//! `TEXT`, `GITHUB_RUN_ID`, and optionally `STATUS_COMMENT`, `COST`,
+//! `NO_RESULT_REASON` and `STATUS_TOKEN` (the caller's SAFE_OUTPUTS_PAT,
+//! else `GH_TOKEN`, the job token). It prints the comment's `id=`.
+
+use std::io::Write as _;
+
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
+
+use super::github::{GH_TOKEN_ENV, Github, is_repo};
+use crate::exit::Exit;
+
+pub const MARKER: &str = "<!-- agentic-job-status -->";
+
+/// The pages of 100 comments looked through for the marked one.
+pub const MAX_PAGES: u32 = 20;
+
+const PER_PAGE: usize = 100;
+
+/// A page of 100 comments of up to 65,536 characters each.
+const MAX_PAGE_BYTES: u64 = 32 << 20;
+
+/// The author of what the job token posts.
+const JOB_TOKEN_AUTHOR: &str = "github-actions[bot]";
+
+const STATUS_TOKEN_ENV: &str = "STATUS_TOKEN";
+
+#[derive(Debug, clap::Args)]
+pub struct Args {}
+
+/// The status comment's body: TEXT, the no-result REASON (the JSON string
+/// apply exported, decoded only here, after crossing job outputs), and
+/// the agent's COST where it is in the run action's grammar, then the
+/// run's marker and the status marker.
+pub fn body(text: &str, reason: Option<&str>, cost: Option<&str>, run: &str) -> Result<String> {
+    let reason = match reason {
+        Some(reason) => {
+            let reason: String =
+                serde_json::from_str(reason).context("NO_RESULT_REASON is not a JSON string")?;
+            format!(" Its reason:\n\n{reason}")
+        }
+        None => String::new(),
+    };
+    let cost = cost
+        .filter(|cost| is_cost(cost))
+        .map(|cost| format!("\n\n<!-- agentic-job-cost: {run} {cost} -->"))
+        .unwrap_or_default();
+    Ok(format!(
+        "{text}{reason}{cost}\n\n<!-- agentic-job-run: {run} -->\n\n{MARKER}"
+    ))
+}
+
+/// `usd=N partial=B`, N a decimal of at most 16 digits on either side of
+/// its point: nothing that can end the HTML comment it goes in.
+fn is_cost(cost: &str) -> bool {
+    let digits =
+        |text: &str| (1..=16).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit());
+    let Some((usd, partial)) = cost
+        .strip_prefix("usd=")
+        .and_then(|rest| rest.split_once(" partial="))
+    else {
+        return false;
+    };
+    let usd = match usd.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(usd),
+    };
+    usd && matches!(partial, "true" | "false")
+}
+
+/// Whether BODY ends with the marker of a run later than RUN.
+fn newer(body: &str, run: &str) -> bool {
+    let Some(rest) = body.strip_suffix(&format!(" -->\n\n{MARKER}")) else {
+        return false;
+    };
+    let Some((_, previous)) = rest.rsplit_once("\n\n<!-- agentic-job-run: ") else {
+        return false;
+    };
+    is_number(previous) && (previous.len(), previous) > (run.len(), run)
+}
+
+fn is_number(text: &str) -> bool {
+    text.starts_with(|c: char| ('1'..='9').contains(&c)) && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether LINE is a caller's own HTML comment, kept above the status: one
+/// comment alone on the line, and not one of this tool's markers.
+fn is_caller_marker(line: &str) -> bool {
+    let Some(inner) = line.strip_prefix("<!--") else {
+        return false;
+    };
+    !inner.trim_start().starts_with("agentic-job-")
+        && !line.contains(['\r', '\u{2028}', '\u{2029}'])
+        && inner.find("-->").is_some_and(|end| end + 3 == inner.len())
+}
+
+/// One run's status for one item.
+pub struct Status {
+    pub repo: String,
+    pub item: String,
+    pub run: String,
+    pub body: String,
+    /// The caller's comment for the item, by id.
+    pub comment: Option<String>,
+}
+
+impl Status {
+    /// The status the environment (GET) describes.
+    pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let repo = get("REPO").unwrap_or_default();
+        let item = get("ITEM").unwrap_or_default();
+        ensure!(
+            is_repo(&repo) && is_number(&item),
+            "status requires a caller repository and numeric item"
+        );
+        let run = get("GITHUB_RUN_ID").unwrap_or_default();
+        ensure!(is_number(&run), "status requires a numeric Actions run ID");
+        let body = body(
+            &get("TEXT").unwrap_or_default(),
+            get("NO_RESULT_REASON").as_deref(),
+            get("COST").as_deref(),
+            &run,
+        )?;
+        Ok(Self {
+            repo,
+            item,
+            run,
+            body,
+            comment: get("STATUS_COMMENT"),
+        })
+    }
+
+    /// Writes the status with GITHUB as AUTHOR, and returns the comment
+    /// it is in. SUMMARY is told why a comment named by id was not used.
+    pub fn upsert(
+        &self,
+        github: &Github,
+        author: &str,
+        summary: &mut dyn FnMut(&str),
+    ) -> Result<Value> {
+        let repo = &self.repo;
+        if let Some(comment) = self.named(github, author, summary) {
+            return self.edit(github, &comment);
+        }
+        for page in 1..=MAX_PAGES {
+            let comments = github.send(
+                "GET",
+                &format!(
+                    "/repos/{repo}/issues/{}/comments?per_page={PER_PAGE}&page={page}",
+                    self.item
+                ),
+                None,
+            )?;
+            let comments = comments.as_array().context("the comments are not a list")?;
+            let found = comments.iter().find(|comment| {
+                comment["user"]["login"] == author
+                    && comment["body"]
+                        .as_str()
+                        .is_some_and(|body| body.ends_with(&format!("\n\n{MARKER}")))
+            });
+            if let Some(found) = found {
+                return self.edit(github, found);
+            }
+            if comments.len() < PER_PAGE {
+                return github.send(
+                    "POST",
+                    &format!("/repos/{repo}/issues/{}/comments", self.item),
+                    Some(&json!({"body": self.body})),
+                );
+            }
+        }
+        bail!("status comment lookup exceeded {MAX_PAGES} pages; refusing to create a duplicate")
+    }
+
+    /// The caller's comment for the item (`STATUS_COMMENT`), when it is
+    /// one the status may edit: AUTHOR's, on this repository's item.
+    /// Otherwise None, and the status goes in the marked comment, so a
+    /// dispatcher's id can neither edit someone else's words nor move the
+    /// status to another item.
+    fn named(&self, github: &Github, author: &str, summary: &mut dyn FnMut(&str)) -> Option<Value> {
+        let id = self.comment.as_deref()?;
+        if !is_number(id) {
+            summary(
+                "Status comment: STATUS_COMMENT is not a comment id; using the marked status comment.",
+            );
+            return None;
+        }
+        let repo = &self.repo;
+        let Ok(comment) = github.send("GET", &format!("/repos/{repo}/issues/comments/{id}"), None)
+        else {
+            summary(&format!(
+                "Status comment: comment {id} could not be read; using the marked status comment."
+            ));
+            return None;
+        };
+        let at = format!("/repos/{}/issues/{}", repo.to_lowercase(), self.item);
+        let here = comment["issue_url"]
+            .as_str()
+            .is_some_and(|url| url.to_lowercase().ends_with(&at));
+        if comment["user"]["login"] != author || !here {
+            summary(&format!(
+                "Status comment: comment {id} is not {author}'s on {repo}#{}; using the marked \
+                 status comment.",
+                self.item
+            ));
+            return None;
+        }
+        Some(comment)
+    }
+
+    /// Edits COMMENT to hold the status, after the caller's opening
+    /// markers: a named comment, once written, is also a marked one a
+    /// later run without the id may find. A newer run's is left as it is.
+    fn edit(&self, github: &Github, comment: &Value) -> Result<Value> {
+        let old = comment["body"].as_str().unwrap_or_default();
+        if newer(old, &self.run) {
+            return Ok(comment.clone());
+        }
+        let kept: Vec<_> = old
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .take_while(|line| is_caller_marker(line))
+            .collect();
+        let body = if kept.is_empty() {
+            self.body.clone()
+        } else {
+            format!("{}\n\n{}", kept.join("\n"), self.body)
+        };
+        let id = comment["id"].as_u64().context("the comment has no id")?;
+        github.send(
+            "PATCH",
+            &format!("/repos/{}/issues/comments/{id}", self.repo),
+            Some(&json!({"body": body})),
+        )
+    }
+}
+
+pub fn run(_args: &Args) -> Result<Exit> {
+    let get = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+    let mut summary = |message: &str| {
+        let written = get("GITHUB_STEP_SUMMARY").map(|path| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .and_then(|mut file| writeln!(file, "{message}"))
+        });
+        if !matches!(written, Some(Ok(()))) {
+            eprintln!("{message}");
+        }
+    };
+    let status = Status::from_env(get)?;
+    let personal = get(STATUS_TOKEN_ENV).is_some();
+    let caller = get("GITHUB_REPOSITORY").unwrap_or_else(|| status.repo.clone());
+    if !personal && !status.repo.eq_ignore_ascii_case(&caller) {
+        summary(
+            "Status comment skipped: cross-repository target requires the caller-supplied \
+             SAFE_OUTPUTS_PAT.",
+        );
+        return Ok(Exit::Success);
+    }
+    let token = if personal {
+        STATUS_TOKEN_ENV
+    } else {
+        GH_TOKEN_ENV
+    };
+    let github = Github::from_env(token)?.with_max_response(MAX_PAGE_BYTES);
+    // The credential's identity plus the marker keeps copied markers from
+    // redirecting edits.
+    let author = if personal {
+        github
+            .login()
+            .context("the status token has no authenticated user identity")?
+    } else {
+        JOB_TOKEN_AUTHOR.to_owned()
+    };
+    let comment = status.upsert(&github, &author, &mut summary)?;
+    if let Some(id) = comment["id"].as_u64() {
+        println!("id={id}");
+    }
+    Ok(Exit::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::github::tests::forge;
+    use super::*;
+
+    const LIST: &str = "GET /repos/o/r/issues/7/comments?per_page=100&page=";
+    const NAMED: &str = "GET /repos/o/r/issues/comments/5";
+    const POST: &str = "POST /repos/o/r/issues/7/comments";
+    const TAG: &str = "<!-- tag: {\"round\":2} -->";
+
+    fn status(run: &str, comment: &str) -> Status {
+        let env = BTreeMap::from([
+            ("REPO", "o/r"),
+            ("ITEM", "7"),
+            ("TEXT", "running"),
+            ("GITHUB_RUN_ID", run),
+            ("STATUS_COMMENT", comment),
+        ]);
+        Status::from_env(|key| {
+            env.get(key)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+        })
+        .unwrap()
+    }
+
+    fn written(run: &str) -> String {
+        format!("running\n\n<!-- agentic-job-run: {run} -->\n\n{MARKER}")
+    }
+
+    fn comment(id: u64, login: &str, body: &str) -> Value {
+        json!({"id": id, "user": {"login": login}, "body": body,
+            "issue_url": "https://api.github.com/repos/O/R/issues/7"})
+    }
+
+    fn marked(login: &str) -> Value {
+        comment(42, login, &format!("old\n\n{MARKER}"))
+    }
+
+    #[test]
+    fn writes() {
+        let status_100 = written("100");
+        type Routes = BTreeMap<String, (u16, Value)>;
+        let page = |routes: &mut Routes, n: u32, comments: Value| {
+            routes.insert(format!("{LIST}{n}"), (200, comments));
+        };
+        let named = |routes: &mut Routes, body: &str| {
+            routes.insert(NAMED.into(), (200, comment(5, JOB_TOKEN_AUTHOR, body)));
+        };
+        let full = json!(vec![marked("mallory"); PER_PAGE]);
+        // (what, STATUS_COMMENT, the forge, what is written where, how
+        // often the summary is told why a named comment was not used)
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            Box<dyn Fn(&mut Routes) + 'a>,
+            Option<(&'a str, String)>,
+            usize,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "a new item",
+                "",
+                Box::new(|r| page(r, 1, json!([]))),
+                Some((POST, status_100.clone())),
+                0,
+            ),
+            (
+                "a later run",
+                "",
+                Box::new(|r| page(r, 1, json!([marked(JOB_TOKEN_AUTHOR)]))),
+                Some(("PATCH /repos/o/r/issues/comments/42", status_100.clone())),
+                0,
+            ),
+            // A marker someone else copied does not redirect the edit.
+            (
+                "a copied marker",
+                "",
+                Box::new(|r| page(r, 1, json!([marked("mallory")]))),
+                Some((POST, status_100.clone())),
+                0,
+            ),
+            (
+                "a quoted marker",
+                "",
+                Box::new(|r| {
+                    page(
+                        r,
+                        1,
+                        json!([comment(42, JOB_TOKEN_AUTHOR, &format!("{MARKER}\nquoted"))]),
+                    )
+                }),
+                Some((POST, status_100.clone())),
+                0,
+            ),
+            (
+                "a later page",
+                "",
+                Box::new(move |r| {
+                    page(r, 1, full.clone());
+                    page(r, 2, json!([marked(JOB_TOKEN_AUTHOR)]));
+                }),
+                Some(("PATCH /repos/o/r/issues/comments/42", status_100.clone())),
+                0,
+            ),
+            // A slower older run does not replace a newer run's status.
+            (
+                "a newer run's",
+                "",
+                Box::new(|r| {
+                    page(
+                        r,
+                        1,
+                        json!([comment(
+                            42,
+                            JOB_TOKEN_AUTHOR,
+                            &format!("done\n\n<!-- agentic-job-run: 101 -->\n\n{MARKER}")
+                        )]),
+                    )
+                }),
+                None,
+                0,
+            ),
+            (
+                "a named comment",
+                "5",
+                Box::new(|r| named(r, "fix round 2")),
+                Some(("PATCH /repos/o/r/issues/comments/5", status_100.clone())),
+                0,
+            ),
+            (
+                "a named comment's markers",
+                "5",
+                Box::new(|r| named(r, &format!("{TAG}\nfix round 2"))),
+                Some((
+                    "PATCH /repos/o/r/issues/comments/5",
+                    format!("{TAG}\n\n{status_100}"),
+                )),
+                0,
+            ),
+            (
+                "a named comment's markers across updates",
+                "5",
+                Box::new(|r| {
+                    named(
+                        r,
+                        &format!(
+                            "{TAG}\r\n<!-- more: 1 -->\n\nfailed\n\n<!-- agentic-job-run: 99 -->\n\n{MARKER}"
+                        ),
+                    )
+                }),
+                Some((
+                    "PATCH /repos/o/r/issues/comments/5",
+                    format!("{TAG}\n<!-- more: 1 -->\n\n{status_100}"),
+                )),
+                0,
+            ),
+            (
+                "a named comment of markers only",
+                "5",
+                Box::new(|r| named(r, TAG)),
+                Some((
+                    "PATCH /repos/o/r/issues/comments/5",
+                    format!("{TAG}\n\n{status_100}"),
+                )),
+                0,
+            ),
+            (
+                "visible text beside a marker",
+                "5",
+                Box::new(|r| named(r, &format!("<!-- a --> shown <!-- b -->\n{TAG}"))),
+                Some(("PATCH /repos/o/r/issues/comments/5", status_100.clone())),
+                0,
+            ),
+            (
+                "a named comment of a newer run",
+                "5",
+                Box::new(|r| {
+                    named(
+                        r,
+                        &format!("{TAG}\n\nrunning\n\n<!-- agentic-job-run: 101 -->\n\n{MARKER}"),
+                    )
+                }),
+                None,
+                0,
+            ),
+            // A dispatcher's id can neither edit someone else's words nor
+            // move the status to another item.
+            (
+                "a named comment of another author",
+                "5",
+                Box::new(|r| {
+                    r.insert(NAMED.into(), (200, comment(5, "mallory", "fix")));
+                    page(r, 1, json!([]));
+                }),
+                Some((POST, status_100.clone())),
+                1,
+            ),
+            (
+                "a named comment on another item",
+                "5",
+                Box::new(|r| {
+                    let mut other = comment(5, JOB_TOKEN_AUTHOR, "fix");
+                    other["issue_url"] = json!("https://api.github.com/repos/o/r/issues/8");
+                    r.insert(NAMED.into(), (200, other));
+                    page(r, 1, json!([]));
+                }),
+                Some((POST, status_100.clone())),
+                1,
+            ),
+            (
+                "a named comment in another repository",
+                "5",
+                Box::new(|r| {
+                    let mut other = comment(5, JOB_TOKEN_AUTHOR, "fix");
+                    other["issue_url"] = json!("https://api.github.com/repos/o/other/issues/7");
+                    r.insert(NAMED.into(), (200, other));
+                    page(r, 1, json!([]));
+                }),
+                Some((POST, status_100.clone())),
+                1,
+            ),
+            (
+                "a named comment that is missing",
+                "5",
+                Box::new(|r| page(r, 1, json!([]))),
+                Some((POST, status_100.clone())),
+                1,
+            ),
+            (
+                "an id that is not one",
+                "5/../../8",
+                Box::new(|r| page(r, 1, json!([]))),
+                Some((POST, status_100.clone())),
+                1,
+            ),
+            // The marked comment keeps the caller's markers too.
+            (
+                "an id that cannot be read, beside a marked comment",
+                "6",
+                Box::new(|r| {
+                    page(
+                        r,
+                        1,
+                        json!([comment(
+                            5,
+                            JOB_TOKEN_AUTHOR,
+                            &format!("{TAG}\n\nfailed\n\n<!-- agentic-job-run: 99 -->\n\n{MARKER}")
+                        )]),
+                    )
+                }),
+                Some((
+                    "PATCH /repos/o/r/issues/comments/5",
+                    format!("{TAG}\n\n{status_100}"),
+                )),
+                1,
+            ),
+        ];
+        for (what, id, routes, want, told) in cases {
+            let mut answers = Routes::new();
+            routes(&mut answers);
+            answers.insert(POST.into(), (201, json!({"id": 1})));
+            for id in [5, 42] {
+                answers.insert(
+                    format!("PATCH /repos/o/r/issues/comments/{id}"),
+                    (200, json!({"id": id})),
+                );
+            }
+            let (github, requests) = forge(answers);
+            let mut summary = Vec::new();
+            status("100", id)
+                .upsert(&github, JOB_TOKEN_AUTHOR, &mut |message| {
+                    summary.push(message.to_owned())
+                })
+                .unwrap_or_else(|err| panic!("{what}: {err:#}"));
+            let writes: Vec<_> = requests
+                .try_iter()
+                .filter(|request| !request.line.starts_with("GET "))
+                .map(|request| {
+                    (
+                        request.line.trim_end_matches(" HTTP/1.1").to_owned(),
+                        request.body,
+                    )
+                })
+                .collect();
+            let want: Vec<_> = want
+                .into_iter()
+                .map(|(line, body)| (line.to_owned(), json!({"body": body})))
+                .collect();
+            assert_eq!(writes, want, "{what}");
+            assert_eq!(summary.len(), told, "{what}: {summary:?}");
+        }
+    }
+
+    /// A lookup that finds no end posts nothing, rather than a duplicate.
+    #[test]
+    fn the_lookup_is_bounded() {
+        let mut routes = BTreeMap::new();
+        for page in 1..=MAX_PAGES + 1 {
+            routes.insert(
+                format!("{LIST}{page}"),
+                (200, json!(vec![marked("mallory"); PER_PAGE])),
+            );
+        }
+        let (github, requests) = forge(routes);
+        let err = status("100", "")
+            .upsert(&github, JOB_TOKEN_AUTHOR, &mut |_| {})
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("exceeded 20 pages"), "{err:#}");
+        assert_eq!(requests.try_iter().count(), MAX_PAGES as usize);
+    }
+
+    #[test]
+    fn the_request() {
+        for (key, value, want) in [
+            ("ITEM", "", "numeric item"),
+            ("ITEM", "*", "numeric item"),
+            ("ITEM", "0", "numeric item"),
+            ("ITEM", "$(exit 9)", "numeric item"),
+            ("REPO", "o/r/x", "caller repository"),
+            ("GITHUB_RUN_ID", "1e3", "numeric Actions run ID"),
+            ("NO_RESULT_REASON", "> not JSON", "not a JSON string"),
+        ] {
+            let env = BTreeMap::from([
+                ("REPO", "o/r"),
+                ("ITEM", "7"),
+                ("GITHUB_RUN_ID", "100"),
+                (key, value),
+            ]);
+            let err = Status::from_env(|key| env.get(key).map(|value| value.to_string()))
+                .err()
+                .unwrap_or_else(|| panic!("{key}={value}"));
+            assert!(format!("{err:#}").contains(want), "{key}={value}: {err:#}");
+        }
+        assert_eq!(
+            body(
+                "ended",
+                Some(r#""> a\n> b""#),
+                Some("usd=1.5 partial=false"),
+                "100"
+            )
+            .unwrap(),
+            format!(
+                "ended Its reason:\n\n> a\n> b\n\n<!-- agentic-job-cost: 100 usd=1.5 partial=false -->\
+                 \n\n<!-- agentic-job-run: 100 -->\n\n{MARKER}"
+            )
+        );
+    }
+}

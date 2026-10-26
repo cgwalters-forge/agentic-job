@@ -237,35 +237,14 @@ test('target events read workflow policy without changing the trusted review bas
   assert.equal(evaluate(checkout)(github, inputs), 'event-sha');
 });
 
+// `agentic-job status` (src/apply/status.rs) keeps the comment author-owned and bounded.
 test('refused event reviews update one author-owned bounded status comment', () => {
-  const { upsert, MARKER } = require('./status.cjs');
-  // As `agentic-job review admit` writes it in the policy job.
-  const reason = 'the bounds do not allow forks';
-  const comments = [{ id: 1, user: { login: 'attacker' }, body: `copied\n\n${MARKER}` }];
-  const calls = [];
-  const api = (method, route, body) => {
-    calls.push([method, route, body]);
-    if (method === 'GET') return comments;
-    if (method === 'POST') {
-      const comment = { id: 2, user: { login: 'github-actions[bot]' }, body };
-      comments.push(comment);
-      return comment;
-    }
-    comments[1].body = body;
-    return comments[1];
-  };
-  const env = { REPO: 'owner/repo', ITEM: '472', GITHUB_RUN_ID: '100', TEXT: `Review refused by policy: ${reason}` };
-  upsert(env, api);
-  upsert({ ...env, GITHUB_RUN_ID: '101' }, api);
-  assert.equal(calls.filter(([method]) => method === 'POST').length, 1);
-  assert.equal(calls.filter(([method]) => method === 'PATCH').length, 1);
-  assert.equal(comments[1].body.split('\n')[0], `Review refused by policy: ${reason}`);
   const caller = fs.readFileSync(path.join(__dirname, '../.github/workflows/review.yml'), 'utf8');
   const refusal = caller.split('\n  refusal:\n')[1].split('\n  agent:\n')[0];
-  assert.match(refusal, /needs.policy.outputs.admitted == 'false'/);
-  assert.match(refusal, /ref: \$\{\{ needs.policy.outputs.source-sha \}\}/);
+  assert.match(refusal, /needs.policy.outputs.admitted == 'false' && needs.policy.outputs.binary-artifact-id != ''/);
+  assert.match(refusal, /artifact-ids: \$\{\{ needs.policy.outputs.binary-artifact-id \}\}\n/);
   assert.match(refusal, /TEXT: \$\{\{ needs.policy.outputs.refusal \}\}/);
-  assert.match(refusal, /run: node .agentic-job-source\/workflow\/status.cjs/);
+  assert.match(refusal, /"\$RUNNER_TEMP\/bin\/agentic-job" status\n/);
   const policy = fs.readFileSync(path.join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /review admit --decision "\$JOB_DIR\/event\.json" --output "\$GITHUB_OUTPUT"/);
   assert.match(refusal, /group: agentic-job-status-/);

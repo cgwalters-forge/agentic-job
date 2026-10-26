@@ -62,6 +62,11 @@ pub enum Command {
     /// Rebuild and push a checked replacement series of a pull request's branch
     #[command(subcommand)]
     Replacement(crate::apply::replacement::Command),
+    /// Read, with GH_TOKEN, the pull request a run pushes to and the repository its commit may go to
+    #[command(subcommand)]
+    Push(crate::apply::push::Command),
+    /// Write a run's status in the one marked comment on its item, from the workflow step's environment
+    Status(crate::apply::status::Args),
     /// Annotate why check refused outputs or apply's handlers failed them, bounded and neutralized
     #[command(subcommand)]
     Diagnostics(crate::diagnostics::Command),
@@ -107,6 +112,8 @@ impl Command {
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
             Self::SecondaryPullRequest(args) => crate::apply::secondary::run(args),
             Self::Replacement(command) => command.run(),
+            Self::Push(command) => command.run(),
+            Self::Status(args) => crate::apply::status::run(args),
             Self::Diagnostics(command) => command.run(),
             Self::Event(args) => event::run(args),
             Self::Review(command) => command.run(),

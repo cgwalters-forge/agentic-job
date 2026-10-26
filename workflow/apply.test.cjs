@@ -5,7 +5,6 @@ const { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSyn
 const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { test } = require('node:test');
-const { OWNER_BRANCHES } = require('./push.cjs');
 
 const workflow = readFileSync(join(__dirname, '../.github/workflows/apply.yml'), 'utf8');
 const wrapper = readFileSync(join(__dirname, '../.github/workflows/agentic-job.yml'), 'utf8');
@@ -690,6 +689,11 @@ test('issue linking executes only policy binary artifacts from this run', () => 
     assert.equal(result.status === 0, expected === 0, result.stderr);
   }
   assert.match(workflow, /artifact-ids: \$\{\{ fromJSON\(inputs.policy\).binary-artifact-id \}\}\n {10}path: \$\{\{ runner.temp \}\}\/apply-binary\n {10}digest-mismatch: error/);
+  // Conclude binds the binary that writes its status comment the same way.
+  const conclude = workflow.split('\n  conclude:\n')[1];
+  assert.equal(conclude.split("- name: Require policy's binary\n")[1].split('        run: |\n')[1].split('\n      - ')[0],
+    workflow.split("- name: Require policy's binary\n")[1].split('        run: |\n')[1].split('\n      - ')[0]);
+  assert.match(conclude, /artifact-ids: \$\{\{ fromJSON\(inputs.policy\).binary-artifact-id \}\}\n {10}path: \$\{\{ runner.temp \}\}\/conclude-binary\n {10}digest-mismatch: error/);
 });
 
 test('no failure in notify stops the run, and conclude still reports it', () => {
@@ -736,7 +740,7 @@ test('no failure in notify stops the run, and conclude still reports it', () => 
   }
 });
 
-// Item-scoped status upserts are exercised in status.test.cjs.
+// Item-scoped status upserts are exercised in crates/agentic-job/src/apply/status.rs.
 
 // How conclude says the run ended: [results, pull request, no result, text, result URL, over budget, pull request's repository, staged, secret at].
 for (const [results, pr, none, text, url = '', over = '', prRepo = '', staged = '', secretAt = ''] of [
@@ -1323,216 +1327,15 @@ test('a pull request without a fork to open it from stops the guard', async () =
   assert.equal((await leaveOutApplied([comment()], [], { fork: '' })).kept.length, 1);
 });
 
-// Runs the fork step against a forge where the token is `me`'s and git
-// reaches the fork after `reachable` tries.
-// `actions` is what the fork's Actions settings do: turn off, refuse to,
-// or stay on whatever is asked.
-// `config` is the policy's, and `head` the head of the pull request
-// `pulls.get` answers with; `accepts` lists the repositories whose default
-// branch holds push.cjs's OWNER_BRANCHES naming them, or is the error
-// reading it throws, and `contents` records what was read.
-async function fork(items, { me = 'bot', output = 'owner/repo', repo = 'caller/repo', reachable = 1, made = 'bot/repo', answer = {}, actions = 'off',
-  config = {}, accepts = [], state = 'open', replacement = false, base = { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } },
-  head = { ref: 'p/agent-run-7', repo: { full_name: 'bot/repo', fork: true, owner: { login: 'bot' } } }, forked = [], contents = [] } = {}) {
-  const dir = mkdtempSync(join(homedir(), 'fork-test-'));
-  try {
-    writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
-    writeFileSync(join(dir, 'config.json'), JSON.stringify(config));
-    const outputs = {}, tries = [], settings = [], read = [];
-    let on = true;
-    const core = { setOutput: (key, value) => { outputs[key] = value; } };
-    const github = { rest: {
-      actions: {
-        setGithubActionsPermissionsRepository: async params => {
-          settings.push(['set', params]);
-          if (actions === 'refused') throw new Error('403');
-          if (actions === 'off') on = params.enabled;
-        },
-        getGithubActionsPermissionsRepository: async params => {
-          settings.push(['get', params]);
-          return { data: actions === 'unknown' ? {} : { enabled: on } };
-        },
-      },
-      users: { getAuthenticated: async () => { if (me === null) throw new Error('403'); return { data: { login: me } }; } },
-      repos: {
-        createFork: async params => {
-          forked.push(params);
-          return { data: { full_name: made, fork: true, owner: { login: made.split('/')[0] }, ...answer } };
-        },
-      },
-      pulls: { get: async params => { read.push(params); return { data: { number: params.pull_number, state, head, base } }; } },
-      git: { getRef: async params => {
-        assert.equal(replacement, true, 'ordinary pushes must not resolve a replacement base');
-        assert.deepEqual(params, { owner: 'owner', repo: 'repo', ref: 'heads/main' });
-        return { data: { object: { type: 'commit', sha: 'b'.repeat(40) } } };
-      } },
-    } };
-    // The head repository of a pull request a push goes to: every one but
-    // the output repository is a fork, `mallory` gives the identity no push
-    // there, and only those in `accepts` accept a push to their branches.
-    Object.assign(github.rest.repos, {
-      get: async ({ owner }) => ({ data: { default_branch: 'main', fork: owner !== 'owner', parent: { full_name: 'owner/repo' }, permissions: { push: owner !== 'mallory' } } }),
-      getBranch: async () => ({ data: { protected: false } }),
-      getBranchRules: async () => ({ data: [] }),
-      getContent: async params => {
-        contents.push(params);
-        const { owner, repo, path } = params;
-        if (accepts instanceof Error) throw accepts;
-        if (!accepts.includes(`${owner}/${repo}`) || path !== OWNER_BRANCHES) throw Object.assign(new Error('Not Found'), { status: 404 });
-        const content = Buffer.from(`${owner}/${repo}\n`);
-        return { data: { type: 'file', path, encoding: 'base64', size: content.length, content: content.toString('base64') } };
-      },
-    });
-    const exec = { getExecOutput: async (program, args, options) => {
-      tries.push([program, ...args]);
-      assert.equal(options.ignoreReturnCode, true);
-      // A fork the forge has made and not filled yet has no branch.
-      return tries.length >= reachable ? { exitCode: 0, stdout: `${'c'.repeat(40)}\trefs/heads/main\n` }
-        : { exitCode: tries.length % 2 ? 128 : 0, stdout: '' };
-    } };
-    await new AsyncFunction('require', 'process', 'core', 'github', 'exec', 'setTimeout', script('Fork the output repository for the pull request'))(
-      name => {
-        if (name === '/workspace/apply-source/workflow/push.cjs') return require('./push.cjs');
-        return require(name);
-      }, { env: { GH_AW_TMP: dir, OUTPUT_REPO: output, REPO: repo, BASE: 'p/agent-run-7',
-        GITHUB_WORKSPACE: '/workspace', REPLACEMENT: String(replacement) } }, core, github, exec, resolve => resolve());
-    return { outputs, forked, tries, settings, read };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-test('a pull request is opened from a fork the token owns, made if missing and reached by git', async () => {
-  const { outputs, forked, tries, settings, read } = await fork([comment(), pull], { reachable: 3, made: 'bot/repo-1' });
-  assert.deepEqual(read, []);
-  assert.deepEqual(forked, [{ owner: 'owner', repo: 'repo', default_branch_only: true }]);
-  assert.deepEqual(tries, Array(3).fill(['git', 'ls-remote', '--heads', 'https://github.com/bot/repo-1.git']));
-  // Actions are turned off on the fork, and that is read back.
-  assert.deepEqual(settings, [['set', { owner: 'bot', repo: 'repo-1', enabled: false }], ['get', { owner: 'bot', repo: 'repo-1' }]]);
-  assert.deepEqual(outputs, { repo: 'bot/repo-1' });
-  // Only a pull request needs one.
-  assert.deepEqual(await fork([comment()], { me: null }), { outputs: {}, forked: [], tries: [], settings: [], read: [] });
-  for (const [name, options, error] of [
-    ['a token /user does not name', { me: null }, /GET \/user names none/],
-    ["the output repository's owner", { me: 'Owner' }, /owns owner\/repo/],
-    ['a fork git never reaches', { reachable: 31 }, /still not there after 30 tries/],
-    // What the forge answers with is the user's repository in the network.
-    ['a repository that is not a fork', { answer: { fork: false } }, /not bot's own fork/],
-    ["another user's repository", { made: 'other/repo' }, /not bot's own fork/],
-    ["the caller's repository, a fork the user owns", { repo: 'Bot/Repo' }, /not bot's own fork/],
-    ['the output repository itself', { made: 'bot/repo', output: 'bot2/x', answer: { full_name: 'Bot2/X' } }, /not bot's own fork/],
-    // A push with a PAT would run the fork's workflows, with its secrets.
-    ['a token that may not turn Actions off', { actions: 'refused' }, /Actions could not be turned off on the fork bot\/repo/],
-    ['a fork whose Actions stay on', { actions: 'on' }, /Actions could not be turned off/],
-    ['an answer that does not say', { actions: 'unknown' }, /Actions could not be turned off/],
-  ]) {
-    await assert.rejects(fork([pull], options), error, name);
-  }
-  // Fork isolation is established before fetching and applying the patch.
+// Where a patch goes is `agentic-job push target`'s (src/apply/push.rs),
+// with its refusals, decided before anything is fetched or applied.
+test('the fork step decides where a patch goes, with policy binary, before the patch is fetched', () => {
+  assert.ok(workflow.indexOf("- name: Require policy's binary\n") <
+    workflow.indexOf('- name: Fork the output repository for the pull request\n'));
   assert.ok(workflow.indexOf('- name: Fork the output repository for the pull request\n') <
     workflow.indexOf("- name: Fetch the target's base branch\n"));
   assert.match(workflow, /- name: Fork the output repository for the pull request\n {8}id: fork\n {8}if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n/);
-});
-
-// An owner has no fork of its own repository. Only where the repository
-// itself accepts it, by a file on its default branch, does a new pull
-// request's branch go there, with its Actions as they are; its CI then
-// runs the commit with its secrets, which a fork avoids.
-test("an owner's pull request is pushed in its own repository only where the repository accepts it", async () => {
-  const path = OWNER_BRANCHES;
-  const accepts = ['owner/repo'];
-  const forked = [], contents = [];
-  const { outputs, tries, settings, read } = await fork([pull], { me: 'Owner', accepts, forked, contents });
-  assert.deepEqual(outputs, { repo: 'owner/repo' });
-  assert.deepEqual([forked, tries, settings, read], [[], [], [], []]);
-  // The default branch's, as no ref is named.
-  assert.deepEqual(contents, [{ owner: 'owner', repo: 'repo', path }]);
-  // Another account's repository is pushed to that account's fork, and not asked.
-  assert.deepEqual((await fork([pull], { accepts, contents })).outputs, { repo: 'bot/repo' });
-  assert.equal(contents.length, 1);
-  for (const [name, answer] of [
-    ['no such file', []],
-    // A fork made or synced from a repository that accepts holds its file,
-    // which names that repository and not the fork.
-    ['a file naming another repository', ['upstream/repo']],
-  ]) {
-    await assert.rejects(fork([pull], { me: 'owner', accepts: answer }),
-      /owns owner\/repo and has no fork of it to push to: .*add \.github\/agentic-job\/accept-owner-branches naming owner\/repo to its default branch/, name);
-  }
-  // A forge that could not answer is not a refusal to report as one.
-  await assert.rejects(fork([pull], { me: 'owner', accepts: Object.assign(new Error('Server Error'), { status: 500 }) }), /^Error: Server Error$/);
-  // A workflow file the agent wrote would run on its own branch.
-  contents.length = 0;
-  await assert.rejects(fork([pull], { me: 'owner', accepts, contents, config: { create_pull_request: { unprotected_dot_folders: ['.github'] } } }),
-    /owns owner\/repo .*with \.github exempted/);
-  assert.equal(contents.length, 0);
-});
-
-// A same-repository pull request's branch would have the target's CI run
-// the agent's commit with its secrets, a write token and OIDC (#430), so
-// it is pushed to only where the repository accepts that. A pull request
-// from the identity's own fork is pushed to there, with Actions turned off
-// as for a new pull request; one from anywhere else goes to its head
-// repository only as push.cjs allows (#553), and nothing is forked or
-// turned off for it.
-test("a push goes to its pull request's head repository, the identity's fork as a new pull request's", async () => {
-  const push = { type: 'push_to_pull_request_branch', branch: 'p/agent-run-7' };
-  const config = { push_to_pull_request_branch: { target: '42', head: '2'.repeat(40) } };
-  const { outputs, forked, read } = await fork([push], { config });
-  assert.deepEqual(forked, [{ owner: 'owner', repo: 'repo', default_branch_only: true }]);
-  // push.cjs reads it first, and leaves the identity's fork to the step.
-  assert.deepEqual(read, Array(2).fill({ owner: 'owner', repo: 'repo', pull_number: 42 }));
-  assert.deepEqual(outputs, { repo: 'bot/repo' });
-  const enabled = { push_to_pull_request_branch: { ...config.push_to_pull_request_branch, replacement_max_commits: 10 } };
-  assert.deepEqual((await fork([push], { config: enabled })).outputs, { repo: 'bot/repo' });
-  assert.deepEqual((await fork([push], { config: enabled, replacement: true, repo: 'owner/repo' })).outputs,
-    { repo: 'bot/repo', 'current-base': 'b'.repeat(40) });
-  await assert.rejects(fork([push], { config: enabled, replacement: true, repo: 'owner/repo',
-    base: { ref: 'main', repo: { full_name: 'other/repo' } } }), /not open from a branch named/);
-  // The forge's names in another case are the same repository.
-  const same = { ref: 'p/agent-run-7', repo: { full_name: 'Bot/Repo', fork: true, owner: { login: 'Bot' } } };
-  assert.deepEqual((await fork([push], { config, head: same })).outputs, { repo: 'bot/repo' });
-  const from = (full_name, owner, fork = true, ref = 'p/agent-run-7') => ({ head: { ref, repo: { full_name, fork, owner: { login: owner } } } });
-  // Another fork the identity can push to and whose owner accepts it,
-  // whoever opened the pull request and whoever owns the output repository.
-  const carol = { ...from('carol/repo', 'carol'), accepts: ['carol/repo'] };
-  for (const me of ['bot', 'owner']) {
-    const result = await fork([push], { me, config, ...carol });
-    assert.deepEqual([result.outputs, result.forked, result.settings, result.tries], [{ repo: 'carol/repo' }, [], [], []], me);
-  }
-  assert.deepEqual((await fork([push], { config: enabled, replacement: true, repo: 'owner/repo', ...carol })).outputs,
-    { repo: 'carol/repo', 'current-base': 'b'.repeat(40) });
-  // A branch of the output repository, which accepts it.
-  const accepted = await fork([push], { config, ...from('owner/repo', 'owner', false), accepts: ['owner/repo'] });
-  assert.deepEqual([accepted.outputs, accepted.forked, accepted.settings], [{ repo: 'owner/repo' }, [], []]);
-  const exempt = { push_to_pull_request_branch: { ...config.push_to_pull_request_branch, unprotected_dot_folders: ['.github'] } };
-  assert.deepEqual((await fork([push], { config: exempt })).outputs, { repo: 'bot/repo' });
-  for (const [name, options, error, forks] of [
-    // Without its own opt-in, as this mock's output repository has none.
-    ['a same-repository pull request', from('owner/repo', 'owner', false), /from a branch of owner\/repo itself, .*add \.github\/agentic-job\/accept-owner-branches/, 0],
-    ["a same-repository pull request, with its owner's token", { me: 'owner', ...from('owner/repo', 'owner', false) }, /from a branch of owner\/repo itself/, 0],
-    // Write access is not its owner's acceptance that its workflows run the
-    // agent's commit with its secrets.
-    ['another fork, without its opt-in', from('carol/repo', 'carol'), /is from carol\/repo, not bot's fork .*add \.github\/agentic-job\/accept-owner-branches naming carol\/repo to its default branch/, 0],
-    ["another fork, with the output repository's opt-in only", { ...from('carol/repo', 'carol'), accepts: ['owner/repo'] }, /add \.github/, 0],
-    ['a fork the identity cannot push to', from('mallory/repo', 'mallory'), /is from mallory\/repo, which bot cannot push to/, 0],
-    // Its Actions are not turned off, and a workflow the agent wrote would run.
-    ['another fork, with .github exempted', { ...carol, config: exempt }, /is from carol\/repo, not from bot's fork .*\.github exempted/, 0],
-    ['a deleted head repository', { head: { ref: 'p/agent-run-7', repo: null } }, /is open, from a deleted repository:p\/agent-run-7, not open from a branch named/, 0],
-    ["another branch of apply's fork", from('bot/repo', 'bot', true, 'main'), /from bot\/repo:main, not open from a branch named p\/agent-run-7/, 0],
-    ['a closed pull request', { state: 'closed' }, /is closed, from bot\/repo/, 0],
-    ['no pull request in the policy', { config: { push_to_pull_request_branch: {} } }, /names no pull request/, 0],
-    ['a pull request the policy does not name', { config: {} }, /names no pull request/, 0],
-    ['a token /user does not name', { me: null }, /GET \/user names none/, 0],
-    // Another repository of the identity's is not the fork the forge answers with.
-    ["a repository of the identity's that is not its fork", from('bot/other', 'bot'), /is from bot\/other:p\/agent-run-7, not from bot\/repo/, 1],
-  ]) {
-    const forked = [];
-    await assert.rejects(fork([push], { config, ...options, forked }), error, name);
-    assert.equal(forked.length, forks, name);
-  }
-  // A push's checks are the trusted source's, checked out for any run that applies.
-  assert.match(workflow, /\n {8}if: \$\{\{ fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\n {8}with:\n {10}repository: \$\{\{ job\.workflow_repository \}\}\n/);
+  assert.match(step('Fork the output repository for the pull request'), /\/apply-binary\/agentic-job" push target /);
   // The pull request's branch is the fork's: the checkout is of the output
   // repository's default branch, by policy's own output, and the base is
   // fetched from the fork the step above checked.
