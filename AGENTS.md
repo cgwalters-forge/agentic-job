@@ -97,6 +97,8 @@ and `workflow/review.md`, which the source digest covers; the
 is not one plain string literal.
 Recent commits usually use `area: Imperative subject` (for example `run: Leave…`);
 explain the reason for a change, not just the diff, in its commit message.
+A user-visible change adds a line under Unreleased in [CHANGELOG.md](CHANGELOG.md),
+and a change to an interface [stable-interfaces.md](docs/stable-interfaces.md) names also updates that page.
 
 ## Security and scope
 
