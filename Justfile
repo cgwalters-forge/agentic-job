@@ -4,13 +4,15 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
 test-feed-refresh:
-    node --test secure-host/refresh-feed.test.mjs
+    cargo test --locked -p agentic-job --bin refresh-feed
 
 refresh-feed:
-    node secure-host/refresh-feed.mjs update
+    cargo run --quiet --locked -p agentic-job --bin refresh-feed -- update
 
+# What refresh-feed built: no build runs in the step feed.yml gives the
+# token, though the job's earlier steps built the locked dependencies.
 publish-feed-refresh:
-    node secure-host/refresh-feed.mjs publish
+    target/debug/refresh-feed publish
 
 # Pinned collector and mocked forge handlers; no forge writes.
 test-safe-output-handlers:
@@ -43,14 +45,14 @@ runner-egress-fixture:
 # Privileged integration proof: only on a fresh disposable supported host.
 # The checkout's binary loads the policy, as secure-host has it do.
 world-write-evidence out:
-    cargo build --locked -p agentic-job --bin agentic-job
-    node secure-host/world-write-evidence.mjs "$1" target/debug/agentic-job
+    cargo build --locked -p agentic-job --bin agentic-job --bin world-write-evidence
+    target/debug/world-write-evidence "$1" target/debug/agentic-job
 
 world-write-test:
-    node --test secure-host/world-write-cases.test.mjs secure-host/world-write-evidence.test.mjs
+    cargo test --locked -p agentic-job --bin world-write-evidence --test world_write_worker
 
 test-binary:
-    node --test secure-host/binary.test.mjs
+    cargo test --locked -p agentic-job --test binary_sh
 
 # Unprivileged regression tests for setup, its probe batching and summaries.
 setup-tests:

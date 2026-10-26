@@ -2111,6 +2111,8 @@ with contents and pull-request write permissions. This is off by default:
 the organization's job token may not be allowed to open pull requests.
 The `threat-feed pin` workflow runs only trusted default-branch code, with a
 read-only job token; only its publishing step receives the dedicated token.
+Earlier steps of the same job build the updater from the locked Rust
+dependencies, so that step trusts them as the `apply` job does.
 Do not grant it workflow or administration access. No untrusted feed text is
 executed or included in a commit message. The job proposes a draft, never
 merges it, and leaves an existing feed proposal untouched. Normal PR checks

@@ -18,7 +18,8 @@ jobs:
     # Off by default. Only repository configuration can enable credentialed proposals.
     if: ${{ vars.THREAT_FEED_REFRESH == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    # A cold build of the updater comes first.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

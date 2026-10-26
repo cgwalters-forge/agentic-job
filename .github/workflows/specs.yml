@@ -1,4 +1,5 @@
-# No write permissions or secrets: TLC executes only this checkout's model.
+# No write permissions or secrets: TLC executes only this checkout's model,
+# and cargo builds only this checkout's runner from its locked dependencies.
 name: specs
 on:
   pull_request:
@@ -9,10 +10,11 @@ permissions:
 jobs:
   tlc:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # A cold build of the runner, then about half a minute of TLC.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Hosted Ubuntu includes Java; no new setup action or write token.
+      # Hosted Ubuntu includes Java and Rust; no new setup action or write token.
       - run: bash specs/check.sh
