@@ -59,10 +59,9 @@ pub struct Args {
 /// the supervisor. That it exists also says setup ran here before.
 pub const CONFIG_DIR: &str = "/etc/agentic-job";
 
-/// A copy of this program that the sandbox user can run: `sandbox check`
-/// starts it there to see the host as that user does. The build it was
-/// made from is in the runner's home, which is closed.
-pub const SELF_COPY: &str = "/usr/local/libexec/agentic-job";
+/// The copy of this program that the sandbox user can run, and the
+/// helper's sudo rule names: the helper's, at the path callers know.
+pub use super::helper::SELF_COPY;
 
 /// Root-owned and writable by the sandbox group alone, not world-writable,
 /// so the world-write policy leaves it be: what the view must deny is the

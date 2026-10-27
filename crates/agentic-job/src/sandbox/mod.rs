@@ -4,21 +4,93 @@
 //! enters the sandbox ([`enter`]) for each probe, through the one
 //! privileged command that user keeps ([`helper`], via [`root`]).
 
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use clap::Subcommand;
 
+use crate::config::{Config, Egress, HostFile, Sandbox};
 use crate::exit::Exit;
 
 pub mod check;
-pub mod enter;
-pub mod helper;
-pub mod root;
 pub(crate) mod session;
 pub mod setup;
 pub mod timed;
 
 // What secure-host holds already, at the paths callers know.
-pub use ::secure_host::{egress, host, local, network, proxy, view, worker_diagnostics};
+pub use ::secure_host::{
+    egress, enter, host, local, network, proxy, root, view, worker_diagnostics,
+};
+
+/// secure-host's helper, with `run` reading root's copy of the
+/// configuration as agentic-job's.
+pub mod helper {
+    pub use ::secure_host::helper::*;
+
+    use anyhow::Result;
+
+    use crate::config::Config;
+    use crate::exit::Exit;
+
+    pub fn run(op: &Op) -> Result<Exit> {
+        Ok(if ::secure_host::helper::run::<Config>(op)? {
+            Exit::Success
+        } else {
+            Exit::Failure
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::HostFile;
+
+        /// `run`'s alone, as the identity token's request is: never the
+        /// sandbox user's.
+        #[test]
+        fn the_runs_credentials_are_unset_in_the_sandbox() {
+            assert_eq!(
+                Config::UNSET,
+                ["AGENTIC_JOB_INFERENCE_KEY", "AGENTIC_JOB_MCP_TOKEN"]
+            );
+        }
+    }
+}
+
+/// What agentic-job's file adds for the helper and the way in: its run
+/// tables, checked with the rest; the run's credentials, unset in the
+/// sandbox; and the session bridge's `session-serve`.
+impl HostFile for Config {
+    const UNSET: &'static [&'static str] =
+        &[crate::run::api_key::API_KEY_VAR, crate::run::mcp::TOKEN_VAR];
+
+    fn load(path: &Path) -> Result<Self> {
+        Config::load(path)
+    }
+
+    fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
+    }
+
+    fn egress(&self) -> &Egress {
+        &self.egress
+    }
+
+    fn tools(&self) -> bool {
+        self.setup.tools.is_some()
+    }
+
+    fn direct(&self) -> Result<Vec<network::Direct>> {
+        Ok(self.check_host()?.direct)
+    }
+
+    /// Checked as `run` checks it.
+    fn session_serve(&self) -> Result<()> {
+        let listen = crate::session::bridge::Listen::from_config(&self.session)?
+            .context("session serve needs session.listen")?;
+        session::serve(listen.capability.as_deref())
+    }
+}
 
 #[derive(Debug, Subcommand)]
 pub enum Command {

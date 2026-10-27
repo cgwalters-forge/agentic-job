@@ -3,7 +3,7 @@
 //! nothing else.
 //!
 //! After setup the runner's user has one sudo rule, for `helper` of the
-//! root-owned copy of this program ([`super::setup::SELF_COPY`]). So this
+//! root-owned copy of this program ([`SELF_COPY`]). So this
 //! is the whole of what that user can have root do, and it is kept
 //! closed: no operation takes a path, a user or a command that root then
 //! acts on. The sandbox user comes from the root-owned configuration;
@@ -16,8 +16,12 @@
 //!
 //! The same operations are what the runner's user did with full sudo
 //! before the lock existed, and still does on a host where setup never
-//! ran (tests): [`super::root::Root`] chooses, and [`Exec`] lets the
+//! ran (tests): [`crate::root::Root`] chooses, and [`Exec`] lets the
 //! sequence that stops the sandbox user run either way.
+//!
+//! What the program built on this crate adds, its own configuration
+//! tables and `session-serve`, comes in through [`HostFile`], which
+//! [`run`] reads root's copy of the configuration as.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
@@ -31,16 +35,17 @@ use clap::Subcommand;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
-use super::egress;
-use super::enter::{Entry, RUN0};
-use super::host::{self, User};
-use super::setup::SELF_COPY;
-use crate::config::{self, Config};
-use crate::exit::Exit;
-use crate::sandbox::egress::ACCESS_LOG;
+use crate::config::{HostFile, ROOT_COPY};
+use crate::egress::{self, ACCESS_LOG};
+use crate::enter::{Entry, RUN0};
+use crate::host::{self, User};
 
-// secure-host's now, at the paths callers know.
-pub use super::host::{roots_alone, trusted_program};
+pub use crate::host::{roots_alone, trusted_program};
+
+/// A copy of this program that the sandbox user can run: `sandbox check`
+/// starts it there to see the host as that user does. The build it was
+/// made from is in the runner's home, which is closed.
+pub const SELF_COPY: &str = "/usr/local/libexec/agentic-job";
 
 /// The command's name, as the sudo rule and the client spell it.
 pub const COMMAND: &str = "helper";
@@ -103,16 +108,18 @@ pub enum Op {
     CrontabRemove,
 }
 
-pub fn run(op: &Op) -> Result<Exit> {
+/// Runs OP as root, with root's copy of the configuration read as F;
+/// whether what it ran succeeded.
+pub fn run<F: HostFile>(op: &Op) -> Result<bool> {
     ensure!(host::is_root(), "`{COMMAND}` runs as root, through sudo");
     program_dirs_are_roots()?;
-    let config = root_config()?;
+    let config = root_config::<F>()?;
     // With sandbox.create-user = false there is no one to enter, reap or
     // clean up after; the rest, the lock's proof (ping) first, still works.
-    let entry = if config.sandbox.create_user {
+    let entry = if config.sandbox().create_user {
         Some(Entry::new(&config)?)
     } else {
-        config.check_host()?;
+        config.direct()?;
         None
     };
     let sandbox = || {
@@ -122,35 +129,31 @@ pub fn run(op: &Op) -> Result<Exit> {
     };
     let exec = Direct;
     match op {
-        Op::Ping => Ok(Exit::Success),
+        Op::Ping => Ok(true),
         Op::Enter { chdir, argv } => enter(sandbox()?, chdir, argv),
-        Op::Reap => reap(sandbox()?.user().uid, &exec).map(|()| Exit::Success),
+        Op::Reap => reap(sandbox()?.user().uid, &exec).map(|()| true),
         Op::EgressLogSize => {
             match open_log()? {
                 Some(file) => println!("{}", file.metadata().context("reading the log")?.len()),
                 None => println!("{NO_LOG}"),
             }
-            Ok(Exit::Success)
+            Ok(true)
         }
         Op::EgressLog { from } => {
             let Some(mut file) = open_log()? else {
-                return Ok(Exit::Success);
+                return Ok(true);
             };
             file.seek(SeekFrom::Start(*from))
                 .with_context(|| format!("reading {ACCESS_LOG}"))?;
             let mut out = std::io::stdout().lock();
             std::io::copy(&mut file, &mut out).context("writing the log")?;
             out.flush().context("writing the log")?;
-            Ok(Exit::Success)
+            Ok(true)
         }
         Op::TailscaleStatus => passthrough(&exec, &["tailscale", "status", "--json"]),
-        Op::SessionServe => {
-            // Root's own copy decides what serve accepts, checked as `run`
-            // checks it: the runner's user passes no arguments here.
-            let listen = crate::session::bridge::Listen::from_config(&config.session)?
-                .context("session serve needs session.listen")?;
-            super::session::serve(listen.capability.as_deref()).map(|()| Exit::Success)
-        }
+        // Root's own copy decides what serve accepts: the runner's user
+        // passes no arguments here.
+        Op::SessionServe => config.session_serve().map(|()| true),
         Op::PkexecControl => passthrough(&exec, &["pkexec", "true"]),
         Op::DisableLinger => {
             let user = &sandbox()?.user().name;
@@ -163,9 +166,9 @@ pub fn run(op: &Op) -> Result<Exit> {
     }
 }
 
-/// Runs ARGV with our standard output and error, under a time limit, and
-/// ends with its status.
-fn passthrough(exec: &Direct, argv: &[&str]) -> Result<Exit> {
+/// Runs ARGV with our standard output and error, under a time limit;
+/// whether it succeeded.
+fn passthrough(exec: &Direct, argv: &[&str]) -> Result<bool> {
     let limited = limited(argv, CONTROL_SECONDS)?;
     let limited: Vec<&str> = limited.iter().map(String::as_str).collect();
     let mut command = exec.command(&limited)?;
@@ -173,15 +176,11 @@ fn passthrough(exec: &Direct, argv: &[&str]) -> Result<Exit> {
         .stdin(Stdio::null())
         .status()
         .with_context(|| format!("running {}", argv.join(" ")))?;
-    Ok(if status.success() {
-        Exit::Success
-    } else {
-        Exit::Failure
-    })
+    Ok(status.success())
 }
 
 /// Becomes `run0` for ARGV as the sandbox user in CHDIR.
-fn enter(entry: &Entry, chdir: &Path, argv: &[String]) -> Result<Exit> {
+fn enter(entry: &Entry, chdir: &Path, argv: &[String]) -> Result<bool> {
     check_chdir(chdir, entry.home())?;
     let run0 = entry.run0_argv(argv, chdir)?;
     let (program, args) = run0.split_first().context("an empty run0 command line")?;
@@ -267,10 +266,10 @@ pub fn parse_log_size(text: &str) -> Option<Option<u64>> {
 }
 
 /// The configuration setup left for root, if it is still root's alone.
-fn root_config() -> Result<Config> {
-    let path = Path::new(config::ROOT_COPY);
+fn root_config<F: HostFile>() -> Result<F> {
+    let path = Path::new(ROOT_COPY);
     roots_alone(path)?;
-    Config::load(path).context("`agentic-job sandbox setup` writes this file")
+    F::load(path).context("`agentic-job sandbox setup` writes this file")
 }
 
 /// Refuses unless every directory root looks programs up in is root's
