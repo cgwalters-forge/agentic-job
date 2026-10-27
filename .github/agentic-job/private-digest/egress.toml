@@ -1,0 +1,35 @@
+# The egress proxy's policy for the private digest caller, in place of
+# the binary's egress/policy.toml (config.toml beside this file names
+# it). Every allowed domain, and its subdomains, is a place the agent can
+# send the repository's source in a GET's path or query, so the list is
+# what the run needs and nothing else (docs/private-repositories.md).
+# The inference proxy is not here: on the tailnet the workflow's network
+# step joins, `egress.direct` reaches it around this proxy, and is a
+# destination to review in the same way. A broker on a public host would
+# have to be added to `allow`.
+
+[egress]
+mode = "allowlist"
+# github.com for the clone, api.github.com for the agent's REST reads
+# with the job's read token, which reads only this repository.
+# Red Hat's public registry for config.toml's pinned container probe image.
+# The pinned v0.6.3 host also requires npm/cargo fetches to pass when installed.
+# These are additional destinations that can receive source in a GET, not
+# write rules. Review them as confidentiality destinations before adoption.
+allow = [
+    "github.com",
+    "api.github.com",
+    "registry.access.redhat.com",
+    "registry.npmjs.org",
+    "index.crates.io",
+    "static.crates.io",
+]
+
+# The only write a private run may keep: git fetch's POST. Any other rule
+# is a channel to whatever its endpoint stores, and `run` refuses one.
+[[write]]
+name = "git fetch (smart HTTP)"
+why = "Cloning the repository POSTs to git-upload-pack; pushing (git-receive-pack) stays refused."
+hosts = ["github.com"]
+methods = ["POST"]
+paths = ["/**/git-upload-pack"]

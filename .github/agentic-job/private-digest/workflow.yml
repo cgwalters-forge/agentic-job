@@ -1,0 +1,191 @@
+# A reference caller for a private repository: a digest of the
+# repository, posted as one comment on one issue of it. It is not a
+# workflow of this repository; nothing runs it here. A private
+# repository that adopts it copies this directory to the same path,
+# installs this file as .github/workflows/private-digest.yml, and
+# replaces each placeholder:
+#
+#   AGENTIC_JOB_COMMIT  the cgwalters-forge/agentic-job commit it has read
+#   DIGEST_ISSUE        the number of the issue the digest is posted on
+#   OWNER/PRIVATE-REPO  the repository itself, in allow.toml
+#   the network step    the agent job's step that joins the inference
+#                       proxy's network, which fails until it is replaced
+#
+# and sets the variables INFERENCE_URL and INFERENCE_AUDIENCE. Left as
+# they are, the placeholders fail the run before the agent starts.
+#
+# What makes it a private run (docs/private-repositories.md): policy.yml
+# admits the repository only as the calling repository and passes
+# `--private`, which allow.toml opts into and which keeps the comment in
+# this repository; the agent is the sandbox user, behind config.toml's
+# egress allowlist, with the job's token, which reads only this
+# repository; check holds the one comment to DIGEST_ISSUE. agentic-job.yml
+# refuses all of this: its agent job is the runner's user.
+#
+# Three conditions are the operator's to establish before installing
+# it, and nothing here checks them:
+#
+# - The runner's provisioning and diagnostic logs must not be public.
+#   GitHub's hosted runners keep them with the repository; a third-party
+#   runner provider may publish its own, and a label here is no proof.
+# - The inference service sees the repository's source, and so does the
+#   detection model check.yml uses when AGENTIC_JOB_DETECT_MODEL is set:
+#   their access and retention are a confidentiality decision.
+# - The run registers at the inference proxy with an identity token
+#   naming this file, not agentic-job.yml: the broker has to admit it
+#   (docs/inference.md#which-workflows-a-broker-admits).
+name: private-digest
+
+on:
+  # A schedule and a manual start, with no inputs: the runner, the item
+  # and the bounds are this file's, never a dispatcher's choice.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: private-digest
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    uses: cgwalters-forge/agentic-job/.github/workflows/policy.yml@AGENTIC_JOB_COMMIT
+    permissions:
+      actions: read
+      contents: read
+    with:
+      id: ${{ github.repository }}#digest
+      task: >-
+        Write a digest of this repository's activity in the last week: merged pull requests,
+        open issues that need attention, and notable changes on main. Hand it back as one
+        add_comment and nothing else.
+      # The calling repository, so that policy.yml admits it private; no
+      # `output-repo` or `item-repo`, so the comment stays in it.
+      repo: ${{ github.repository }}
+      kind: analysis
+      outputs: add_comment
+      max-outputs: "1"
+      comment-target: DIGEST_ISSUE
+      # policy.yml refuses an `issue` that is not a number, so a
+      # placeholder left here ends the run before the agent.
+      issue: DIGEST_ISSUE
+      notify: none
+      allow: .github/agentic-job/private-digest/allow.toml
+      config: .github/agentic-job/private-digest/config.toml
+      agent: claude
+      inference-url: ${{ vars.INFERENCE_URL }}
+      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
+      max-requests: "150"
+      timeout: "60"
+      artifact-prefix: digest-
+
+  agent:
+    needs: policy
+    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    # The job token, read only, is the one credential the clone and the
+    # agent's GitHub reads get. `id-token` is for `run` to register at the
+    # inference proxy; the sandbox user never sees the request token.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      id-token: write
+    outputs:
+      exit: ${{ steps.run.outputs.exit }}
+      safe-outputs-artifact-id: ${{ steps.run.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ steps.run.outputs.safe-outputs-artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.policy.outputs.ref }}
+          persist-credentials: false
+      - name: The policy call's source repository and commit
+        env:
+          SOURCE_REPOSITORY: ${{ needs.policy.outputs.source-repository }}
+          SOURCE_SHA: ${{ needs.policy.outputs.source-sha }}
+        run: |
+          echo "$SOURCE_REPOSITORY at $SOURCE_SHA"
+          [[ "$SOURCE_REPOSITORY" == */* && "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.policy.outputs.source-repository }}
+          ref: ${{ needs.policy.outputs.source-sha }}
+          path: .agentic-job-source
+          persist-credentials: false
+      - uses: ./.agentic-job-source/prepare # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          binary-artifact-id: ${{ needs.policy.outputs.binary-artifact-id }}
+          policy-artifact-id: ${{ needs.policy.outputs.policy-artifact-id }}
+      # In place of agent.yml's admit step, which refuses every private
+      # run: this job is for the one policy marked private, on this
+      # repository, and for nothing else.
+      - name: Admit the private run
+        run: |
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.private == true and .repo == $repo' .agentic-job/policy.json > /dev/null ||
+            { echo "::error::this job runs only a private policy for $GITHUB_REPOSITORY"; exit 1; }
+      # Placeholder: the deployment's join of the inference proxy's network
+      # (a VPN or tailnet), as agent.yml's `network` step does, as root
+      # before anything of the agent's is on the machine. `egress.direct`
+      # then reaches the proxy around the egress proxy, which the domain
+      # allowlist keeps to GitHub and the host probes' registries. A credential
+      # it uses has to be spent
+      # here: anything still valid after secure-host is the runner's
+      # user's. A broker on a public host instead goes in egress.toml's
+      # `allow`, as one more place the source can go.
+      - name: Join the inference proxy's network (placeholder)
+        run: |
+          echo "::error::replace this step with the deployment's network join (docs/private-repositories.md#a-reference-caller)"
+          exit 1
+      - name: Check inference proxy reachability
+        run: agentic-job secure-host inference .agentic-job/config.toml
+      - name: The host's configuration
+        # The host image reads the policy from /, not the caller checkout.
+        run: >-
+          agentic-job config --host --from .agentic-job/config.toml
+          --string "egress.policy=$GITHUB_WORKSPACE/.github/agentic-job/private-digest/egress.toml"
+          > "$RUNNER_TEMP/agentic-job-host.toml"
+      # The last step with root; it makes the sandbox user.
+      - uses: ./.agentic-job-source/secure-host # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          config: ${{ runner.temp }}/agentic-job-host.toml
+      # The agent as the sandbox user. No step follows it here: a step
+      # after it would be the runner's user, which holds the request token.
+      - id: run
+        timeout-minutes: 70
+        uses: ./.agentic-job-source/run # zizmor: ignore[self-repository] Execute the policy-selected source checkout, not the caller repository.
+        with:
+          agent-user: sandbox
+          github-token: ${{ github.token }}
+
+  check:
+    needs: [policy, agent]
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    uses: cgwalters-forge/agentic-job/.github/workflows/check.yml@AGENTIC_JOB_COMMIT
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      safe-outputs-artifact-id: ${{ needs.agent.outputs.safe-outputs-artifact-id }}
+      safe-outputs-artifact-digest: ${{ needs.agent.outputs.safe-outputs-artifact-digest }}
+
+  # The comment on DIGEST_ISSUE is all it writes, with the job token; no
+  # SAFE_OUTPUTS_PAT is passed. It executes no agent-produced code.
+  apply:
+    needs: [policy, agent, check]
+    if: ${{ always() && needs.policy.result == 'success' }}
+    uses: cgwalters-forge/agentic-job/.github/workflows/apply.yml@AGENTIC_JOB_COMMIT
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+    with:
+      policy: ${{ toJSON(needs.policy.outputs) }}
+      agent: ${{ toJSON(needs.agent) }}
+      check: ${{ toJSON(needs.check) }}
