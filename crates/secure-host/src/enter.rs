@@ -9,7 +9,7 @@
 //! user's slice, which is what the supervisor kills when the run ends.
 //!
 //! `run0` is root's to run. How the supervisor, the runner's user, gets
-//! root to run it is [`super::root`]: the helper on a machine setup has
+//! root to run it is [`crate::root`]: the helper on a machine setup has
 //! locked, sudo itself elsewhere.
 
 use std::collections::BTreeMap;
@@ -22,10 +22,10 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, ensure};
 
-use super::host::{self, User};
-use super::network;
-use super::root::Root;
-use crate::config::{Config, Sandbox};
+use crate::config::{HostFile, Sandbox};
+use crate::host::{self, User};
+use crate::network;
+use crate::root::Root;
 
 /// `run0` came with systemd 256, and its `--pipe` with 257.
 pub const RUN0: &str = "run0";
@@ -65,27 +65,31 @@ pub struct Entry {
     env: BTreeMap<String, String>,
     root: Root,
     filesystem_view: bool,
+    /// The program's own variables to unset ([`HostFile::UNSET`]), which
+    /// [`Entry::new`] takes from the file's type.
+    unset: &'static [&'static str],
 }
 
 impl Entry {
     /// The sandbox user of `config`, which `sandbox setup` has created.
-    pub fn new(config: &Config) -> Result<Self> {
-        let host = config.check_host()?;
+    pub fn new<F: HostFile>(config: &F) -> Result<Self> {
+        let direct = config.direct()?;
+        let sandbox = config.sandbox();
         ensure!(
-            config.sandbox.create_user,
+            sandbox.create_user,
             "sandbox.create-user = false: there is no sandbox user to enter"
         );
-        let name = &config.sandbox.user;
+        let name = &sandbox.user;
         let user = User::lookup(name)?
             .with_context(|| format!("no user {name}: `agentic-job sandbox setup` creates it"))?;
         ensure!(user.uid != 0, "the sandbox user {name} is root by uid");
-        let proxy = if config.egress.proxy {
-            network::proxy_environment(&host.direct)
+        let proxy = if config.egress().proxy {
+            network::proxy_environment(&direct)
         } else {
             BTreeMap::new()
         };
-        let mut entry = Self::for_user(user, &config.sandbox, proxy, Root::detect());
-        if config.setup.tools.is_some() {
+        let mut entry = Self::for_user(user, sandbox, proxy, Root::detect(), F::UNSET);
+        if config.tools() {
             entry.prepend_tools_path();
         }
         Ok(entry)
@@ -100,12 +104,14 @@ impl Entry {
     }
 
     /// The fixed variables, then the egress proxy's, then the
-    /// configuration's own, each over the one before.
+    /// configuration's own, each over the one before; and UNSET, the
+    /// program's own variables, removed.
     fn for_user(
         user: User,
         sandbox: &Sandbox,
         proxy: BTreeMap<String, String>,
         root: Root,
+        unset: &'static [&'static str],
     ) -> Self {
         let fixed = [
             ("LANG".to_owned(), LANG.to_owned()),
@@ -121,6 +127,7 @@ impl Entry {
             env,
             root,
             filesystem_view: sandbox.filesystem_view,
+            unset,
         }
     }
 
@@ -173,11 +180,11 @@ impl Entry {
         let unset = SUDO_VARS
             .iter()
             .chain(OIDC_REQUEST_VARS)
-            // `run`'s alone, as the identity token's request is.
-            .chain(&[crate::run::api_key::API_KEY_VAR, crate::run::mcp::TOKEN_VAR])
+            // The program's alone, as the identity token's request is.
+            .chain(self.unset)
             .flat_map(|name| ["-u".to_owned(), (*name).to_owned()]);
         let properties = if self.filesystem_view {
-            super::view::properties(&self.user)?
+            crate::view::properties(&self.user)?
         } else {
             Vec::new()
         };
@@ -255,6 +262,9 @@ impl Entry {
 mod tests {
     use super::*;
 
+    /// agentic-job's, as its HostFile has them.
+    const UNSET: &[&str] = &["AGENTIC_JOB_INFERENCE_KEY", "AGENTIC_JOB_MCP_TOKEN"];
+
     fn entry(env: &[(&str, &str)]) -> Entry {
         let sandbox = Sandbox {
             env: env
@@ -269,7 +279,7 @@ mod tests {
             gid: 1001,
             home: "/home/agent".into(),
         };
-        Entry::for_user(user, &sandbox, BTreeMap::new(), Root::Sudo)
+        Entry::for_user(user, &sandbox, BTreeMap::new(), Root::Sudo, UNSET)
     }
 
     #[test]
@@ -339,15 +349,16 @@ mod tests {
     fn the_view_is_opt_in() {
         // The walk's switch is gone: a configuration that still asks for
         // it is refused rather than taken for protection it no longer has.
-        assert!(Config::parse("[sandbox]\nworld-write-walk = true").is_err());
-        for (text, view) in [("", false), ("[sandbox]\nfilesystem-view = true", true)] {
-            let config = Config::parse(text).unwrap();
-            assert_eq!(config.sandbox.filesystem_view, view);
+        assert!(toml::from_str::<Sandbox>("world-write-walk = true").is_err());
+        for (text, view) in [("", false), ("filesystem-view = true", true)] {
+            let sandbox: Sandbox = toml::from_str(text).unwrap();
+            assert_eq!(sandbox.filesystem_view, view);
             let entry = Entry::for_user(
                 entry(&[]).user,
-                &config.sandbox,
+                &sandbox,
                 BTreeMap::new(),
                 Root::Sudo,
+                UNSET,
             );
             let argv = entry.run0_argv(&strings(&["true"]), entry.home()).unwrap();
             assert_eq!(
@@ -391,7 +402,13 @@ mod tests {
             gid: 1001,
             home: "/home/agent".into(),
         };
-        let locked = Entry::for_user(user, &Sandbox::default(), BTreeMap::new(), Root::Helper);
+        let locked = Entry::for_user(
+            user,
+            &Sandbox::default(),
+            BTreeMap::new(),
+            Root::Helper,
+            UNSET,
+        );
         let command = locked
             .command(&strings(&["id", "-u"]), Some(Path::new("/home/agent/w")))
             .unwrap();

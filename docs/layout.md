@@ -21,14 +21,21 @@ programs root may run (`host.rs`), the network rules (`network.rs`), the
 egress proxy's setup and the proxy itself (`egress.rs`, `proxy/`) with
 the `[egress]` table (`config.rs`), the mount view (`view.rs`), the
 probe of reachable listeners (`local.rs`), the platform, apt and
-world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`) and the
-Worker-diagnostics rule (`worker_diagnostics.rs`); agentic-job
+world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`), the
+Worker-diagnostics rule (`worker_diagnostics.rs`), and the privileged
+seam: the helper's fixed operations (`helper.rs`), how the runner's
+user has root run them (`root.rs`) and the way in as the sandbox user
+(`enter.rs`), with the `[sandbox]` table (`config.rs`). agentic-job
 re-exports each at its old path (`files`, `sandbox::host`,
-`config::Egress`, `secure_host::apt`, ...). Two seams keep agents out:
-agentic-job's `main` hands `host::bare` the agent's variables to leave
-out too, and gives `egress::start` the binary and command that run the
-proxy. The sandbox user, helper, probes, the image and the `secure-host`
-binary still live in agentic-job's `sandbox/` and `secure_host/` below.
+`sandbox::helper`, `config::Sandbox`, `secure_host::apt`, ...). Three
+seams keep agents out: agentic-job's `main` hands `host::bare` the
+agent's variables to leave out too; it gives `egress::start` the binary
+and command that run the proxy; and its `Config` implements
+`config::HostFile`, through which the helper and the way in check the
+run tables, unset the run's credentials and serve `session-serve`.
+Setting up the sandbox
+user, the probes, the image and the `secure-host` binary still live in
+agentic-job's `sandbox/` and `secure_host/` below.
 
 Paths below are relative to `crates/agentic-job/src/`.
 
@@ -46,8 +53,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `redact.rs` | Secret redaction |
 | `sandbox/setup.rs`, `sandbox/setup/` | Host preparation: the lock, the sandbox user, the agents and tools |
 | `sandbox/check/` | Host, runner-lock and network probes |
-| `sandbox/enter.rs` | Entry as the sandbox user |
-| `sandbox/helper.rs`, `sandbox/root.rs` | Fixed privileged operations and their callers |
+| `sandbox/mod.rs`, `sandbox/session.rs` | agentic-job's side of secure-host's helper and way in: its configuration and `session-serve` |
 | `session/` | ACP transport, permissions, limits, transcript and digest |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |

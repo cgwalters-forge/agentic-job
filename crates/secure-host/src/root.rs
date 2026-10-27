@@ -14,11 +14,10 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, ensure};
 
-use super::enter::Entry;
-use super::helper::{self, Exec, ViaSudo};
-use super::setup::SELF_COPY;
 use crate::config::ROOT_COPY;
-use crate::sandbox::egress::ACCESS_LOG;
+use crate::egress::ACCESS_LOG;
+use crate::enter::Entry;
+use crate::helper::{self, Exec, SELF_COPY, ViaSudo};
 
 /// Becomes root for an operation without ever asking for a password.
 const SUDO: &[&str] = &["sudo", "-n", "--"];
@@ -32,7 +31,8 @@ pub enum Root {
 }
 
 impl Root {
-    pub(crate) fn session_serve_command() -> Command {
+    /// The helper's `session-serve`, which only the helper runs.
+    pub fn session_serve_command() -> Command {
         Self::helper_command::<&str>("session-serve", &[])
     }
 
@@ -70,7 +70,7 @@ impl Root {
             Self::Helper => Some(Self::helper_command::<&str>("ping", &[])),
             Self::Sudo => Self::sudo_command(&["true"]).ok(),
         };
-        command.is_some_and(|mut command| super::host::succeeds(&mut command))
+        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
     }
 
     /// The command that runs ARGV as the sandbox user of ENTRY in CWD.
@@ -191,7 +191,7 @@ impl Root {
             Self::Helper => Some(Self::helper_command::<&str>("pkexec-control", &[])),
             Self::Sudo => Self::sudo_command(&["pkexec", "true"]).ok(),
         };
-        command.is_some_and(|mut command| super::host::succeeds(&mut command))
+        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
     }
 
     /// Takes the sandbox user USER's lingering away again.
@@ -200,7 +200,7 @@ impl Root {
             Self::Helper => Some(Self::helper_command::<&str>("disable-linger", &[])),
             Self::Sudo => Self::sudo_command(&["loginctl", "disable-linger", "--", user]).ok(),
         };
-        command.is_some_and(|mut command| super::host::succeeds(&mut command))
+        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
     }
 
     /// Removes the sandbox user USER's crontab again.
@@ -209,7 +209,7 @@ impl Root {
             Self::Helper => Some(Self::helper_command::<&str>("crontab-remove", &[])),
             Self::Sudo => Self::sudo_command(&["crontab", "-r", "-u", user]).ok(),
         };
-        command.is_some_and(|mut command| super::host::succeeds(&mut command))
+        command.is_some_and(|mut command| crate::host::succeeds(&mut command))
     }
 }
 
