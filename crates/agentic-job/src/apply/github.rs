@@ -34,7 +34,7 @@ pub(super) fn same(a: &Value, b: &str) -> bool {
 
 /// Whether NAME is `owner/repo` as GitHub spells one, and so a path of
 /// two segments under `/repos/`.
-pub(super) fn is_repo(name: &str) -> bool {
+pub(crate) fn is_repo(name: &str) -> bool {
     let part = |part: &str| {
         !part.is_empty()
             && part
@@ -167,6 +167,11 @@ impl Github {
         }
         serde_json::from_str(&text)
             .with_context(|| format!("{method} {path}: the response is not JSON"))
+    }
+
+    /// GETs PATH, and returns the JSON of a successful answer.
+    pub(crate) fn get(&self, path: &str) -> Result<Value> {
+        self.send("GET", path, None)
     }
 
     /// GETs PATH, or None where the forge answers that there is nothing

@@ -57,8 +57,9 @@ test('scripted review reports the checked-out SHA', () => {
 
 test('automatic and dispatched review prompts try the change and allow concern-specific experiments, not routine verification', () => {
   const standing = fs.readFileSync(path.join(__dirname, 'review.md'), 'utf8');
-  const dispatch = fs.readFileSync(path.join(__dirname, '../.github/workflows/dispatch.yml'), 'utf8');
-  const instructions = dispatch.match(/const instructions = profile === 'review'\s+\? '([^']+)'/)[1];
+  // The dispatched review's text is `agentic-job dispatch`'s, its string continuations joined.
+  const dispatch = fs.readFileSync(path.join(__dirname, '../crates/agentic-job/src/dispatch.rs'), 'utf8').replace(/\\\n\s*/g, '');
+  const instructions = dispatch.match(/const REVIEW: &str = "((?:[^"\\]|\\.)+)";/)[1].replaceAll('\\"', '"');
   for (const prompt of [standing, dispatch]) {
     assert.match(prompt, /do not set item_number or other routing fields: the workflow fixes the target\./);
   }

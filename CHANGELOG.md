@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- dispatch.yml's `target` job runs `agentic-job dispatch` in place of its
+  github-script step, with the same refusals, outputs and task text. It
+  checks out the agentic-job source to get the binary: a copy names
+  `cgwalters-forge/agentic-job` and the commit its `run` job pins there
+  (docs/dispatch.md).
 - `policy.yml` and `agentic-job.yml` take the task as an artifact,
   `task-artifact`, in place of `task`: the runner drops a job output its secret masker changes, so
   a task quoting credential-shaped text no longer reaches policy empty.

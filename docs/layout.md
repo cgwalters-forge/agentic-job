@@ -45,6 +45,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `config/` | TOML types, validation and composition from workflow inputs |
 | `policy.rs` | Bounds, per-run policy and gh-aw configuration |
 | `event/` | Event admission, run guards and fenced task context |
+| `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
 | `check/` | Output policy and strict mail-patch parsing |
 | `collect/` | gh-aw's collector and sanitizer, ported: `handback check`, check.yml and callers off GitHub |
 | `apply/` | Publishing checked outputs behind `Publisher`; Forgejo only |

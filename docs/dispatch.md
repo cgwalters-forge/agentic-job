@@ -21,7 +21,9 @@ A caller that kept an edited copy sets `AGENT_CONFIG` to its path.
 In `dispatch.yml`, replace `uses: ./.github/workflows/agentic-job.yml` with
 `uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
 where `COMMIT` is the full reviewed SHA of the source you copied, **including
-the `review-item` and `fake-profile` inputs**. A local reusable call here pins the workflow, binary
+the `review-item` and `fake-profile` inputs**. In the `target` job's checkout, replace
+`repository` and `ref` with `cgwalters-forge/agentic-job` and the same `COMMIT`: that job
+runs `agentic-job dispatch` from it. A local reusable call here pins the workflow, binary
 and actions to this checkout's commit: it cannot silently run an older release.
 In `dispatch.toml`, replace `repos` with your exact public repository name.
 Commit the files to your protected default branch and allow the pinned actions
@@ -392,8 +394,11 @@ The implement session needs only the patch and outcome: apply constructs its
 draft request from that summary. [Safe outputs](safe-outputs.md) defines the
 fields and limits. Editing a session changes the trial, not the real agent.
 
-Preflight has contents read only and fetches issue/PR title and body without
-checking out target code. Text reaches the task as fenced JSON data, with
+Preflight, the `target` job's `agentic-job dispatch`, has contents read only and
+no secret, and fetches issue/PR title and body without checking out target code.
+It takes the binary as the policy job does, a release's by its attested
+checksums for the pinned source, or a build of that source where none is
+published yet (about two minutes). Text reaches the task as fenced JSON data, with
 angle brackets escaped so it cannot close the fence. Dispatch inputs are never
 pasted into executable code. Default-branch checks apply to manual dispatch;
 the workflow-call interface lets same-repository CI exercise the exact caller.
@@ -419,8 +424,9 @@ says why on the issue.
 
 ## Verification
 
-`node --test workflow/dispatch.test.cjs workflow/review.test.cjs` executes the
-actual preflight and all shipped sessions; `cargo test -p agentic-job review`
+`cargo test -p agentic-job dispatch` covers every preflight refusal and each
+profile's task text; `node --test workflow/dispatch.test.cjs workflow/review.test.cjs`
+checks the caller's shape and runs all shipped sessions; `cargo test -p agentic-job review`
 covers hostile review routing and output cases.
 CI calls the **same dispatch.yml**, running research wherever it runs its
 end-to-end jobs, plus review on PRs; triage takes the same path with other
