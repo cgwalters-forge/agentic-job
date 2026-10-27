@@ -1,0 +1,26 @@
+# The bounds of the private digest caller (workflow.yml beside this file):
+# one comment, on one issue, in the private repository the workflow runs
+# in. Replace OWNER/PRIVATE-REPO with that repository. policy.yml reads
+# only this file; where an organization's bounds file is also given
+# (`agentic-job policy --org-allow`), it has to set `private = true` too
+# (docs/private-repositories.md).
+
+# Admit a target that is not public. `policy --private` still refuses
+# one that is not the calling repository, outputs anywhere else, and a
+# patch or a project update.
+private = true
+
+hosts = ["github.com"]
+repos = ["OWNER/PRIVATE-REPO"]
+bases = ["main"]
+
+# A digest is one comment and nothing else. No patch is admitted, so the
+# patch limits are never reached.
+max_outputs = 1
+max_patch_bytes = 1024
+max_patch_files = 1
+
+# Which issue the comment goes on is the workflow's `comment-target`,
+# which check holds every comment to; the agent cannot choose another.
+[outputs]
+add_comment = { max = 1 }

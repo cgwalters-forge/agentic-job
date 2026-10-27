@@ -121,3 +121,43 @@ Organization and repository identities come from the caller's repository: the
 bounds files it owns and the repository the workflow runs in, never a workflow
 input a dispatcher can set. BPF host evidence and release binaries improve other
 boundaries; they do not make a private run safe on their own.
+
+## A reference caller
+
+[`.github/agentic-job/private-digest/`](../.github/agentic-job/private-digest/workflow.yml)
+composes the conditions above for one job: a digest posted as one comment on
+one issue of the private repository it runs in. It calls `policy.yml`,
+`check.yml` and `apply.yml` and has an agent job of its own, which runs the
+agent as the sandbox user behind the domain allowlist with the job's read
+token. It is not a workflow of this repository and nothing runs it here. A
+repository that adopts it fills in placeholders for the agentic-job commit,
+the issue and its own name. It also replaces a step that joins the inference
+proxy's network, which this repository cannot supply. Left as they are, the
+placeholders fail the run before the agent starts. `tests/private_digest.rs`
+holds it to this page: its bounds refuse a missing opt-in, outputs or an item
+in another repository, a patch and a project. Check refuses a comment anywhere
+but the issue, a second comment and any other output. Its egress policy is one
+`run` admits, and `policy.yml` refuses a public caller naming a private target.
+
+The host-configuration step resolves the egress policy against the caller
+checkout before handing it to the host image, which reads it from `/`.
+Container and subordinate-UID probes remain enabled even though the digest
+itself does not use containers. The configuration pins the official UBI minimal
+probe image by digest, and the allowlist admits `registry.access.redhat.com`
+for its manifests and layers. The pinned v0.6.3 host also expects successful
+package fetches when npm or cargo is installed, so `registry.npmjs.org`,
+`index.crates.io` and `static.crates.io` are allowed for those probes.
+No registry write rule is added. Like GitHub, these registries and their
+subdomains can receive private source in GET paths or queries: the adopter
+must approve those additional confidentiality destinations.
+Revisit the image pin and allowlist together if the registry's download route
+changes; a redirect outside the allowlist must fail closed.
+
+Three gates stay manual, since nothing the run can check establishes them.
+Before installing it, the operator confirms that the runner's provisioning
+and diagnostic logs are private to the repository's audience. They approve
+the inference service's access and retention, including the detection
+model `check.yml` sends the proposed comment to when
+`AGENTIC_JOB_DETECT_MODEL` is set. And the broker has to admit the
+caller's own workflow file, which its identity token names
+([inference](inference.md#which-workflows-a-broker-admits)).
