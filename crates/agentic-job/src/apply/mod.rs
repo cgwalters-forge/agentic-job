@@ -16,7 +16,7 @@
 
 pub mod forgejo;
 mod git;
-mod github;
+pub(crate) mod github;
 pub mod issue_reference;
 mod mentions;
 pub mod push;

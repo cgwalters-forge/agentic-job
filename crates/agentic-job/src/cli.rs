@@ -72,6 +72,8 @@ pub enum Command {
     Diagnostics(crate::diagnostics::Command),
     /// Decide whether the event that started the workflow may start a run, and write its task
     Event(event::Args),
+    /// Check a dispatch.yml run's inputs and item, and write its agent, skills and task, before any policy job
+    Dispatch(crate::dispatch::Args),
     /// Resolve trusted workflow review routing without running reviewed code
     #[command(subcommand)]
     Review(crate::review::Command),
@@ -116,6 +118,7 @@ impl Command {
             Self::Status(args) => crate::apply::status::run(args),
             Self::Diagnostics(command) => command.run(),
             Self::Event(args) => event::run(args),
+            Self::Dispatch(args) => crate::dispatch::run(args),
             Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),

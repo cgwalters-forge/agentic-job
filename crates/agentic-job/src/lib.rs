@@ -15,6 +15,7 @@ pub mod check;
 pub mod cli;
 pub mod collect;
 pub mod config;
+pub mod dispatch;
 pub mod event;
 pub mod exit;
 // The `::` is the secure-host crate's, not the `secure_host` module's.
