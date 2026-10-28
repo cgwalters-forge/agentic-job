@@ -105,7 +105,9 @@ bounds can allow:
 `missing_data`.
 
 Off GitHub, `agentic-job apply --forge forgejo` publishes
-`add_comment` and `create_pull_request`, and refuses the rest
+`add_comment`, `create_pull_request`, `create_issue`, `add_labels`,
+`remove_labels`, `close_issue` and `close_pull_request`, writes nothing
+for `noop`, `missing_tool` and `missing_data`, and refuses the rest
 ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)).
 
 ## Hand-back files
