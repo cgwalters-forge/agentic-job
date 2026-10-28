@@ -15,8 +15,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use super::{Checker, Want};
-use crate::sandbox::host;
-use crate::sandbox::setup::{self, RootGroup};
+use crate::host;
+use crate::setup::{self, RootGroup};
 
 /// Where the kernel lists a process's groups.
 const PROC_STATUS: &str = "/proc/self/status";

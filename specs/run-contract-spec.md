@@ -54,7 +54,7 @@ Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 placed in its own workspace, but MUST NOT be able to list or enter the runner's
 private directories, including its checkout. It MUST NOT inherit the job's
 `ACTIONS_*` variables or read the OIDC request values from accessible processes.
-Enforcement: [on_host.rs](../crates/agentic-job/src/sandbox/check/on_host.rs),
+Enforcement: [on_host.rs](../crates/secure-host/src/check/on_host.rs),
 runtime checks `private-dir:{path}`, `env-job-variables` and `oidc-value:{name}`
 (with positive controls). These run as part of `sandbox check` and run's probes;
 see [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md#the-sandbox-users-probes)
@@ -74,7 +74,7 @@ runtime checks `token-runner-file`, `token-config-mode`, `token-config-dir-mode`
 be able to enumerate or list another user's process in `/proc`, or read its
 `/proc/PID/cmdline`, even with the PID known. Setup MUST enable
 `hidepid=invisible` by default for every sandbox entry path.
-Enforcement: [on_host.rs](../crates/agentic-job/src/sandbox/check/on_host.rs),
+Enforcement: [on_host.rs](../crates/secure-host/src/check/on_host.rs),
 runtime test `proc-other-users` via a session, user-manager service and Podman
 user namespace, with `proc-control-runner` and `proc-control-sandbox-*`;
 [sandbox_host.rs](../crates/agentic-job/tests/sandbox_host.rs)
@@ -585,7 +585,7 @@ Enforcement: [workflow_commands.rs](../crates/secure-host/src/workflow_commands.
 `escaping_breaks_both_syntaxes`;
 [transcript.rs](../crates/agentic-job/src/session/transcript.rs),
 `agent_logs_are_escaped_but_transcripts_keep_original_bytes`;
-[check/mod.rs](../crates/agentic-job/src/sandbox/check/mod.rs),
+[check/mod.rs](../crates/secure-host/src/check/mod.rs),
 `stderr_is_bounded_and_escaped` (probe diagnostics also contain sandbox text).
 
 A caller MAY write the agent job itself, between the policy, check and apply

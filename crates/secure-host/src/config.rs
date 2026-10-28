@@ -37,6 +37,13 @@ pub trait HostFile: Sized {
     /// returns where the sandbox user connects without the egress proxy.
     fn direct(&self) -> Result<Vec<Direct>>;
 
+    /// The session bridge's loopback port when this host serves one.
+    /// The probes must prove the sandbox user cannot reach it, including
+    /// through the node's own tailnet addresses and serve's HTTPS port.
+    fn session_port(&self) -> Option<u16> {
+        None
+    }
+
     /// The helper's `session-serve`, as root: what the program has the
     /// host serve for a session, decided by this file alone. Refused
     /// unless the program has one.

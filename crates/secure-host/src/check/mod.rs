@@ -6,10 +6,12 @@
 //! work. Without the control, a probe that fails because a program is
 //! missing reads as a protection that holds.
 //!
-//! The probes are a function, [`probes`], because `run` repeats them
-//! with `[sandbox.check] before-agent` and the host test that removes
-//! protections calls it. None of them is of the run token: those are
-//! `run`'s own (`crate::run::probe`), made once the token is in place.
+//! The probes are a function, [`probes`], because agentic-job's `run`
+//! repeats them with `[sandbox.check] before-agent` and the host test
+//! that removes protections calls it. None of them is of the run token:
+//! those are agentic-job's own (`run::probe`), made once the token is in
+//! place. They read the host's tables of any [`HostFile`]; agentic-job's
+//! `sandbox::check` maps the result to its exit states.
 //! cgwalters-forge/actions's secure-host/docs/probes.md lists them all.
 //!
 //! The probes are methods of `Checker` in the modules under this one:
@@ -24,11 +26,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 
-use super::enter::{Entry, Output};
-use super::host::{self, User};
-use super::root::Root;
-use crate::config::{self, Config};
-use crate::exit::Exit;
+use crate::config::{self, Egress, HostFile, Sandbox};
+use crate::enter::{Entry, Output};
+use crate::host::{self, User};
+use crate::root::Root;
 
 mod net;
 mod on_host;
@@ -181,7 +182,9 @@ impl Report {
     }
 }
 
-pub fn run(args: &Args) -> Result<Exit> {
+/// `sandbox check`, with root's copy of the configuration read by
+/// `parse`: whether the probes passed, now or as this job's record says.
+pub fn run<F: HostFile>(args: &Args, parse: impl FnOnce(&str) -> Result<F>) -> Result<bool> {
     ensure!(
         !host::is_root(),
         "`sandbox check` runs as the runner's user, which it compares the sandbox user with; it enters the sandbox through the helper"
@@ -190,7 +193,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))
         .context("`agentic-job sandbox setup` writes this file")?;
-    let config = Config::parse(&text).with_context(|| format!("in {}", path.display()))?;
+    let config = parse(&text).with_context(|| format!("in {}", path.display()))?;
     let record = job_record(record::binary, |name| std::env::var(name).ok(), &text);
     let checked = once(args.mode(), record.as_ref(), || {
         let started = Instant::now();
@@ -218,15 +221,14 @@ pub fn run(args: &Args) -> Result<Exit> {
                 "The sandbox checks passed earlier in this job, against this configuration ({}): not repeated",
                 file.display()
             );
-            Exit::Success
+            true
         }
-        Checked::Probed { passed: true } => Exit::Success,
-        Checked::Probed { passed: false } => Exit::Failure,
+        Checked::Probed { passed } => passed,
     })
 }
 
 /// Removes this job's record of a passing check, if there is one: what
-/// starts the agent (`run`) calls this first, since
+/// enters the sandbox user (agentic-job's `run`) calls this first, since
 /// what that user leaves behind is what the next check has to probe.
 pub fn forget_passed() -> Result<()> {
     forget(|name| std::env::var(name).ok())
@@ -311,15 +313,19 @@ fn once(
 /// Probes the sandbox `config` describes, as its sandbox user, from the
 /// runner's user. `Err` is a probe that could not be made at all; a
 /// probe that came out wrong is in the report.
-pub fn probes(config: &Config) -> Result<Report> {
-    let entry = if config.sandbox.create_user {
+pub fn probes<F: HostFile>(config: &F) -> Result<Report> {
+    let entry = if config.sandbox().create_user {
         Some(Entry::new(config)?)
     } else {
-        config.check_host()?;
+        config.direct()?;
         None
     };
     let checker = Checker {
-        config,
+        config: Tables {
+            sandbox: config.sandbox(),
+            egress: config.egress(),
+            session_port: config.session_port(),
+        },
         root: entry.as_ref().map_or_else(Root::detect, Entry::root),
         entry,
         runner: User::current()?,
@@ -346,8 +352,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+/// The tables of the configuration the probes read.
+#[derive(Clone, Copy)]
+struct Tables<'a> {
+    sandbox: &'a Sandbox,
+    egress: &'a Egress,
+    session_port: Option<u16>,
+}
+
 struct Checker<'a> {
-    config: &'a Config,
+    config: Tables<'a>,
     /// None with `sandbox.create-user = false`: only the runner's user,
     /// and the host, are probed.
     entry: Option<Entry>,
@@ -421,7 +435,7 @@ impl Checker<'_> {
     }
 
     fn timed<T>(&mut self, name: &str, run: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        super::timed::stage("check", name, || run(self))
+        crate::timed::stage("check", name, || run(self))
     }
 
     /// The way into the sandbox user, which only its probes ask for.
@@ -576,7 +590,7 @@ fn in_order<R: Send>(
     attempts: &[Attempt],
     make: impl Fn(&Attempt) -> Result<R> + Sync,
 ) -> Result<Vec<R>> {
-    let make = |attempt: &Attempt| super::timed::stage("check", &attempt.id, || make(attempt));
+    let make = |attempt: &Attempt| crate::timed::stage("check", &attempt.id, || make(attempt));
     let together: Vec<&Attempt> = attempts
         .iter()
         .filter(|attempt| attempt.kind != AttemptKind::RefusedInContainer)

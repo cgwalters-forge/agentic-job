@@ -14,10 +14,11 @@ use anyhow::{Context, Result};
 
 use super::{Checker, Want, contains};
 use crate::config::Sandbox;
-use crate::sandbox::enter::OIDC_REQUEST_VARS;
-use crate::sandbox::local::{ABSTRACT_PREFIX, Reached};
-use crate::sandbox::setup::{self, SELF_COPY, resolved};
-use crate::sandbox::{egress, host, network, worker_diagnostics};
+use crate::enter::OIDC_REQUEST_VARS;
+use crate::helper::SELF_COPY;
+use crate::local::{ABSTRACT_PREFIX, Reached};
+use crate::setup::{self, resolved};
+use crate::{egress, host, network, worker_diagnostics};
 
 /// A variable of a process of the runner's, standing in for the tokens in
 /// the environments of real job steps.
@@ -496,7 +497,7 @@ impl Checker<'_> {
             ),
             std::fs::read_dir(&self.runner.home).is_ok(),
         );
-        let mut dirs = setup::private_dirs(&self.config.sandbox, &self.runner);
+        let mut dirs = setup::private_dirs(self.config.sandbox, &self.runner);
         // Where the job's files are, if not under one of those: the
         // directory this runs in and the ones the CI system names. Only
         // what is the runner's own, so that running this from / says

@@ -7,10 +7,9 @@ use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs};
 use anyhow::{Context, Result, ensure};
 
 use super::{Attempt, CONTAINER_UID, Checker, Want};
-use crate::sandbox::enter::Output;
-use crate::sandbox::proxy::policy::{Policy, Request};
-use crate::sandbox::{egress, host, network};
-use crate::session::bridge;
+use crate::enter::Output;
+use crate::proxy::policy::{Policy, Request};
+use crate::{egress, host, network};
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
@@ -212,10 +211,10 @@ fn skipped_containers(egress: bool, tailnet: bool, session: bool) -> Vec<&'stati
 /// `Self`), from which serve passes a client on, at the bridge's port,
 /// where the check holds a listener as a control, and at serve's. None
 /// without `[session] listen`.
-fn bridge_targets(listen: bool, status: &serde_json::Value) -> Vec<(String, u16)> {
-    if !listen {
+fn bridge_targets(port: Option<u16>, status: &serde_json::Value) -> Vec<(String, u16)> {
+    let Some(port) = port else {
         return Vec::new();
-    }
+    };
     let own = status
         .get("Self")
         .and_then(|own| own.get("TailscaleIPs"))
@@ -224,11 +223,11 @@ fn bridge_targets(listen: bool, status: &serde_json::Value) -> Vec<(String, u16)
         .flatten()
         .filter_map(serde_json::Value::as_str)
         .flat_map(|addr| {
-            [bridge::PORT, SERVE_PORT]
+            [port, SERVE_PORT]
                 .into_iter()
                 .map(move |port| (addr.to_owned(), port))
         });
-    std::iter::once((BRIDGE_HOST.to_owned(), bridge::PORT))
+    std::iter::once((BRIDGE_HOST.to_owned(), port))
         .chain(own)
         .collect()
 }
@@ -304,7 +303,7 @@ impl Checker<'_> {
             let requests = [&metadata, &metadata_v6, &metadata];
             let results = super::concurrently(&[0, 1, 2], |&index| {
                 let name = ["runner-metadata", "runner-metadata-v6", "metadata"][index];
-                crate::sandbox::timed::stage("check", name, || {
+                crate::timed::stage("check", name, || {
                     if index == 2 {
                         self.sandbox_succeeds(requests[index])
                     } else {
@@ -335,7 +334,7 @@ impl Checker<'_> {
             self.report.note(&format!(
                 "[sandbox.check] containers = false: not run, not passed: {}; the sandbox user \
                  can still run rootless Podman, whose subordinate uids' network goes unprobed",
-                skipped_containers(egress, tailnet, self.config.session.listen).join(", ")
+                skipped_containers(egress, tailnet, self.config.session_port.is_some()).join(", ")
             ));
         } else {
             let got = self.sandbox_succeeds(&["podman", "pull", "-q", &image])?;
@@ -422,8 +421,8 @@ impl Checker<'_> {
         if tailnet {
             self.timed("tailnet", |this| this.tailnet())?;
         }
-        if self.config.session.listen {
-            self.timed("session-bridge", |this| this.session_bridge())?;
+        if let Some(port) = self.config.session_port {
+            self.timed("session-bridge", |this| this.session_bridge(port))?;
         } else {
             self.report
                 .note("no [session] listen, so no session bridge to probe");
@@ -438,13 +437,13 @@ impl Checker<'_> {
     /// at each target on the bridge's port, the control; serve's port has
     /// none to show, and a note says so. The loopback control must hold:
     /// without it, the bridge's refusal shows nothing.
-    fn session_bridge(&mut self) -> Result<()> {
+    fn session_bridge(&mut self, port: u16) -> Result<()> {
         let user = self.user()?.to_owned();
         let status = self
             .root
             .tailscale_status()
             .unwrap_or(serde_json::Value::Null);
-        let targets = bridge_targets(true, &status);
+        let targets = bridge_targets(Some(port), &status);
         // Setup serves a session only on the tailnet: without its
         // addresses, half of what the rules refuse would go unprobed.
         self.report.expect(
@@ -457,15 +456,18 @@ impl Checker<'_> {
         // loopback only, so a failure to listen there stops the check; at
         // a tailnet address it leaves that probe without a control.
         let mut listeners = Vec::new();
-        for (addr, port) in targets.iter().filter(|(_, port)| *port == bridge::PORT) {
+        for (addr, port) in targets
+            .iter()
+            .filter(|(_, target_port)| *target_port == port)
+        {
             match hold(addr, *port) {
                 Ok(listener) => listeners.push(listener),
                 Err(err) if addr != BRIDGE_HOST => self.report.note(&format!("{err:#}")),
                 Err(err) => return Err(err),
             }
         }
-        let bridge = socket_text(BRIDGE_HOST, bridge::PORT);
-        let probe = tcp_probe(BRIDGE_HOST, bridge::PORT);
+        let bridge = socket_text(BRIDGE_HOST, port);
+        let probe = tcp_probe(BRIDGE_HOST, port);
         let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
         self.report.expect(
             Want::Succeed,
@@ -904,7 +906,7 @@ impl Checker<'_> {
             .root
             .tailscale_status()
             .unwrap_or(serde_json::Value::Null);
-        let endpoints = network::direct(&self.config.egress)?;
+        let endpoints = network::direct(self.config.egress)?;
         // The URL as the configuration has it: an https endpoint is not
         // spoken to in plain HTTP.
         for (endpoint, url) in endpoints.into_iter().zip(self.config.egress.direct.clone()) {
@@ -1168,7 +1170,7 @@ mod tests {
     /// proxy's refusal, and a control it refuses stops the check.
     #[test]
     fn egress_probes_follow_the_policy() {
-        use crate::sandbox::proxy::policy::ECOSYSTEMS;
+        use crate::proxy::policy::ECOSYSTEMS;
         let shipped = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../egress/policy.toml"),
         )
@@ -1328,12 +1330,12 @@ mod tests {
         let null = serde_json::Value::Null;
         let loopback = ("127.0.0.1", 7790);
         let cases = [
-            (false, &up, &[][..]),
-            (false, &null, &[]),
-            (true, &null, &[loopback]),
-            (true, &no_addresses, &[loopback]),
+            (None, &up, &[][..]),
+            (None, &null, &[]),
+            (Some(7790), &null, &[loopback]),
+            (Some(7790), &no_addresses, &[loopback]),
             (
-                true,
+                Some(7790),
                 &up,
                 &[
                     loopback,
@@ -1349,7 +1351,7 @@ mod tests {
                 .iter()
                 .map(|&(addr, port)| (addr.to_owned(), port))
                 .collect();
-            assert_eq!(bridge_targets(listen, status), want, "{listen} {status}");
+            assert_eq!(bridge_targets(listen, status), want, "{listen:?} {status}");
         }
         assert_eq!(
             socket_text("fd7a:115c:a1e0::1", 443),
