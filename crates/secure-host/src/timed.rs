@@ -1,5 +1,6 @@
-//! `agentic-job sandbox timed`: secure-host's setup or probes, timed, with
-//! one line of the job summary saying how long each took and its stages.
+//! Timed stages, and `agentic-job sandbox timed`: secure-host's setup or
+//! probes, timed, with one line of the job summary saying how long each
+//! took and its stages.
 //!
 //! It runs as the runner's user, and only the two fixed commands below:
 //! nothing of its caller's reaches their arguments, so it is no way to run
@@ -16,8 +17,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-
-use crate::exit::Exit;
 
 /// The summary GitHub Actions shows for the step; unset or empty for none.
 const SUMMARY: &str = "GITHUB_STEP_SUMMARY";
@@ -42,9 +41,19 @@ static STAGE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a valid pattern")
 });
 
-/// Monotonic elapsed time, including errors; informational, never
-/// authorization. Setup's stages print [`STAGE`]'s lines from secure-host.
-pub(super) use ::secure_host::setup::stage;
+/// Log monotonic wall time even when a stage fails, without changing its
+/// result: informational, never authorization. [`run`] reads these lines,
+/// with KIND `setup` or `check`, for the job summary ([`STAGE`]).
+pub fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let started = Instant::now();
+    let result = run();
+    println!(
+        "Sandbox {kind} stage {name}: {:.3}s ({})",
+        started.elapsed().as_secs_f64(),
+        if result.is_ok() { "ok" } else { "failed" }
+    );
+    result
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Label {
@@ -92,16 +101,16 @@ pub struct Args {
     pub label: Label,
 }
 
-pub fn run(args: &Args) -> Result<Exit> {
+/// Runs the command `args` names, and returns its exit status.
+pub fn run(args: &Args) -> Result<u8> {
     let summary = std::env::var_os(SUMMARY)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let status = timed(
+    Ok(timed(
         args.label,
         args.label.command(std::env::var_os(RUNNER_TEMP))?,
         summary.as_deref(),
-    );
-    Ok(Exit::Command(status))
+    ))
 }
 
 /// Runs COMMAND with its output passed through, and returns its exit

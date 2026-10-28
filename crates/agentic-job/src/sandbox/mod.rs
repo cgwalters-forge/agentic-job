@@ -12,15 +12,46 @@ use clap::Subcommand;
 use crate::config::{Config, Egress, HostFile, Sandbox};
 use crate::exit::Exit;
 
-pub mod check;
 pub(crate) mod session;
 pub mod setup;
-pub mod timed;
 
 // What secure-host holds already, at the paths callers know.
 pub use ::secure_host::{
     egress, enter, host, local, network, proxy, root, view, worker_diagnostics,
 };
+
+/// secure-host's probes, with `run` reading root's copy of the
+/// configuration as agentic-job's.
+pub mod check {
+    pub use ::secure_host::check::*;
+
+    use anyhow::Result;
+
+    use crate::config::Config;
+    use crate::exit::Exit;
+
+    /// In place of the glob's `run`, which returns whether they passed.
+    pub fn run(args: &Args) -> Result<Exit> {
+        Ok(if ::secure_host::check::run(args, Config::parse)? {
+            Exit::Success
+        } else {
+            Exit::Failure
+        })
+    }
+}
+
+/// secure-host's timed setup and probes, its status an exit state.
+pub mod timed {
+    pub use ::secure_host::timed::*;
+
+    use anyhow::Result;
+
+    use crate::exit::Exit;
+
+    pub fn run(args: &Args) -> Result<Exit> {
+        ::secure_host::timed::run(args).map(Exit::Command)
+    }
+}
 
 /// secure-host's helper, with `run` reading root's copy of the
 /// configuration as agentic-job's.
@@ -84,11 +115,31 @@ impl HostFile for Config {
         Ok(self.check_host()?.direct)
     }
 
+    fn session_port(&self) -> Option<u16> {
+        self.session.listen.then_some(crate::session::bridge::PORT)
+    }
+
     /// Checked as `run` checks it.
     fn session_serve(&self) -> Result<()> {
         let listen = crate::session::bridge::Listen::from_config(&self.session)?
             .context("session serve needs session.listen")?;
         session::serve(listen.capability.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_probes_get_the_bridge_port_only_when_listening() {
+        for listen in [false, true] {
+            let config = Config::parse(&format!("[session]\nlisten = {listen}\n")).unwrap();
+            assert_eq!(
+                config.session_port(),
+                listen.then_some(crate::session::bridge::PORT)
+            );
+        }
     }
 }
 

@@ -9,7 +9,7 @@ egress proxy) is documented with the action that runs it:
 [egress](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md)
 and the
 [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-it-assumes).
-The code is `crates/agentic-job/src/sandbox/` and `egress/`
+The code is `crates/secure-host/`, `crates/agentic-job/src/sandbox/` and `egress/`
 ([layout](layout.md)); `run`'s probes are in
 [sandbox-check.md](sandbox-check.md), the requirements it serves in
 [requirements.md](requirements.md), and how a workflow calls it in

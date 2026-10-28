@@ -1100,19 +1100,7 @@ fn require_world_write_policy(pin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Log monotonic wall time even when a stage fails, without changing its
-/// result. agentic-job's `sandbox timed` reads these lines, with KIND
-/// `setup` or `check`, for the job summary.
-pub fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = Instant::now();
-    let result = run();
-    println!(
-        "Sandbox {kind} stage {name}: {:.3}s ({})",
-        started.elapsed().as_secs_f64(),
-        if result.is_ok() { "ok" } else { "failed" }
-    );
-    result
-}
+pub use crate::timed::stage;
 
 /// A [`stage`] of setup.
 pub fn timed<T>(name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {

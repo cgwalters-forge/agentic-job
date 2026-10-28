@@ -4,12 +4,14 @@
 //! trust: it knows nothing of agents, inference or safe outputs, and
 //! agentic-job depends on it, never the other way round. It holds the
 //! host setup ([`setup`]), the network rules, the egress proxy and the
-//! helper among it; agentic-job adds its agents and session through
-//! [`setup::Program`]. The probes and the image still live in
-//! agentic-job's `sandbox` and `secure_host` modules, which re-export
-//! these at their old paths. docs/layout.md has the map.
+//! helper among it, and the probes that prove it ([`check`]); agentic-job
+//! adds its agents and session through [`setup::Program`]. The image
+//! still lives in agentic-job's `secure_host` module, and agentic-job's
+//! `sandbox` re-exports these at their old paths. docs/layout.md has the
+//! map.
 
 pub mod apt;
+pub mod check;
 pub mod config;
 pub mod egress;
 pub mod enter;
@@ -22,6 +24,7 @@ pub mod platform;
 pub mod proxy;
 pub mod root;
 pub mod setup;
+pub mod timed;
 pub mod view;
 pub mod worker_diagnostics;
 pub mod workflow_commands;

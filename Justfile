@@ -56,8 +56,8 @@ test-binary:
 
 # Unprivileged regression tests for setup, its probe batching and summaries.
 setup-tests:
-    cargo test --locked --lib sandbox::setup::tests
-    cargo test --locked --lib sandbox::check::
+    cargo test --locked -p agentic-job --lib sandbox::setup::tests
+    cargo test --locked -p secure-host --lib -- setup::tests check:: timed::
 
 # Refuses VERSION unless it may be released from this checkout (its tags
 # included); prints the previous version tag. See src/bin/release-check.rs.

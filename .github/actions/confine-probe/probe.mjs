@@ -92,7 +92,7 @@ const HELPER = '/usr/local/libexec/agentic-job';
 
 export const SANDBOX_USER = 'runner-sandbox';
 
-/** The rules of a `sudo -l` listing, normalized as sandbox::check::runner::sudo_rules does. */
+/** The rules of a `sudo -l` listing, normalized as secure_host::check::runner::sudo_rules does. */
 export function sudoRules(listing) {
   return listing.split('\n').map(line => line.trim()).filter(line => line.startsWith('('))
     .map(line => line.split(/\s+/).join(' '));
