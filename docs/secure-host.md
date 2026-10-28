@@ -79,8 +79,12 @@ next image release:
   process an earlier step left running, and can have `Runner.Worker`
   dump its memory.
 - Under `egress.write-policy`, the runner's storage writes go only to the
-  twenty `productionresultssaN` accounts
-  ([#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422)),
+  results service's twenty `productionresultssaN` accounts from gh-aw and
+  `productionresultssa31`, verified through GitHub's artifact service
+  redirects in [CI run 40611370113](https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113)
+  (DNS existence alone does not establish ownership;
+  [#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
+  [tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
   not to every Azure storage account.
 - The sandbox user is refused EC2's IPv6 metadata address
   unconditionally

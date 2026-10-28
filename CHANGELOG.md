@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Under `egress.write-policy`, the runner may also upload to the verified
+  results storage account `productionresultssa31`, alongside gh-aw's first
+  twenty. Hosted runners now get this account, so `upload-artifact` failed
+  (tracker#974).
 - `.github/agentic-job/private-digest/` is a reference caller for a private
   repository: one digest comment on one issue, with the sandbox user, the
   egress allowlist and the job's read token. It is an example to copy and is
