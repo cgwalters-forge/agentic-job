@@ -694,6 +694,11 @@ bounds both files must name it. A top-level `forge` (`github` by default,
 organization bounds, both files must name the same one. A top-level `allowed_domains` is
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
+A top-level `native_handlers`, empty by default, lists `add_comment` or
+`create_pull_request` for apply to publish with
+[agentic-job's own handlers](#agentic-jobs-own-handlers) on GitHub rather
+than gh-aw's; each must be a type the bounds allow, and with
+organization bounds a type is routed only where both files name it.
 
 A `[memory]` table lets a run hand back the agent's notes
 ([below](#what-the-agent-does)); without it none is handed back, and
@@ -1061,7 +1066,9 @@ secrets."
 The apply job has a machine of its own and a write credential. Event
 notification jobs can also write, but do not apply agent outputs.
 Apply runs gh-aw's pinned handlers on the
-checked outputs, and nothing else that came from the agent's machine.
+checked outputs, or [agentic-job's own](#agentic-jobs-own-handlers) for
+the types the bounds route to them, and nothing else that came from the
+agent's machine.
 The workflow declares one secret, names it only in that job, and never
 uses `secrets: inherit`, which would hand every secret of the caller to
 the agent's job too. Which token, and how to set it up, is in
@@ -1167,6 +1174,66 @@ either action (Dependabot's included) also updates the job's `ref:`
 lines and records the corpus again with `just publication-corpus`,
 which needs node 24, as github-script runs on, and replaces
 `/tmp/gh-aw`. Review the diff: it is the change in what gets published.
+
+The same job runs each case again with its `add_comment` and
+`create_pull_request` routed to [agentic-job's own
+handlers](#agentic-jobs-own-handlers): apply.yml's two steps for them,
+then gh-aw's, have to make the recorded writes, in the recorded order,
+and the same `safe-output-items.jsonl` and pushed commits. The ordinary
+suite runs those two steps on each case's recorded requests without the
+pinned code, and the unit tests in `apply/publish.rs` hold the rest of
+what gh-aw's handler step records to the corpus: its outputs, summary
+and error report.
+
+### agentic-job's own handlers
+
+Bounds that list `add_comment` or `create_pull_request` in
+`native_handlers` ([the bounds](#the-bounds-and-the-policy)) have apply
+publish those types with `agentic-job publish` instead of gh-aw's
+handlers, in a step of policy's binary before gh-aw's: a port of the two
+handlers at the pin, on the GitHub [`Publisher`](../crates/agentic-job/src/apply/github.rs)
+that holds apply's token. It is off by default; every other type stays
+gh-aw's, and so does everything before the handlers (the fork step, the
+patch's trial, the partial note, the issue link and the guard against
+re-runs).
+
+What it sends is what gh-aw's handlers send: the second sanitizing with
+the same mentions allowed (the item's author and the event's people),
+the footer, the workflow and execution markers, the applied name hidden
+as apply.yml's hook hides it, the comment limits, the title prefix, the
+draft setting, and the branch pushed to the `head-repo` the fork step
+chose, committed by the job's git identity. It writes the same
+`safe-output-items.jsonl` entries, step outputs (`created_pr_number`,
+`created_pr_url`, `comment_id`, `items_failed` and the rest), summary and
+`safe-output-errors.json`, as `publish-errors.json`; the [publication
+corpus](#the-publication-corpus) holds it to all of them.
+
+Each request goes to one of the two: it writes gh-aw's step the other
+requests (`gh-aw-output.json`) before it publishes anything. The routed
+requests must come first in the run's order, after nothing but `noop`,
+`missing_tool` and `missing_data`, so that publishing them first keeps
+the run's order. Where gh-aw's handlers would do something it does not,
+it refuses the whole run before the first write, and gh-aw's step is
+given no request: a request after another type, a field or handler
+setting it does not read (a comment's `comment_id` or `reply_to_id`, a
+pull request's labels, stack fields or another base), a temporary ID
+(`#aw_`), a mention gh-aw would look up, or a file gh-aw's footer would
+read in `/tmp/gh-aw`. `check` (and so `handback check`) refuses the
+order, the fields and the temporary IDs, which depend on the requests
+alone, while the agent can still change them. A run with no routed request is given to gh-aw's step
+whole, held to none of these. A failure is not answered as gh-aw would answer it:
+a pull request the forge refuses opens no fallback issue, a comment on
+something that is not an issue or pull request is not retried on a
+discussion, and the routed comments after a failed pull request are not
+posted (gh-aw's would carry a note of the failure). Each of these fails
+the job, and `diagnostics handler-errors` reports why. gh-aw's own
+comments after a pull request that failed here do carry that note: it
+is written into the requests gh-aw's step is given, as its handler
+manager would add it.
+
+Every `update_project` field is checked against the live project in a
+step before both, so that a field or option the pinned handler would
+skip refuses the run before either writes anything.
 
 ## Off GitHub
 

@@ -68,7 +68,7 @@ the next in the same major version.
   (`agentic-job policy --allow`, `agentic-job event --allow`): top-level
   `hosts`, `allow_http`, `repos`, `bases`, `private`, `max_outputs`,
   `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`,
-  `push_repo` and `dedupe`, and the tables `[outputs.TYPE]`,
+  `push_repo`, `native_handlers` and `dedupe`, and the tables `[outputs.TYPE]`,
   `[unprotected_files]`, `[memory]`, `[forge]`,
   `[secondary_pull_request]` and `[trigger]`
   ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy),
@@ -103,6 +103,11 @@ bounds can allow:
 `reply_to_pull_request_review_comment`,
 `resolve_pull_request_review_thread`, `noop`, `missing_tool` and
 `missing_data`.
+
+The bounds' `native_handlers` may have `add_comment` and
+`create_pull_request` published by agentic-job's own handlers instead of
+gh-aw's, which send the same requests
+([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)).
 
 Off GitHub, `agentic-job apply --forge forgejo` publishes
 `add_comment`, `create_pull_request`, `push_to_pull_request_branch`,

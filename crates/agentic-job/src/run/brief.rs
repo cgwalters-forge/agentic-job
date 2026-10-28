@@ -554,6 +554,7 @@ mod tests {
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
+            native_handlers: Vec::new(),
         }
     }
 
@@ -860,6 +861,7 @@ mod brief_tests {
             forge: Default::default(),
             contract: crate::policy::CONTRACT,
             secondary_pull_request: None,
+            native_handlers: Vec::new(),
         }
     }
 

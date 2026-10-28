@@ -61,7 +61,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
 | `check/` | Output policy and strict mail-patch parsing |
 | `collect/` | gh-aw's collector and sanitizer, ported: `handback check`, check.yml and callers off GitHub |
-| `apply/` | Publishing checked outputs behind `Publisher`; Forgejo only |
+| `apply/` | Publishing checked outputs behind `Publisher`: Forgejo's, and on GitHub the types the bounds route away from gh-aw's handlers (`publish.rs`) |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `redact.rs` | Secret redaction |

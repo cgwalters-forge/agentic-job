@@ -31,8 +31,8 @@ const REPORTS: [&str; 2] = ["agent_output.json", "report.json"];
 pub enum Command {
     /// Annotate the collector's and check's refusal reasons in DIR
     Refusals(ReasonArgs),
-    /// Annotate the errors in gh-aw's safe-output-errors.json at PATH
-    HandlerErrors(ReasonArgs),
+    /// Annotate the errors in gh-aw's safe-output-errors.json, and in `agentic-job publish`'s report of the same shape, at each PATH there is one
+    HandlerErrors(HandlerErrorArgs),
     /// Copy only the refusal reasons in SOURCE to DESTINATION, for a diagnostics artifact
     Copy(CopyArgs),
 }
@@ -47,6 +47,16 @@ pub struct ReasonArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct HandlerErrorArgs {
+    /// The reports, in order; one that is not there names no error
+    #[arg(required = true)]
+    pub paths: Vec<PathBuf>,
+    /// The step's $GITHUB_OUTPUT, appended `reason=` with the reasons joined
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct CopyArgs {
     pub source: PathBuf,
     pub destination: PathBuf,
@@ -55,11 +65,18 @@ pub struct CopyArgs {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         match self {
-            Self::Refusals(args) => {
-                annotate(args, "Refused by check: ", &refusal_reasons(&args.path)?)
-            }
+            Self::Refusals(args) => annotate(
+                args.output.as_deref(),
+                "Refused by check: ",
+                &refusal_reasons(&args.path)?,
+            ),
             Self::HandlerErrors(args) => {
-                annotate(args, "Failed to apply ", &handler_errors(&args.path)?)
+                let mut reasons = Vec::new();
+                for path in &args.paths {
+                    reasons.extend(handler_errors(path)?);
+                }
+                reasons.truncate(MAX_ERRORS);
+                annotate(args.output.as_deref(), "Failed to apply ", &reasons)
             }
             Self::Copy(args) => {
                 copy(&args.source, &args.destination)?;
@@ -69,12 +86,12 @@ impl Command {
     }
 }
 
-fn annotate(args: &ReasonArgs, prefix: &str, reasons: &[String]) -> Result<Exit> {
+fn annotate(output: Option<&Path>, prefix: &str, reasons: &[String]) -> Result<Exit> {
     // A neutralized reason holds no line break; `%` is the runner's escape.
     for reason in reasons {
         println!("::error::{prefix}{}", reason.replace('%', "%25"));
     }
-    if let Some(output) = &args.output {
+    if let Some(output) = output {
         let joined: String = reasons.join("; ").chars().take(MAX_OUTPUT_CHARS).collect();
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -395,17 +412,44 @@ mod tests {
         }
     }
 
+    /// gh-aw's report and `agentic-job publish`'s are read in turn, and
+    /// either may not be there.
+    #[test]
+    fn handler_errors_of_both_publishers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name);
+        let (gh_aw, ours, output) = (
+            path("safe-output-errors.json"),
+            path("publish-errors.json"),
+            path("output"),
+        );
+        std::fs::write(&output, "").unwrap();
+        std::fs::write(&ours, json!({"message": "refused: x"}).to_string()).unwrap();
+        let run = |paths: &[&PathBuf]| {
+            Command::HandlerErrors(HandlerErrorArgs {
+                paths: paths.iter().map(|path| (*path).clone()).collect(),
+                output: Some(output.clone()),
+            })
+            .run()
+            .unwrap();
+        };
+        run(&[&gh_aw, &ours]);
+        let failed = json!({"failures": [{"type": "create_issue", "error": "e"}]});
+        std::fs::write(&gh_aw, failed.to_string()).unwrap();
+        run(&[&gh_aw, &ours]);
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            "reason=refused: x\nreason=create\\_issue: e; refused: x\n"
+        );
+    }
+
     #[test]
     fn annotations_and_output_stay_on_their_lines() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
         std::fs::write(&output, "").unwrap();
-        let args = ReasonArgs {
-            path: dir.path().into(),
-            output: Some(output.clone()),
-        };
         let reasons = vec![neutralize("a%0A::warning::b\nc"); 300];
-        annotate(&args, "Refused by check: ", &reasons).unwrap();
+        annotate(Some(&output), "Refused by check: ", &reasons).unwrap();
         let written = std::fs::read_to_string(&output).unwrap();
         assert_eq!(written.lines().count(), 1);
         assert!(written.starts_with("reason=a%0A::warning::b c; "));

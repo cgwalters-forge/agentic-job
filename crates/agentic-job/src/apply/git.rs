@@ -75,6 +75,9 @@ pub(super) struct Push<'a> {
     /// What `branch` must hold in `to`, `base_commit` too: None for a new
     /// branch, which must not exist.
     pub head: Option<&'a str>,
+    /// Who commits it, now; by default [`COMMITTER`] at the patch's
+    /// author date, so that a retry makes the very same commit.
+    pub committer: Option<(&'a str, &'a str)>,
 }
 
 impl Git<'_> {
@@ -92,6 +95,17 @@ impl Git<'_> {
     /// Runs git in DIR with only the configuration given here: not the
     /// job's (a credential helper, a URL rewrite), no hooks, no redirect.
     pub fn run(&self, dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+        self.run_as(dir, args, input, COMMITTER)
+    }
+
+    /// [`Git::run`], committing as COMMITTER.
+    fn run_as(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        input: Option<&[u8]>,
+        committer: (&str, &str),
+    ) -> Result<String> {
         let config = [
             (
                 "http.extraHeader",
@@ -99,8 +113,8 @@ impl Git<'_> {
             ),
             ("http.followRedirects", "false".to_owned()),
             ("core.hooksPath", "/dev/null".to_owned()),
-            ("user.name", COMMITTER.0.to_owned()),
-            ("user.email", COMMITTER.1.to_owned()),
+            ("user.name", committer.0.to_owned()),
+            ("user.email", committer.1.to_owned()),
         ];
         let mut command = Command::new("git");
         command
@@ -193,11 +207,16 @@ impl Git<'_> {
         // the GitHub apply job (`am.keepcr`): without it `git am` would
         // commit other bytes than check read, and a patch to a file with
         // CRLF line ends would not apply at all.
-        self.run(
-            dir,
-            &["am", "-q", "--keep-cr", "--committer-date-is-author-date"],
-            Some(push.patch),
-        )?;
+        match push.committer {
+            None => self.run(
+                dir,
+                &["am", "-q", "--keep-cr", "--committer-date-is-author-date"],
+                Some(push.patch),
+            )?,
+            Some(committer) => {
+                self.run_as(dir, &["am", "-q", "--keep-cr"], Some(push.patch), committer)?
+            }
+        };
         // check read the paths the patch names; git applies by its own
         // reading, so what it changed is held to those.
         let changed = self.run(

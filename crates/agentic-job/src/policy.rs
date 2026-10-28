@@ -143,6 +143,11 @@ pub const NEUTRAL_OUTPUTS: &[&str] = &[
     MISSING_DATA,
 ];
 
+/// The types apply can publish on GitHub with agentic-job's own handlers
+/// (`agentic-job publish`) in place of gh-aw's, where the bounds'
+/// `native_handlers` name them; every other type stays gh-aw's.
+pub const NATIVE_OUTPUTS: &[&str] = &["add_comment", CREATE_PULL_REQUEST];
+
 /// gh-aw's target field for an issue or a pull request alike. GitLab
 /// numbers the two apart (`#5` and `!5` are different items), so there a
 /// request names `issue_number` or `pull_request_number`; one naming this
@@ -589,6 +594,40 @@ pub struct Bounds {
     /// opens it.
     #[serde(default)]
     pub secondary_pull_request: Option<SecondaryPullRequest>,
+    /// The output types apply publishes with agentic-job's own handlers
+    /// rather than gh-aw's, of [`NATIVE_OUTPUTS`] and on GitHub. Empty by
+    /// default: gh-aw's handlers publish every type.
+    #[serde(default)]
+    pub native_handlers: Vec<String>,
+}
+
+/// What a bounds file and a policy both hold `native_handlers` to: each
+/// one of [`NATIVE_OUTPUTS`] that ALLOWS admits, named once, on GitHub.
+fn check_native_handlers(
+    types: &[String],
+    forge: Forge,
+    allows: impl Fn(&str) -> bool,
+) -> Result<()> {
+    for (at, output) in types.iter().enumerate() {
+        ensure!(
+            NATIVE_OUTPUTS.contains(&output.as_str()),
+            "native_handlers: {output:?} is not one of {}",
+            NATIVE_OUTPUTS.join(", ")
+        );
+        ensure!(
+            allows(output),
+            "native_handlers names {output:?}, which the outputs do not allow"
+        );
+        ensure!(
+            !types[..at].contains(output),
+            "native_handlers names {output:?} twice"
+        );
+    }
+    ensure!(
+        types.is_empty() || forge == Forge::Github,
+        "native_handlers is only for GitHub"
+    );
+    Ok(())
 }
 
 /// The smallest `secondary_pull_request` patch budget, as for the primary.
@@ -1170,6 +1209,10 @@ pub struct Policy {
     /// and counts a `create_pull_request` of either repository alike.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_pull_request: Option<Secondary>,
+    /// The bounds' `native_handlers`, of the types this policy allows:
+    /// what apply publishes with `agentic-job publish`, not gh-aw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_handlers: Vec<String>,
 }
 
 /// Match HTTP authorities exactly, including ports, without DNS resolution.
@@ -1445,6 +1488,9 @@ impl Policy {
     /// the dot-folders protected.
     fn validate(&self) -> Result<()> {
         check_context(&self.context)?;
+        check_native_handlers(&self.native_handlers, self.forge, |output| {
+            self.safe_outputs.max_of(output).is_some()
+        })?;
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
         }
@@ -1725,6 +1771,9 @@ impl Bounds {
                 "secondary_pull_request is only for GitHub"
             );
         }
+        check_native_handlers(&self.native_handlers, self.forge, |output| {
+            self.outputs.contains_key(output)
+        })?;
         for repo in &self.unprotected_files.repos {
             ensure!(
                 REPO_RE.is_match(repo) && !dotted(repo),
@@ -2177,6 +2226,12 @@ impl Bounds {
             secondary_pull_request: secondary.and_then(|secondary| {
                 clone_url_host(clone_url).map(|host| secondary.compile(host, &self.protected))
             }),
+            native_handlers: self
+                .native_handlers
+                .iter()
+                .filter(|output| types.contains(&output.as_str()))
+                .cloned()
+                .collect(),
         })
     }
 }
@@ -2615,6 +2670,11 @@ fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
             _ => None,
         }
         .filter(|_| policy.safe_outputs.create_pull_request.is_some());
+    // gh-aw's handlers unless both files route a type, and the type is
+    // still allowed.
+    policy.native_handlers.retain(|output| {
+        other.native_handlers.contains(output) && policy.safe_outputs.max_of(output).is_some()
+    });
     if policy.safe_outputs.types().next().is_none() {
         return Err(vec!["the bounds files allow no common output type".into()]);
     }
@@ -5349,6 +5409,68 @@ max_patch_files = 10
                     max_patch_files = 1\n[outputs]\ncreate_pull_request = { max = 1, ready_when_complete = true }\n";
         let parsed: Bounds = toml::from_str(toml).unwrap();
         assert!(parsed.outputs[CREATE_PULL_REQUEST].ready_when_complete);
+    }
+
+    /// `native_handlers` routes only what both files name, of the types
+    /// the run may hand back, and only on GitHub; off, policy.json says
+    /// nothing of it.
+    #[test]
+    fn native_handlers_are_explicit_and_only_narrow() {
+        let compile = |native: &[&str], outputs: &'static str| {
+            let mut bounds = bounds();
+            bounds.native_handlers = native.iter().map(|output| (*output).to_owned()).collect();
+            bounds.validate().unwrap();
+            bounds
+                .compile(&Request {
+                    outputs,
+                    ..request()
+                })
+                .unwrap()
+        };
+        let both = ["add_comment", CREATE_PULL_REQUEST];
+        let all = "create_pull_request,add_comment,noop";
+        for (caller, organization, outputs, want) in [
+            (&both[..], &both[..], all, &both[..]),
+            (&both[..], &[][..], all, &[][..]),
+            (&["add_comment"][..], &both[..], all, &["add_comment"][..]),
+            (
+                &both[..],
+                &both[..],
+                "create_pull_request,noop",
+                &[CREATE_PULL_REQUEST][..],
+            ),
+        ] {
+            let policy =
+                intersect(compile(caller, outputs), compile(organization, outputs)).unwrap();
+            assert_eq!(
+                policy.native_handlers, want,
+                "{caller:?} {organization:?} {outputs}"
+            );
+            policy.validate().unwrap();
+        }
+        let off = serde_json::to_string(&compile(&[], all)).unwrap();
+        assert!(!off.contains("native_handlers"), "{off}");
+
+        let with = |native: &str| format!("native_handlers = {native}\n{BOUNDS}");
+        for (bounds, want) in [
+            (with(r#"["create_issue"]"#), "is not one of"),
+            (with(r#"["add_comment", "add_comment"]"#), "twice"),
+            (
+                with(r#"["add_comment"]"#).replace("add_comment = { max = 3 }\n", ""),
+                "which the outputs do not allow",
+            ),
+            (
+                format!("forge = \"forgejo\"\n{}", with(r#"["add_comment"]"#)),
+                "only for GitHub",
+            ),
+        ] {
+            let bounds: Bounds = toml::from_str(&bounds).unwrap();
+            let err = format!("{:#}", bounds.validate().unwrap_err());
+            assert!(err.contains(want), "{err}");
+        }
+        let mut policy = compile(&both, all);
+        policy.native_handlers.push("close_issue".into());
+        assert!(policy.validate().is_err());
     }
 
     #[test]

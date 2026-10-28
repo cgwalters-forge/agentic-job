@@ -1,6 +1,7 @@
 //! GitHub's REST API and git, with one token: what the GitHub commands
-//! here ([`super::secondary`], [`super::push`], [`super::status`]) ask
-//! the forge, in place of apply.yml's github-script steps.
+//! here ([`super::secondary`], [`super::push`], [`super::status`],
+//! [`super::publish`]) ask the forge, in place of apply.yml's
+//! github-script steps.
 
 use std::time::Duration;
 
@@ -9,8 +10,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
-use super::git::{self, Git};
-use super::owner;
+use super::git::{self, Git, Push};
+use super::{
+    BranchPush, Close, CommitStatus, LabelChange, Made, NewIssue, Op, Publisher, PullRequest, owner,
+};
 
 const API_URL_VAR: &str = "GITHUB_API_URL";
 
@@ -25,6 +28,42 @@ pub const GH_TOKEN_ENV: &str = "GH_TOKEN";
 pub(super) const FORK_TRIES: u32 = 30;
 
 const FORK_WAIT: Duration = Duration::from_secs(10);
+
+/// How gh-aw's handler retries opening a pull request after a transient
+/// failure (its `RATE_LIMIT_RETRY_CONFIG`): up to five more times, the
+/// wait doubling from [`RETRY_WAIT`] up to [`MAX_RETRY_WAIT`]. Its jitter
+/// and its reading of `Retry-After` are left out.
+const PULL_REQUEST_RETRIES: u32 = 5;
+
+const RETRY_WAIT: Duration = Duration::from_secs(30);
+
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(240);
+
+/// The statuses gh-aw's `isTransientError` retries.
+const TRANSIENT_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];
+
+/// What in a refusal's message gh-aw's `isTransientError` retries.
+const TRANSIENT_MESSAGES: &[&str] = &[
+    "unexpected html response",
+    "network",
+    "timeout",
+    "econnreset",
+    "enotfound",
+    "etimedout",
+    "econnrefused",
+    "socket hang up",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "rate limit",
+    "abuse detection",
+    "too many requests",
+    "temporarily unavailable",
+    "no server is currently available",
+];
+
+/// What in a message gh-aw's `isRateLimitError` calls a rate limit.
+const RATE_LIMIT_MESSAGES: &[&str] = &["rate limit", "abuse detection", "too many requests"];
 
 /// Whether A and B name the same repository or login: GitHub's names
 /// ignore case.
@@ -69,6 +108,131 @@ pub struct Github {
     max_response: u64,
     /// Between asking git whether the fork is there.
     pub(super) fork_wait: Duration,
+    /// Before the first retry of a transient failure.
+    pub(super) retry_wait: Duration,
+    /// The `X-GitHub-Api-Version` asked for, if not the forge's default.
+    api_version: Option<&'static str>,
+}
+
+/// A request the forge refused: its status and its message, as octokit
+/// words one (its `toErrorMessage`), so that what is reported matches
+/// what gh-aw's handlers report.
+#[derive(Debug)]
+pub(super) struct Refused {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// A request the forge did not answer in full: the connection failed or
+/// timed out.
+#[derive(Debug)]
+struct Unanswered(String);
+
+impl std::fmt::Display for Unanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unanswered {}
+
+/// Whether gh-aw's `isTransientError` retries ERR: no answer, or a
+/// refusal of a transient status or message.
+fn is_transient(err: &anyhow::Error) -> bool {
+    if err.is::<Unanswered>() {
+        return true;
+    }
+    err.downcast_ref::<Refused>().is_some_and(|refused| {
+        let message = refused.message.trim_start().to_lowercase();
+        TRANSIENT_STATUSES.contains(&refused.status)
+            || message.starts_with("<!doctype html")
+            || TRANSIENT_MESSAGES
+                .iter()
+                .any(|pattern| message.contains(pattern))
+    })
+}
+
+/// The error gh-aw's `withRetry` throws (its `enhanceError`) when OPERATION
+/// failed with ERR after RETRIES retries: what its handler reports, and
+/// what its manager quotes in the comments after a pull request that
+/// failed. A 403 its `x-ratelimit-remaining` header alone calls a rate
+/// limit is not told apart here.
+fn retry_failure(err: &anyhow::Error, operation: &str, retries: u32) -> String {
+    let original = format!("{err:#}");
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let rate_limit = err
+        .downcast_ref::<Refused>()
+        .is_some_and(|refused| refused.status == 429)
+        || RATE_LIMIT_MESSAGES
+            .iter()
+            .any(|pattern| original.to_lowercase().contains(pattern));
+    let (code, failed, retryable, suggestion) = if !is_transient(err) {
+        (
+            "ERR_API",
+            format!("(attempt {})", retries + 1),
+            false,
+            "This error cannot be resolved by retrying. Please check the error details and fix \
+             the underlying issue.",
+        )
+    } else if rate_limit {
+        (
+            "E010 RATE_LIMIT_EXCEEDED",
+            format!("after {retries} retry attempts"),
+            true,
+            "RATE_LIMIT_EXCEEDED: GitHub API rate limit persisted after 3 retries.",
+        )
+    } else {
+        (
+            "ERR_API",
+            format!("after {retries} retry attempts"),
+            true,
+            "All retry attempts exhausted. This may be a persistent issue. Check GitHub status or \
+             try again later.",
+        )
+    };
+    format!(
+        "{code}: [{timestamp}] {operation} failed {failed}\n\nOriginal error: {original}\n\
+         Retryable: {retryable}\nSuggestion: {suggestion}"
+    )
+}
+
+impl Refused {
+    /// The refusal TEXT says, which a forge's JSON error words with
+    /// `message`, any `errors` and a `documentation_url`.
+    fn of(status: u16, text: &str) -> Self {
+        let message = match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(data)) => match data.get("message") {
+                Some(message) => {
+                    let message = message
+                        .as_str()
+                        .map_or_else(|| message.to_string(), str::to_owned);
+                    let errors = data.get("errors").and_then(Value::as_array).map(|errors| {
+                        let errors: Vec<String> = errors.iter().map(Value::to_string).collect();
+                        format!(": {}", errors.join(", "))
+                    });
+                    let documentation = data
+                        .get("documentation_url")
+                        .map(|url| format!(" - {}", url.as_str().unwrap_or_default()));
+                    format!(
+                        "{message}{}{}",
+                        errors.unwrap_or_default(),
+                        documentation.unwrap_or_default()
+                    )
+                }
+                None => format!("Unknown error: {}", Value::Object(data)),
+            },
+            _ => text.to_owned(),
+        };
+        Self { status, message }
+    }
 }
 
 impl Github {
@@ -93,7 +257,21 @@ impl Github {
             http,
             max_response: super::forgejo::MAX_RESPONSE,
             fork_wait: FORK_WAIT,
+            retry_wait: RETRY_WAIT,
+            api_version: None,
         })
+    }
+
+    /// The API's address.
+    #[cfg(test)]
+    pub(super) fn api_url(&self) -> &str {
+        &self.api
+    }
+
+    /// Asks for VERSION of the API, as `X-GitHub-Api-Version`.
+    pub(super) fn with_api_version(mut self, version: &'static str) -> Self {
+        self.api_version = Some(version);
+        self
     }
 
     /// The API the runner names (`GITHUB_API_URL`), with the token in the
@@ -116,7 +294,13 @@ impl Github {
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String)> {
         let url = format!("{}{path}", self.api);
         let authorization = format!("Bearer {}", self.token);
+        let version = self.api_version.unwrap_or_default();
         let request = |builder: ureq::RequestBuilder<ureq::typestate::WithBody>| {
+            let builder = if version.is_empty() {
+                builder
+            } else {
+                builder.header("x-github-api-version", version)
+            };
             builder
                 .header("authorization", &authorization)
                 .header("accept", "application/vnd.github+json")
@@ -125,22 +309,27 @@ impl Github {
                 .send(body.map(Value::to_string).unwrap_or_default().as_bytes())
         };
         let response = match method {
-            "GET" => self
-                .http
-                .get(&url)
-                .header("authorization", &authorization)
-                .header("accept", "application/vnd.github+json")
-                .header("user-agent", "agentic-job")
-                .call(),
+            "GET" => {
+                let builder = self.http.get(&url);
+                let builder = if version.is_empty() {
+                    builder
+                } else {
+                    builder.header("x-github-api-version", version)
+                };
+                builder
+                    .header("authorization", &authorization)
+                    .header("accept", "application/vnd.github+json")
+                    .header("user-agent", "agentic-job")
+                    .call()
+            }
             "POST" => request(self.http.post(&url)),
             "PUT" => request(self.http.put(&url)),
             "PATCH" => request(self.http.patch(&url)),
             _ => bail!("{method} is not a method this sends"),
         };
-        let mut response = match response {
-            Ok(response) => response,
-            Err(err) => bail!("{method} {path}: {}", self.shown(&err.to_string())),
-        };
+        let mut response = response.map_err(|err| {
+            Unanswered(format!("{method} {path}: {}", self.shown(&err.to_string())))
+        })?;
         let status = response.status().as_u16();
         match response
             .body_mut()
@@ -167,6 +356,52 @@ impl Github {
         }
         serde_json::from_str(&text)
             .with_context(|| format!("{method} {path}: the response is not JSON"))
+    }
+
+    /// Sends METHOD with BODY to PATH under the API, and returns the JSON
+    /// of a successful answer (null for none); a refusal is [`Refused`].
+    pub(super) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+        let (status, text) = self.call(method, path, body)?;
+        if !(200..300).contains(&status) {
+            let mut refused = Refused::of(status, &text);
+            refused.message = refused.message.replace(&self.token, "[token]");
+            return Err(refused.into());
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text)
+            .with_context(|| format!("{method} {path}: the response is not JSON"))
+    }
+
+    /// [`Self::request`], tried again after a transient failure as gh-aw's
+    /// handler tries OPERATION, opening a pull request, again; a failure
+    /// is worded as its `withRetry` words one.
+    fn request_retrying(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        operation: &str,
+    ) -> Result<Value> {
+        let mut wait = self.retry_wait;
+        let mut retries = 0;
+        loop {
+            match self.request(method, path, body) {
+                Err(err) if retries < PULL_REQUEST_RETRIES && is_transient(&err) => {
+                    retries += 1;
+                    println!(
+                        "::warning::{method} {path} failed ({}); retry {retries}/{PULL_REQUEST_RETRIES} in {}s",
+                        crate::run::enter::one_line(&format!("{err:#}")),
+                        wait.as_secs()
+                    );
+                    std::thread::sleep(wait);
+                    wait = (wait * 2).min(MAX_RETRY_WAIT);
+                }
+                Err(err) => bail!(retry_failure(&err, operation, retries)),
+                answer => return answer,
+            }
+        }
     }
 
     /// GETs PATH, and returns the JSON of a successful answer.
@@ -281,6 +516,108 @@ impl Github {
     }
 }
 
+/// Who commits a pull request's patch: the job's git identity, as
+/// apply.yml's `Configure git` gives it to gh-aw's handler.
+pub(super) const ACTIONS_COMMITTER: (&str, &str) = (
+    "github-actions[bot]",
+    "41898282+github-actions[bot]@users.noreply.github.com",
+);
+
+/// [`Publisher`] for GitHub, writing what gh-aw's handlers write: a
+/// comment on the run's item, and a pull request in the output repository
+/// from its branch, pushed to the head repository apply.yml's fork step
+/// chose (the token's fork with Actions off, or the repository itself
+/// only where it says so). Nothing here chooses where a branch goes.
+pub struct GithubPublisher {
+    pub(super) github: Github,
+    /// Where git finds `OWNER/NAME.git`.
+    pub(super) git: String,
+    /// The repository comments go to: the run's item's.
+    pub(super) item_repo: String,
+    /// The repository a pull request is opened in: the output repository.
+    pub(super) repo: String,
+}
+
+/// What GitHub leaves to gh-aw's handlers: refused before any write.
+const GH_AW_PUBLISHES: &str =
+    "on GitHub only comments and pull requests are published here; the rest is gh-aw's";
+
+impl Publisher for GithubPublisher {
+    fn preflight(&self, op: &Op) -> Result<()> {
+        ensure!(
+            matches!(op, Op::Comment { .. } | Op::PullRequest(_)),
+            GH_AW_PUBLISHES
+        );
+        Ok(())
+    }
+
+    fn comment(&self, issue: u64, body: &str) -> Result<Made> {
+        let path = format!("/repos/{}/issues/{issue}/comments", self.item_repo);
+        let answer = self
+            .github
+            .request("POST", &path, Some(&json!({"body": body})))?;
+        Made::from_answer(&answer, "POST", &path)
+    }
+
+    fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
+        // The handler names a branch of the repository itself without its
+        // owner, and leaves out `head_repo`.
+        let own = pr.push_repo.eq_ignore_ascii_case(&self.repo);
+        self.github
+            .git()
+            .push(
+                &Push {
+                    from: &format!("{}/{}.git", self.git, self.repo),
+                    base: &pr.base,
+                    base_commit: &pr.base_commit,
+                    to: &format!("{}/{}.git", self.git, pr.push_repo),
+                    branch: &pr.branch,
+                    patch: &pr.patch,
+                    files: &pr.files,
+                    head: None,
+                    committer: Some(ACTIONS_COMMITTER),
+                },
+                None,
+            )
+            .context("Failed to push changes")?;
+        let mut body = json!({"title": pr.title, "body": pr.body});
+        if own {
+            body["head"] = json!(pr.branch);
+        } else {
+            body["head"] = json!(format!("{}:{}", owner(&pr.push_repo), pr.branch));
+            body["head_repo"] = json!(pr.push_repo);
+        }
+        body["base"] = json!(pr.base);
+        body["draft"] = json!(pr.draft);
+        let path = format!("/repos/{}/pulls", self.repo);
+        let operation = format!("create pull request in {}", self.repo);
+        let answer = self
+            .github
+            .request_retrying("POST", &path, Some(&body), &operation)?;
+        Made::from_answer(&answer, "POST", &path)
+    }
+
+    fn create_issue(&self, _: &NewIssue) -> Result<String> {
+        bail!(GH_AW_PUBLISHES)
+    }
+
+    fn push_to_branch(&self, _: &BranchPush) -> Result<String> {
+        bail!(GH_AW_PUBLISHES)
+    }
+
+    fn status(&self, _: &CommitStatus) -> Result<String> {
+        bail!(GH_AW_PUBLISHES)
+    }
+
+    fn change_labels(&self, _: &LabelChange) -> Result<String> {
+        bail!(GH_AW_PUBLISHES)
+    }
+
+    fn close(&self, _: &Close) -> Result<String> {
+        bail!(GH_AW_PUBLISHES)
+    }
+}
+
 /// A plain HTTP address on a literal loopback address: the tests' forge.
 fn is_loopback_http(api: &str) -> bool {
     api.strip_prefix("http://")
@@ -312,6 +649,7 @@ pub(super) mod tests {
         });
         let mut github = Github::new(&server, TOKEN.to_owned()).unwrap();
         github.fork_wait = Duration::ZERO;
+        github.retry_wait = Duration::ZERO;
         (github, requests)
     }
 
@@ -330,5 +668,45 @@ pub(super) mod tests {
             assert_eq!(is_repo(name), repo, "{name:?}");
         }
         assert_eq!(segment("fix/a b#%?"), "fix/a%20b%23%25%3F");
+    }
+
+    /// What gh-aw's handler retries is tried again, at most
+    /// [`PULL_REQUEST_RETRIES`] times; anything else is not.
+    #[test]
+    fn retries() {
+        for (status, message, tries) in [
+            (502, "injected failure", 1 + PULL_REQUEST_RETRIES),
+            (429, "slow down", 1 + PULL_REQUEST_RETRIES),
+            (
+                403,
+                "You have exceeded a secondary rate limit",
+                1 + PULL_REQUEST_RETRIES,
+            ),
+            (422, "A pull request already exists", 1),
+            (404, "Not Found", 1),
+        ] {
+            let routes = [("POST /x".to_owned(), (status, json!({"message": message})))];
+            let (github, requests) = forge(routes.into_iter().collect());
+            let err = github
+                .request_retrying("POST", "/x", None, "create pull request in o/r")
+                .unwrap_err()
+                .to_string();
+            let (code, failed, retryable) = match tries {
+                1 => ("ERR_API", "(attempt 1)", false),
+                _ if status == 502 => ("ERR_API", "after 5 retry attempts", true),
+                _ => ("E010 RATE_LIMIT_EXCEEDED", "after 5 retry attempts", true),
+            };
+            assert!(err.starts_with(&format!("{code}: [")), "{err}");
+            assert!(
+                err.contains(&format!(
+                    "] create pull request in o/r failed {failed}\n\nOriginal error: {message}\n\
+                     Retryable: {retryable}\nSuggestion: "
+                )),
+                "{err}"
+            );
+            assert_eq!(requests.try_iter().count(), tries as usize, "{status}");
+        }
+        let github = Github::new("http://127.0.0.1:1", TOKEN.to_owned()).unwrap();
+        assert!(is_transient(&github.call("GET", "/", None).unwrap_err()));
     }
 }

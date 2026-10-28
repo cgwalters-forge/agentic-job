@@ -45,6 +45,15 @@ says what a caller may rely on across versions.
   `agentic-job`, after every other write; no request can ask for one
   (docs/safe-outputs.md#pushing-to-a-pull-requests-branch-on-forgejo,
   docs/safe-outputs.md#commit-statuses-on-forgejo).
+- A bounds file's `native_handlers` (off by default) has apply publish
+  `add_comment` and `create_pull_request` on GitHub with agentic-job's own
+  handlers (`agentic-job publish`) instead of gh-aw's. They send what gh-aw's
+  pinned handlers send, which the publication corpus checks, and they
+  refuse a run that gh-aw would publish differently before writing anything.
+  The routed requests must come before every other type but `noop`,
+  `missing_tool` and `missing_data`, which `check` enforces
+  (docs/safe-outputs.md#agentic-jobs-own-handlers).
+- `agentic-job diagnostics handler-errors` takes more than one report.
 - `agentic-job apply --forge forgejo` also publishes `add_labels`,
   `remove_labels`, `close_issue`, `close_pull_request` and `create_issue`,
   and writes nothing for `noop`, `missing_tool` and `missing_data` instead

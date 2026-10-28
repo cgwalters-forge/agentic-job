@@ -5,11 +5,11 @@
 //! record before it may replace them, and the record has to come from the
 //! pinned code, not from what someone expects it to do.
 //!
-//! Each case runs three of apply.yml's steps: the one that writes the
+//! Each case runs four of apply.yml's steps: the one that writes the
 //! handlers' configuration, then the guard that leaves out what an earlier
-//! attempt applied and the one that runs gh-aw's handler manager, both
-//! scripts read from apply.yml and run by the pinned `actions/github-script`
-//! bundle. The steps before the guard that edit the requests (a review's
+//! attempt applied, the check of project fields and the one that runs
+//! gh-aw's handler manager, the last three scripts read from apply.yml and
+//! run by the pinned `actions/github-script` bundle. The steps before the guard that edit the requests (a review's
 //! folded findings, a partial run's note, a pull request's issue) are not
 //! run: the requests are as those steps would leave a complete run's
 //! without an issue. Its client talks to a loopback forge here, which records every
@@ -17,6 +17,13 @@
 //! git pushes go to bare repositories in a scratch directory. Nothing is
 //! sent to a real forge. The forge's starting state and its failures are
 //! the case's input; everything in the golden files is recorded.
+//!
+//! Each case is run again with the bounds routing its `add_comment` and
+//! `create_pull_request` to agentic-job's own handlers (`agentic-job
+//! publish`), whose two steps then run before gh-aw's: together they have
+//! to write what gh-aw's handlers alone did, in the same order. Without
+//! the pinned checkouts, `routed_steps_publish_first_and_leave_the_rest`
+//! runs those two steps alone, on the recorded guard's output.
 //!
 //! The run needs node, git, jq and bash, gh-aw's repository at apply.yml's
 //! `github/gh-aw/actions/setup` pin in `AGENTIC_JOB_TEST_GH_AW` and
@@ -39,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use agentic_job::check::BASE_COMMIT_HEADER;
 use serde_json::{Map, Value, json};
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -55,7 +63,10 @@ const GH_AW_TMP: &str = "/tmp/gh-aw";
 
 const CONFIG_STEP: &str = "Write the handlers' configuration";
 const GUARD_STEP: &str = "Leave out what an earlier attempt applied";
+const PROJECT_STEP: &str = "Check the project fields before anything is published";
 const APPLY_STEP: &str = "Apply the outputs with gh-aw's handlers";
+const ROUTE_STEP: &str = "Which outputs agentic-job publishes";
+const PUBLISH_STEP: &str = "Publish the outputs routed to agentic-job";
 
 /// The calling, output and item repository unless a case says otherwise.
 const REPO: &str = "owner/repo";
@@ -440,6 +451,20 @@ impl State {
                     ));
                 }
                 (200, headers, Value::Array(shown))
+            }
+            // A project's fields, as the seed's `/graphql/fields` lists them.
+            "POST" if path == "/graphql" => {
+                let query = body["query"].as_str().unwrap_or_default();
+                let data = if query.contains("projectV2(number:") {
+                    json!({"organization": {"projectV2": {"id": "project"}}})
+                } else if query.contains("fields(") {
+                    let nodes = self.store.get("/graphql/fields").cloned();
+                    json!({"node": {"fields": {"nodes": nodes.unwrap_or_else(|| json!([])),
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}}}})
+                } else {
+                    return not_found;
+                };
+                (200, vec![], json!({ "data": data }))
             }
             "POST" => self.create(&path, body),
             "PATCH" => {
@@ -835,8 +860,10 @@ impl Scratch {
 /// out as apply.yml's checkout, `Configure git` and the base's fetch
 /// leave it; and the patch the case's change makes, with check's report
 /// naming it. Returns what the case's `{head:BRANCH}` and `{tree}` stand
-/// for: a branch's commit, and the tree the patch makes.
-fn prepare_git(scratch: &Scratch, case: &Value) -> Vec<(String, String)> {
+/// for: a branch's commit, and the tree the patch makes. For NATIVE, the
+/// patch and report are check's whole: with the base commit header, and
+/// the size and paths `agentic-job publish` holds the patch to again.
+fn prepare_git(scratch: &Scratch, case: &Value, native: bool) -> Vec<(String, String)> {
     let git = &case["git"];
     if git.is_null() {
         return vec![];
@@ -884,12 +911,19 @@ fn prepare_git(scratch: &Scratch, case: &Value) -> Vec<(String, String)> {
     let branch = git["patch"]["branch"].as_str().unwrap();
     let file = format!("aw-{branch}.patch");
     std::fs::create_dir_all(scratch.path("download")).unwrap();
-    std::fs::write(scratch.path("download").join(&file), &patch.stdout).unwrap();
-    std::fs::write(
-        scratch.path("download/report.json"),
-        json!({"patch": {"file": file}}).to_string(),
-    )
-    .unwrap();
+    let mut patch = String::from_utf8(patch.stdout).unwrap();
+    let mut report = json!({"patch": {"file": file}});
+    if native {
+        let base_commit = scratch.git(&seed, &["rev-parse", base]);
+        let (from, rest) = patch.split_once('\n').unwrap();
+        patch = format!("{from}\n{BASE_COMMIT_HEADER}: {base_commit}\n{rest}");
+        let mut files: Vec<&String> = git["patch"]["files"].as_object().unwrap().keys().collect();
+        files.sort();
+        report = json!({"ok": true, "errors": [], "items": case["items"], "patch": {
+            "file": file, "bytes": patch.len(), "base_commit": base_commit, "files": files}});
+    }
+    std::fs::write(scratch.path("download").join(&file), &patch).unwrap();
+    std::fs::write(scratch.path("download/report.json"), report.to_string()).unwrap();
     let workspace = scratch.path("workspace");
     scratch.git(
         scratch.dir.path(),
@@ -1098,14 +1132,56 @@ fn github_script(
     )
 }
 
-/// Replaces gh-aw's directory with this attempt's download of check's
-/// outputs: the items, the configuration, the report and the patch.
-fn fresh_tmp(scratch: &Scratch, case: &Value) {
-    let tmp = Path::new(GH_AW_TMP);
+/// The types `agentic-job publish` handles.
+const NATIVE: &[&str] = &["add_comment", "create_pull_request"];
+
+/// The types CASE's bounds route away from gh-aw's handlers: its
+/// `native`, or else those of [`NATIVE`] it configures.
+fn routed(case: &Value) -> Vec<&str> {
+    match case["native"].as_array() {
+        Some(types) => types
+            .iter()
+            .map(|output| output.as_str().unwrap())
+            .collect(),
+        None => NATIVE
+            .iter()
+            .copied()
+            .filter(|output| case["config"].get(*output).is_some())
+            .collect(),
+    }
+}
+
+/// The policy check's upload holds for CASE where the bounds route its
+/// [`routed`] types away from gh-aw's handlers; none route without one.
+fn native_policy(case: &Value) -> Value {
+    let routed = routed(case);
+    if routed.is_empty() {
+        return json!({});
+    }
+    json!({
+        "repo": REPO,
+        "clone_url": format!("{SERVER}/{REPO}"),
+        "base": "main",
+        "kind": "branch",
+        "max_outputs": 5,
+        "max_patch_bytes": 1_048_576,
+        "safe_outputs": case["config"],
+        "contract": agentic_job::policy::CONTRACT,
+        "native_handlers": routed,
+    })
+}
+
+/// Replaces gh-aw's directory TMP with this attempt's download of check's
+/// outputs: the items, the configuration, the report and the patch, and
+/// for NATIVE the policy routing types to `agentic-job publish`.
+fn fresh_tmp(scratch: &Scratch, case: &Value, tmp: &Path, native: bool) {
     if tmp.exists() {
         std::fs::remove_dir_all(tmp).unwrap();
     }
     std::fs::create_dir_all(tmp).unwrap();
+    if native {
+        std::fs::write(tmp.join("policy.json"), native_policy(case).to_string()).unwrap();
+    }
     std::fs::write(tmp.join("config.json"), case["config"].to_string()).unwrap();
     std::fs::write(
         tmp.join("agent_output.json"),
@@ -1164,18 +1240,107 @@ fn seed(case: &Value) -> Value {
     Value::Object(seed)
 }
 
-fn run_case(paths: &Paths, case: &Value) -> Value {
+/// Runs apply.yml's bash step NAME with ENV, its script edited by EDIT,
+/// and returns its exit status, outputs and annotations.
+fn bash_step(
+    doc: &Yaml,
+    scratch: &Scratch,
+    name: &str,
+    env: &[(String, String)],
+    edit: impl Fn(&str) -> String,
+) -> (i32, BTreeMap<String, String>, Vec<String>) {
+    let step = step(doc, name);
+    let output_file = scratch.path("github-output");
+    std::fs::write(&output_file, "").unwrap();
+    let output = Command::new("bash")
+        .args([
+            "-eo",
+            "pipefail",
+            "-c",
+            &edit(step["run"].as_str().unwrap()),
+        ])
+        .env_clear()
+        .envs(env.iter().cloned())
+        .envs(literal_env(&step["env"]))
+        .env("GITHUB_OUTPUT", &output_file)
+        .output()
+        .unwrap();
+    if std::env::var_os("AGENTIC_JOB_TEST_VERBOSE").is_some() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    (
+        output.status.code().unwrap_or(-1),
+        read_commands(&output_file),
+        annotations(&output.stdout),
+    )
+}
+
+/// Runs apply.yml's steps that route requests to `agentic-job publish`
+/// and run it, with its git server the bare repositories, and returns
+/// whether it routed, how it ended, the requests it left gh-aw's handlers
+/// and its error report.
+fn publish_steps(
+    doc: &Yaml,
+    scratch: &Scratch,
+    forge: &Forge,
+    env: &[(String, String)],
+    tmp: &Path,
+) -> Value {
+    forge.state().step = "publish".into();
+    let (exit, outputs, _) = bash_step(doc, scratch, ROUTE_STEP, env, str::to_owned);
+    assert_eq!(exit, 0, "{ROUTE_STEP}");
+    if outputs.get("native").map(String::as_str) != Some("true") {
+        return json!({"routed": false});
+    }
+    let mut env = env.to_vec();
+    env.push(("GH_TOKEN".into(), TOKEN.into()));
+    let server = format!("file://{}", scratch.path("server").display());
+    let (exit, outputs, annotations) = bash_step(doc, scratch, PUBLISH_STEP, &env, |script| {
+        // Git's server alone, as gh-aw's handlers have it: the bare
+        // repositories. The links it writes still name GITHUB_SERVER_URL.
+        let from = r#"--server "$GITHUB_SERVER_URL""#;
+        assert!(script.contains(from), "{PUBLISH_STEP}");
+        script.replace(from, &format!("--server {server}"))
+    });
+    json!({
+        "routed": true,
+        "exit": exit,
+        "outputs": outputs,
+        "annotations": annotations,
+        "remainder": read_json(&tmp.join("gh-aw-output.json"))["items"],
+        "errors": read_json(&tmp.join("publish-errors.json")),
+    })
+}
+
+/// Runs CASE as apply.yml would: with PATHS, gh-aw's steps in the pinned
+/// checkouts, and without, the recorded guard's output in the guard's
+/// place and no gh-aw step; with NATIVE, the bounds routing the case's
+/// types of [`NATIVE`] to `agentic-job publish`, whose steps run before
+/// gh-aw's (step `publish` of the requests). Its git server is the bare
+/// repositories, as for gh-aw's handlers.
+fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
     let name = case["name"].as_str().unwrap();
     let text = apply_text();
     let doc = &YamlLoader::load_from_str(&text).unwrap()[0];
     let scratch = Scratch {
         dir: tempfile::tempdir().unwrap(),
     };
-    for dir in ["home", "runner-temp/gh-aw/actions", "workspace", "server"] {
+    for dir in [
+        "home",
+        "runner-temp/gh-aw/actions",
+        "runner-temp/apply-binary",
+        "workspace",
+        "server",
+    ] {
         std::fs::create_dir_all(scratch.path(dir)).unwrap();
     }
     // As gh-aw's setup action copies its scripts.
-    for entry in std::fs::read_dir(paths.gh_aw.join("actions/setup/js")).unwrap() {
+    for entry in paths
+        .map(|paths| std::fs::read_dir(paths.gh_aw.join("actions/setup/js")).unwrap())
+        .into_iter()
+        .flatten()
+    {
         let entry = entry.unwrap();
         let file = entry.file_name().into_string().unwrap();
         if (file.ends_with(".cjs") && !file.ends_with(".test.cjs")) || file.ends_with(".json") {
@@ -1186,6 +1351,23 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
             .unwrap();
         }
     }
+    // As apply.yml downloads policy's.
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_agentic-job"),
+        scratch.path("runner-temp/apply-binary/agentic-job"),
+    )
+    .unwrap();
+    // gh-aw's handlers keep their files in its fixed directory; without
+    // them, the steps are given one of the scratch's.
+    let tmp = match paths {
+        Some(_) => PathBuf::from(GH_AW_TMP),
+        None => scratch.path("gh-aw"),
+    };
+    let recorded_guard = if paths.is_none() {
+        read_json(&golden(name))
+    } else {
+        Value::Null
+    };
     std::fs::write(
         scratch.path("gitconfig"),
         format!(
@@ -1196,7 +1378,7 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
     .unwrap();
     std::fs::write(scratch.path("event.json"), "{}").unwrap();
     let mut text = case.to_string();
-    for (placeholder, value) in prepare_git(&scratch, case) {
+    for (placeholder, value) in prepare_git(&scratch, case, native) {
         text = text.replace(&placeholder, &value);
     }
     let case: &Value = &serde_json::from_str(&text).unwrap();
@@ -1231,6 +1413,12 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
     };
 
     let has_patch = !case["git"].is_null();
+    // The project fields' step is recorded only where there is one to check.
+    let has_project = case["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["type"] == "update_project");
     let mut vars: BTreeMap<String, String> = [
         ("OUTPUT_REPO", REPO),
         ("ITEM_REPO", REPO),
@@ -1304,12 +1492,20 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
     base.extend(literal_env(&doc["env"]));
     base.extend(literal_env(&doc["jobs"]["apply"]["env"]));
     base.extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for (key, file) in [
+        ("GH_AW_TMP", ""),
+        ("REPORT", "/report.json"),
+        ("MADE", "/safe-output-items.jsonl"),
+        ("GH_AW_AGENT_OUTPUT", "/agent_output.json"),
+    ] {
+        base.push((key.into(), format!("{}{file}", tmp.display())));
+    }
 
     let attempts = case["attempts"].as_u64().unwrap_or(1);
     let mut recorded = vec![];
     for attempt in 1..=attempts {
         forge.state().attempt = attempt;
-        fresh_tmp(&scratch, case);
+        fresh_tmp(&scratch, case, &tmp, native);
         let mut env = base.clone();
         env.push(("GITHUB_RUN_ATTEMPT".into(), attempt.to_string()));
 
@@ -1338,6 +1534,38 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
                 steps.insert(label.into(), Value::Null);
                 continue;
             }
+            let Some(paths) = paths else {
+                // The recorded guard's output, without gh-aw's step.
+                if label == "guard" {
+                    let guard =
+                        &recorded_guard["attempts"][usize::try_from(attempt).unwrap() - 1]["guard"];
+                    let items = json!({"items": guard["items"], "errors": []});
+                    std::fs::write(tmp.join("agent_output.json"), items.to_string()).unwrap();
+                    steps.insert(label.into(), guard.clone());
+                }
+                continue;
+            };
+            if label == "apply" {
+                // Before either publisher; one that fails skips agentic-job's.
+                forge.state().step = "project".into();
+                let script = step(doc, PROJECT_STEP)["with"]["script"].as_str().unwrap();
+                let (exit, ..) = github_script(paths, &scratch, &env, script);
+                let checked = if exit == 0 { "success" } else { "failure" };
+                env.push(("PROJECT_CHECKED".into(), checked.into()));
+                if has_project {
+                    steps.insert("project".into(), json!({ "exit": exit }));
+                }
+                if native && exit == 0 {
+                    let published = publish_steps(doc, &scratch, &forge, &env, &tmp);
+                    if published["routed"] == true {
+                        env.push((
+                            "GH_AW_AGENT_OUTPUT".into(),
+                            tmp.join("gh-aw-output.json").display().to_string(),
+                        ));
+                    }
+                    steps.insert("publish".into(), published);
+                }
+            }
             forge.state().step = label.into();
             let step = step(doc, step_name);
             let mut step_env = env.clone();
@@ -1354,7 +1582,6 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
                 "annotations": annotations,
                 "summary": summary,
             });
-            let tmp = Path::new(GH_AW_TMP);
             if label == "guard" {
                 result["items"] = read_json(&tmp.join("agent_output.json"))["items"].clone();
                 result["skipped"] = read_json(&tmp.join("skipped.json"));
@@ -1364,13 +1591,26 @@ fn run_case(paths: &Paths, case: &Value) -> Value {
             }
             steps.insert(label.into(), result);
         }
+        let index = usize::try_from(attempt).unwrap() - 1;
+        // The recorded project fields' step, which agentic-job's waits for.
+        let project = recorded_guard["attempts"][index]["project"]["exit"].as_i64();
+        if paths.is_none() && native && steps["guard"]["exit"] == 0 && project.unwrap_or(0) == 0 {
+            let published = publish_steps(doc, &scratch, &forge, &env, &tmp);
+            steps.insert("publish".into(), published);
+        }
         let requests = std::mem::take(&mut forge.state().requests);
-        recorded.push(json!({
-            "handler_config": read_json(&Path::new(GH_AW_TMP).join("handler-config.json")),
+        let mut attempt = json!({
+            "handler_config": read_json(&tmp.join("handler-config.json")),
             "guard": steps["guard"],
-            "apply": steps["apply"],
+            "apply": steps.get("apply").cloned().unwrap_or(Value::Null),
             "requests": requests,
-        }));
+        });
+        for label in ["project", "publish"] {
+            if let Some(result) = steps.get(label) {
+                attempt[label] = result.clone();
+            }
+        }
+        recorded.push(attempt);
     }
     normalize(json!({
         "pins": pins(),
@@ -1422,7 +1662,7 @@ fn handlers_publish_as_recorded() {
         if only.as_deref().is_some_and(|only| only != name) {
             continue;
         }
-        let got = run_case(&paths, &case);
+        let got = run_case(Some(&paths), &case, false);
         let text = serde_json::to_string_pretty(&got).unwrap() + "\n";
         if bless {
             std::fs::write(golden(name), text).unwrap();
@@ -1431,10 +1671,171 @@ fn handlers_publish_as_recorded() {
             std::fs::write(&actual, &text).unwrap();
             drifted.push(format!("{name} (now: {})", actual.display()));
         }
+        // Here, as each one's gh-aw_TMP is the one fixed directory.
+        assert_routed_as_recorded(&run_case(Some(&paths), &case, true), &case);
     }
     assert!(
         drifted.is_empty(),
         "the pinned handlers no longer publish as recorded: {drifted:?}; \
          compare, and record again with {BLESS_VAR}=1 if the change is intended"
     );
+}
+
+/// The writes of REQUESTS made in STEPS, each with its method, path,
+/// version, body and keys, in order.
+fn writes(requests: &Value, steps: &[&str]) -> Vec<Value> {
+    requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            steps.contains(&request["step"].as_str().unwrap()) && request["method"] != "GET"
+        })
+        .map(|request| {
+            let mut request = request.clone();
+            request.as_object_mut().unwrap().remove("step");
+            request
+        })
+        .collect()
+}
+
+/// GOT, a run of NAME with `agentic-job publish` before gh-aw's handlers,
+/// published what the recorded run of gh-aw's handlers alone did: the
+/// same writes in the same order, the same commits, and the same record
+/// of what was made.
+fn assert_routed_as_recorded(got: &Value, case: &Value) {
+    let name = case["name"].as_str().unwrap();
+    let recorded = read_json(&golden(name));
+    // The guard's name of a pull request digests its patch, which holds
+    // check's base header here.
+    let applied = regex::Regex::new(r"agentic-job-applied: \d+/\d+/[0-9a-f]{16}").unwrap();
+    for (at, (got, recorded)) in got["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(recorded["attempts"].as_array().unwrap())
+        .enumerate()
+    {
+        let what = format!("{name}, attempt {} with agentic-job's handlers", at + 1);
+        let writes = |requests: &Value, steps: &[&str]| {
+            applied
+                .replace_all(&json!(writes(requests, steps)).to_string(), "{applied}")
+                .into_owned()
+        };
+        assert_eq!(
+            writes(&got["requests"], &["publish", "apply"]),
+            writes(&recorded["requests"], &["apply"]),
+            "{what}: writes"
+        );
+        assert_eq!(
+            got["apply"]["made"], recorded["apply"]["made"],
+            "{what}: made"
+        );
+        // Each request was published once: gh-aw's step had the others.
+        if got["publish"]["routed"] == true {
+            let theirs: Vec<&Value> = got["guard"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| !routed(case).contains(&item["type"].as_str().unwrap()))
+                .collect();
+            assert_eq!(
+                got["publish"]["remainder"],
+                left(case, &theirs, recorded),
+                "{what}: remainder"
+            );
+        }
+    }
+    assert_eq!(got["pushed"], recorded["pushed"], "{name}: pushed");
+}
+
+/// THEIRS, the requests CASE leaves gh-aw's handlers, as `agentic-job
+/// publish` leaves them after the RECORDED attempt's failures: gh-aw's
+/// handler manager starts each comment after a pull request that failed
+/// with a warning, which only its step would know of otherwise.
+fn left(case: &Value, theirs: &[&Value], recorded: &Value) -> Value {
+    let failed = recorded["apply"]["errors"]["failures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|failure| failure["type"] == "create_pull_request")
+        .filter(|_| routed(case).contains(&"create_pull_request"));
+    let mut theirs: Vec<Value> = theirs.iter().map(|item| (*item).clone()).collect();
+    if let Some(failure) = failed {
+        for item in theirs
+            .iter_mut()
+            .filter(|item| item["type"] == "add_comment")
+        {
+            item["body"] = json!(format!(
+                "\n\n---\n> [!WARNING]\n> The `create_pull_request` operation failed: {}. \
+                 The code changes were not applied.\n\n{}",
+                failure["error"].as_str().unwrap(),
+                item["body"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+    json!(theirs)
+}
+
+/// apply.yml's steps route each case's types of [`NATIVE`] to `agentic-job
+/// publish`, which publishes them as the recorded run of gh-aw's handlers
+/// did, first, and leaves gh-aw's step the rest: run with the recorded
+/// guard's output, without gh-aw's steps, against the loopback forge.
+#[test]
+fn routed_steps_publish_first_and_leave_the_rest() {
+    for case in cases() {
+        let name = case["name"].as_str().unwrap();
+        let got = run_case(None, &case, true);
+        let recorded = read_json(&golden(name));
+        let routed = native_policy(&case) != json!({});
+        for (at, (got, recorded)) in got["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(recorded["attempts"].as_array().unwrap())
+            .enumerate()
+        {
+            let what = format!("{name}, attempt {}", at + 1);
+            let published = &got["publish"];
+            // A guard or project fields' step that refused the run stops
+            // it before either publisher.
+            if recorded["guard"]["exit"] != 0
+                || recorded["project"]["exit"].as_i64().unwrap_or(0) != 0
+            {
+                assert!(published.is_null(), "{what}");
+                continue;
+            }
+            assert_eq!(published["routed"], json!(routed), "{what}");
+            if !routed {
+                assert!(writes(&got["requests"], &["publish"]).is_empty(), "{what}");
+                continue;
+            }
+            let items = got["guard"]["items"].as_array().unwrap();
+            let (ours, theirs): (Vec<&Value>, Vec<&Value>) = items
+                .iter()
+                .partition(|item| self::routed(&case).contains(&item["type"].as_str().unwrap()));
+            assert_eq!(
+                published["remainder"],
+                left(&case, &theirs, recorded),
+                "{what}: remainder"
+            );
+            // The routed requests come first, and so do their writes.
+            let mine = writes(&got["requests"], &["publish"]);
+            let all = writes(&recorded["requests"], &["apply"]);
+            assert!(
+                all.starts_with(&mine) && (ours.len() < items.len() || mine == all),
+                "{what}: {mine:#?}\nnot the start of the recorded {all:#?}"
+            );
+            // It fails where one of its types failed gh-aw's handlers.
+            let failed = recorded["apply"]["errors"]["failures"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|failure| ours.iter().any(|item| item["type"] == failure["type"]));
+            assert_eq!(published["exit"], json!(i32::from(failed)), "{what}: exit");
+        }
+        if routed && !case["git"].is_null() {
+            assert_eq!(got["pushed"], recorded["pushed"], "{name}: pushed");
+        }
+    }
 }

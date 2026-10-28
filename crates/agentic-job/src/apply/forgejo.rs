@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use super::git::{self, Git, Push};
 use super::{
-    BranchPush, Close, CommitStatus, Kind, LabelChange, NewIssue, Op, Publisher, PullRequest,
+    BranchPush, Close, CommitStatus, Kind, LabelChange, Made, NewIssue, Op, Publisher, PullRequest,
     STATUS_CONTEXT,
 };
 
@@ -384,13 +384,9 @@ impl Forgejo {
             .with_context(|| format!("{method} {path}: the response is not JSON"))
     }
 
-    /// POSTs BODY to PATH under the API and returns the `html_url` of
-    /// what it made.
-    fn post(&self, path: &str, body: &Value) -> Result<String> {
-        self.send(path, Some(body))?["html_url"]
-            .as_str()
-            .map(str::to_owned)
-            .with_context(|| format!("POST {path}: the response names no html_url"))
+    /// POSTs BODY to PATH under the API and returns what it made.
+    fn post(&self, path: &str, body: &Value) -> Result<Made> {
+        Made::from_answer(&self.send(path, Some(body))?, "POST", path)
     }
 
     /// REPO, as the forge answers for it: refused when the answer does not
@@ -566,6 +562,7 @@ impl Forgejo {
                 patch: &pr.patch,
                 files: &pr.files,
                 head: None,
+                committer: None,
             },
             self.recover_pushed_commit.as_deref(),
         )
@@ -661,14 +658,14 @@ impl Publisher for Forgejo {
         Ok(())
     }
 
-    fn comment(&self, issue: u64, body: &str) -> Result<String> {
+    fn comment(&self, issue: u64, body: &str) -> Result<Made> {
         self.post(
             &format!("/repos/{}/issues/{issue}/comments", self.repo),
             &json!({"body": body}),
         )
     }
 
-    fn open_pull_request(&self, pr: &PullRequest) -> Result<String> {
+    fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
         // `plan` refuses this too; held here as well, as nothing else
         // stands between the agent's code and the repository's CI. Forgejo
         // reads a head of the repository's own owner as its own branch.
@@ -710,6 +707,7 @@ impl Publisher for Forgejo {
                 patch: &push.patch,
                 files: &push.files,
                 head: Some(&push.head),
+                committer: None,
             },
             None,
         )
@@ -802,7 +800,7 @@ impl Publisher for Forgejo {
             Kind::PullRequest => format!("/repos/{}/pulls/{}", self.repo, close.number),
         };
         self.request(PATCH, &path, Some(&json!({"state": "closed"})))
-            .with_context(|| format!("after commenting {comment}"))?;
+            .with_context(|| format!("after commenting {}", comment.url))?;
         Ok(item.html_url)
     }
 }
@@ -826,6 +824,8 @@ pub(super) mod tests {
     pub(in crate::apply) struct Request {
         pub line: String,
         pub authorization: String,
+        /// `X-GitHub-Api-Version`, empty without one.
+        pub api_version: String,
         pub body: Value,
     }
 
@@ -850,7 +850,8 @@ pub(super) mod tests {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                let (mut authorization, mut length) = (String::new(), 0);
+                let (mut authorization, mut api_version, mut length) =
+                    (String::new(), String::new(), 0);
                 loop {
                     let mut header = String::new();
                     reader.read_line(&mut header).unwrap();
@@ -860,6 +861,7 @@ pub(super) mod tests {
                     let (name, value) = header.split_once(':').unwrap();
                     match name.to_ascii_lowercase().as_str() {
                         "authorization" => authorization = value.trim().to_owned(),
+                        "x-github-api-version" => api_version = value.trim().to_owned(),
                         "content-length" => length = value.trim().parse().unwrap(),
                         _ => {}
                     }
@@ -869,6 +871,7 @@ pub(super) mod tests {
                 let request = Request {
                     line: line.trim().to_owned(),
                     authorization,
+                    api_version,
                     body: if request.is_empty() {
                         Value::Null
                     } else {
@@ -941,9 +944,9 @@ pub(super) mod tests {
         let super::super::Op::Comment { body, .. } = &ops[0] else {
             panic!("expected a planned comment");
         };
-        let url = forgejo(&server).comment(5, body).unwrap();
+        let made = forgejo(&server).comment(5, body).unwrap();
         assert_eq!(
-            url,
+            made.url,
             "https://forge.example/owner/name/issues/5#issuecomment-3"
         );
         let request = requests.recv().unwrap();
@@ -1134,6 +1137,7 @@ pub(super) mod tests {
             branch: "agent-run-7".into(),
             title: "WIP: Fix it".into(),
             body: "Why.".into(),
+            draft: true,
             patch: patch.into_bytes(),
             files: vec!["README".into(), "src/x".into()],
         };
@@ -1157,8 +1161,9 @@ pub(super) mod tests {
         let (server, requests) = mock(answers);
         let mut forgejo = forgejo(&server);
         forgejo.git = root.path().display().to_string();
-        let url = forgejo.open_pull_request(&pr).unwrap();
-        assert_eq!(url, "https://forge.example/owner/name/pulls/9");
+        let made = forgejo.open_pull_request(&pr).unwrap();
+        assert_eq!(made.url, "https://forge.example/owner/name/pulls/9");
+        assert_eq!(made.number, Some(9));
         for repo in ["owner/name", "fork/name"] {
             let request = requests.recv().unwrap();
             assert_eq!(request.line, format!("GET /api/v1/repos/{repo} HTTP/1.1"));
@@ -1420,7 +1425,7 @@ pub(super) mod tests {
             &["update-ref", &format!("refs/heads/{}", pr.branch), &commit],
         );
         assert_eq!(
-            forgejo.open_pull_request(&pr).unwrap(),
+            forgejo.open_pull_request(&pr).unwrap().url,
             "https://forge.example/owner/name/pulls/9"
         );
         let last = requests.iter().last().unwrap();
