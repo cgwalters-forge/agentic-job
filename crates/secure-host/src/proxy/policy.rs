@@ -111,7 +111,8 @@ fn glob_regex(glob: &str) -> Result<Regex> {
 /// the Azure storage it hands out signed upload URLs for. A policy file
 /// cannot say either: the service's hosts (`run-actions-N-azure-REGION`,
 /// `pipelinesghubeusN`) are not published, so that rule covers a domain
-/// and every name under it, and the storage accounts are gh-aw's list.
+/// and every name under it, and the storage accounts are gh-aw's list
+/// plus verified results-service destinations.
 /// Only the transparent listener's connections get them, never the
 /// sandbox user's.
 ///
@@ -131,14 +132,22 @@ const RUNNER_WRITES: &[(&str, RunnerHosts, &[&str])] = &[
     // is every Azure account's, so a step cannot upload to storage of its
     // choosing. GitHub documents only the suffix, and actions/runner and
     // actions/toolkit name no account: they PUT to the signed URL the
-    // results service returns. gh-aw's firewall pins
-    // productionresultssa0 to productionresultssa19 (its github-actions
-    // ecosystem), as do allowlists built by watching hosted runners
-    // (step-security/agent, openai/fence); an account beyond them is
-    // refused, and the list follows gh-aw's when ECOSYSTEMS is updated.
+    // results service returns. gh-aw's firewall pins only
+    // productionresultssa0 to productionresultssa19, but on 28 Oct 2026
+    // hosted runners were handed productionresultssa31, which it refuses
+    // (cgwalters-forge/tracker#974).
     (
         "GitHub Actions results storage (runner)",
         RunnerHosts::Ecosystem("github-actions"),
+        &["PUT"],
+    ),
+    // GitHub's artifact service redirected downloads to this account in
+    // https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113
+    // (secure-host-write-policy and e2e-write-policy). DNS existence alone
+    // is not evidence of GitHub ownership: admit no neighboring accounts.
+    (
+        "GitHub Actions results storage (runner)",
+        RunnerHosts::Hosts(&["productionresultssa31.blob.core.windows.net"]),
         &["PUT"],
     ),
 ];
@@ -149,6 +158,8 @@ enum RunnerHosts {
     Domain(&'static str),
     /// The exact hosts of a gh-aw ecosystem identifier in ECOSYSTEMS.
     Ecosystem(&'static str),
+    /// Additional independently verified exact hosts.
+    Hosts(&'static [&'static str]),
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +193,10 @@ impl WriteRule {
                     .iter()
                     .map(|host| normalize_host(host))
                     .collect(),
+                Vec::new(),
+            ),
+            RunnerHosts::Hosts(hosts) => (
+                hosts.iter().map(|host| normalize_host(host)).collect(),
                 Vec::new(),
             ),
         };
@@ -945,26 +960,32 @@ mod tests {
     }
 
     /// The runner's built-in writes reach the Actions service's names and
-    /// gh-aw's list of the results service's storage accounts, with PUT
-    /// alone there, and nothing that only ends in the same letters or is
-    /// another Azure account; the shipped policy has none of them.
+    /// the results service's storage accounts, with PUT alone there, and
+    /// nothing that only ends in the same letters, is an unregistered
+    /// account, or is another Azure account; the shipped policy has none
+    /// of them.
     #[test]
     fn runner_writes() {
         // Updating gh-aw's list changes where the runner may write: make
         // that a reviewed change here, not a silent one.
         let storage = ecosystem_hosts(ECOSYSTEMS, "github-actions").unwrap();
-        assert_eq!(storage.len(), 20, "{storage:?}");
-        for host in &storage {
-            let account = host
-                .strip_prefix("productionresultssa")
-                .and_then(|rest| rest.strip_suffix(".blob.core.windows.net"));
-            assert!(
-                account.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
-                "{host}"
-            );
-        }
+        let expected: HashSet<_> = (0..20)
+            .map(|n| format!("productionresultssa{n}.blob.core.windows.net"))
+            .collect();
+        assert_eq!(storage.iter().cloned().collect::<HashSet<_>>(), expected);
         let policy = shipped();
         let runner = policy.with_runner_writes().unwrap();
+        for n in 20..200 {
+            let host = format!("productionresultssa{n}.blob.core.windows.net");
+            let request = Request {
+                method: "PUT",
+                host: &host,
+                path: "/arbitrary/path",
+                has_body: true,
+                ..Request::default()
+            };
+            assert_eq!(runner.request(&request).allowed, n == 31, "{host}");
+        }
         let write = |method, host| Request {
             method,
             host,
@@ -988,12 +1009,23 @@ mod tests {
             ("PUT", "productionresultssa7.blob.core.windows.net", true),
             ("PUT", "productionresultssa0.blob.core.windows.net", true),
             ("PUT", "ProductionResultsSA19.blob.core.windows.net.", true),
+            ("PUT", "productionresultssa20.blob.core.windows.net", false),
+            ("PUT", "productionresultssa31.blob.core.windows.net", true),
+            ("POST", "productionresultssa31.blob.core.windows.net", false),
+            (
+                "PUT",
+                "a.productionresultssa31.blob.core.windows.net",
+                false,
+            ),
+            ("PUT", "productionresultssa199.blob.core.windows.net", false),
             ("POST", "productionresultssa7.blob.core.windows.net", false),
+            // names that did not resolve: anyone's to register
+            ("PUT", "productionresultssa22.blob.core.windows.net", false),
+            ("PUT", "productionresultssa200.blob.core.windows.net", false),
             // any other Azure account, an attacker's
             ("PUT", "attacker.blob.core.windows.net", false),
             ("PUT", "blob.core.windows.net", false),
             ("PUT", "productionresultssa.blob.core.windows.net", false),
-            ("PUT", "productionresultssa20.blob.core.windows.net", false),
             ("PUT", "productionresultssa999.blob.core.windows.net", false),
             ("PUT", "productionresultssa07.blob.core.windows.net", false),
             ("PUT", "productionresultssa7x.blob.core.windows.net", false),
