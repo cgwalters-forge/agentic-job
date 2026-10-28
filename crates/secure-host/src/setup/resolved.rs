@@ -24,7 +24,7 @@ use std::process::Command;
 use anyhow::{Context, Result, ensure};
 
 use super::{MODE_FILE, install_file};
-use crate::sandbox::host;
+use crate::host;
 
 pub const UNIT: &str = "systemd-resolved.service";
 

@@ -581,7 +581,7 @@ form a command. Protection MUST NOT depend on runner state such as
 the rest of the job. The agent's own process writes to the runner's log
 only through `run`; a step that runs untrusted code itself is that step's
 to keep from the log.
-Enforcement: [workflow_commands.rs](../crates/agentic-job/src/workflow_commands.rs),
+Enforcement: [workflow_commands.rs](../crates/secure-host/src/workflow_commands.rs),
 `escaping_breaks_both_syntaxes`;
 [transcript.rs](../crates/agentic-job/src/session/transcript.rs),
 `agent_logs_are_escaped_but_transcripts_keep_original_bytes`;
