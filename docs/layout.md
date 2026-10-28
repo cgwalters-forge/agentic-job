@@ -25,17 +25,24 @@ world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`), the
 Worker-diagnostics rule (`worker_diagnostics.rs`), and the privileged
 seam: the helper's fixed operations (`helper.rs`), how the runner's
 user has root run them (`root.rs`) and the way in as the sandbox user
-(`enter.rs`), with the `[sandbox]` table (`config.rs`). agentic-job
-re-exports each at its old path (`files`, `sandbox::host`,
-`sandbox::helper`, `config::Sandbox`, `secure_host::apt`, ...). Three
-seams keep agents out: agentic-job's `main` hands `host::bare` the
-agent's variables to leave out too; it gives `egress::start` the binary
-and command that run the proxy; and its `Config` implements
-`config::HostFile`, through which the helper and the way in check the
-run tables, unset the run's credentials and serve `session-serve`.
-Setting up the sandbox
-user, the probes, the image and the `secure-host` binary still live in
-agentic-job's `sandbox/` and `secure_host/` below.
+(`enter.rs`), with the `[sandbox]` table (`config.rs`), and the host
+setup itself (`setup.rs`): the runner lock, the sandbox user, sudo and
+polkit denials, the privileged-binary allowlist (`setup/`), the
+systemd-resolved closure, the egress proxy and rules in their order,
+with the escaping of the setup script's output (`workflow_commands.rs`).
+agentic-job re-exports each at its old path (`files`, `sandbox::host`,
+`sandbox::helper`, `sandbox::setup`, `config::Sandbox`,
+`secure_host::apt`, ...). Four seams keep agents out: agentic-job's
+`main` hands `host::bare` the agent's variables to leave out too; it
+gives `egress::start` the binary and command that run the proxy; its
+`Config` implements `config::HostFile`, through which the helper and
+the way in check the run tables, unset the run's credentials and serve
+`session-serve`; and its `sandbox/setup.rs` implements
+`setup::Program`, which reads and checks the file for setup and adds
+the agents, npm, Vibe, caller tools, managed settings and the session's
+serve at fixed points of setup's order. The probes, the image and the
+`secure-host` binary still live in agentic-job's `sandbox/` and
+`secure_host/` below.
 
 Paths below are relative to `crates/agentic-job/src/`.
 
@@ -52,7 +59,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `redact.rs` | Secret redaction |
-| `sandbox/setup.rs`, `sandbox/setup/` | Host preparation: the lock, the sandbox user, the agents and tools |
+| `sandbox/setup.rs`, `sandbox/setup/` | agentic-job's part of secure-host's setup: the agents, tools, managed settings and session |
 | `sandbox/check/` | Host, runner-lock and network probes |
 | `sandbox/mod.rs`, `sandbox/session.rs` | agentic-job's side of secure-host's helper and way in: its configuration and `session-serve` |
 | `session/` | ACP transport, permissions, limits, transcript and digest |

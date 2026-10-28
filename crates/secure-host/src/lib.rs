@@ -3,11 +3,11 @@
 //! The host's side of agentic-job, for any job that runs code it does not
 //! trust: it knows nothing of agents, inference or safe outputs, and
 //! agentic-job depends on it, never the other way round. It holds the
-//! parts of the host setup that stand on their own so far, the network
-//! rules, the egress proxy and the helper among them; the rest (setting
-//! up the sandbox user and the probes) still lives in agentic-job's
-//! `sandbox` and `secure_host` modules, which re-export these at their
-//! old paths. docs/layout.md has the map.
+//! host setup ([`setup`]), the network rules, the egress proxy and the
+//! helper among it; agentic-job adds its agents and session through
+//! [`setup::Program`]. The probes and the image still live in
+//! agentic-job's `sandbox` and `secure_host` modules, which re-export
+//! these at their old paths. docs/layout.md has the map.
 
 pub mod apt;
 pub mod config;
@@ -21,6 +21,8 @@ pub mod network;
 pub mod platform;
 pub mod proxy;
 pub mod root;
+pub mod setup;
 pub mod view;
 pub mod worker_diagnostics;
+pub mod workflow_commands;
 pub mod world_write;

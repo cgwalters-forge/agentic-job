@@ -32,4 +32,4 @@ pub mod workflows;
 
 pub mod detect;
 pub mod diagnostics;
-mod workflow_commands;
+use ::secure_host::workflow_commands;

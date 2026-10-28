@@ -28,7 +28,7 @@ impl Escaper {
 }
 
 /// `text` with both command syntaxes broken; see [`Escaper`].
-pub(crate) fn escaped(text: &str) -> String {
+pub fn escaped(text: &str) -> String {
     let mut escaper = Escaper::default();
     let mut shown = String::with_capacity(text.len());
     for c in text.chars() {

@@ -496,7 +496,7 @@ impl Checker<'_> {
             ),
             std::fs::read_dir(&self.runner.home).is_ok(),
         );
-        let mut dirs = setup::private_dirs(self.config, &self.runner);
+        let mut dirs = setup::private_dirs(&self.config.sandbox, &self.runner);
         // Where the job's files are, if not under one of those: the
         // directory this runs in and the ones the CI system names. Only
         // what is the runner's own, so that running this from / says

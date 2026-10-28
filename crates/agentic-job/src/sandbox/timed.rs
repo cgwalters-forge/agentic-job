@@ -42,17 +42,9 @@ static STAGE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a valid pattern")
 });
 
-/// Monotonic elapsed time, including errors; informational, never authorization.
-pub(super) fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = Instant::now();
-    let result = run();
-    println!(
-        "Sandbox {kind} stage {name}: {:.3}s ({})",
-        started.elapsed().as_secs_f64(),
-        if result.is_ok() { "ok" } else { "failed" }
-    );
-    result
-}
+/// Monotonic elapsed time, including errors; informational, never
+/// authorization. Setup's stages print [`STAGE`]'s lines from secure-host.
+pub(super) use ::secure_host::setup::stage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Label {

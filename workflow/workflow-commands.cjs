@@ -14,7 +14,7 @@
 // the handler writes none (`created_pr_url`, which conclude reports as
 // the run's result), mask text from the log or stop command processing.
 //
-// This is the twin of crates/agentic-job/src/workflow_commands.rs, which
+// This is the twin of crates/secure-host/src/workflow_commands.rs, which
 // `run` and the sandbox checks use for the agent's own log; keep the two
 // in step.
 
