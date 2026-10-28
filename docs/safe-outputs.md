@@ -289,7 +289,9 @@ nonempty strings. The agent is also asked to keep a checkpoint in its
 outcome from the start ([harness](harness.md#limits)); while that
 is not `"complete": true`, the pull request made up from the outcome, and
 the agent's own request if its body or message holds no checkpoint,
-end with it as `incomplete`, each field cut to 400 characters. `check` refuses the hand-back for a malformed checkpoint,
+end with it as `incomplete`, each field cut to 400 characters. So do they,
+with the outcome's `stopped_early` as what is left, when the run stopped
+early, even after the agent marked its checkpoint complete. `check` refuses the hand-back for a malformed checkpoint,
 a second one, a line starting like the fence with more on it, or one over
 8 KiB, rather than take it for complete work. Apply records the reason in
 `applied.json`'s `checkpoint`: the exit state's (`runtime` for 124, `cap`

@@ -40,6 +40,7 @@ const SANDBOX_USER_VAR: &str = "AGENTIC_JOB_TEST_SANDBOX_USER";
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_FAILURE: i32 = 1;
 const EXIT_ERROR: i32 = 2;
+const EXIT_LIMIT: i32 = 3;
 const EXIT_NOT_STARTED: i32 = 4;
 const RUN_ID: &str = "4242";
 const PROXY_VARS: [&str; 6] = [
@@ -1600,6 +1601,120 @@ fn a_run_that_cannot_register_never_starts() {
         got.all()
     );
     assert!(proxy.seen().is_empty(), "{:?}", proxy.seen());
+}
+
+/// A proxy that restarts while the agent works refuses the run's token
+/// from then on, so the agent may have stopped short (#2058): a session
+/// that succeeded all the same fails the run, or, if it handed back a
+/// change, ends as stopped at a limit, with that change as a partial one.
+#[test]
+fn a_run_whose_token_the_proxy_forgot_mid_run_does_not_succeed() {
+    let request = json!({"type": "create_pull_request", "title": "docs: Add a greeting",
+        "body": "Adds a greeting."});
+    // An agent that calls its work complete, as one may whose last
+    // requests were refused.
+    let outcome = json!({"summary": "Adds a greeting.", "stopped_early": null,
+        "checkpoint": {"complete": true}});
+    let change = json!([
+        canary(),
+        {"write": {"title": "Write", "path": "{cwd}/GREETING.md", "content": "Hello.\n"}},
+        {"write": {"title": "Write", "path": "{home}/out/safe-outputs.jsonl",
+            "content": format!("{request}\n")}},
+        {"write": {"title": "Write", "path": "{home}/out/outcome.json",
+            "content": outcome.to_string()}},
+        {"say": "Done."},
+    ]);
+    // (the case, the agent's script if not the default, the exit state,
+    // the summary's result)
+    let cases = [
+        ("forgotten", None, EXIT_FAILURE, "failure"),
+        ("forgotten-change", Some(change), EXIT_LIMIT, "budget"),
+    ];
+    for (case, script, want, result) in cases {
+        let proxy = Proxy::start();
+        proxy.admit_unproven().restart_after_polls(1);
+        let job = Job::new(case);
+        job.own_repository();
+        if let Some(script) = &script {
+            let mut prs = pull_requests();
+            prs["create_pull_request"]["ready_when_complete"] = json!(true);
+            job.allow(prs);
+            job.script(script);
+        }
+        let got = job.own_run(&own_config(&plain(&proxy)));
+        assert_eq!(got.code, Some(want), "{case}: {}", got.all());
+        assert!(
+            got.stderr
+                .contains("no longer knows this run's token (HTTP 401; did it restart?)"),
+            "{case}: {}",
+            got.all()
+        );
+        assert!(
+            got.stderr.contains("inference token revoked mid-run"),
+            "{case}: {}",
+            got.all()
+        );
+        // The session's own result, under out/work/, keeps its success;
+        // the run's summary says why the run did not succeed.
+        assert_eq!(
+            job.json("out/work/harness/harness.json")["result"],
+            "success"
+        );
+        let summary = job.json("out/run/summary.json");
+        assert_eq!(summary["result"], result, "{case}: {summary:#}");
+        assert_eq!(
+            summary["provider_error"], "unreachable",
+            "{case}: {summary:#}"
+        );
+        assert!(
+            summary["failures"].as_array().unwrap().iter().any(|f| {
+                f["kind"] == "inference_unreachable"
+                    && f["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("inference token revoked mid-run"))
+            }),
+            "{case}: {summary:#}"
+        );
+        assert!(
+            summary["failures"].as_array().unwrap().iter().any(|f| {
+                f["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("inference token revoked mid-run"))
+            }),
+            "{case}: {summary:#}"
+        );
+        assert_eq!(job.json("out/work/inference.json")["ended"], true, "{case}");
+        assert_eq!(
+            job.path(PATCH).exists(),
+            script.is_some(),
+            "{case}: {}",
+            got.all()
+        );
+        if script.is_none() {
+            continue;
+        }
+        // The agent's own request carries a checkpoint that the check
+        // reports, so that the partial change opens as a draft.
+        let collected = collected(&job);
+        let check = Command::new(BIN)
+            .arg("check")
+            .args(["--policy", "policy.json", "--outputs", "out/safe-outputs"])
+            .arg("--collected")
+            .arg(&collected)
+            .args(["--report", "verdict.json"])
+            .current_dir(&job.dir)
+            .output()
+            .unwrap();
+        let verdict = job.json("verdict.json");
+        assert_eq!(check.status.code(), Some(EXIT_SUCCESS), "{verdict:#}");
+        assert_eq!(verdict["checkpoint"]["reason"], "incomplete", "{verdict:#}");
+        assert!(
+            verdict["checkpoint"]["left"]
+                .as_str()
+                .is_some_and(|left| left.contains("inference token revoked mid-run")),
+            "{verdict:#}"
+        );
+    }
 }
 
 /// A cap on model requests binds only if the proxy counts them. A proxy

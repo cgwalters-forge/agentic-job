@@ -108,6 +108,9 @@ struct State {
     /// A proxy whose usage records are of a schema the client does not
     /// know.
     odd_records: bool,
+    /// How many more `GET`s of a run's record the proxy answers before
+    /// it forgets every run, as when it restarts mid-run.
+    polls_before_restart: Option<u32>,
 }
 
 /// The proxy, listening on a port of the loopback address.
@@ -252,7 +255,14 @@ impl State {
         if ending && !keep {
             run.state = "finished";
         }
-        (200, Self::record(run).to_string())
+        let answer = (200, Self::record(run).to_string());
+        if !ending && let Some(left) = &mut self.polls_before_restart {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.runs.clear();
+            }
+        }
+        answer
     }
 
     /// A model request on one of the broker's routes: answered with a
@@ -387,6 +397,14 @@ impl Proxy {
     /// Forgets every run, as the broker does when it restarts.
     pub fn restart(&self) {
         self.state().runs.clear();
+    }
+
+    /// Restarts after answering N `GET`s of a run's record: from then on
+    /// the run's token gets 401, its model requests and its ending
+    /// included.
+    pub fn restart_after_polls(&self, n: u32) -> &Self {
+        self.state().polls_before_restart = Some(n);
+        self
     }
 
     /// Counts N more model requests for every active run.

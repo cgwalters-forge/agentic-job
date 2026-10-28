@@ -806,7 +806,7 @@ fn the_end_of_a_run() {
     let proxy = Proxy::start();
     let run = register(&proxy, oidc_mode()).unwrap();
     proxy.restart();
-    assert_eq!(run.end(QUICK).unwrap(), Ended::Ended(None));
+    assert_eq!(run.end(QUICK).unwrap(), Ended::Forgotten);
 }
 
 /// A proxy that registers a run and gives no count of its requests the
