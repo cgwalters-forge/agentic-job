@@ -1,0 +1,203 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "review-comment",
+  "attempts": [
+    {
+      "handler_config": {
+        "create_pull_request_review_comment": {
+          "max": 1,
+          "target-repo": "owner/repo",
+          "target": "7"
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "create_pull_request_review_comment",
+            "path": "src/lib.rs",
+            "line": 2,
+            "body": "This could overflow."
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "1",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "1",
+          "items_warnings": "0",
+          "processed_count": "1",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [],
+        "summary": "<details>\n<summary>✅ Safe Output Processing Summary (1 applied, 0 skipped, 0 failed)</summary>\n\nProcessed 1 safe-output message(s).\n\nStatus: **success**\n\nApplied: **1** · Skipped: **0** · Warnings: **0** · Failed: **0** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Success | Create Pull Request Review Comment | 1 |  |\n\n<details>\n<summary>✅ Create Pull Request Review Comment - Success (Message 1)</summary>\n\n### Create Pull Request Review Comment\n\n**Target:** [owner/repo#7](https://github.com/owner/repo/issues/7)\n\n</details>\n\n</details>\n\n",
+        "made": [
+          {
+            "type": "submit_pull_request_review",
+            "url": "https://github.com/owner/repo/pull/7#pullrequestreview-1001",
+            "number": 7,
+            "repo": "owner/repo",
+            "provider": "github",
+            "id": 1001,
+            "target": {
+              "provider": "github",
+              "repository": "owner/repo",
+              "number": 7
+            },
+            "metadata": {
+              "review_id": 1001,
+              "review_event": "COMMENT",
+              "review_state": "COMMENTED"
+            },
+            "before_state": {
+              "requested_reviewers": [],
+              "requested_team_reviewers": [],
+              "reviews": []
+            },
+            "after_state": {
+              "requested_reviewers": [],
+              "requested_team_reviewers": [],
+              "reviews": [
+                {
+                  "id": 1001,
+                  "user": "agentic-bot",
+                  "state": "COMMENTED"
+                }
+              ]
+            },
+            "timestamp": "{time}"
+          },
+          {
+            "type": "create_pull_request_review_comment",
+            "url": "https://github.com/owner/repo/pull/7#discussion_r1002",
+            "number": 7,
+            "repo": "owner/repo",
+            "provider": "github",
+            "id": 1002,
+            "target": {
+              "provider": "github",
+              "repository": "owner/repo",
+              "number": 7
+            },
+            "metadata": {
+              "review_id": 1001,
+              "path": "src/lib.rs",
+              "line": 2,
+              "side": "RIGHT"
+            },
+            "timestamp": "{time}"
+          }
+        ],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/collaborators?affiliation=direct&per_page=30",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7/files?per_page=100&page=1",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7/reviews?per_page=100",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "POST",
+          "path": "/repos/owner/repo/pulls/7/reviews",
+          "api_version": "2026-03-10",
+          "body": {
+            "commit_id": "1111111111111111111111111111111111111111",
+            "event": "COMMENT",
+            "comments": [
+              {
+                "path": "src/lib.rs",
+                "line": 2,
+                "body": "This could overflow.",
+                "side": "RIGHT"
+              }
+            ],
+            "body": "\n\n> Generated by [agentic-job](https://github.com/owner/repo/actions/runs/4242)\n\n<!-- gh-aw-agentic-workflow: agentic-job, id: 4242, workflow_id: agentic-job, run: https://github.com/owner/repo/actions/runs/4242 -->\n"
+          },
+          "keys": [
+            "commit_id",
+            "event",
+            "comments",
+            "body"
+          ]
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7/reviews?per_page=100",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7/reviews/1001/comments?per_page=100",
+          "api_version": "2026-03-10"
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}

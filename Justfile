@@ -36,6 +36,28 @@ collect-fixtures gh-aw-js:
             "$scratch/collected.json" "$case/collected.json"
     done
 
+# The publication corpus (crates/agentic-job/tests/publication.rs), recorded
+# again from gh-aw and actions/github-script at the commits apply.yml pins.
+# Needs node, git, jq and the network; replaces /tmp/gh-aw. Review the diff:
+# it is what the pinned handlers now send to GitHub.
+publication-corpus:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    for action in github/gh-aw/actions/setup actions/github-script; do
+        commit=$(grep -o -m1 "$action@[0-9a-f]\{40\}" .github/workflows/apply.yml | cut -d@ -f2)
+        repo=$(cut -d/ -f1-2 <<< "$action")
+        dir="$scratch/${repo#*/}"
+        git init --quiet "$dir"
+        # What the test reads of each: gh-aw's scripts, github-script's bundle.
+        git -C "$dir" sparse-checkout set --no-cone /actions/setup/js/ /action.yml /dist/
+        git -C "$dir" fetch --quiet --depth 1 "https://github.com/$repo" "$commit"
+        git -C "$dir" checkout --quiet --detach FETCH_HEAD
+    done
+    AGENTIC_JOB_TEST_GH_AW="$scratch/gh-aw" AGENTIC_JOB_TEST_GITHUB_SCRIPT="$scratch/github-script" AGENTIC_JOB_BLESS_PUBLICATION=1 \
+        cargo test --locked -p agentic-job --test publication -- --ignored
+
 runner-egress-test:
     node --test workflow/runner-egress/parse.test.mjs
 

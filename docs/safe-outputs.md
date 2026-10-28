@@ -1132,6 +1132,42 @@ CI drives `collect` and the handlers with the scripted agent, and
 drives gh-aw's own collector and handlers on two fixtures when dispatched. Deployment evidence is in the
 [README](../README.md#what-is-real-today).
 
+### The publication corpus
+
+Replacing the handlers for the [neutral profile](#neutral-profile)'s
+GitHub types means a second implementation holding apply's write
+credential. Before it may publish, it has to send what the pinned
+handlers send. `crates/agentic-job/tests/publication.rs` records that
+from the pinned code itself, not from what anyone expects of it: each
+case of `tests/data/publication/cases.json` runs apply.yml's step that
+writes the handlers' configuration, its re-run guard and its handler
+step, the last two in the `actions/github-script` bundle apply.yml pins,
+against a loopback forge that records every request and keeps what was
+posted, with git pushes going to local bare repositories. Nothing reaches
+a real forge. The steps that edit the requests before the guard (a
+review's folded findings, a partial run's note, a pull request's issue)
+are not run, so no case has those. The cases are the forge's starting state, its failures and
+the requests; the golden file of each holds the method, path, body and
+its keys' order of every request, the step outputs, annotations and
+summary, the guard's kept and skipped items, `safe-output-items.jsonl`,
+and the commits pushed. They cover `add_comment`, `create_pull_request`,
+`push_to_pull_request_branch`, `create_issue`, `close_issue`,
+`close_pull_request`, `add_labels`, `remove_labels`,
+`create_pull_request_review_comment`, `noop` and `missing_data`; the
+footer and execution marker, the applied name and its digest, the second
+sanitizing, a `max` and a link limit, a re-run finding its comment on a
+second page, re-runs of an issue and a pull request, half-closed issues
+and pull requests, and failures of the forge and of the guard.
+
+The golden files name the gh-aw and github-script commits they were
+recorded at, and the ordinary test suite fails when apply.yml pins
+others, or when CI's `publication` job checks out others. That job runs
+the pinned code again and fails on any difference. So an update of
+either action (Dependabot's included) also updates the job's `ref:`
+lines and records the corpus again with `just publication-corpus`,
+which needs node 24, as github-script runs on, and replaces
+`/tmp/gh-aw`. Review the diff: it is the change in what gets published.
+
 ## Off GitHub
 
 `policy`, `collect` and `check` need no forge; gh-aw's handlers run

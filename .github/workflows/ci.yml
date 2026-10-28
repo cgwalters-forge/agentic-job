@@ -431,6 +431,47 @@ jobs:
           AGENTIC_JOB: target/debug/agentic-job
           GH_AW_JS: ${{ env.GH_AW }}/actions/setup/js
 
+  # crates/agentic-job/tests/publication.rs: what gh-aw's handlers send to
+  # GitHub, run by apply.yml's own scripts in the github-script it pins,
+  # compared with the recorded corpus in tests/data/publication. A second
+  # implementation of the handlers would hold apply's write credentials;
+  # this record is what it has to match, so a change in what the pinned
+  # code publishes fails here. The forge is a loopback one in the test:
+  # no token reaches it, and nothing is written to a real forge. Both
+  # checkouts must be at apply.yml's pins (the test refuses others), so
+  # bump these with them and record the corpus again (`just publication-corpus`).
+  publication:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: github/gh-aw
+          ref: 462ed682857c4ab64d40f2c85e3738fa27834839
+          path: gh-aw
+          sparse-checkout: actions/setup/js
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: actions/github-script
+          ref: 3a2844b7e9c422d3c10d287c895573f7108da1b3
+          path: github-script
+          persist-credentials: false
+      # What github-script's action.yml runs it with.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked --test publication -- --ignored
+        env:
+          AGENTIC_JOB_TEST_GH_AW: ${{ github.workspace }}/gh-aw
+          AGENTIC_JOB_TEST_GITHUB_SCRIPT: ${{ github.workspace }}/github-script
+
   # What a release would publish, so a dependency that breaks the static
   # build is found on its pull request and not at the next tag.
   static:
@@ -2150,7 +2191,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
