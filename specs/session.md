@@ -200,7 +200,8 @@ stops one thing:
   identity (cross-site WebSocket hijacking). It holds on the capability path
   too whenever there is an `Origin`, which a browser always sends.
 - The network rules keep the sandbox user from port 7790 on loopback and from
-  the node's own tailnet addresses ([network.rs](../crates/secure-host/src/network.rs)).
+  the node's own tailnet addresses ([network.rs](../crates/secure-host/src/network.rs)),
+  which `sandbox check` probes ([the session's bridge](../docs/sandbox-check.md#a-sessions-bridge)).
   Without them, the agent could connect to the bridge with a forged
   `Tailscale-User-Login`, or through serve as the node's owner, and prompt its
   own session.
@@ -423,8 +424,6 @@ The slice built here has six parts:
 
 No forge writes happen during the session. Still to do:
 
-- a `sandbox check` probe that the sandbox user cannot reach the bridge, beside
-  the ruleset's unit test;
 - a run of `tailscale serve` on a real runner, including what it does when the
   tailnet has no HTTPS certificates (setup gives it 60 seconds), and whether
   `--accept-app-caps` forwards `Tailscale-App-Capabilities` as expected

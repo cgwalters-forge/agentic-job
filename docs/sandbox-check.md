@@ -81,7 +81,8 @@ probe that expected success, rather than passing.
 `[sandbox.check] containers = false` skips every probe that pulls or
 runs `container-image`: `container-pull`, `container-build`,
 `container-built-run`, `container-control`, `container-metadata`, the
-`egress-container-*` and `tailnet-container*` probes, and in `run` the
+`egress-container-*`, `tailnet-container*` and `session-bridge-container`
+probes, and in `run` the
 `token-container-*` and `broker-egress-container` probes. Each skipped
 probe is named in a note and none counts as passed. The `podman
 unshare` probes of the filesystem view pull nothing and stay. The
@@ -91,6 +92,40 @@ metadata service, nothing around the proxy) and kept from the run
 token goes unprobed. A host that does not want that should remove
 podman rather than turn the probes off; turning them off is accepting
 it.
+
+## A session's bridge
+
+With `[session] listen`, the network rules reject the sandbox's uids on
+loopback at the [session bridge](../specs/session.md)'s port, 7790, and
+at the node's own tailnet addresses, where `tailscale serve` passes a
+client on. The bridge lets in whoever `Tailscale-User-Login` names, so
+an agent that reached it could name the operator, or come through serve
+as the node's owner, and prompt the session it runs in. The check proves
+those rules: as the runner's user it listens at `127.0.0.1:7790` and at
+port 7790 of each address `tailscale status` gives the node, and
+connecting there is the control. Every check runs before `run` binds
+the bridge, so a loopback port already taken is not the bridge but
+whatever serve would hand the operator's connections to: that, or any
+other failure to listen on loopback, stops the check, and the loopback
+control must succeed. A tailnet address it cannot listen at is noted
+and has no control. A session is served only on the tailnet, so
+`session-bridge-tailnet` fails where `tailscale status` gives no address
+of the node's. Then the sandbox user must fail to open a TCP connection
+to `session-bridge:127.0.0.1:7790`, to each tailnet address at 7790 and
+at serve's port, 443, and, where it runs containers, a subordinate uid
+must fail to reach the loopback port (`session-bridge-container`). As
+with every refusal, the check first confirms the sandbox user's session
+got as far as the attempt. Nothing listens at serve's port during the
+check, so that probe is noted as having no control; the address rule it
+tests covers every port and is shown with a control at 7790. Without
+`[session] listen` the probe is skipped with a note.
+
+No CI shard covers it. The sandbox probe shards use
+`crates/agentic-job/tests/data/sandbox/ci.toml`, which has no session:
+session setup needs tailscale with HTTPS certificates, which those
+runners do not join. The probe runs in the check of a session run, such
+as one the reusable workflow's `session` input starts, and the ruleset
+is unit-tested in `crates/secure-host/src/network.rs`.
 
 ## `run`'s token probes
 
