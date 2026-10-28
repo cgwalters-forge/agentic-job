@@ -266,7 +266,7 @@ on:
       event:
         description: >-
           Decide the run from the event that started the calling workflow (`agentic-job event`,
-          docs/events.md): the `[trigger]` table of the bounds file says who may start one and from
+          docs/events.md): the `[github]` trigger table of the bounds file says who may start one and from
           which events; the event's text joins `task` behind a fence; a pull request's base becomes
           the run's; comments go to the triggering item; and a refused event ends the run in the
           policy job, with its reason in the job summary and the other jobs skipped

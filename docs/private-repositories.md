@@ -80,7 +80,7 @@ private target only if all of these hold, each checked where it is enforced:
   for a private run. It refuses `create_pull_request` and
   `push_to_pull_request_branch`: apply pushes a patch through a fork, which
   it checks without a credential, so a private fork is out of its reach.
-  Off GitHub, every bounds file naming the same `push_repo` admits
+  Off GitHub, every bounds file naming the same `[forgejo]` `push_repo` admits
   `create_pull_request` when it is asked for by name (`all` leaves it
   out). Forgejo's apply pushes only to that fork, and only if the fork is
   private ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)).

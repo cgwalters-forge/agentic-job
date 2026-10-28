@@ -22,5 +22,5 @@ max_patch_files = 1
 
 # Which issue the comment goes on is the workflow's `comment-target`,
 # which check holds every comment to; the agent cannot choose another.
-[outputs]
+[github.outputs]
 add_comment = { max = 1 }

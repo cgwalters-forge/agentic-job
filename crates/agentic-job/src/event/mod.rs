@@ -5,7 +5,7 @@
 //! caller's), and the event's payload is a stranger's text: the title of
 //! an issue, the body of a comment, the name of a branch. This command is
 //! the one place that reads it. It decides from the caller's bounds file
-//! (the `[trigger]` table) who may start a run and from which events,
+//! (the `[github.trigger]` table) who may start a run and from which events,
 //! fail closed, and writes the untrusted text into the task file behind a
 //! fence it cannot close, so the agent reads it as data. The decision and
 //! the targets (the triggering issue or pull request, the pull request's
@@ -123,7 +123,7 @@ static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// The event's values may start with a dash: they are a stranger's text.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// The caller's bounds file, for its [trigger] table
+    /// The caller's bounds file, for its [github.trigger] table
     #[arg(long, value_name = "FILE")]
     pub allow: PathBuf,
     /// The event's name (GITHUB_EVENT_NAME)
@@ -157,7 +157,7 @@ pub struct Args {
     pub out: PathBuf,
 }
 
-/// The `[trigger]` table of the bounds file. Absent, no event starts a run.
+/// The `[github.trigger]` table of the bounds file. Absent, no event starts a run.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Trigger {
@@ -197,29 +197,29 @@ impl Trigger {
         guards::validate(self)?;
         for event in &self.events {
             if !EVENTS.contains(&event.as_str()) {
-                bail!("[trigger] events: {event:?} is not one of {EVENTS:?}");
+                bail!("[github.trigger] events: {event:?} is not one of {EVENTS:?}");
             }
         }
         for command in &self.commands {
             let Some(name) = command.strip_prefix('/') else {
-                bail!("[trigger] commands: {command:?} must start with a slash");
+                bail!("[github.trigger] commands: {command:?} must start with a slash");
             };
             if !COMMAND_RE.is_match(command) || name.contains(char::is_whitespace) {
-                bail!("[trigger] commands: {command:?} is not a command name");
+                bail!("[github.trigger] commands: {command:?} is not a command name");
             }
         }
         for bot in &self.bots {
             if bot == GITHUB_ACTIONS {
-                bail!("[trigger] bots: {GITHUB_ACTIONS} would let a run start the next");
+                bail!("[github.trigger] bots: {GITHUB_ACTIONS} would let a run start the next");
             }
             if !LOGIN_RE.is_match(bot) {
-                bail!("[trigger] bots: {bot:?} is not a login");
+                bail!("[github.trigger] bots: {bot:?} is not a login");
             }
         }
         for label in &self.labels {
             if label.trim().is_empty() || label.len() > 50 || label.contains(char::is_control) {
                 bail!(
-                    "[trigger] labels: {label:?} must be nonempty, at most 50 bytes and contain no control characters"
+                    "[github.trigger] labels: {label:?} must be nonempty, at most 50 bytes and contain no control characters"
                 );
             }
         }
@@ -230,13 +230,13 @@ impl Trigger {
                 .iter()
                 .any(|e| comment_events.contains(&e.as_str()))
         {
-            bail!("[trigger] commands is empty, and a comment event needs one");
+            bail!("[github.trigger] commands is empty, and a comment event needs one");
         }
         if self.roles.is_empty() && self.bots.is_empty() {
-            bail!("[trigger] roles and bots are both empty: nobody may start a run");
+            bail!("[github.trigger] roles and bots are both empty: nobody may start a run");
         }
         if self.roles.len() > 1 && self.roles.iter().any(|role| role == ALL_ROLES) {
-            bail!("[trigger] roles: {ALL_ROLES:?} admits anyone and must stand alone");
+            bail!("[github.trigger] roles: {ALL_ROLES:?} admits anyone and must stand alone");
         }
         Ok(())
     }
@@ -363,9 +363,9 @@ pub struct Input<'a> {
 
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = policy::Bounds::load(&args.allow)?;
-    let Some(trigger) = bounds.trigger.as_ref() else {
+    let Some(trigger) = bounds.trigger() else {
         bail!(
-            "{}: no [trigger] table, so no event may start a run",
+            "{}: no [github] trigger table, so no event may start a run",
             args.allow.display()
         );
     };

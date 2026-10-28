@@ -9,6 +9,12 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Breaking (0.x): a bounds file names its forge with one `[github]`,
+  `[forgejo]` or `[gitlab]` section, which holds its `outputs` (and, for
+  GitHub, `trigger`, `memory` and `secondary_pull_request`; for Forgejo,
+  `push_repo`). The old top-level `outputs`, `trigger`, `memory`,
+  `secondary_pull_request`, `push_repo` and scalar `forge` keys are
+  refused (#1393).
 - `.github/agentic-job/private-digest/` is a reference caller for a private
   repository: one digest comment on one issue, with the sandbox user, the
   egress allowlist and the job's read token. It is an example to copy and is

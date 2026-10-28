@@ -1168,7 +1168,7 @@ fn hostile_text_is_fenced() {
     fences_are_balanced(&task);
 }
 
-/// A bounds file without a [trigger] table starts nothing, and a bad one
+/// A bounds file without a [github] trigger table starts nothing, and a bad one
 /// is an error, not a refusal.
 #[test]
 fn bounds_without_a_trigger_table() {
@@ -1186,7 +1186,7 @@ fn bounds_without_a_trigger_table() {
         .output()
         .expect("the binary runs");
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no [trigger] table"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no [github] trigger table"));
 }
 
 /// The caller's own task comes first, unchanged.

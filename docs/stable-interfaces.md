@@ -63,10 +63,13 @@ the next in the same major version.
 - **The bounds file**, the workflow's `allow` input
   (`agentic-job policy --allow`, `agentic-job event --allow`): top-level
   `hosts`, `allow_http`, `repos`, `bases`, `private`, `max_outputs`,
-  `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`,
-  `push_repo` and `dedupe`, and the tables `[outputs.TYPE]`,
-  `[unprotected_files]`, `[memory]`, `[forge]`,
-  `[secondary_pull_request]` and `[trigger]`
+  `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`
+  and `dedupe`, the table `[unprotected_files]`, and exactly one forge
+  section — `[github]` (with `[github.outputs.TYPE]`,
+  `[github.trigger]`, `[github.memory]` and
+  `[github.secondary_pull_request]`), `[forgejo]` (with
+  `[forgejo.outputs.TYPE]` and `push_repo`) or `[gitlab]` (with
+  `[gitlab.outputs.TYPE]` alone)
   ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy),
   [events](events.md)). `allowed_domains` is accepted and ignored.
 - **The runner configuration**, the workflow's `config` input

@@ -45,7 +45,7 @@ test('agent-board proposals pass the pinned collector and bounded project check'
   const file = name => join(work, name);
   try {
     mkdirSync(file('outputs'));
-    writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["example/intake"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.update_project]\nmax = 1\nprojects = ["${proposal.project}"]\nfields = ["Status"]\n`);
+    writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["example/intake"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.update_project]\nmax = 1\nprojects = ["${proposal.project}"]\nfields = ["Status"]\n`);
     const policy = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', proposal.target_repo,
       '--clone-url', 'https://github.com/example/intake', '--base', 'main', '--kind', 'analysis',
       '--outputs', 'update_project', '--max-outputs', '3'], { encoding: 'utf8' });
@@ -183,7 +183,7 @@ test('checked issue actions preserve the actual handler payload', async () => {
       const item = labels
         ? { type, repo, item_number: 7, labels }
         : { type, repo, issue_number: 7, ...(name === 'close with body' ? { body: 'Done in #8.', state_reason: 'not_planned' } : {}) };
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${type}]\nmax = ${max}\n` +
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.${type}]\nmax = ${max}\n` +
         (labels ? `allowed = ${JSON.stringify(labels)}\nblocked = ${JSON.stringify(blocked)}\n` : ''));
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', type,
@@ -257,7 +257,7 @@ test('checked updates reach the pinned handlers with only the listed fields', as
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${type}]\nmax = 1\nfields = ${JSON.stringify(fields)}\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.${type}]\nmax = 1\nfields = ${JSON.stringify(fields)}\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', type,
         '--max-outputs', '1'], { encoding: 'utf8' });
@@ -316,7 +316,7 @@ test('checked reviewer and assignee requests name exactly the allowed logins', a
       try {
         const file = name => join(work, name);
         mkdirSync(file('outputs'));
-        writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${type}]\nmax = 2\nallowed = ["octocat", "hubot"]\n`);
+        writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.${type}]\nmax = 2\nallowed = ["octocat", "hubot"]\n`);
         const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
           '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', type,
           '--max-outputs', '2'], { encoding: 'utf8' });
@@ -378,7 +378,7 @@ test('a checked check run is posted with the pinned name on the pull request hea
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.create_check_run]\nmax = 1\nname = "agent verdict"\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.create_check_run]\nmax = 1\nname = "agent verdict"\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'create_check_run',
         '--max-outputs', '1'], { encoding: 'utf8' });
@@ -457,7 +457,7 @@ test('links and build output survive gh-aw\'s URL filtering, a private key does 
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.add_comment]\nmax = 1\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.add_comment]\nmax = 1\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'add_comment',
         '--max-outputs', '1'], { encoding: 'utf8' });
@@ -522,7 +522,7 @@ test('checked pull request closures and sub-issue links reach only the named ite
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.${item.type}]\nmax = 1\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.${item.type}]\nmax = 1\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', item.type,
         '--max-outputs', '1'], { encoding: 'utf8' });
@@ -602,7 +602,7 @@ test('a checked discussion is posted only in the category the bounds pin', async
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.create_discussion]\nmax = 1\ncategory = "Agent reports"\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.create_discussion]\nmax = 1\ncategory = "Agent reports"\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'create_discussion',
         '--max-outputs', '1'], { encoding: 'utf8' });
@@ -686,7 +686,7 @@ test('a checked comment is hidden only on the triggering item, for a pinned reas
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs.hide_comment]\nmax = 1\nallowed_reasons = ["SPAM", "OUTDATED"]\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 1\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs.hide_comment]\nmax = 1\nallowed_reasons = ["SPAM", "OUTDATED"]\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', 'hide_comment',
         '--max-outputs', '1', '--item-repo', itemRepo], { encoding: 'utf8' });
@@ -774,7 +774,7 @@ test('checked review comments, replies and resolved threads stay on the triggeri
     try {
       const file = name => join(work, name);
       mkdirSync(file('outputs'));
-      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[outputs]\n${line.type} = { max = 1 }\n`);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}", "${itemRepo}"]\nbases = ["main"]\nmax_outputs = 3\nmax_patch_bytes = 100000\nmax_patch_files = 10\n[github.outputs]\n${line.type} = { max = 1 }\n`);
       const policyResult = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
         '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'analysis', '--outputs', line.type,
         '--max-outputs', '1', '--item-repo', itemRepo], { encoding: 'utf8' });

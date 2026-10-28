@@ -7,13 +7,13 @@ max_outputs = 11
 max_patch_bytes = 1024
 max_patch_files = 1
 
-[outputs]
+[github.outputs]
 add_comment = { max = 1 }
 noop = { max = 1 }
 # Inline findings beside the verdict (docs/review.md), held to the pull request.
 create_pull_request_review_comment = { max = 10 }
 
-[trigger]
+[github.trigger]
 events = ["issue_comment"]
 roles = ["admin", "maintain", "write"]
 bots = []

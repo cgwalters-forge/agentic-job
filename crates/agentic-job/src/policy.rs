@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,7 @@ const MAX_OUTPUTS: &str = "max";
 /// gh-aw states a patch's size cap in units of this many bytes.
 const KB: u64 = 1024;
 
-/// The ceilings of `[memory]`: gh-aw's repo-memory defaults, 100 files of
+/// The ceilings of `[github.memory]`: gh-aw's repo-memory defaults, 100 files of
 /// 100 KB each (docs/src/content/docs/reference/repo-memory.md in
 /// github/gh-aw), and a total that keeps the hand-back small.
 pub const MAX_MEMORY_FILES: u32 = 100;
@@ -530,8 +530,6 @@ pub struct Bounds {
     pub max_patch_bytes: u64,
     /// The most files a patch may touch.
     pub max_patch_files: u32,
-    /// The output types a run may ask for, and the ceiling of each.
-    pub outputs: BTreeMap<String, OutputLimit>,
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
@@ -542,10 +540,6 @@ pub struct Bounds {
     /// match as `branches` do, case counting; see [`protecting_glob`].
     #[serde(default)]
     pub protected: Vec<String>,
-    /// Which events may start a run, and who may start one
-    /// (`agentic-job event`). Absent, none may.
-    #[serde(default)]
-    pub trigger: Option<crate::event::Trigger>,
     /// Who the hand-back's commit is by, as `Name <address>`. Without it,
     /// whatever `run` says, which a compromised agent machine chooses:
     /// with it, `check` refuses a patch by anyone else, so the run's
@@ -555,13 +549,6 @@ pub struct Bounds {
     /// See [`check_commit_author`].
     #[serde(default)]
     pub commit_author: Option<String>,
-    /// The fork (OWNER/NAME) Forgejo's `apply` pushes a pull request's
-    /// branch to, never the target repository: the target's CI then runs
-    /// the agent's code as a fork's. Only the bounds name it, never a
-    /// hand-back; it also lets a private run off GitHub open a pull
-    /// request (docs/safe-outputs.md#publishing-to-forgejo).
-    #[serde(default)]
-    pub push_repo: Option<String>,
     /// Whether a run may work on a repository that is not public. Off,
     /// run evidence is published and only public repositories are run;
     /// on, `policy` keeps such a run's outputs in its own repository and
@@ -573,15 +560,41 @@ pub struct Bounds {
     /// reads: links to every public host are kept ([`link_domains`]).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// Where the outputs are applied and everything only that forge
+    /// implements (#1393): exactly one of this, `forgejo` and `gitlab`
+    /// is present, which [`Bounds::forge`] reads. GitHub alone has
+    /// `trigger`, `memory` and `secondary_pull_request` today, so they
+    /// live in its section and are refused in the others.
+    #[serde(default)]
+    pub github: Option<GithubBounds>,
+    /// The Forgejo section: neutral output types alone, plus the fork its
+    /// `apply` pushes a pull request's branch to.
+    #[serde(default)]
+    pub forgejo: Option<ForgejoBounds>,
+    /// The GitLab section: neutral output types alone, nothing else yet.
+    #[serde(default)]
+    pub gitlab: Option<GitlabBounds>,
+}
+
+/// `[github]`: the output types a run may ask for (every one, including
+/// the types no other forge has an object for), and what only GitHub
+/// implements today. `outputs` has no default: a `[github]` section that
+/// allows nothing is a caller's mistake like an empty top-level `outputs`
+/// was, and clearer to refuse where it is named.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubBounds {
+    /// The output types a run may ask for, and the ceiling of each.
+    pub outputs: BTreeMap<String, OutputLimit>,
+    /// Which events may start a run, and who may start one
+    /// (`agentic-job event`). Absent, none may.
+    #[serde(default)]
+    pub trigger: Option<crate::event::Trigger>,
     /// The agent's notes across runs (#119): `run` hands back `~/memory/`
     /// as `memory.json` and `check` holds it to these bounds. Absent, no
     /// memory is handed back, and `check` refuses one.
     #[serde(default)]
     pub memory: Option<Memory>,
-    /// Where the outputs are applied; GitHub by default. Another forge
-    /// may list only [`NEUTRAL_OUTPUTS`].
-    #[serde(default)]
-    pub forge: Forge,
     /// One exact further repository a run may propose a pull request to
     /// (#1075). Kept apart from `repos`, which admits repositories to work
     /// on, so that admitting one is no permission to write to it. `check`
@@ -591,11 +604,36 @@ pub struct Bounds {
     pub secondary_pull_request: Option<SecondaryPullRequest>,
 }
 
+/// `[forgejo]`: the neutral output types alone, plus the fork (OWNER/NAME)
+/// Forgejo's `apply` pushes a pull request's branch to, never the target
+/// repository: the target's CI then runs the agent's code as a fork's.
+/// Only the bounds name it, never a hand-back; it also lets a private run
+/// off GitHub open a pull request
+/// (docs/safe-outputs.md#publishing-to-forgejo). `trigger`, `memory` and
+/// `secondary_pull_request` are refused here: they are implemented for
+/// GitHub alone (#1393), and a caller naming one has mistaken its forge.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgejoBounds {
+    /// The output types a run may ask for, of [`NEUTRAL_OUTPUTS`] alone.
+    pub outputs: BTreeMap<String, OutputLimit>,
+    #[serde(default)]
+    pub push_repo: Option<String>,
+}
+
+/// `[gitlab]`: the neutral output types alone, nothing else yet.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitlabBounds {
+    /// The output types a run may ask for, of [`NEUTRAL_OUTPUTS`] alone.
+    pub outputs: BTreeMap<String, OutputLimit>,
+}
+
 /// The smallest `secondary_pull_request` patch budget, as for the primary.
 const MIN_SECONDARY_PATCH_BYTES: u64 = KB;
 const MIN_SECONDARY_PATCH_FILES: u32 = 1;
 
-/// `[secondary_pull_request]`: its own repository, base, branches and
+/// `[github.secondary_pull_request]`: its own repository, base, branches and
 /// patch budget, none with a default, and its own exemptions, none
 /// inherited from the primary output's: configuring it must not widen
 /// what a patch to that repository may touch.
@@ -801,7 +839,7 @@ impl Secondary {
     }
 }
 
-/// `[memory]`: how much of the agent's memory directory is handed back,
+/// `[github.memory]`: how much of the agent's memory directory is handed back,
 /// and what its files may be. Each bound has a default and a ceiling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1142,7 +1180,7 @@ pub struct Policy {
     /// author `check` lets a patch name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_author: Option<String>,
-    /// The bounds' `push_repo`, where a pull request is asked for: the
+    /// The bounds' `[forgejo]` fork, where a pull request is asked for: the
     /// only repository Forgejo's `apply` pushes its branch to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_repo: Option<String>,
@@ -1155,7 +1193,7 @@ pub struct Policy {
     /// [`GH_AW_LINK_DOMAINS`], in a policy written by hand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_domains: Vec<String>,
-    /// The bounds' `[memory]`, where every bounds file has one.
+    /// The bounds' `[github.memory]`, where every bounds file has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<Memory>,
     /// The bounds' [`Forge`].
@@ -1661,9 +1699,100 @@ impl Bounds {
         Ok(bounds)
     }
 
+    /// The forge the section present names. GitHub where there is none,
+    /// which [`Self::validate`] refuses before any run reads it, so a
+    /// hand-written `Bounds` built without validating still compiles a
+    /// GitHub policy instead of panicking.
+    pub fn forge(&self) -> Forge {
+        if self.forgejo.is_some() {
+            Forge::Forgejo
+        } else if self.gitlab.is_some() {
+            Forge::Gitlab
+        } else {
+            Forge::Github
+        }
+    }
+
+    /// The section's output types, whichever forge it names. Empty where
+    /// there is no section, which `validate` refuses.
+    pub fn outputs(&self) -> &BTreeMap<String, OutputLimit> {
+        static NONE: LazyLock<BTreeMap<String, OutputLimit>> = LazyLock::new(BTreeMap::new);
+        self.github
+            .as_ref()
+            .map(|github| &github.outputs)
+            .or(self.forgejo.as_ref().map(|forgejo| &forgejo.outputs))
+            .or(self.gitlab.as_ref().map(|gitlab| &gitlab.outputs))
+            .unwrap_or(&NONE)
+    }
+
+    /// [`Self::outputs`], for tests that build on a parsed file. Production
+    /// code reads the section's map and never widens one.
+    #[cfg(test)]
+    fn outputs_mut(&mut self) -> &mut BTreeMap<String, OutputLimit> {
+        self.github
+            .as_mut()
+            .map(|github| &mut github.outputs)
+            .or(self.forgejo.as_mut().map(|forgejo| &mut forgejo.outputs))
+            .or(self.gitlab.as_mut().map(|gitlab| &mut gitlab.outputs))
+            .unwrap_or_else(|| unreachable!("validated bounds name one forge section"))
+    }
+
+    /// The bounds' `[github]` trigger: the only forge `agentic-job event`
+    /// reads today.
+    pub fn trigger(&self) -> Option<&crate::event::Trigger> {
+        self.github
+            .as_ref()
+            .and_then(|github| github.trigger.as_ref())
+    }
+
+    /// The bounds' `[github]` memory, cloned into the policy.
+    fn memory(&self) -> Option<Memory> {
+        self.github
+            .as_ref()
+            .and_then(|github| github.memory.clone())
+    }
+
+    /// The bounds' `[github]` secondary pull request.
+    fn secondary_pull_request(&self) -> Option<&SecondaryPullRequest> {
+        self.github
+            .as_ref()
+            .and_then(|github| github.secondary_pull_request.as_ref())
+    }
+
+    /// The bounds' `[forgejo]` fork, cloned into the policy.
+    fn push_repo(&self) -> Option<String> {
+        self.forgejo
+            .as_ref()
+            .and_then(|forgejo| forgejo.push_repo.clone())
+    }
+
     /// A bounds file that bounds nothing, or asks for what cannot be, is
     /// the caller's mistake and not a request to refuse.
     fn validate(&self) -> Result<()> {
+        // The section names the forge, so exactly one: none cannot say
+        // where outputs are applied (0.x made `[github]` explicit, #1393),
+        // and two disagree.
+        let mut sections: Vec<&str> = Vec::new();
+        if self.github.is_some() {
+            sections.push("github");
+        }
+        if self.forgejo.is_some() {
+            sections.push("forgejo");
+        }
+        if self.gitlab.is_some() {
+            sections.push("gitlab");
+        }
+        match sections.as_slice() {
+            [] => bail!("no forge section: add [github], [forgejo] or [gitlab]"),
+            [_] => {}
+            _ => bail!(
+                "the sections [{}] and [{}] are both present: exactly one forge per bounds file",
+                sections[0],
+                sections[1]
+            ),
+        }
+        let forge = self.forge();
+        let outputs = self.outputs();
         for (name, list) in [
             ("hosts", &self.hosts),
             ("repos", &self.repos),
@@ -1684,10 +1813,9 @@ impl Bounds {
         for pattern in self.repos.iter().chain(&self.bases) {
             glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
         }
-        ensure!(!self.outputs.is_empty(), "`outputs` lists no output type");
-        self.forge
-            .check_outputs(self.outputs.keys().map(String::as_str))?;
-        for (output, limit) in &self.outputs {
+        ensure!(!outputs.is_empty(), "`outputs` lists no output type");
+        forge.check_outputs(outputs.keys().map(String::as_str))?;
+        for (output, limit) in outputs {
             limit.validate(output)?;
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str()),
@@ -1708,22 +1836,31 @@ impl Bounds {
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
         }
-        if let Some(push_repo) = &self.push_repo {
+        // A Forgejo pull request is opened only through the fork its
+        // bounds name: policy cannot tell a Forgejo target otherwise, so
+        // allowing the type without the fork admits a run that could
+        // never hand its patch back.
+        let push_repo = self.push_repo();
+        if let Some(push_repo) = &push_repo {
             ensure!(
                 REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
                 "push_repo requires an exact repository name: {push_repo:?}"
             );
         }
-        if let Some(memory) = &self.memory {
+        ensure!(
+            forge != Forge::Forgejo
+                || push_repo.is_some()
+                || !outputs.contains_key(CREATE_PULL_REQUEST),
+            "a [forgejo] bounds allowing {CREATE_PULL_REQUEST} must name push_repo: apply pushes \
+             a pull request's branch only to the fork it names"
+        );
+        if let Some(memory) = self.memory() {
             memory.validate()?;
         }
-        if let Some(secondary) = &self.secondary_pull_request {
+        // Only within `[github]`, so GitHub is implied; `Policy::validate`
+        // keeps the check for a hand-written policy.json.
+        if let Some(secondary) = self.secondary_pull_request() {
             secondary.validate()?;
-            // Apply off GitHub pushes to `push_repo` alone.
-            ensure!(
-                self.forge == Forge::Github,
-                "secondary_pull_request is only for GitHub"
-            );
         }
         for repo in &self.unprotected_files.repos {
             ensure!(
@@ -1800,6 +1937,8 @@ impl Bounds {
             private,
         } = *request;
         let mut errors = Vec::new();
+        let limits = self.outputs();
+        let push_repo = self.push_repo();
 
         let repo_ok = REPO_RE.is_match(repo) && !dotted(repo);
         if !repo_ok || !glob_matches(&self.repos, repo) {
@@ -1868,7 +2007,7 @@ impl Bounds {
         let mut types: Vec<&str> = Vec::new();
         if outputs.trim() == ALL_OUTPUTS {
             types.extend(
-                self.outputs
+                limits
                     .keys()
                     .map(String::as_str)
                     .filter(|output| {
@@ -1892,7 +2031,7 @@ impl Bounds {
             errors.push("outputs lists no output type".to_owned());
         }
         let known = || {
-            self.outputs
+            limits
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>()
@@ -1901,7 +2040,7 @@ impl Bounds {
         errors.extend(
             types
                 .iter()
-                .filter(|output| !self.outputs.contains_key(**output))
+                .filter(|output| !limits.contains_key(**output))
                 .map(|output| {
                     format!(
                         "output type {output:?} is not within the bounds ({})",
@@ -1939,7 +2078,7 @@ impl Bounds {
             // there, and only to a private fork for a private run,
             // and the run's evidence stays on the same forge.
             let named_fork =
-                carrier == CREATE_PULL_REQUEST && self.push_repo.is_some() && !on_github(clone_url);
+                carrier == CREATE_PULL_REQUEST && push_repo.is_some() && !on_github(clone_url);
             if private && types.contains(&carrier) && !named_fork {
                 errors.push(format!(
                     "a private run hands back no patch, so it can't {carrier}: apply's fork is \
@@ -1952,7 +2091,7 @@ impl Bounds {
         // its CI as the repository's own, with its secrets. Nor is it the
         // target's owner's: Forgejo reads a pull request's head of that
         // owner as the target's own branch.
-        if let Some(push_repo) = &self.push_repo
+        if let Some(push_repo) = &push_repo
             && types.contains(&CREATE_PULL_REQUEST)
             && same_owner(push_repo, repo)
         {
@@ -1965,7 +2104,7 @@ impl Bounds {
         // names with the pull request and its head: the branch has to be
         // one the bounds let a push go to, and `bases` does not say which.
         let push = types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
-        let push_limit = self.outputs.get(PUSH_TO_PULL_REQUEST_BRANCH);
+        let push_limit = limits.get(PUSH_TO_PULL_REQUEST_BRANCH);
         let branches = match push_limit {
             Some(limit) if push => &limit.branches[..],
             _ => &self.bases[..],
@@ -2022,8 +2161,7 @@ impl Bounds {
         // user's token, a public repository and a branch run; and in a
         // repository the run's own patch cannot be mistaken for.
         let secondary = self
-            .secondary_pull_request
-            .as_ref()
+            .secondary_pull_request()
             .filter(|_| types.contains(&CREATE_PULL_REQUEST));
         if let Some(secondary) = secondary {
             for (what, name) in [("works on", Some(repo)), ("applies to", output_repo)] {
@@ -2073,45 +2211,28 @@ impl Bounds {
 
         // The lower of what was asked for and what the bounds allow.
         let limit = |output: &str| OutputLimit {
-            max: self
-                .outputs
-                .get(output)
-                .map_or(0, |bound| bound.max)
-                .min(max),
-            allowed: self
-                .outputs
-                .get(output)
-                .and_then(|bound| bound.allowed.clone()),
-            blocked: self
-                .outputs
+            max: limits.get(output).map_or(0, |bound| bound.max).min(max),
+            allowed: limits.get(output).and_then(|bound| bound.allowed.clone()),
+            blocked: limits
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.blocked.clone()),
-            projects: self
-                .outputs
+            projects: limits
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.projects.clone()),
-            fields: self
-                .outputs
+            fields: limits
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.fields.clone()),
             branches: Vec::new(),
             replacement_max_commits: 0,
-            name: self
-                .outputs
-                .get(output)
-                .and_then(|bound| bound.name.clone()),
-            category: self
-                .outputs
-                .get(output)
-                .and_then(|bound| bound.category.clone()),
-            allowed_reasons: self
-                .outputs
+            name: limits.get(output).and_then(|bound| bound.name.clone()),
+            category: limits.get(output).and_then(|bound| bound.category.clone()),
+            allowed_reasons: limits
                 .get(output)
                 .map_or_else(Vec::new, |bound| bound.allowed_reasons.clone()),
             ready_when_complete: false,
         };
         let ready = |output: &str| {
-            self.outputs
+            limits
                 .get(output)
                 .is_some_and(|bound| bound.ready_when_complete)
         };
@@ -2132,8 +2253,7 @@ impl Bounds {
                 max: limit(PUSH_TO_PULL_REQUEST_BRANCH).max,
                 target: number.to_owned(),
                 head: head.to_owned(),
-                replacement_max_commits: self
-                    .outputs
+                replacement_max_commits: limits
                     .get(PUSH_TO_PULL_REQUEST_BRANCH)
                     .map_or(0, |bound| bound.replacement_max_commits),
                 replacement_base: None,
@@ -2165,14 +2285,11 @@ impl Bounds {
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
             commit_author: self.commit_author.clone(),
-            push_repo: self
-                .push_repo
-                .clone()
-                .filter(|_| types.contains(&CREATE_PULL_REQUEST)),
+            push_repo: push_repo.filter(|_| types.contains(&CREATE_PULL_REQUEST)),
             private,
             allowed_domains: link_domains().to_vec(),
-            memory: self.memory.clone(),
-            forge: self.forge,
+            memory: self.memory(),
+            forge: self.forge(),
             contract: CONTRACT,
             secondary_pull_request: secondary.and_then(|secondary| {
                 clone_url_host(clone_url).map(|host| secondary.compile(host, &self.protected))
@@ -2634,16 +2751,17 @@ max_outputs = 5
 max_patch_bytes = 8388608
 max_patch_files = 100
 
-[outputs]
+[unprotected_files]
+repos = ["cgwalters-bot/homegit", "cgwalters-forge/review"]
+files = ["CONTRIBUTING.md", "AGENTS.md"]
+
+[github]
+[github.outputs]
 create_pull_request = { max = 1 }
 add_comment = { max = 3 }
 noop = { max = 1 }
 missing_tool = { max = 3 }
 missing_data = { max = 3 }
-
-[unprotected_files]
-repos = ["cgwalters-bot/homegit", "cgwalters-forge/review"]
-files = ["CONTRIBUTING.md", "AGENTS.md"]
 "#;
 
     const REPO: &str = "bootc-dev/bootc";
@@ -2676,7 +2794,7 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     }
 
     const SECONDARY: &str = r#"
-[secondary_pull_request]
+[github.secondary_pull_request]
 repo = "cgwalters-forge/misctool"
 base = "main"
 branch_prefix = "agentic-job/"
@@ -2702,7 +2820,7 @@ max_patch_files = 10
     fn secondary_pull_request_bounds_are_explicit() {
         assert!(policy().secondary_pull_request.is_none());
         let configured = configured();
-        let secondary = configured.secondary_pull_request.as_ref().unwrap();
+        let secondary = configured.secondary_pull_request().unwrap();
         // Nothing inherited from the primary output's exemptions.
         assert!(secondary.unprotected_files.repos.is_empty());
         assert!(secondary.unprotected_files.files.is_empty());
@@ -2710,7 +2828,10 @@ max_patch_files = 10
         // Unreadable: a list of destinations, a missing field (no
         // defaults), an unknown key.
         for (from, to) in [
-            ("[secondary_pull_request]", "[[secondary_pull_request]]"),
+            (
+                "[github.secondary_pull_request]",
+                "[[github.secondary_pull_request]]",
+            ),
             ("repo = \"cgwalters-forge/misctool\"\n", ""),
             ("base = \"main\"\n", ""),
             ("branch_prefix = \"agentic-job/\"\n", ""),
@@ -2724,7 +2845,7 @@ max_patch_files = 10
         // Readable, and refused or accepted by validation.
         let unprotected = |repo: &str, folder: &str| {
             format!(
-                "max_patch_files = 10\n[secondary_pull_request.unprotected_files]\n\
+                "max_patch_files = 10\n[github.secondary_pull_request.unprotected_files]\n\
                  repos = [{repo:?}]\nfiles = [\"AGENTS.md\"]\ndot_folders = [{folder:?}]\n"
             )
         };
@@ -2914,7 +3035,7 @@ max_patch_files = 10
 
         // Its own exemptions, for itself alone.
         let text = format!(
-            "{BOUNDS}{SECONDARY}\n[secondary_pull_request.unprotected_files]\n\
+            "{BOUNDS}{SECONDARY}\n[github.secondary_pull_request.unprotected_files]\n\
              repos = [\"cgwalters-forge/misctool\"]\nfiles = [\"go.mod\"]\n\
              dot_folders = [\".github\"]\n"
         );
@@ -3132,7 +3253,7 @@ max_patch_files = 10
     #[test]
     fn push_folder_exemptions_are_repository_scoped_and_intersected() {
         let mut bounds = bounds();
-        bounds.outputs.insert(
+        bounds.outputs_mut().insert(
             PUSH_TO_PULL_REQUEST_BRANCH.into(),
             OutputLimit {
                 max: 1,
@@ -3242,7 +3363,7 @@ max_patch_files = 10
         let second = "https://github.com/users/example/projects/2";
         let compile = |projects: &[&str], fields: &[&str]| {
             let mut bounds = bounds();
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 "update_project".to_owned(),
                 OutputLimit {
                     max: 2,
@@ -3329,7 +3450,7 @@ max_patch_files = 10
             toml::from_str("max = 5\nallowed = ['triage', 'blocked']\nblocked = ['blocked']")
                 .unwrap();
         bounds
-            .outputs
+            .outputs_mut()
             .insert("create_issue".to_owned(), limit.clone());
         bounds.validate().unwrap();
         let policy = bounds
@@ -3367,7 +3488,7 @@ max_patch_files = 10
             (MARK_READY, vec![]),
         ] {
             let mut bounds = bounds();
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 output.to_owned(),
                 OutputLimit {
                     max: 2,
@@ -3390,7 +3511,7 @@ max_patch_files = 10
             // Organization bounds narrow the fields; none in common is refused.
             if !fields.is_empty() {
                 let mut org = bounds.clone();
-                org.outputs.get_mut(output).unwrap().fields = vec!["title".to_owned()];
+                org.outputs_mut().get_mut(output).unwrap().fields = vec!["title".to_owned()];
                 let other = org
                     .compile(&Request {
                         outputs: output,
@@ -3421,7 +3542,7 @@ max_patch_files = 10
             "link_sub_issue",
         ] {
             let labels = output.ends_with("_labels");
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 output.to_owned(),
                 OutputLimit {
                     max: 2,
@@ -3443,18 +3564,18 @@ max_patch_files = 10
             assert_eq!(json[output]["max"], 2, "{json}");
             if !labels {
                 // Label limits are only for the label outputs.
-                bounds.outputs.get_mut(output).unwrap().allowed = Some(vec![]);
+                bounds.outputs_mut().get_mut(output).unwrap().allowed = Some(vec![]);
                 assert!(bounds.validate().is_err());
-                bounds.outputs.get_mut(output).unwrap().allowed = None;
+                bounds.outputs_mut().get_mut(output).unwrap().allowed = None;
             }
             if labels {
-                bounds.outputs.get_mut(output).unwrap().allowed = None;
+                bounds.outputs_mut().get_mut(output).unwrap().allowed = None;
                 assert!(bounds.validate().is_err());
-                bounds.outputs.get_mut(output).unwrap().allowed = Some(vec![]);
+                bounds.outputs_mut().get_mut(output).unwrap().allowed = Some(vec![]);
                 bounds.validate().unwrap();
             }
         }
-        bounds.outputs.get_mut("add_labels").unwrap().allowed = None;
+        bounds.outputs_mut().get_mut("add_labels").unwrap().allowed = None;
         assert!(bounds.validate().is_err());
     }
 
@@ -3478,7 +3599,7 @@ max_patch_files = 10
                 (logins(&["octocat[bot]"]), vec![], false),
             ] {
                 let mut bounds = bounds();
-                bounds.outputs.insert(
+                bounds.outputs_mut().insert(
                     (*output).to_owned(),
                     OutputLimit {
                         max: 2,
@@ -3504,7 +3625,7 @@ max_patch_files = 10
             // refused rather than left to the handlers' "anyone".
             let compiled = |allowed: &[&str]| {
                 let mut bounds = bounds();
-                bounds.outputs.insert(
+                bounds.outputs_mut().insert(
                     (*output).to_owned(),
                     OutputLimit {
                         max: 1,
@@ -3573,7 +3694,7 @@ max_patch_files = 10
 
         let compiled = |reasons: &[&str]| {
             let mut bounds = bounds();
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 HIDE_COMMENT.to_owned(),
                 OutputLimit {
                     max: 2,
@@ -3632,7 +3753,7 @@ max_patch_files = 10
 
         let mut bounds = bounds();
         for output in REVIEW_THREAD_OUTPUTS {
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 (*output).to_owned(),
                 OutputLimit {
                     max: 2,
@@ -3688,7 +3809,7 @@ max_patch_files = 10
                 "protected_files = []",
             ] {
                 let text = format!(
-                    "{BOUNDS}\n[outputs.{output}]\nmax = 1\nallowed_reasons = ['SPAM']\n{key}\n"
+                    "{BOUNDS}\n[github.outputs.{output}]\nmax = 1\nallowed_reasons = ['SPAM']\n{key}\n"
                 )
                 .replace(&format!("{output} = {{ max = 1 }}\n"), "")
                 .replace(&format!("{output} = {{ max = 3 }}\n"), "");
@@ -3760,7 +3881,7 @@ max_patch_files = 10
                 } else {
                     &mut limit.category
                 } = Some(pin.to_owned());
-                bounds.outputs.insert(output.to_owned(), limit);
+                bounds.outputs_mut().insert(output.to_owned(), limit);
                 bounds.validate().unwrap();
                 bounds
                     .compile(&Request {
@@ -3909,7 +4030,7 @@ max_patch_files = 10
         ] {
             let configured = |allowed: Option<Vec<&str>>, blocked: &str| {
                 let mut bounds = bounds();
-                bounds.outputs.insert(
+                bounds.outputs_mut().insert(
                     "create_issue".to_owned(),
                     OutputLimit {
                         max: 2,
@@ -4459,7 +4580,7 @@ max_patch_files = 10
                 private,
                 ..bounds()
             };
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 UPDATE_PROJECT.to_owned(),
                 OutputLimit {
                     max: 1,
@@ -4555,7 +4676,6 @@ max_patch_files = 10
                 public,
                 None,
             ),
-            ("public, named in neither", None, None, public, None),
             (
                 "public, comments only",
                 Some(FORK),
@@ -4565,20 +4685,6 @@ max_patch_files = 10
                     ..public
                 },
                 None,
-            ),
-            (
-                "private, named in neither",
-                None,
-                None,
-                forge,
-                Some("can't create_pull_request"),
-            ),
-            (
-                "private, named by the caller only",
-                Some(FORK),
-                None,
-                forge,
-                Some("can't create_pull_request"),
             ),
             (
                 "named differently",
@@ -4624,14 +4730,33 @@ max_patch_files = 10
                 Some("can't create_pull_request"),
             ),
         ];
+        // Bounds of a private Forgejo run that may open a pull request
+        // through the fork its `[forgejo]` section names, if any.
+        let parsed = |push_repo: Option<&str>| {
+            let fork = push_repo
+                .map(|repo| format!("push_repo = {repo:?}\n"))
+                .unwrap_or_default();
+            toml::from_str::<Bounds>(&format!(
+                r#"
+hosts = ["github.com", "forge.example", "github.com:443"]
+repos = ["bootc-dev/*"]
+bases = ["main", "bot/**"]
+max_outputs = 5
+max_patch_bytes = 8388608
+max_patch_files = 100
+private = true
+
+[forgejo]
+{fork}[forgejo.outputs]
+create_pull_request = {{ max = 1 }}
+add_comment = {{ max = 1 }}
+noop = {{ max = 1 }}
+"#
+            ))
+            .unwrap()
+        };
         let with = |push_repo: Option<&str>| {
-            let mut bounds = Bounds {
-                private: true,
-                push_repo: push_repo.map(str::to_owned),
-                ..bounds()
-            };
-            bounds.hosts.push("forge.example".to_owned());
-            bounds.hosts.push("github.com:443".to_owned());
+            let bounds = parsed(push_repo);
             bounds.validate().unwrap();
             bounds
         };
@@ -4661,11 +4786,7 @@ max_patch_files = 10
             }
         }
         for push_repo in ["bot", "bot/../x", "bot/..", "a b/c", "bot/bootc.git"] {
-            let bounds = Bounds {
-                push_repo: Some(push_repo.to_owned()),
-                ..bounds()
-            };
-            assert!(bounds.validate().is_err(), "{push_repo}");
+            assert!(parsed(Some(push_repo)).validate().is_err(), "{push_repo}");
         }
         // Nor does a policy.json written by hand name the target.
         for (push_repo, ok) in [
@@ -4686,7 +4807,7 @@ max_patch_files = 10
     #[test]
     fn what_the_job_token_cannot_apply_is_refused() {
         let mut bounds = bounds();
-        bounds.outputs.insert(
+        bounds.outputs_mut().insert(
             "update_project".to_owned(),
             OutputLimit {
                 max: 1,
@@ -4817,7 +4938,7 @@ max_patch_files = 10
     /// Bounds that let a run push to branches this system names.
     fn push_bounds() -> Bounds {
         let mut bounds = bounds();
-        bounds.outputs.insert(
+        bounds.outputs_mut().insert(
             PUSH_TO_PULL_REQUEST_BRANCH.to_owned(),
             OutputLimit {
                 max: 1,
@@ -5160,7 +5281,7 @@ max_patch_files = 10
         }
         let mut bounds = push_bounds();
         bounds
-            .outputs
+            .outputs_mut()
             .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
             .unwrap()
             .max = 2;
@@ -5208,7 +5329,7 @@ max_patch_files = 10
             let compile = |count| {
                 let mut bounds = push_bounds();
                 bounds
-                    .outputs
+                    .outputs_mut()
                     .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
                     .unwrap()
                     .replacement_max_commits = count;
@@ -5279,7 +5400,11 @@ max_patch_files = 10
         for (output, bounds, request, ready) in carriers {
             let compile = |on| {
                 let mut bounds = bounds();
-                bounds.outputs.get_mut(output).unwrap().ready_when_complete = on;
+                bounds
+                    .outputs_mut()
+                    .get_mut(output)
+                    .unwrap()
+                    .ready_when_complete = on;
                 bounds.validate().unwrap();
                 bounds.compile(&request()).unwrap()
             };
@@ -5316,9 +5441,10 @@ max_patch_files = 10
             assert_eq!(limit.validate(output).is_ok(), accepted, "{output}");
         }
         let toml = "hosts = []\nrepos = []\nbases = []\nmax_outputs = 1\nmax_patch_bytes = 1\n\
-                    max_patch_files = 1\n[outputs]\ncreate_pull_request = { max = 1, ready_when_complete = true }\n";
+                    max_patch_files = 1\n[github.outputs]\n\
+                    create_pull_request = { max = 1, ready_when_complete = true }\n";
         let parsed: Bounds = toml::from_str(toml).unwrap();
-        assert!(parsed.outputs[CREATE_PULL_REQUEST].ready_when_complete);
+        assert!(parsed.outputs()[CREATE_PULL_REQUEST].ready_when_complete);
     }
 
     #[test]
@@ -5379,12 +5505,13 @@ max_patch_files = 10
             ["create_pull_request", "noop"]
         );
 
-        // `[memory]` reaches the policy with its defaults, within its
+        // `[github.memory]` reaches the policy with its defaults, within its
         // ceilings; without it there is none, and no key for it.
         assert_eq!(all.memory, None);
         assert!(!serde_json::to_string(&all).unwrap().contains("memory"));
         let memory = |table: &str| {
-            let bounds: Bounds = toml::from_str(&format!("{BOUNDS}\n[memory]\n{table}")).unwrap();
+            let bounds: Bounds =
+                toml::from_str(&format!("{BOUNDS}\n[github.memory]\n{table}")).unwrap();
             bounds.validate().unwrap();
             let policy = bounds.compile(&request()).unwrap();
             policy.validate().unwrap();
@@ -5425,7 +5552,7 @@ max_patch_files = 10
         org.max_outputs = 2;
         org.max_patch_bytes = 4096;
         org.max_patch_files = 3;
-        org.outputs.remove("missing_data");
+        org.outputs_mut().remove("missing_data");
         org.unprotected_files = Unprotected::default();
         let request = Request {
             repo: "cgwalters-bot/homegit",
@@ -5495,8 +5622,8 @@ max_patch_files = 10
     fn disjoint_output_bounds_refuse_in_both_orders() {
         let mut local = bounds();
         let mut org = bounds();
-        local.outputs.retain(|name, _| name == "noop");
-        org.outputs.retain(|name, _| name == "missing_data");
+        local.outputs_mut().retain(|name, _| name == "noop");
+        org.outputs_mut().retain(|name, _| name == "missing_data");
         let request = Request {
             outputs: "all",
             ..request()
@@ -5666,11 +5793,84 @@ max_patch_files = 10
     #[test]
     fn bad_bounds_files() {
         let with = |from: &str, to: &str| BOUNDS.replace(from, to);
+        // The neutral half of [`BOUNDS`], before its `[github]` section.
+        let neutral = format!("{}\n", BOUNDS.split("\n[github]").next().unwrap());
         let cases = [
             (
                 "an unknown key",
-                format!("{BOUNDS}\nextra = 1\n"),
+                format!("extra = 1\n{BOUNDS}"),
                 "unknown field",
+            ),
+            // The forge comes from a section (#1393): one, and only one.
+            ("no forge section", neutral.clone(), "no forge section"),
+            (
+                "two forge sections",
+                format!(
+                    "{neutral}[github.outputs]\nnoop = {{ max = 1 }}\n\
+                     [forgejo.outputs]\nnoop = {{ max = 1 }}\n"
+                ),
+                "the sections [github] and [forgejo] are both present",
+            ),
+            (
+                "the old scalar forge key",
+                format!("forge = \"forgejo\"\n{neutral}"),
+                "unknown field `forge`",
+            ),
+            (
+                "the old top-level outputs",
+                format!("{neutral}[outputs]\nnoop = {{ max = 1 }}\n"),
+                "unknown field `outputs`",
+            ),
+            (
+                "the old top-level push_repo",
+                format!("{neutral}push_repo = \"fork/repo\"\n"),
+                "unknown field `push_repo`",
+            ),
+            (
+                "the old top-level trigger",
+                format!("{neutral}[trigger]\nevents = [\"pull_request\"]\n"),
+                "unknown field `trigger`",
+            ),
+            (
+                "the old top-level memory",
+                format!("{neutral}[memory]\nmax_files = 1\n"),
+                "unknown field `memory`",
+            ),
+            (
+                "the old top-level secondary_pull_request",
+                format!("{neutral}[secondary_pull_request]\nrepo = \"fork/other\"\n"),
+                "unknown field `secondary_pull_request`",
+            ),
+            (
+                "memory, which only GitHub implements, in [forgejo]",
+                format!(
+                    "{neutral}[forgejo.memory]\nmax_files = 1\n\
+                     [forgejo.outputs]\nnoop = {{ max = 1 }}\n"
+                ),
+                "unknown field `memory`",
+            ),
+            (
+                "a trigger, which only GitHub implements, in [forgejo]",
+                format!(
+                    "{neutral}[forgejo.trigger]\nevents = [\"pull_request\"]\n\
+                     [forgejo.outputs]\nnoop = {{ max = 1 }}\n"
+                ),
+                "unknown field `trigger`",
+            ),
+            (
+                "a forgejo pull request without its fork",
+                format!("{neutral}[forgejo.outputs]\ncreate_pull_request = {{ max = 1 }}\n"),
+                "must name push_repo",
+            ),
+            (
+                "a GitHub-only output type on forgejo",
+                format!("{neutral}[forgejo.outputs]\nlink_sub_issue = {{ max = 1 }}\n"),
+                "GitHub-only",
+            ),
+            (
+                "a GitHub-only output type on gitlab",
+                format!("{neutral}[gitlab.outputs]\nlink_sub_issue = {{ max = 1 }}\n"),
+                "GitHub-only",
             ),
             (
                 "an unknown output type",
@@ -5787,57 +5987,57 @@ max_patch_files = 10
             ),
             (
                 "an unknown memory key",
-                format!("{BOUNDS}\n[memory]\nbranch = \"x\"\n"),
+                format!("{BOUNDS}\n[github.memory]\nbranch = \"x\"\n"),
                 "unknown field `branch`",
             ),
             (
                 "no memory files",
-                format!("{BOUNDS}\n[memory]\nmax_files = 0\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_files = 0\n"),
                 "memory.max_files must be from 1 to 100",
             ),
             (
                 "too many memory files",
-                format!("{BOUNDS}\n[memory]\nmax_files = 101\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_files = 101\n"),
                 "memory.max_files must be from 1 to 100",
             ),
             (
                 "empty memory files",
-                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 0\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_file_bytes = 0\n"),
                 "memory.max_file_bytes must be from 1 to 102400",
             ),
             (
                 "a memory file too big",
-                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 102401\nmax_bytes = 200000\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_file_bytes = 102401\nmax_bytes = 200000\n"),
                 "memory.max_file_bytes must be from 1 to 102400",
             ),
             (
                 "a memory too big",
-                format!("{BOUNDS}\n[memory]\nmax_bytes = 1048577\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_bytes = 1048577\n"),
                 "memory.max_bytes must be from max_file_bytes to 1048576",
             ),
             (
                 "a memory smaller than one file",
-                format!("{BOUNDS}\n[memory]\nmax_file_bytes = 2048\nmax_bytes = 1024\n"),
+                format!("{BOUNDS}\n[github.memory]\nmax_file_bytes = 2048\nmax_bytes = 1024\n"),
                 "memory.max_bytes must be from max_file_bytes",
             ),
             (
                 "no memory extensions",
-                format!("{BOUNDS}\n[memory]\nextensions = []\n"),
+                format!("{BOUNDS}\n[github.memory]\nextensions = []\n"),
                 "memory.extensions lists no extension",
             ),
             (
                 "a script as memory",
-                format!("{BOUNDS}\n[memory]\nextensions = [\"md\", \"sh\"]\n"),
+                format!("{BOUNDS}\n[github.memory]\nextensions = [\"md\", \"sh\"]\n"),
                 "memory.extensions may only name md, txt, json, jsonl, csv, not \"sh\"",
             ),
             (
                 "a dotted memory extension",
-                format!("{BOUNDS}\n[memory]\nextensions = [\".md\"]\n"),
+                format!("{BOUNDS}\n[github.memory]\nextensions = [\".md\"]\n"),
                 "not \".md\"",
             ),
             (
                 "an upper-case memory extension",
-                format!("{BOUNDS}\n[memory]\nextensions = [\"MD\"]\n"),
+                format!("{BOUNDS}\n[github.memory]\nextensions = [\"MD\"]\n"),
                 "not \"MD\"",
             ),
             (
@@ -5903,7 +6103,7 @@ max_patch_files = 10
             ),
             (
                 "a memory extension twice",
-                format!("{BOUNDS}\n[memory]\nextensions = [\"md\", \"md\"]\n"),
+                format!("{BOUNDS}\n[github.memory]\nextensions = [\"md\", \"md\"]\n"),
                 "memory.extensions names \"md\" twice",
             ),
         ];
@@ -6150,11 +6350,11 @@ max_patch_files = 10
         }
     }
 
-    /// Bounds on FORGE allowing OUTPUT, with LIMIT as its table.
+    /// Bounds on FORGE (a `[github]`, `[forgejo]` or `[gitlab]` section)
+    /// allowing OUTPUT, with LIMIT as its table.
     fn forge_bounds(forge: &str, output: &str, limit: &str) -> Result<Bounds> {
         let bounds: Bounds = toml::from_str(&format!(
             r#"
-forge = "{forge}"
 hosts = ["forge.example"]
 repos = ["owner/*"]
 bases = ["main"]
@@ -6162,7 +6362,7 @@ max_outputs = 3
 max_patch_bytes = 65536
 max_patch_files = 10
 
-[outputs]
+[{forge}.outputs]
 {output} = {limit}
 "#
         ))?;
@@ -6249,14 +6449,23 @@ max_patch_files = 10
             for (name, forge) in FORGES {
                 let held = forge == Forge::Github || *neutral;
                 assert_eq!(forge.holds(output), held, "{output} on {name}");
+                // A Forgejo pull request is opened only through the fork
+                // its bounds name, so allowing the type without one is
+                // refused even though the type is neutral.
+                let forked = name == "forgejo" && *output == CREATE_PULL_REQUEST;
                 match forge_bounds(name, output, limit) {
-                    Ok(_) => assert!(held, "{output} admitted on {name}"),
+                    Ok(_) => assert!(held && !forked, "{output} admitted on {name}"),
                     Err(err) => {
-                        assert!(!held, "{output} on {name}: {err:#}");
-                        assert!(
-                            format!("{err:#}").contains("GitHub-only"),
-                            "{output} on {name}: {err:#}"
-                        );
+                        let text = format!("{err:#}");
+                        if forked {
+                            assert!(
+                                text.contains("must name push_repo"),
+                                "{output} on {name}: {text}"
+                            );
+                        } else {
+                            assert!(!held, "{output} on {name}: {text}");
+                            assert!(text.contains("GitHub-only"), "{output} on {name}: {text}");
+                        }
                     }
                 }
             }
@@ -6272,7 +6481,7 @@ max_patch_files = 10
         };
         for (name, forge) in FORGES {
             let mut bounds = forge_bounds(name, "add_comment", "{ max = 2 }").unwrap();
-            bounds.outputs.insert(
+            bounds.outputs_mut().insert(
                 "noop".into(),
                 OutputLimit {
                     max: 1,

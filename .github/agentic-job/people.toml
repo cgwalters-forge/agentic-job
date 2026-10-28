@@ -9,6 +9,6 @@ max_outputs = 2
 max_patch_bytes = 1048576
 max_patch_files = 1
 
-[outputs]
+[github.outputs]
 add_reviewer = { max = 1, allowed = ["cgwalters-bot"] }
 assign_to_user = { max = 1, allowed = ["cgwalters-bot"] }

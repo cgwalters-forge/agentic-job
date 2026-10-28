@@ -37,15 +37,15 @@ agentic-job event --allow allow.toml --event-name "$GITHUB_EVENT_NAME" \
     [--pull-request pull.json] --task task.md --out DIR
 ```
 
-It reads the `[trigger]` table of the caller's bounds file and decides,
-fail closed: a bounds file without the table starts nothing. Exit 0 and
+It reads the `[github]` trigger table of the caller's bounds file and decides,
+fail closed: a bounds file without it starts nothing. Exit 0 and
 `DIR/task.md` when the run may start; exit 1 and no task when it may
 not; exit 2 when the bounds or the payload cannot be read. Either way
 `DIR/event.json` (`agentic-job-event/v1`) says what was decided and why,
 so the workflow can end quietly.
 
 ```toml
-[trigger]
+[github.trigger]
 # Which events may start a run: issues, issue_comment, pull_request,
 # pull_request_target, pull_request_review_comment, schedule,
 # workflow_dispatch, discussion (label commands only).
@@ -260,7 +260,7 @@ nothing to say. The job summary and the `trigger` outputs say why.
 
 ## Deadline
 
-The `[trigger]` table also accepts `stop-after`, an RFC 3339 timestamp:
+The `[github.trigger]` table also accepts `stop-after`, an RFC 3339 timestamp:
 at or after it every event is refused. Quotas and cooldowns are not
 implemented; caller concurrency and the request cap bound a run instead.
 The `cooldown` and `max-runs-per-user` keys, and `event --run-history`, were
