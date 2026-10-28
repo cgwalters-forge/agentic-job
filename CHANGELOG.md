@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `agentic-job apply --forge forgejo` also publishes `add_labels`,
+  `remove_labels`, `close_issue`, `close_pull_request` and `create_issue`,
+  and writes nothing for `noop`, `missing_tool` and `missing_data` instead
+  of refusing them. Before any write it reads each target and refuses
+  another kind of item or one not of the repository, and a label the
+  repository lacks, which it never creates, or a label change Forgejo
+  would carry out on other labels; it refuses fields Forgejo has
+  no meaning for, such as `temporary_id` or `state_reason: not_planned`
+  (docs/safe-outputs.md#labels-issues-and-closing-on-forgejo).
 - Status edits drop a run-supplied `agent-board-maintain-plan` marker rather
   than give it bot-last-edited provenance. Fake-forge and workflow tests pin
   this contract, including completion and retries; ordinary caller markers

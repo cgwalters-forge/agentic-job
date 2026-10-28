@@ -2,9 +2,8 @@
 //! not GitHub, from a job of its own that holds the write token. GitHub's
 //! apply is still gh-aw's handlers in apply.yml; this is the first slice
 //! of moving publishing behind [`Publisher`] (#1346), for Forgejo, and
-//! for two outputs only: `add_comment` and `create_pull_request`. On
-//! GitHub, [`secondary`] opens the policy's secondary pull request after
-//! the handlers.
+//! for the outputs in [`SUPPORTED`]. On GitHub, [`secondary`] opens the
+//! policy's secondary pull request after the handlers.
 //!
 //! The input is the check job's upload: check's `report.json` and the
 //! patch beside it. That upload went through a machine other than the
@@ -12,7 +11,9 @@
 //! report's word: the same counts, types, destinations, marker, handler
 //! limits and patch rules check applies, and a patch that is byte for
 //! byte the size check reported. Everything is decided before the first
-//! write ([`plan`]), so a refusal leaves the forge as it was.
+//! write ([`plan`]), and what only the forge can say (an item's kind, a
+//! label's ID) is asked before it too ([`Publisher::preflight`]), so a
+//! refusal leaves the forge as it was.
 
 pub mod forgejo;
 mod git;
@@ -36,7 +37,7 @@ use serde_json::{Map, Value};
 use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, PatchRules, Policy};
+use crate::policy::{CREATE_PULL_REQUEST, MISSING_DATA, NOOP, PatchRules, Policy};
 
 /// Check's verdict, as the check job uploads it.
 pub const REPORT_FILE: &str = "report.json";
@@ -46,11 +47,56 @@ pub const REPORT_FILE: &str = "report.json";
 pub const TOKEN_ENV: &str = "FORGEJO_TOKEN";
 
 const ADD_COMMENT: &str = "add_comment";
+const CREATE_ISSUE: &str = "create_issue";
+const ADD_LABELS: &str = "add_labels";
+const REMOVE_LABELS: &str = "remove_labels";
+const CLOSE_ISSUE: &str = "close_issue";
+const CLOSE_PULL_REQUEST: &str = "close_pull_request";
+const MISSING_TOOL: &str = "missing_tool";
+
+/// What says why a run wrote nothing: the run's status reports it, and
+/// apply writes nothing for it.
+const NO_WRITE: &[&str] = &[NOOP, MISSING_TOOL, MISSING_DATA];
 
 /// What this publishes. Anything else is refused, not left out: a run
 /// whose closing or labelling is silently dropped looks done when it is
 /// not.
-const SUPPORTED: &[&str] = &[ADD_COMMENT, CREATE_PULL_REQUEST];
+const SUPPORTED: &[&str] = &[
+    ADD_COMMENT,
+    CREATE_PULL_REQUEST,
+    CREATE_ISSUE,
+    ADD_LABELS,
+    REMOVE_LABELS,
+    CLOSE_ISSUE,
+    CLOSE_PULL_REQUEST,
+    NOOP,
+    MISSING_TOOL,
+    MISSING_DATA,
+];
+
+/// The fields apply maps onto Forgejo, of those gh-aw's rules let each
+/// type hold (`safe-outputs/validation.json`). Another is refused, never
+/// dropped: `create_issue`'s `temporary_id`, `parent`, `blocked_by` and
+/// `fields` and `close_issue`'s `confidence`, `rationale`, `suggest` and
+/// `duplicate_of` would each be left undone.
+const FIELDS: &[(&str, &[&str])] = &[
+    (CREATE_ISSUE, &["type", "repo", "title", "body", "labels"]),
+    (ADD_LABELS, &["type", "repo", "item_number", "labels"]),
+    (REMOVE_LABELS, &["type", "repo", "item_number", "labels"]),
+    (
+        CLOSE_ISSUE,
+        &["type", "repo", "issue_number", "body", "state_reason"],
+    ),
+    (
+        CLOSE_PULL_REQUEST,
+        &["type", "repo", "pull_request_number", "body"],
+    ),
+];
+
+/// The collector's bounds on a title and a body, in characters
+/// (`safe-outputs/validation.json`), held again before the footer.
+const MAX_TITLE_CHARS: usize = 128;
+const MAX_BODY_CHARS: usize = 65_000;
 
 /// check's own bound on the collector's result, which the report repeats.
 const MAX_REPORT_BYTES: u64 = 4 << 20;
@@ -112,6 +158,42 @@ pub struct Args {
 pub enum Op {
     Comment { issue: u64, body: String },
     PullRequest(PullRequest),
+    Issue(NewIssue),
+    Labels(LabelChange),
+    Close(Close),
+}
+
+/// What an issue number names. Forgejo numbers issues and pull requests
+/// together, so a request for one may name the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Issue,
+    PullRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewIssue {
+    pub title: String,
+    pub body: String,
+    /// Names of labels the repository has: never created.
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelChange {
+    /// An issue or a pull request.
+    pub item: u64,
+    pub add: bool,
+    /// Distinct names, as check admitted them, in their own case.
+    pub labels: Vec<String>,
+}
+
+/// A comment saying why, then the item closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Close {
+    pub number: u64,
+    pub kind: Kind,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,12 +215,24 @@ pub struct PullRequest {
     pub files: Vec<String>,
 }
 
-/// The writes a forge does for apply. Each returns the URL of what it made.
+/// The writes a forge does for apply. Each returns the URL of what it
+/// made or changed.
 pub trait Publisher {
+    /// Refuses OP when what the forge says makes it one apply must not
+    /// write (another kind of item, another repository's, a label the
+    /// repository lacks), reading only. [`publish`] asks this of every op
+    /// before the first write.
+    fn preflight(&self, op: &Op) -> Result<()>;
     fn comment(&self, issue: u64, body: &str) -> Result<String>;
     /// Pushes the patch to a new branch of the fork and opens a pull
     /// request from it.
     fn open_pull_request(&self, pr: &PullRequest) -> Result<String>;
+    fn create_issue(&self, issue: &NewIssue) -> Result<String>;
+    /// Adds the labels the item lacks, or removes those it has; with
+    /// nothing to change, writes nothing.
+    fn change_labels(&self, change: &LabelChange) -> Result<String>;
+    /// Comments and closes; an item closed already gets neither.
+    fn close(&self, close: &Close) -> Result<String>;
 }
 
 /// Where the trusted caller has apply publish.
@@ -254,7 +348,12 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
                 Ok(pr) => ops.push(Op::PullRequest(pr)),
                 Err(err) => errors.push(format!("{err:#}")),
             },
-            _ => {}
+            output if NO_WRITE.contains(&output) => {}
+            _ => match metadata(item, target.run_url) {
+                Ok(Some(op)) => ops.push(op),
+                Ok(None) => {}
+                Err(err) => errors.push(format!("{err:#}")),
+            },
         }
     }
     let carried = report
@@ -271,8 +370,15 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
     if errors.is_empty() {
         // The pull request first: its push makes the last checks, against
         // the repository (base commit, applied paths, a new branch), and a
-        // refusal there is to leave no comment pointing at nothing.
-        ops.sort_by_key(|op| matches!(op, Op::Comment { .. }));
+        // refusal there is to leave no comment pointing at nothing. Closing
+        // last, as what a reader is least able to undo.
+        ops.sort_by_key(|op| match op {
+            Op::PullRequest(_) => 0,
+            Op::Issue(_) => 1,
+            Op::Comment { .. } => 2,
+            Op::Labels(_) => 3,
+            Op::Close(_) => 4,
+        });
         Ok(ops)
     } else {
         Err(errors)
@@ -398,6 +504,107 @@ fn pull_request(
     })
 }
 
+/// The op of an issue, label or close request, its every field mapped or
+/// refused, and its text filtered as a comment's is. Its repository,
+/// target and labels are held to the policy by
+/// [`check::redirections_to`], as every request is; what the forge says
+/// of them, by [`Publisher::preflight`]. None for a type with no op.
+fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
+    let output = check::item_type(item);
+    let Some((_, fields)) = FIELDS.iter().find(|(name, _)| *name == output) else {
+        return Ok(None);
+    };
+    let unmapped: Vec<&str> = item
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !fields.contains(key))
+        .collect();
+    anyhow::ensure!(
+        unmapped.is_empty(),
+        "a {output} with {}, which apply does not map onto Forgejo",
+        unmapped.join(", ")
+    );
+    let required = |key: &str, max: usize| -> Result<&str> {
+        let text = item
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .with_context(|| format!("a {output} without a {key}"))?;
+        anyhow::ensure!(
+            text.chars().count() <= max,
+            "a {output} whose {key} is over {max} characters"
+        );
+        Ok(text)
+    };
+    let body = || -> Result<String> {
+        let body = required("body", MAX_BODY_CHARS)?;
+        Ok(with_footer(&mentions::filter(body, "forgejo"), run_url))
+    };
+    let number = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_u64)
+            .filter(|number| *number > 0)
+            .with_context(|| format!("a {output} without a positive integer {key}"))
+    };
+    let labels = || -> Result<Vec<String>> {
+        let listed = match item.get("labels") {
+            None => &[][..],
+            Some(Value::Array(listed)) => listed.as_slice(),
+            Some(_) => anyhow::bail!("a {output} whose labels are not an array"),
+        };
+        let mut names: Vec<String> = Vec::new();
+        for label in listed {
+            let name = label
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .with_context(|| format!("a {output} with label {label}, which is not a name"))?;
+            // Only exact repeats: a repository may have `Docs` and `docs`,
+            // and the publisher resolves names to labels once each.
+            if !names.iter().any(|named| named == name) {
+                names.push(name.to_owned());
+            }
+        }
+        Ok(names)
+    };
+    Ok(Some(match output {
+        CREATE_ISSUE => Op::Issue(NewIssue {
+            title: mentions::filter(required("title", MAX_TITLE_CHARS)?, "forgejo"),
+            body: body()?,
+            labels: labels()?,
+        }),
+        ADD_LABELS | REMOVE_LABELS => {
+            let labels = labels()?;
+            anyhow::ensure!(!labels.is_empty(), "a {output} without labels");
+            Op::Labels(LabelChange {
+                item: number("item_number")?,
+                add: output == ADD_LABELS,
+                labels,
+            })
+        }
+        CLOSE_ISSUE => {
+            // Forgejo records no reason, so only gh-aw's default means
+            // the same there.
+            if let Some(reason) = item.get("state_reason") {
+                anyhow::ensure!(
+                    reason == "completed",
+                    "a close_issue with state_reason {reason}, which Forgejo does not record"
+                );
+            }
+            Op::Close(Close {
+                number: number("issue_number")?,
+                kind: Kind::Issue,
+                body: body()?,
+            })
+        }
+        CLOSE_PULL_REQUEST => Op::Close(Close {
+            number: number("pull_request_number")?,
+            kind: Kind::PullRequest,
+            body: body()?,
+        }),
+        _ => anyhow::bail!("a {output}, which apply does not map onto Forgejo"),
+    }))
+}
+
 /// The OWNER of OWNER/NAME.
 fn owner(repo: &str) -> &str {
     repo.split_once('/').map_or(repo, |(owner, _)| owner)
@@ -464,14 +671,21 @@ fn trailer_start(body: &str) -> Option<usize> {
     }
 }
 
-/// Makes the writes in order. A failure after the first write names what
-/// was already made, so that whoever runs it again knows.
+/// Asks the forge about every op, then makes the writes in order. A
+/// failure after the first write names what was already made, so that
+/// whoever runs it again knows.
 pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
+    for op in ops {
+        publisher.preflight(op)?;
+    }
     let mut made = Vec::new();
     for op in ops {
         let url = match op {
             Op::Comment { issue, body } => publisher.comment(*issue, body),
             Op::PullRequest(pr) => publisher.open_pull_request(pr),
+            Op::Issue(issue) => publisher.create_issue(issue),
+            Op::Labels(change) => publisher.change_labels(change),
+            Op::Close(close) => publisher.close(close),
         };
         match url {
             Ok(url) => made.push(url),
@@ -540,13 +754,29 @@ mod tests {
     pub(super) fn policy() -> Policy {
         let mut policy = crate::policy::tests::policy();
         policy.push_repo = Some(PUSH_REPO.to_owned());
-        policy.safe_outputs.others.insert(
-            ADD_COMMENT.to_owned(),
-            OutputLimit {
-                max: 1,
-                ..OutputLimit::default()
-            },
-        );
+        let labels = OutputLimit {
+            max: 2,
+            allowed: Some(vec!["triage".to_owned(), "bug".to_owned()]),
+            blocked: vec!["release".to_owned()],
+            ..OutputLimit::default()
+        };
+        for (output, limit) in [
+            (ADD_COMMENT, OutputLimit::default()),
+            (CREATE_ISSUE, OutputLimit::default()),
+            (CLOSE_ISSUE, OutputLimit::default()),
+            (CLOSE_PULL_REQUEST, OutputLimit::default()),
+            (ADD_LABELS, labels.clone()),
+            (REMOVE_LABELS, labels),
+            (NOOP, OutputLimit::default()),
+            (MISSING_TOOL, OutputLimit::default()),
+            (MISSING_DATA, OutputLimit::default()),
+        ] {
+            policy
+                .safe_outputs
+                .others
+                .insert(output.to_owned(), OutputLimit { max: 1, ..limit });
+        }
+        policy.max_outputs = 20;
         policy
     }
 
@@ -572,6 +802,85 @@ mod tests {
 
     fn comment_item() -> Value {
         json!({"type": "add_comment", "body": "Done."})
+    }
+
+    const REPO: &str = "bootc-dev/bootc";
+
+    fn issue_item() -> Value {
+        json!({"type": CREATE_ISSUE, "repo": REPO, "title": "Flaky @user test",
+            "body": "It fails, says @user.", "labels": ["bug", "BUG"]})
+    }
+
+    fn labels_item(output: &str) -> Value {
+        json!({"type": output, "repo": REPO, "item_number": 5, "labels": ["triage"]})
+    }
+
+    fn close_item() -> Value {
+        json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 6,
+            "state_reason": "completed", "body": "Fixed by !9.\n\nCloses #6"})
+    }
+
+    fn close_pull_request_item() -> Value {
+        json!({"type": CLOSE_PULL_REQUEST, "repo": REPO, "pull_request_number": 7,
+            "body": "Superseded."})
+    }
+
+    /// Every type apply maps, in the order it writes them, and the ones
+    /// that write nothing.
+    #[test]
+    fn metadata() {
+        let dir = checked(&[
+            close_item(),
+            close_pull_request_item(),
+            labels_item(REMOVE_LABELS),
+            labels_item(ADD_LABELS),
+            json!({"type": NOOP, "message": "Nothing else."}),
+            json!({"type": MISSING_DATA, "reason": "No logs."}),
+            json!({"type": MISSING_TOOL, "reason": "No browser."}),
+            comment_item(),
+            issue_item(),
+            pull_request_item(),
+        ]);
+        let ops = plan(dir.path(), &policy(), &target(Some(64))).unwrap();
+        let footer = format!("> Generated by [agentic-job]({RUN})");
+        let labels = |add| {
+            Op::Labels(LabelChange {
+                item: 5,
+                add,
+                labels: vec!["triage".to_owned()],
+            })
+        };
+        assert!(matches!(ops[0], Op::PullRequest(_)), "{ops:?}");
+        assert_eq!(
+            ops[1..],
+            [
+                Op::Issue(NewIssue {
+                    title: "Flaky @\u{200b}user test".to_owned(),
+                    body: format!("It fails, says @\u{200b}user.\n\n{footer}"),
+                    labels: vec!["bug".to_owned(), "BUG".to_owned()],
+                }),
+                Op::Comment {
+                    issue: 64,
+                    body: format!("Done.\n\n{footer}")
+                },
+                labels(false),
+                labels(true),
+                // The footer before the trailer, and the reference filtered.
+                Op::Close(Close {
+                    number: 6,
+                    kind: Kind::Issue,
+                    body: format!("Fixed by !\u{200b}9.\n\n{footer}\n\nCloses #6"),
+                }),
+                Op::Close(Close {
+                    number: 7,
+                    kind: Kind::PullRequest,
+                    body: format!("Superseded.\n\n{footer}"),
+                }),
+            ]
+        );
+        // A hand-back of no-write outcomes alone writes nothing.
+        let dir = checked(&[json!({"type": NOOP, "message": "Nothing to do."})]);
+        assert_eq!(plan(dir.path(), &policy(), &target(None)).unwrap(), []);
     }
 
     /// A checked upload of `items`, with the patch check would report.
@@ -603,17 +912,26 @@ mod tests {
 
     #[test]
     fn filters_every_planned_body() {
-        let mut comment = comment_item();
-        let mut pr = pull_request_item();
-        for item in [&mut comment, &mut pr] {
+        let mut items = [
+            comment_item(),
+            pull_request_item(),
+            issue_item(),
+            close_item(),
+            close_pull_request_item(),
+        ];
+        for item in &mut items {
             item["body"] = json!("@user @org/team !12 `@code` user@example.com");
         }
-        let dir = checked(&[comment, pr]);
+        let dir = checked(&items);
         let ops = plan(dir.path(), &policy(), &target(Some(64))).unwrap();
+        assert_eq!(ops.len(), items.len());
         for op in ops {
             let body = match op {
                 Op::Comment { body, .. } => body,
                 Op::PullRequest(pr) => pr.body,
+                Op::Issue(issue) => issue.body,
+                Op::Close(close) => close.body,
+                Op::Labels(_) => unreachable!(),
             };
             assert!(body.starts_with(
                 "@\u{200b}user @\u{200b}org/team !\u{200b}12 `@code` user@example.com"
@@ -719,14 +1037,143 @@ mod tests {
         let none: Change = |_, _, _| {};
         let cases: &[(&[Value], Change, &str)] = &[
             (
-                &[json!({"type": "noop", "message": "x"})],
+                &[json!({"type": "update_issue", "issue_number": 5, "body": "x"})],
                 none,
-                "\"noop\", which apply does not publish",
+                "\"update_issue\", which apply does not publish",
             ),
             (
-                &[json!({"type": "close_issue", "body": "x"})],
+                &[json!({"type": NOOP, "message": "x"})],
+                |_, policy, _| {
+                    policy.safe_outputs.others.remove(NOOP);
+                },
+                "\"noop\", which the policy does not allow",
+            ),
+            (
+                &[labels_item(ADD_LABELS), labels_item(ADD_LABELS)],
                 none,
-                "\"close_issue\", which apply does not publish",
+                "2 outputs of type \"add_labels\", over 1",
+            ),
+            // Fields with no Forgejo meaning are refused, not dropped.
+            (
+                &[
+                    json!({"type": CREATE_ISSUE, "title": "t", "body": "b", "temporary_id": "aw_x1"}),
+                ],
+                none,
+                "a create_issue with temporary_id, which apply does not map onto Forgejo",
+            ),
+            (
+                &[json!({"type": CREATE_ISSUE, "title": "t", "body": "b", "fields": [{"a": 1}]})],
+                none,
+                "a create_issue with fields, which apply does not map",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 6, "body": "b",
+                    "confidence": "HIGH", "rationale": "r"}),
+                ],
+                none,
+                "a close_issue with confidence, rationale, which apply does not map",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 6, "body": "b",
+                    "state_reason": "not_planned"}),
+                ],
+                none,
+                "state_reason \"not_planned\", which Forgejo does not record",
+            ),
+            // Targets: the policy's repository, named explicitly, by the
+            // field of the item's kind.
+            (
+                &[json!({"type": CLOSE_ISSUE, "issue_number": 6, "body": "b"})],
+                none,
+                "a close_issue requires the policy's explicit repo",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_ISSUE, "repo": "other/repo", "issue_number": 6, "body": "b"}),
+                ],
+                none,
+                "a close_issue with repo \"other/repo\", which is not the policy's",
+            ),
+            (
+                &[json!({"type": CREATE_ISSUE, "repo": "other/repo", "title": "t", "body": "b"})],
+                none,
+                "a create_issue with repo \"other/repo\", which is not the policy's",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_PULL_REQUEST, "repo": REPO, "issue_number": 7, "body": "b"}),
+                ],
+                none,
+                "a close_pull_request requires a positive integer pull_request_number",
+            ),
+            (
+                &[json!({"type": ADD_LABELS, "repo": REPO, "labels": ["triage"]})],
+                none,
+                "a add_labels requires a positive integer item_number",
+            ),
+            (
+                &[json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 6, "body": " "})],
+                none,
+                "a close_issue without a body",
+            ),
+            // Labels: the policy's lists, counts and shapes.
+            (
+                &[
+                    json!({"type": ADD_LABELS, "repo": REPO, "item_number": 5, "labels": ["release"]}),
+                ],
+                none,
+                "label \"release\", outside the policy's label limits",
+            ),
+            (
+                &[
+                    json!({"type": REMOVE_LABELS, "repo": REPO, "item_number": 5, "labels": ["wontfix"]}),
+                ],
+                none,
+                "label \"wontfix\", outside the policy's label limits",
+            ),
+            (
+                &[json!({"type": ADD_LABELS, "repo": REPO, "item_number": 5,
+                    "labels": ["triage", "bug", "triage"]})],
+                none,
+                "exceeding the per-request label limit",
+            ),
+            (
+                &[json!({"type": ADD_LABELS, "repo": REPO, "item_number": 5, "labels": []})],
+                none,
+                "a add_labels without labels",
+            ),
+            (
+                &[json!({"type": CREATE_ISSUE, "title": "t", "body": "b", "labels": [7]})],
+                none,
+                "a create_issue with label 7, which is not a name",
+            ),
+            // Text bounds, before the footer.
+            (
+                &[json!({"type": CREATE_ISSUE, "title": "t".repeat(129), "body": "b"})],
+                none,
+                "a create_issue whose title is over 128 characters",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_PULL_REQUEST, "repo": REPO, "pull_request_number": 7,
+                    "body": "é".repeat(65_001)}),
+                ],
+                none,
+                "a close_pull_request whose body is over 65000 characters",
+            ),
+            (
+                &[json!({"type": CREATE_ISSUE, "title": "t"})],
+                none,
+                "a create_issue without a body",
+            ),
+            (
+                &[
+                    json!({"type": CREATE_ISSUE, "title": "t", "body": "<!-- agentic-job-applied: 1 -->"}),
+                ],
+                none,
+                "a create_issue holding the marker",
             ),
             (
                 &[comment_item(), comment_item()],
@@ -971,14 +1418,37 @@ mod tests {
     struct Recording {
         calls: RefCell<Vec<String>>,
         fail_at: Option<usize>,
+        /// The op whose preflight the forge refuses.
+        refuse: Option<usize>,
+        preflights: RefCell<usize>,
     }
 
     impl Publisher for Recording {
+        fn preflight(&self, _: &Op) -> Result<()> {
+            let mut asked = self.preflights.borrow_mut();
+            anyhow::ensure!(self.refuse != Some(*asked), "no such label");
+            *asked += 1;
+            Ok(())
+        }
         fn comment(&self, issue: u64, _: &str) -> Result<String> {
             self.call(format!("comment {issue}"))
         }
         fn open_pull_request(&self, pr: &PullRequest) -> Result<String> {
             self.call(format!("pull {}", pr.branch))
+        }
+        fn create_issue(&self, issue: &NewIssue) -> Result<String> {
+            self.call(format!("issue {}", issue.labels.join(",")))
+        }
+        fn change_labels(&self, change: &LabelChange) -> Result<String> {
+            let sign = if change.add { '+' } else { '-' };
+            self.call(format!(
+                "labels {} {sign}{}",
+                change.item,
+                change.labels.join(",")
+            ))
+        }
+        fn close(&self, close: &Close) -> Result<String> {
+            self.call(format!("close {:?} {}", close.kind, close.number))
         }
     }
 
@@ -1014,5 +1484,59 @@ mod tests {
         };
         let err = format!("{:#}", publish(&ops, &recording).unwrap_err());
         assert_eq!(err, "after publishing url of pull agent-run-7: refused");
+    }
+
+    /// Every op is asked of the forge before the first write, so that a
+    /// refusal of any writes nothing; a failure after a write names what
+    /// was made.
+    #[test]
+    fn publishes_metadata() {
+        let dir = checked(&[
+            close_pull_request_item(),
+            close_item(),
+            labels_item(ADD_LABELS),
+            comment_item(),
+            issue_item(),
+        ]);
+        let ops = plan(dir.path(), &policy(), &target(Some(64))).unwrap();
+        let all = [
+            "issue bug,BUG",
+            "comment 64",
+            "labels 5 +triage",
+            "close PullRequest 7",
+            "close Issue 6",
+        ];
+        // The op the forge refuses, the write that fails, and the writes
+        // made and the error, if any.
+        type Case<'a> = (Option<usize>, Option<usize>, &'a [&'a str], Option<&'a str>);
+        let cases: &[Case] = &[
+            (None, None, &all, None),
+            (Some(0), None, &[], Some("no such label")),
+            (Some(4), None, &[], Some("no such label")),
+            (None, Some(0), &[], Some("refused")),
+            (
+                None,
+                Some(3),
+                &all[..3],
+                Some(
+                    "after publishing url of issue bug,BUG, url of comment 64, \
+                     url of labels 5 +triage: refused",
+                ),
+            ),
+        ];
+        for (refuse, fail_at, made, error) in cases {
+            let recording = Recording {
+                refuse: *refuse,
+                fail_at: *fail_at,
+                ..Recording::default()
+            };
+            let result = publish(&ops, &recording).map_err(|err| format!("{err:#}"));
+            assert_eq!(*recording.calls.borrow(), *made, "{refuse:?} {fail_at:?}");
+            match (result, error) {
+                (Ok(urls), None) => assert_eq!(urls.len(), all.len()),
+                (Err(err), Some(want)) => assert_eq!(err, *want),
+                (result, _) => panic!("{refuse:?} {fail_at:?}: {result:?}"),
+            }
+        }
     }
 }

@@ -1236,8 +1236,10 @@ The token needs the scopes `write:repository` and `write:issue`, no more.
 CI's `forgejo` job runs apply with only those against a Forgejo LTS container,
 in [crates/agentic-job/tests/forgejo.rs](../crates/agentic-job/tests/forgejo.rs).
 
-It publishes two outputs: `add_comment`, to `--comment-target` in the
-repository, and `create_pull_request`. Any other type is refused by
+It publishes `add_comment`, to `--comment-target` in the repository,
+`create_pull_request`, and the issue and label types
+[below](#labels-issues-and-closing-on-forgejo); `noop`, `missing_tool` and
+`missing_data` write nothing. Any other type is refused by
 name, as is a report check refused. Before anything is written, apply
 holds the report to the policy again: the repository, `max_outputs` and
 each type's count, a request naming another repository, item, base or
@@ -1250,9 +1252,11 @@ gh-aw's handlers' second pass is not repeated. Before publication, apply
 inserts a zero-width break in user and team mentions and Forgejo `!N`
 references outside code spans and fences. Closing and reopening references
 share the collector's cap of ten; later ones are neutralized too.
-Then the pull request is
-opened, its push making the last checks, and the comments posted after
-it; a failure after a write names what was made.
+Then apply asks the forge what only it can say about each request, still
+before any write, and the pull request is
+opened, its push making the last checks, then issues created, comments
+posted, labels changed and items closed; a failure after a write names
+what was made.
 
 A pull request's branch goes to a fork, never to the target repository.
 `--push-repo` is required for one and must be the `push_repo` the bounds
@@ -1332,10 +1336,57 @@ no credential of their own. The fork's own push workflows run the code too,
 so the fork should have Actions disabled or no secrets. Comments involve no
 push.
 
+#### Labels, issues and closing on Forgejo
+
+`add_labels`, `remove_labels`, `close_issue`, `close_pull_request` and
+`create_issue` are held to the same rules as on GitHub
+([closing issues and changing labels](#closing-issues-and-changing-labels),
+[closing pull requests](#closing-pull-requests-and-linking-sub-issues)):
+the policy's explicit `repo`, a positive integer target of the field for
+its kind, each type's `max` and the label `allowed` and `blocked` lists.
+apply also refuses, rather than drops, a field Forgejo has no meaning
+for: `create_issue`'s `temporary_id`, `parent`, `blocked_by` and
+`fields`, `close_issue`'s `confidence`, `rationale`, `suggest` and
+`duplicate_of`, and a `state_reason` other than `completed`, since
+Forgejo records no reason for closing. A title is at most 128
+characters and a body 65000, before the footer. Titles and bodies, a
+closing comment's included, get the mention filter and footer above.
+
+Before the first write, apply reads each target through
+`GET /repos/OWNER/NAME/issues/N` and refuses one the forge does not
+answer for as that number of this repository (one moved elsewhere), a
+`close_issue` naming a pull request and a `close_pull_request` naming an
+issue: Forgejo numbers the two together. For `add_labels` and
+`create_issue` it reads the repository's labels and refuses a label it
+lacks, by name, matched exactly or in another case when only one label is
+so named. It never creates a label; organization labels cannot be added.
+Names differing only in case are each their own label. Forgejo keeps one
+label of an [exclusive scope](https://forgejo.org/docs/latest/user/labels/#scoped-labels)
+on an item and removes the item's other when adding one, so apply refuses
+two requested labels of one scope, and an addition that would remove a
+label of the item: no request names that removal.
+`remove_labels` looks at the item's labels: one it lacks is no change,
+and a name matching two of them in another case is refused.
+
+A label is added by its ID, only if the item lacks it, and removed only if
+the item has it, so a re-run changes nothing more. Forgejo's removal takes
+a name, looked for among the repository's labels, then the
+organization's, and only then as an ID, so apply removes a label by its
+exact name and refuses one that name could resolve otherwise: an
+organization's label, a name of digits, or one another repository label
+has in another case. Closing posts the body
+as a comment, then sets the item's `state` to `closed`; an item already
+closed gets neither. If closing fails after the comment, the error names
+the comment, and a re-run comments again: Forgejo gets no marker to find
+it by; so does one Forgejo refuses to close, such as an issue with open
+dependencies. `create_issue` posts the title, body and label IDs, and
+fails, naming the issue, if Forgejo created it without them, as it does
+for a token that may not set labels.
+
 Not done: re-run detection (a
-re-run with a pull request is refused at its branch; one with only
-comments posts them again),
-reviews, labels and pushes to an open pull request.
+re-run with a pull request is refused at its branch; one with comments
+or a new issue posts them again),
+reviews and pushes to an open pull request.
 
 ## Neutral profile
 
