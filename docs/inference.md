@@ -89,7 +89,20 @@ it is not a broker-side hard spending limit.
 
 Whatever way the run ends, `run` then sends `DELETE /v1/runs/self`,
 with the same retries. A 401 means the proxy no longer knows the token,
-which ends it without a usage record. If the run cannot be ended its
+which ends it without a usage record. The proxy keeps runs in memory, so
+a restart while the agent works refuses its model requests from then on,
+and an agent may end its turn on that with an empty result (#2058). A
+session that succeeded all the same therefore does not: `run` says
+`inference token revoked mid-run (broker restart?)` after the 401
+warning and fails with exit state 1, or, if the run handed back a
+change, ends with exit state 3 so that the change is a partial one;
+`summary.json` gives the reason and classifies it as `inference_unreachable`
+(`provider_error: "unreachable"`), including when a partial change is kept:
+the broker lost its state, rather than the caller supplying a bad credential.
+The 401 does not say when the proxy
+forgot the run, so a restart after the agent's last request fails the
+run too: retrying it is cheaper than trusting an empty result.
+If the run cannot be ended its
 token may still be live, and nothing it produced is left to upload.
 Under `token-file` there is nothing to end and the upload goes ahead.
 

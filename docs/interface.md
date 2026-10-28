@@ -119,9 +119,9 @@ Callers branch on these, so they are part of the interface.
 | State | `run` | The other commands |
 | --- | --- | --- |
 | 0 | the agent ended its turn | accepted; every probe passed |
-| 1 | the agent failed or cancelled, or a signal stopped `run` | refused; a probe failed |
+| 1 | the agent failed or cancelled, the inference proxy no longer knew the run's token when it was ended ([inference.md](inference.md#what-run-does)), or a signal stopped `run` | refused; a probe failed |
 | 2 | bad arguments, an internal error, results that did not pass the gate, or a run that could not be cleaned up after | bad arguments or an internal error |
-| 3 | a request, task or spending limit stopped the agent, or it handed back after a turn that ended on an error | |
+| 3 | a request, task or spending limit stopped the agent, or it handed back after a turn that ended on an error, or a change on a token the proxy forgot | |
 | 4 | the run never started: something before the agent failed (the check of where the binary is, the agent's configuration, the clone, the registration at the proxy, the probe of the run token); trying again is safe | |
 | 124 | the timeout stopped the agent | |
 

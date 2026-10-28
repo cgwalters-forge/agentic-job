@@ -80,7 +80,7 @@ use crate::redact::Redactor;
 use crate::session::bridge::{Bridge, Listen};
 use crate::session::process::SandboxUser;
 use crate::session::steer::{self, Watch};
-use crate::session::{self, Clients, Limits, Options, Policy, RunResult};
+use crate::session::{self, Clients, Limits, Options, Outcome, Policy, RunResult};
 
 /// Under `--out`: what `run` keeps for itself. Nothing here is redacted,
 /// and nothing here is uploaded: what is, is put together under it and
@@ -1170,8 +1170,9 @@ impl Plan {
     /// uploaded from if they pass the gate. An error is a run of which
     /// nothing may be uploaded, and nothing is then there to upload.
     /// `true` for a run its model provider stopped that handed back a
-    /// change all the same ([`RunResult::stopped_by_provider`]): it ends
-    /// as one stopped at a limit.
+    /// change all the same ([`RunResult::stopped_by_provider`]), or whose
+    /// session succeeded on a token the proxy forgot ([`TOKEN_LOST`]) and
+    /// handed back a change: it ends as one stopped at a limit.
     ///
     /// The agent's files are read by commands of the sandbox user, which
     /// the caller stops afterwards: they run programs of the agent's
@@ -1193,15 +1194,30 @@ impl Plan {
         };
         // A run whose model provider failed it, and whose agent could not
         // hand back for that, is collected as one stopped at a limit: its
-        // change, if it has one, is handed back as a partial one.
-        let provider_stopped = (!session.internal_error)
+        // change, if it has one, is handed back as a partial one. So is
+        // one whose session succeeded on a token the proxy forgot: the
+        // agent may have ended its turn on refused requests.
+        let token_lost = (settled.forgotten
+            && !session.internal_error
+            && session.result.result == Outcome::Success)
+            .then(|| RunResult {
+                result: Outcome::Budget,
+                message: Some(TOKEN_LOST.to_owned()),
+                // The broker lost its session state, not a credential the
+                // caller can fix: a new run can reach inference again.
+                provider_error: Some(session::provider::Class::Unreachable),
+                handed_back: false,
+                ..session.result.as_ref().clone()
+            });
+        let stopped_short = (!session.internal_error)
             .then(|| session.result.stopped_by_provider())
-            .flatten();
+            .flatten()
+            .or_else(|| token_lost.clone());
         // Its message becomes the outcome's `stopped_early`, and with it
         // the pull request's body and the patch, which are not redacted
         // but refused when they hold a secret: it may quote an error that
         // names the gateway.
-        let mut harness = provider_stopped
+        let mut harness = stopped_short
             .clone()
             .unwrap_or_else(|| session.result.as_ref().clone());
         harness.message = harness.message.map(|message| {
@@ -1243,13 +1259,20 @@ impl Plan {
         };
         // One that changed nothing, or whose change was not handed back,
         // still failed: there is nothing partial to go on from.
-        let provider_stopped = provider_stopped.filter(|_| change.handed_back_patch());
-        if let Some(stopped) = &provider_stopped {
+        let stopped_short = stopped_short.filter(|_| change.handed_back_patch());
+        if let Some(stopped) = &stopped_short {
             eprintln!(
                 "warning: {}: handing back the working tree as a partial change",
                 stopped.message.as_deref().unwrap_or_default()
             );
         }
+        // One on a forgotten token that has nothing partial fails.
+        let token_failed = token_lost
+            .filter(|_| stopped_short.is_none())
+            .map(|lost| RunResult {
+                result: Outcome::Failure,
+                ..lost
+            });
 
         let transcript = staging.transcript();
         for name in [session::ACP_LOG, session::STDERR_LOG, session::RESULT_FILE] {
@@ -1266,9 +1289,9 @@ impl Plan {
         // so that the summary says why it failed, or how its provider
         // stopped it. Redacted below with the rest: the error may quote
         // what the agent wrote.
-        let rewritten = match &provider_stopped {
-            Some(stopped) => Some(stopped),
-            None => session.internal_error.then_some(session.result.as_ref()),
+        let rewritten = match (&stopped_short, &token_failed) {
+            (Some(result), _) | (None, Some(result)) => Some(result),
+            (None, None) => session.internal_error.then_some(session.result.as_ref()),
         };
         if let Some(result) = rewritten {
             let path = transcript.join(session::RESULT_FILE);
@@ -1429,7 +1452,7 @@ impl Plan {
             summary["result"].as_str().unwrap_or_default(),
             session.redactor.count()
         );
-        Ok(provider_stopped.is_some())
+        Ok(stopped_short.is_some())
     }
 }
 
@@ -1459,6 +1482,8 @@ struct Settled {
     dead: bool,
     /// The proxy's record of what the run used.
     usage: Option<Value>,
+    /// Whether the proxy no longer knew the token ([`Ended::Forgotten`]).
+    forgotten: bool,
 }
 
 impl Settled {
@@ -1466,8 +1491,16 @@ impl Settled {
     const NO_RUN: Self = Self {
         dead: true,
         usage: None,
+        forgotten: false,
     };
 }
+
+/// Why a run whose session succeeded fails, or hands back its change as
+/// a partial one, when the proxy no longer knew its token at the end:
+/// the agent's requests were refused from when the proxy forgot it, and
+/// an agent that ends its turn on that leaves an empty result (#2058).
+const TOKEN_LOST: &str = "inference token revoked mid-run (broker restart?): the inference \
+                          proxy no longer knew this run's token when it was ended";
 
 /// The signals that ask a job to stop.
 struct Signals {
@@ -1514,8 +1547,10 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
     let ended = tokio::task::spawn_blocking(move || ending.end(Retry::end_of_run()))
         .await
         .context("ending the run at the proxy")?;
+    let forgotten = matches!(ended, Ok(Ended::Forgotten));
     let (ended, usage) = match ended {
         Ok(Ended::Ended(record)) => (true, record),
+        Ok(Ended::Forgotten) => (true, None),
         Ok(Ended::NoRunApi) => (false, None),
         Err(err) => {
             eprintln!("error: {}", enter::one_line(&format!("{err:#}")));
@@ -1536,6 +1571,7 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
     Ok(Settled {
         dead: ended || !run.has_run_api(),
         usage,
+        forgotten,
     })
 }
 
@@ -1688,9 +1724,11 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                 Some(Err(_)) => Settled {
                     dead: false,
                     usage: None,
+                    forgotten: false,
                 },
             };
             let exit = session.result.result.exit();
+            let forgotten = standing.forgotten;
             // On a thread, which a signal cannot cancel: as with the
             // preparation, it is told to stop, what it was running is
             // killed, and it is waited for.
@@ -1720,6 +1758,10 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                     });
                     let exit = match done {
                         Ok(true) => Exit::Limit,
+                        Ok(false) if forgotten && exit == Exit::Success => {
+                            eprintln!("error: {TOKEN_LOST}");
+                            Exit::Failure
+                        }
                         _ => exit,
                     };
                     (Stage::Finished(exit), Some(done.map(drop)))

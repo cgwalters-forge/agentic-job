@@ -780,9 +780,13 @@ pub struct Run {
 /// How ending a run went.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ended {
-    /// The token admits nothing more. No record if the proxy no longer
-    /// knows the run.
+    /// The token admits nothing more. No record if the proxy gave none.
     Ended(Option<Record>),
+    /// The proxy no longer knows the token (HTTP 401), so it admits
+    /// nothing, and there is no record of the run: the proxy forgot it,
+    /// as when it restarts, and the agent may have lost inference before
+    /// it was done.
+    Forgotten,
     /// `token-file`: there is nothing to end, and the token lives as long
     /// as the proxy lets it.
     NoRunApi,
@@ -1356,7 +1360,7 @@ impl Run {
                      record of the run",
                     self.url
                 );
-                return Attempt::Done(Ended::Ended(None));
+                return Attempt::Done(Ended::Forgotten);
             }
             let why = |what: String| format!("ending the run at the proxy failed: {what}; {LIVE}");
             if answer.status != 200 {

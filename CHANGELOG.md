@@ -9,6 +9,14 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `run` no longer succeeds when the inference proxy no longer knows the
+  run's token at its end (HTTP 401, as after a broker restart): it says
+  `inference token revoked mid-run (broker restart?)` and exits 1, or 3
+  with the change as a partial one if the agent handed one back
+  (docs/inference.md#what-run-does). Under `ready_when_complete`, the
+  agent's own request from a run that stopped early now carries a
+  checkpoint too, so that it opens as a draft. Broker token loss is reported
+  as `inference_unreachable`, including for a partial change.
 - Under `egress.write-policy`, the runner may also upload to the verified
   results storage account `productionresultssa31`, alongside gh-aw's first
   twenty. Hosted runners now get this account, so `upload-artifact` failed

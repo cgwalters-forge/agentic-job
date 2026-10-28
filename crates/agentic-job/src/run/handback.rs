@@ -383,25 +383,39 @@ fn open_checkpoint(outcome: &Object) -> Option<Checkpoint> {
     })
 }
 
-/// The checkpoint of a pull request made up from OUTCOME, for work that
-/// [`default_pull_request`] calls partial, or that the agent's own
-/// checkpoint says is not done: under `ready_when_complete` that work
-/// would otherwise open ready for review.
-fn fallback_checkpoint(outcome: &Object) -> Option<Checkpoint> {
-    if let Some(open) = open_checkpoint(outcome) {
-        return Some(open);
-    }
-    let summary = outcome.text("summary").unwrap_or_default().trim();
-    let left = match outcome.get("stopped_early") {
-        Some(early) if truthy(early) => early
+/// The checkpoint of work that OUTCOME says is not done: the agent's own
+/// open checkpoint, or else, when the run stopped early (as
+/// [`mark_stopped_early`] says even after the agent marked its checkpoint
+/// complete), one that says why. Under `ready_when_complete` that work
+/// would otherwise open ready for review, whoever wrote the request.
+fn partial_checkpoint(outcome: &Object) -> Option<Checkpoint> {
+    open_checkpoint(outcome).or_else(|| {
+        let early = outcome.get("stopped_early").filter(|early| truthy(early))?;
+        let left = early
             .as_str()
             .map(|why| cut(&squeeze(why), MAX_REASON_CHARS))
             .filter(|why| !why.is_empty())
-            .unwrap_or_else(|| "the run stopped early".to_owned()),
-        _ if summary.is_empty() => NO_SUMMARY.to_owned(),
-        _ => return None,
-    };
-    Some(Checkpoint {
+            .unwrap_or_else(|| "the run stopped early".to_owned());
+        Some(stopped_checkpoint(outcome, left))
+    })
+}
+
+/// The checkpoint of a pull request made up from OUTCOME, for work that
+/// [`default_pull_request`] calls partial: [`partial_checkpoint`], or
+/// one for an agent that wrote no summary.
+fn fallback_checkpoint(outcome: &Object) -> Option<Checkpoint> {
+    partial_checkpoint(outcome).or_else(|| {
+        let summary = outcome.text("summary").unwrap_or_default().trim();
+        summary
+            .is_empty()
+            .then(|| stopped_checkpoint(outcome, NO_SUMMARY.to_owned()))
+    })
+}
+
+/// A checkpoint for work OUTCOME does not say is done, with LEFT.
+fn stopped_checkpoint(outcome: &Object, left: String) -> Checkpoint {
+    let summary = outcome.text("summary").unwrap_or_default().trim();
+    Checkpoint {
         reason: "incomplete".to_owned(),
         done: if summary.is_empty() {
             "unknown: the agent wrote no summary".to_owned()
@@ -410,7 +424,7 @@ fn fallback_checkpoint(outcome: &Object) -> Option<Checkpoint> {
         },
         left,
         next: "read this change and its description, then continue the task".to_owned(),
-    })
+    }
 }
 
 /// The `outputs.jsonl` to hand back, and what goes with it.
@@ -514,12 +528,12 @@ pub fn build_outputs(
                 );
             }
             // The agent's own words without a checkpoint, while its outcome
-            // says the work is not done, would open it ready: the outcome's
-            // goes with them. One they hold already, or a malformed one,
-            // is left for the check to read.
+            // says the work is not done or the run stopped early, would
+            // open it ready: the outcome's goes with them. One they hold
+            // already, or a malformed one, is left for the check to read.
             let field = if push { "message" } else { "body" };
             if policy.safe_outputs.ready_when_complete()
-                && let Some(open) = open_checkpoint(outcome)
+                && let Some(open) = partial_checkpoint(outcome)
                 && let Some(words) = item.text(field)
                 && matches!(checkpoint::find(words), Ok(None))
             {
@@ -1954,9 +1968,9 @@ mod tests {
         assert_eq!(found.left.chars().count(), MAX_CHECKPOINT_CHARS);
     }
 
-    /// The agent's own request, while its outcome's checkpoint is open,
-    /// carries that checkpoint unless it holds one: its words alone would
-    /// open unfinished work ready for review.
+    /// The agent's own request, while its outcome's checkpoint is open or
+    /// the run stopped early, carries that checkpoint unless it holds one:
+    /// its words alone would open unfinished work ready for review.
     #[test]
     fn an_open_checkpoint_keeps_the_agents_own_request_a_draft() {
         let mut ready = pull_requests();
@@ -1972,6 +1986,8 @@ mod tests {
         let open = object(json!({"summary": "Half.",
             "checkpoint": {"complete": false, "done": "a", "left": "the tests", "next": "b"}}));
         let done = object(json!({"summary": "All.", "checkpoint": {"complete": true}}));
+        let stopped = object(json!({"summary": "All.", "stopped_early": "lost",
+            "checkpoint": {"complete": true}}));
         let own = Checkpoint {
             reason: "budget".into(),
             done: "d".into(),
@@ -1993,6 +2009,8 @@ mod tests {
                 Some("mine"),
             ),
             ("complete", pr("B"), &ready, &done, "body", None),
+            // Stopped after the agent called its work complete.
+            ("stopped", pr("B"), &ready, &stopped, "body", Some("lost")),
             ("off", pr("B"), &off, &open, "body", None),
             (
                 "a push",
