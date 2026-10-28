@@ -1993,7 +1993,7 @@ test('the apply step hands the handlers a core and an exec whose output cannot f
       core.info('see ##[warning]legacy-marker');
       await exec.exec('git', ['am', '--3way', 'x.patch'], { cwd: '.' });
     };\n`);
-    writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: [], errors: [] }));
+    for (const [name, text] of [['agent_output.json', JSON.stringify({ items: [], errors: [] })], ['project-writes.json', '[]']]) writeFileSync(join(root, name), text);
     const logged = [], outputs = {}, written = [];
     const core = { info: text => logged.push(text), warning: text => logged.push(text), setOutput: (key, value) => { outputs[key] = value; } };
     const github = { hook: { before() {}, after() {} } };
@@ -2005,7 +2005,7 @@ test('the apply step hands the handlers a core and an exec whose output cannot f
     } };
     process.stdout.write = (chunk, ...rest) => { written.push(String(chunk)); return stdout.call(process.stdout, chunk, ...rest); };
     const env = { RUNNER_TEMP: root, GITHUB_WORKSPACE: root, GH_AW_WORKFLOW_NAME: 'agentic-job', GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: '{}',
-      GH_AW_AGENT_OUTPUT: join(root, 'agent_output.json') };
+      GH_AW_AGENT_OUTPUT: join(root, 'agent_output.json'), GH_AW_TMP: root, PROJECT_CHECKED: 'success' };
     await new AsyncFunction('require', 'process', 'core', 'github', 'context', 'exec', 'io', 'getOctokit', script("Apply the outputs with gh-aw's handlers"))(
       require, { env }, core, github, {}, exec, {}, () => github);
     assert.deepEqual(logged, [': :set-output name=created_pr_url: :https://attacker.example/', 'see ## [warning]legacy-marker']);

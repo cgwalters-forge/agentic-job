@@ -1111,6 +1111,14 @@ fn verdict_of(
     if let Some(lines) = contents.get(OUTPUTS_FILE) {
         errors.extend(check_run_names(lines, policy));
     }
+    // What apply's own handlers would refuse after the session, refused here.
+    if !policy.native_handlers.is_empty() {
+        let values: Vec<Value> = items.iter().cloned().map(Value::Object).collect();
+        errors.extend(crate::apply::publish::refusals(
+            &values,
+            &policy.native_handlers,
+        ));
+    }
     errors.extend(
         items
             .iter()
@@ -2037,6 +2045,60 @@ mod tests {
         );
         assert_eq!(patch.bytes, patch_of("src/new.rs").len());
         assert_eq!(patch.files, ["src/new.rs"]);
+    }
+
+    /// What `agentic-job publish` would refuse after the session is refused
+    /// here, where the agent can still mend it.
+    #[test]
+    fn native_handlers_refusals() {
+        let comment = json!({"type": "add_comment", "body": "Done."});
+        let mut policy = Policy {
+            native_handlers: vec!["add_comment".into()],
+            ..policy()
+        };
+        policy.safe_outputs.others.insert(
+            "add_comment".into(),
+            crate::policy::OutputLimit {
+                max: 1,
+                ..Default::default()
+            },
+        );
+        for (name, items, refused) in [
+            (
+                "a comment first",
+                vec![comment.clone(), pull_request()],
+                None,
+            ),
+            (
+                "a comment after gh-aw's request",
+                vec![pull_request(), comment.clone()],
+                Some("a add_comment after a create_pull_request"),
+            ),
+            (
+                "a comment with a field publish does not publish",
+                vec![
+                    json!({"type": "add_comment", "body": "Done.", "target": "7"}),
+                    pull_request(),
+                ],
+                Some("the field \"target\""),
+            ),
+        ] {
+            let handback = Handback {
+                items,
+                ..Handback::pull_request()
+            };
+            let verdict = handback.check_against(&policy);
+            let found = verdict
+                .errors
+                .iter()
+                .any(|e| refused.is_some_and(|r| e.contains(r)));
+            assert_eq!(
+                (verdict.ok, found),
+                (refused.is_none(), refused.is_some()),
+                "{name}: {:?}",
+                verdict.errors
+            );
+        }
     }
 
     /// A run is blocked only when it hands back `missing_data`, with at

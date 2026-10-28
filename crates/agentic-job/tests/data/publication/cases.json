@@ -127,6 +127,44 @@
     }
   },
   {
+    "name": "comment-and-labels",
+    "about": "A comment, then labels on the same issue: with native_handlers the comment is agentic-job's and the labels gh-aw's, published in this order.",
+    "config": {"add_comment": {"max": 1}, "add_labels": {"max": 1, "allowed": ["triage"]}},
+    "items": [
+      {"type": "add_comment", "item_number": 7, "body": "Triaged, @owner."},
+      {"type": "add_labels", "item_number": 7, "labels": ["triage"]}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "labels-with-native-comments",
+    "about": "Labels alone, in a run a bot dispatched, with add_comment agentic-job's: it has nothing to publish, and leaves gh-aw's step every request without refusing the event, which only a comment of its own would read.",
+    "native": ["add_comment"],
+    "env": {"GITHUB_ACTOR": "github-actions[bot]"},
+    "config": {"add_comment": {"max": 1}, "add_labels": {"max": 1, "allowed": ["triage"]}},
+    "items": [{"type": "add_labels", "item_number": 7, "repo": "owner/repo", "labels": ["triage"]}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    }
+  },
+  {
+    "name": "comment-and-unknown-project-option",
+    "about": "A comment, then a project field set to an option the project does not have: the project fields' step refuses the run before either publisher writes anything.",
+    "config": {"add_comment": {"max": 1}, "update_project": {"max": 1, "projects": ["https://github.com/orgs/owner/projects/1"], "fields": ["Status"]}},
+    "items": [
+      {"type": "add_comment", "item_number": 7, "body": "Triaged."},
+      {"type": "update_project", "project": "https://github.com/orgs/owner/projects/1", "content_type": "issue", "content_number": 7, "fields": {"Status": "Shipped"}}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [],
+      "/graphql/fields": [{"id": "status", "name": "Status", "dataType": "SINGLE_SELECT", "options": [{"id": "triage", "name": "Triage"}]}]
+    }
+  },
+  {
     "name": "review-comment",
     "about": "A review comment on the run's pull request, posted in one review of event COMMENT when the handlers are done.",
     "config": {"create_pull_request_review_comment": {"max": 1}},
@@ -158,6 +196,36 @@
       "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
       "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
     }
+  },
+  {
+    "name": "create-pull-request-transient",
+    "about": "The forge fails opening the pull request once, after the branch is pushed: the handler waits and opens it.",
+    "config": {"create_pull_request": {"max": 1, "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "create_pull_request", "title": "Fix the overflow", "body": "Checks the length first.", "branch": "agent-run-4242"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/pulls", "status": 502}]
+  },
+  {
+    "name": "create-pull-request-failure-comment",
+    "about": "The forge refuses the pull request after the branch is pushed, and the comment after it starts with a warning that the changes were not applied. With only create_pull_request agentic-job's, gh-aw's step posts the comment, and has to warn of the same failure.",
+    "native": ["create_pull_request"],
+    "config": {"create_pull_request": {"max": 1, "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024, "max_patch_files": 100}, "add_comment": {"max": 1}},
+    "items": [
+      {"type": "create_pull_request", "title": "Fix the overflow", "body": "Checks the length first.", "branch": "agent-run-4242"},
+      {"type": "add_comment", "item_number": 7, "body": "The requested changes have been applied."}
+    ],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
+    },
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/pulls", "status": 422}]
   },
   {
     "name": "push-to-pull-request-branch",

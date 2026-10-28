@@ -1,0 +1,118 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "comment-and-unknown-project-option",
+  "attempts": [
+    {
+      "handler_config": {
+        "add_comment": {
+          "max": 1,
+          "target-repo": "owner/repo",
+          "target": "7"
+        },
+        "update_project": {
+          "max": 1,
+          "projects": [
+            "https://github.com/orgs/owner/projects/1"
+          ],
+          "fields": [
+            "Status"
+          ],
+          "target-repo": "owner/repo"
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "add_comment",
+            "item_number": 7,
+            "body": "Triaged.\n\nagentic-job-applied: 4242/0/15f55046aec7d554"
+          },
+          {
+            "type": "update_project",
+            "project": "https://github.com/orgs/owner/projects/1",
+            "content_type": "issue",
+            "content_number": 7,
+            "fields": {
+              "Status": "Shipped"
+            }
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 1,
+        "outputs": {
+          "project-refused": "true"
+        },
+        "annotations": [
+          "::error::Unhandled error: Error: the project fields were refused before anything was published"
+        ],
+        "summary": "",
+        "made": null,
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7/comments?per_page=100",
+          "api_version": ""
+        },
+        {
+          "step": "project",
+          "method": "POST",
+          "path": "/graphql",
+          "api_version": "",
+          "body": {
+            "query": "query($login: String!, $number: Int!) {\n    organization(login: $login) { projectV2(number: $number) { id } }\n  }",
+            "variables": {
+              "login": "owner",
+              "number": 1
+            }
+          },
+          "keys": [
+            "query",
+            "variables"
+          ]
+        },
+        {
+          "step": "project",
+          "method": "POST",
+          "path": "/graphql",
+          "api_version": "",
+          "body": {
+            "query": "query($projectId: ID!, $after: String) {\n      node(id: $projectId) { ... on ProjectV2 { fields(first: 100, after: $after) {\n        nodes {\n          ... on ProjectV2Field { id name dataType }\n          ... on ProjectV2SingleSelectField { id name dataType options { id name } }\n          ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } }\n        }\n        pageInfo { hasNextPage endCursor }\n      } } }\n    }",
+            "variables": {
+              "projectId": "project",
+              "after": null
+            }
+          },
+          "keys": [
+            "query",
+            "variables"
+          ]
+        }
+      ],
+      "project": {
+        "exit": 1
+      }
+    }
+  ],
+  "pushed": {}
+}

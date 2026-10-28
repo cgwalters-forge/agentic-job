@@ -1,9 +1,11 @@
 //! `agentic-job apply`: publish what `check` accepted to a forge that is
 //! not GitHub, from a job of its own that holds the write token. GitHub's
-//! apply is still gh-aw's handlers in apply.yml; this is the first slice
-//! of moving publishing behind [`Publisher`] (#1346), for Forgejo, and
-//! for the outputs in [`SUPPORTED`]. On GitHub, [`secondary`] opens the
-//! policy's secondary pull request after the handlers.
+//! apply is still gh-aw's handlers in apply.yml, but for the types the
+//! bounds route to [`publish`] (`add_comment` and `create_pull_request`);
+//! this is the first slice of moving publishing behind [`Publisher`]
+//! (#1346), for Forgejo, and for the outputs in [`SUPPORTED`]. On GitHub,
+//! [`secondary`] opens the policy's secondary pull request after the
+//! handlers.
 //!
 //! The input is the check job's upload: check's `report.json` and the
 //! patch beside it. That upload went through a machine other than the
@@ -24,6 +26,7 @@ mod git;
 pub(crate) mod github;
 pub mod issue_reference;
 mod mentions;
+pub mod publish;
 pub mod push;
 pub mod replacement;
 pub mod secondary;
@@ -297,24 +300,54 @@ pub struct PullRequest {
     pub branch: String,
     pub title: String,
     pub body: String,
+    /// Opened as a draft: on Forgejo, which has no such flag, the title
+    /// says so too ([`DRAFT_PREFIX`]).
+    pub draft: bool,
     pub patch: Vec<u8>,
     /// The paths the patch names, as check read them: the only paths the
     /// pushed commit may change.
     pub files: Vec<String>,
 }
 
-/// The writes a forge does for apply. Each returns the URL of what it
-/// made or changed.
+/// What a write made: its page, and what the forge numbers it by, where
+/// its answer says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Made {
+    pub url: String,
+    /// A pull request's number.
+    pub number: Option<u64>,
+    pub id: Option<u64>,
+    pub node_id: Option<String>,
+}
+
+impl Made {
+    /// What the forge's ANSWER to `METHOD PATH` says was made: refused
+    /// without the page it is at.
+    fn from_answer(answer: &Value, method: &str, path: &str) -> Result<Self> {
+        let url = answer["html_url"]
+            .as_str()
+            .with_context(|| format!("{method} {path}: the response names no html_url"))?;
+        Ok(Self {
+            url: url.to_owned(),
+            number: answer["number"].as_u64(),
+            id: answer["id"].as_u64(),
+            node_id: answer["node_id"].as_str().map(str::to_owned),
+        })
+    }
+}
+
+/// The writes a forge does for apply. A comment and a pull request return
+/// what they made; the others the URL of what they made or changed.
 pub trait Publisher {
     /// Refuses OP when what the forge says makes it one apply must not
     /// write (another kind of item, another repository's, a label the
     /// repository lacks), reading only. [`publish`] asks this of every op
     /// before the first write.
     fn preflight(&self, op: &Op) -> Result<()>;
-    fn comment(&self, issue: u64, body: &str) -> Result<String>;
+    fn comment(&self, issue: u64, body: &str) -> Result<Made>;
     /// Pushes the patch to a new branch of the fork and opens a pull
     /// request from it.
-    fn open_pull_request(&self, pr: &PullRequest) -> Result<String>;
+    fn open_pull_request(&self, pr: &PullRequest) -> Result<Made>;
     /// Pushes the patch on the pull request's branch, and returns the pull
     /// request's URL.
     fn push_to_branch(&self, push: &BranchPush) -> Result<String>;
@@ -559,6 +592,7 @@ fn pull_request(
             title.to_owned()
         },
         body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
+        draft,
         patch: bytes,
         files,
     })
@@ -897,8 +931,8 @@ pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
     let mut made = Vec::new();
     for op in ops {
         let url = match op {
-            Op::Comment { issue, body } => publisher.comment(*issue, body),
-            Op::PullRequest(pr) => publisher.open_pull_request(pr),
+            Op::Comment { issue, body } => publisher.comment(*issue, body).map(|made| made.url),
+            Op::PullRequest(pr) => publisher.open_pull_request(pr).map(|made| made.url),
             Op::Push(push) => publisher.push_to_branch(push),
             Op::Issue(issue) => publisher.create_issue(issue),
             Op::Labels(change) => publisher.change_labels(change),
@@ -1850,20 +1884,23 @@ mod tests {
             *asked += 1;
             Ok(())
         }
-        fn comment(&self, issue: u64, _: &str) -> Result<String> {
+        fn comment(&self, issue: u64, _: &str) -> Result<Made> {
             self.call(format!("comment {issue}"))
         }
-        fn open_pull_request(&self, pr: &PullRequest) -> Result<String> {
+        fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
             self.call(format!("pull {}", pr.branch))
         }
         fn push_to_branch(&self, push: &BranchPush) -> Result<String> {
             self.call(format!("push {} {}", push.number, push.branch))
+                .map(|made| made.url)
         }
         fn status(&self, status: &CommitStatus) -> Result<String> {
             self.call(format!("status {}", status.state.name()))
+                .map(|made| made.url)
         }
         fn create_issue(&self, issue: &NewIssue) -> Result<String> {
             self.call(format!("issue {}", issue.labels.join(",")))
+                .map(|made| made.url)
         }
         fn change_labels(&self, change: &LabelChange) -> Result<String> {
             let sign = if change.add { '+' } else { '-' };
@@ -1872,18 +1909,23 @@ mod tests {
                 change.item,
                 change.labels.join(",")
             ))
+            .map(|made| made.url)
         }
         fn close(&self, close: &Close) -> Result<String> {
             self.call(format!("close {:?} {}", close.kind, close.number))
+                .map(|made| made.url)
         }
     }
 
     impl Recording {
-        fn call(&self, what: String) -> Result<String> {
+        fn call(&self, what: String) -> Result<Made> {
             let mut calls = self.calls.borrow_mut();
             anyhow::ensure!(self.fail_at != Some(calls.len()), "refused");
             calls.push(what.clone());
-            Ok(format!("url of {what}"))
+            Ok(Made {
+                url: format!("url of {what}"),
+                ..Made::default()
+            })
         }
     }
 

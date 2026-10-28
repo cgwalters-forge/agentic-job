@@ -29,7 +29,7 @@ static LIMITS: LazyLock<Vec<Limit>> =
 /// A link as `comment_limit_helpers.cjs` counts one,
 /// `/https?:\/\/[^\s]+/g`, with JavaScript's `\s` spelled out: Rust's
 /// also has U+0085 and lacks U+FEFF.
-static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"https?://[^\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]+",
     )

@@ -21,7 +21,7 @@ use unicode_normalization::UnicodeNormalization;
 use super::markdown::{balance, outside_code};
 
 /// JavaScript's `\s`, the body of a character class.
-const JS_SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
+pub(crate) const JS_SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
 
 /// Whether C is in JavaScript's `\s`, which is also what its `trim` drops.
 pub fn is_js_space(c: char) -> bool {
@@ -214,11 +214,64 @@ pub fn sanitize(
     neutralize_mentions: bool,
     keeps_link: &dyn Fn(&str) -> bool,
 ) -> String {
+    let mentions = if neutralize_mentions {
+        Mentions::All
+    } else {
+        Mentions::Deferred
+    };
+    sanitize_with(text, max_length, &mentions, keeps_link)
+}
+
+/// What becomes of a sanitized text's mentions.
+pub enum Mentions<'a> {
+    /// Left to the trusted job (`deferMentions`).
+    Deferred,
+    /// Each wrapped in code (`sanitizeContentCore`).
+    All,
+    /// Those of ALIASES kept, up to MAX distinct ones, case ignored, and
+    /// the rest wrapped in code: a handler's `sanitizeContent(text,
+    /// {allowedAliases, maxMentions})`. No aliases is [`Mentions::All`].
+    Allowing { aliases: &'a [String], max: usize },
+}
+
+/// gh-aw's `RUNTIME_TO_MENTION_ALIAS_MAP`: an allowed runtime login also
+/// allows the name people mention it by.
+const RUNTIME_MENTION_ALIASES: &[(&str, &str)] = &[("copilot-swe-agent", "copilot")];
+
+/// TEXT as [`sanitize`] does it, with MENTIONS.
+pub fn sanitize_with(
+    text: &str,
+    max_length: usize,
+    mentions: &Mentions<'_>,
+    keeps_link: &dyn Fn(&str) -> bool,
+) -> String {
     if text.is_empty() {
         return String::new();
     }
-    // The core truncates first as well, so as not to work on more.
-    let mut s = if neutralize_mentions {
+    // `expandAllowedAliases`, lowercase, without empty ones.
+    let mut allowed: Vec<String> = Vec::new();
+    if let Mentions::Allowing { aliases, .. } = mentions {
+        for alias in aliases.iter().filter(|alias| !alias.is_empty()) {
+            let alias = alias.to_lowercase();
+            let runtime = RUNTIME_MENTION_ALIASES
+                .iter()
+                .filter(|(login, _)| *login == alias)
+                .map(|(_, name)| (*name).to_owned());
+            for name in std::iter::once(alias.clone()).chain(runtime) {
+                if !allowed.contains(&name) {
+                    allowed.push(name);
+                }
+            }
+        }
+    }
+    let (neutralize, max_allowed) = match mentions {
+        Mentions::Deferred => (false, 0),
+        Mentions::Allowing { max, .. } if !allowed.is_empty() => (true, *max),
+        Mentions::All | Mentions::Allowing { .. } => (true, 0),
+    };
+    // The core truncates first as well, so as not to work on more; the
+    // path that keeps some mentions does not.
+    let mut s = if neutralize && allowed.is_empty() {
         truncate(text, max_length)
     } else {
         text.to_owned()
@@ -232,8 +285,8 @@ pub fn sanitize(
     s = outside_code(&s, &mut |t, _, _| sanitize_url_protocols(t));
     s = outside_code(&s, &mut |t, _, _| sanitize_url_domains(t, keeps_link));
     s = truncate(&s, max_length);
-    if neutralize_mentions {
-        s = neutralize_all_mentions(&s);
+    if neutralize {
+        s = neutralize_mentions(&s, &allowed, max_allowed);
     }
     s = neutralize_bot_triggers(&s);
     s = outside_code(&s, &mut |t, _, _| escape_template_delimiters(t));
@@ -782,13 +835,21 @@ fn neighbours(
 }
 
 /// `neutralizeAllMentions`: each `@name` outside code wrapped in code.
-fn neutralize_all_mentions(s: &str) -> String {
+/// `neutralizeAllMentions`, or with ALLOWED (lowercase) the handlers'
+/// `neutralizeMentions`, which keeps those up to MAX_ALLOWED distinct ones.
+fn neutralize_mentions(s: &str, allowed: &[String], max_allowed: usize) -> String {
     let span = CodeSpan::for_text(s);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     outside_code(s, &mut |segment, region_before, region_after| {
         MENTION_RE
             .replace_all(segment, |caps: &Captures<'_>| {
                 let whole = caps.get(0).map_or(0..0, |m| m.range());
                 let prefix = &caps[1];
+                let alias = caps[2].to_lowercase();
+                if allowed.contains(&alias) && (seen.contains(&alias) || seen.len() < max_allowed) {
+                    seen.insert(alias);
+                    return caps[0].to_owned();
+                }
                 let (before, after) = neighbours(
                     segment,
                     whole.start + prefix.len(),
@@ -904,6 +965,48 @@ mod tests {
         for (input, neutralize, want) in cases {
             assert_eq!(
                 &sanitize(input, 1000, *neutralize, &keeps_public),
+                want,
+                "{input:?}"
+            );
+        }
+    }
+
+    /// A handler's allowed mentions, against what the pinned
+    /// `sanitizeContent` gave for each.
+    #[test]
+    fn allowed_mentions() {
+        let cases: &[(&str, &[&str], usize, &str)] = &[
+            (
+                "hi @Owner and @someone",
+                &["owner"],
+                50,
+                "hi @Owner and `@someone`",
+            ),
+            ("@a @b @a @c", &["a", "b", "c"], 2, "@a @b @a `@c`"),
+            (
+                "thanks @copilot",
+                &["copilot-swe-agent"],
+                50,
+                "thanks @copilot",
+            ),
+            ("hi @someone", &[], 50, "hi `@someone`"),
+            ("a `x` @owner @b", &["OWNER"], 50, "a `x` @owner ``@b``"),
+            (
+                "@org/team and @owner/x",
+                &["org/team"],
+                50,
+                "@org/team and `@owner/x`",
+            ),
+            ("hi @owner", &["", "owner"], 50, "hi @owner"),
+        ];
+        for (input, aliases, max, want) in cases {
+            let aliases: Vec<String> = aliases.iter().map(|a| (*a).to_owned()).collect();
+            let mentions = Mentions::Allowing {
+                aliases: &aliases,
+                max: *max,
+            };
+            assert_eq!(
+                &sanitize_with(input, 1000, &mentions, &keeps_public),
                 want,
                 "{input:?}"
             );

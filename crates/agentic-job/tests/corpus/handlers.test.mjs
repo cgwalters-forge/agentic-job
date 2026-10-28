@@ -78,7 +78,7 @@ test('agent-board proposals pass the pinned collector and bounded project check'
     const config = JSON.parse(readFileSync(file('handler-config.json')));
     assert.equal(config.update_project['target-repo'], proposal.target_repo);
     const guardSource = workflow.split('const guarded = client => {')[1].split('client.hook.before')[0];
-    const preflight = workflow.split('const pending = new Map();')[1].split('const guarded = client => {')[0];
+    const preflight = workflow.split('const pending = new Map();')[1].split('// The project writes gh-aw\'s step may make')[0];
     for (const [name, fieldName, present, requested, ok] of [
       ['existing exact field', 'Status', true, { Status: 'Triage' }, true],
       ['missing field cannot create schema', 'Status', false, { Status: 'Triage' }, false],

@@ -37,7 +37,7 @@
 //! job refuses it in. [`field_guide`] tells it the fields.
 
 pub(crate) mod markdown;
-mod sanitize;
+pub(crate) mod sanitize;
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;

@@ -3,7 +3,8 @@
 # to whoever started it. It runs nothing that came from the agent's
 # machine but the checked outputs.
 #
-#   apply     gh-aw's pinned handlers on check.yml's accepted outputs;
+#   apply     gh-aw's pinned handlers on check.yml's accepted outputs, and
+#             agentic-job's own for the types the bounds route to them;
 #             uses SAFE_OUTPUTS_PAT; conclude prefers it for status comments
 #   conclude  edits the opted-in status comment, including check's
 #             refusal to the policy's comment target
@@ -85,7 +86,7 @@ jobs:
     environment: ${{ fromJSON(inputs.policy).apply-environment }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      pull-request: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+      pull-request: ${{ steps.publish.outputs.created_pr_number || steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
       result-url: ${{ steps.result.outputs.result-url }}
       # `true` when the run handed back only noop, missing_tool or missing_data, for conclude.
       no-result: ${{ steps.result.outputs.no-result }}
@@ -743,6 +744,117 @@ jobs:
               await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
                 .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
             }
+      # Every project field is read from the live project before either
+      # publisher below writes anything: a field or value the pinned
+      # handler would skip, create or misaddress refuses the whole run.
+      # The writes it admits are counted for gh-aw's step, which holds its
+      # project writes to them.
+      - name: Check the project fields before anything is published
+        id: project
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          script: |
+            // The pinned handler otherwise reports success for skipped values.
+            const pending = new Map();
+            const writeKey = variables => JSON.stringify([variables.projectId, variables.fieldId, variables.value]);
+            const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
+            const items = JSON.parse(require('node:fs').readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8')).items;
+            for (const item of items.filter(item => item.type === 'update_project')) {
+              if (!project?.projects.includes(item.project)) throw new Error("project is outside the apply bounds");
+              const [, kind, login, , number] = new URL(item.project).pathname.split('/');
+              const owner = kind === 'orgs' ? 'organization' : 'user';
+              const found = await github.graphql(`query($login: String!, $number: Int!) {
+                ${owner}(login: $login) { projectV2(number: $number) { id } }
+              }`, { login, number: Number(number) });
+              const projectId = found[owner]?.projectV2?.id;
+              if (!projectId) throw new Error("bounded project could not be resolved");
+              const fields = [];
+              let after = null;
+              do {
+                const result = await github.graphql(`query($projectId: ID!, $after: String) {
+                  node(id: $projectId) { ... on ProjectV2 { fields(first: 100, after: $after) {
+                    nodes {
+                      ... on ProjectV2Field { id name dataType }
+                      ... on ProjectV2SingleSelectField { id name dataType options { id name } }
+                      ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                  } } }
+                }`, { projectId, after });
+                const page = result.node.fields;
+                fields.push(...page.nodes);
+                if (page.pageInfo.hasNextPage && (!page.pageInfo.endCursor || page.pageInfo.endCursor === after)) {
+                  throw new Error("project field pagination did not advance");
+                }
+                after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+              } while (after);
+              for (const [name, raw] of Object.entries(item.fields)) {
+                const matches = fields.filter(field => field.name === name);
+                if (!project.fields.includes(name) || matches.length !== 1) throw new Error(`project field ${name} is not an exact existing bounded field`);
+                const field = matches[0];
+                const normalized = name.split(/[\s_-]+/).map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+                if (normalized.toUpperCase() === 'REPOSITORY' || fields.find(candidate => candidate.name.toLowerCase() === normalized.toLowerCase())?.id !== field.id) {
+                  throw new Error(`project field ${name} cannot be addressed exactly by the pinned handler`);
+                }
+                let value;
+                if (field.dataType === 'NUMBER') {
+                  const number = typeof raw === 'number' ? raw : Number(raw);
+                  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(raw).trim()) || !Number.isFinite(number)) throw new Error(`invalid number for project field ${name}`);
+                  value = { number };
+                } else if (field.dataType === 'SINGLE_SELECT' || field.dataType === 'ITERATION') {
+                  const iteration = field.dataType === 'ITERATION';
+                  const options = iteration ? field.configuration?.iterations : field.options;
+                  const option = options?.find(option => (iteration ? option.title : option.name).toLowerCase() === String(raw).toLowerCase());
+                  if (!option) throw new Error(`unknown option or iteration for project field ${name}`);
+                  value = iteration ? { iterationId: option.id } : { singleSelectOptionId: option.id };
+                } else if (field.dataType === 'DATE') {
+                  const date = String(raw);
+                  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error(`invalid date for project field ${name}`);
+                  value = { date };
+                } else if (field.dataType === 'TEXT') {
+                  value = { text: String(raw) };
+                } else {
+                  throw new Error(`unsupported type for project field ${name}`);
+                }
+                const key = writeKey({ projectId, fieldId: field.id, value });
+                pending.set(key, (pending.get(key) ?? 0) + 1);
+              }
+            }
+            // The project writes gh-aw's step may make, each counted.
+            require('node:fs').writeFileSync(`${process.env.GH_AW_TMP}/project-writes.json`, JSON.stringify([...pending]));
+      # The output types the bounds route away from gh-aw's handlers
+      # (`native_handlers`, off by default), from check's policy.json.
+      - name: Which outputs agentic-job publishes
+        id: route
+        run: echo "native=$(jq -r '(.native_handlers // []) | length > 0' "$GH_AW_TMP/policy.json")" >> "$GITHUB_OUTPUT"
+      # Policy's binary publishes the routed requests as gh-aw's handlers
+      # would (docs/safe-outputs.md#agentic-jobs-own-handlers), with the
+      # same token, settings and guard, and the same records, before
+      # them. It leaves gh-aw's step the rest in gh-aw-output.json, written
+      # before it publishes anything and not at all when it refuses the
+      # run: no request is published by both, and a refusal publishes
+      # nothing. A pull request that fails has the comments there warn of
+      # it, as gh-aw's manager would. It pushes only to the `head-repo`
+      # the fork step chose.
+      - name: Publish the outputs routed to agentic-job
+        id: publish
+        if: ${{ fromJSON(inputs.policy).apply-staged != 'true' && steps.route.outputs.native == 'true' && steps.project.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          GH_AW_WORKFLOW_ID: agentic-job
+          GH_AW_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+          GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
+          GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
+          GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" publish --policy "$GH_AW_TMP/policy.json" --outputs "$GH_AW_TMP/agent_output.json" \
+            --handlers "$GH_AW_TMP/handler-config.json" --checked "$GH_AW_TMP" --server "$GITHUB_SERVER_URL" \
+            --remainder "$GH_AW_TMP/gh-aw-output.json" --made "$MADE" --errors "$GH_AW_TMP/publish-errors.json"
       # gh-aw's handler can open an issue in a pull request's place
       # whatever `fallback_as_issue` says (where the forge refuses it to
       # Actions, for one), so no client the handlers use opens more issues
@@ -755,7 +867,9 @@ jobs:
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/agent_output.json
+          # What the step above left gh-aw where it routes any type: none
+          # when that file is not there.
+          GH_AW_AGENT_OUTPUT: ${{ env.GH_AW_TMP }}/${{ steps.route.outputs.native == 'true' && 'gh-aw-output.json' || 'agent_output.json' }}
           GH_AW_WORKFLOW_ID: agentic-job
           # The handlers end each body they post with this run's job (gh-aw's
           # execution provenance), and refuse to post without it.
@@ -764,6 +878,7 @@ jobs:
           # The handlers sanitize text again: the collector's policy, in check.yml.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
           GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
+          PROJECT_CHECKED: ${{ steps.project.outcome }}
         with:
           # Use the checkout's credential selection for API writes too.
           github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
@@ -782,78 +897,14 @@ jobs:
             let issues = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).create_issue?.max ?? 0;
             const creates = (options, what) => options.method === "POST" && new RegExp(`^/repos/[^/]+/[^/]+/${what}$`).test(options.url);
             let projectRefusal = false;
-            // Preflight every field before any handler can mutate the forge.
-            // The pinned handler otherwise reports success for skipped values.
-            const pending = new Map();
-            const writeKey = variables => JSON.stringify([variables.projectId, variables.fieldId, variables.value]);
-            const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
-            try {
-              const items = JSON.parse(require('node:fs').readFileSync(process.env.GH_AW_AGENT_OUTPUT, 'utf8')).items;
-              for (const item of items.filter(item => item.type === 'update_project')) {
-                if (!project?.projects.includes(item.project)) throw new Error("project is outside the apply bounds");
-                const [, kind, login, , number] = new URL(item.project).pathname.split('/');
-                const owner = kind === 'orgs' ? 'organization' : 'user';
-                const found = await github.graphql(`query($login: String!, $number: Int!) {
-                  ${owner}(login: $login) { projectV2(number: $number) { id } }
-                }`, { login, number: Number(number) });
-                const projectId = found[owner]?.projectV2?.id;
-                if (!projectId) throw new Error("bounded project could not be resolved");
-                const fields = [];
-                let after = null;
-                do {
-                  const result = await github.graphql(`query($projectId: ID!, $after: String) {
-                    node(id: $projectId) { ... on ProjectV2 { fields(first: 100, after: $after) {
-                      nodes {
-                        ... on ProjectV2Field { id name dataType }
-                        ... on ProjectV2SingleSelectField { id name dataType options { id name } }
-                        ... on ProjectV2IterationField { id name dataType configuration { iterations { id title } } }
-                      }
-                      pageInfo { hasNextPage endCursor }
-                    } } }
-                  }`, { projectId, after });
-                  const page = result.node.fields;
-                  fields.push(...page.nodes);
-                  if (page.pageInfo.hasNextPage && (!page.pageInfo.endCursor || page.pageInfo.endCursor === after)) {
-                    throw new Error("project field pagination did not advance");
-                  }
-                  after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
-                } while (after);
-                for (const [name, raw] of Object.entries(item.fields)) {
-                  const matches = fields.filter(field => field.name === name);
-                  if (!project.fields.includes(name) || matches.length !== 1) throw new Error(`project field ${name} is not an exact existing bounded field`);
-                  const field = matches[0];
-                  const normalized = name.split(/[\s_-]+/).map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
-                  if (normalized.toUpperCase() === 'REPOSITORY' || fields.find(candidate => candidate.name.toLowerCase() === normalized.toLowerCase())?.id !== field.id) {
-                    throw new Error(`project field ${name} cannot be addressed exactly by the pinned handler`);
-                  }
-                  let value;
-                  if (field.dataType === 'NUMBER') {
-                    const number = typeof raw === 'number' ? raw : Number(raw);
-                    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(raw).trim()) || !Number.isFinite(number)) throw new Error(`invalid number for project field ${name}`);
-                    value = { number };
-                  } else if (field.dataType === 'SINGLE_SELECT' || field.dataType === 'ITERATION') {
-                    const iteration = field.dataType === 'ITERATION';
-                    const options = iteration ? field.configuration?.iterations : field.options;
-                    const option = options?.find(option => (iteration ? option.title : option.name).toLowerCase() === String(raw).toLowerCase());
-                    if (!option) throw new Error(`unknown option or iteration for project field ${name}`);
-                    value = iteration ? { iterationId: option.id } : { singleSelectOptionId: option.id };
-                  } else if (field.dataType === 'DATE') {
-                    const date = String(raw);
-                    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error(`invalid date for project field ${name}`);
-                    value = { date };
-                  } else if (field.dataType === 'TEXT') {
-                    value = { text: String(raw) };
-                  } else {
-                    throw new Error(`unsupported type for project field ${name}`);
-                  }
-                  const key = writeKey({ projectId, fieldId: field.id, value });
-                  pending.set(key, (pending.get(key) ?? 0) + 1);
-                }
-              }
-            } catch (error) {
+            // The project fields' step refused the run before either
+            // publisher wrote anything; it is refused here, as it fails the job.
+            if (process.env.PROJECT_CHECKED !== 'success') {
               core.setOutput("project-refused", "true");
-              throw error;
+              throw new Error("the project fields were refused before anything was published");
             }
+            const pending = new Map(JSON.parse(require('node:fs').readFileSync(`${process.env.GH_AW_TMP}/project-writes.json`, 'utf8')));
+            const writeKey = variables => JSON.stringify([variables.projectId, variables.fieldId, variables.value]);
             const guarded = client => {
               const project = JSON.parse(process.env.GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG).update_project;
               if (project) {
@@ -969,8 +1020,8 @@ jobs:
       - name: Write applied.json
         if: ${{ always() && (steps.apply.outcome != 'skipped' || steps.staged.outcome != 'skipped') }}
         env:
-          PR: ${{ steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
-          PR_URL: ${{ steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
+          PR: ${{ steps.publish.outputs.created_pr_number || steps.apply.outputs.created_pr_number || steps.applied.outputs.pull-request-number }}
+          PR_URL: ${{ steps.publish.outputs.created_pr_url || steps.apply.outputs.created_pr_url || steps.applied.outputs.pull-request-url }}
           FORK: ${{ steps.fork.outputs.repo }}
           EXIT: ${{ fromJSON(inputs.policy).proposals-artifact != '' && '0' || fromJSON(inputs.agent).outputs.exit }}
           CHECKPOINT: ${{ steps.complete.outputs.checkpoint }}
@@ -1049,14 +1100,16 @@ jobs:
       # report holds each failed output's type and error, not the request:
       # bounded and neutralized as check's refusal reasons are, as a
       # handler's error can quote the agent's text. The reader is policy's
-      # binary, fetched above for every applied run.
+      # binary, fetched above for every applied run; it reads agentic-job's
+      # own handlers' report, of the same shape, as well.
       - name: Show why a handler failed
         id: handler-errors
-        if: ${{ !cancelled() && steps.apply.outcome == 'failure' }}
+        if: ${{ !cancelled() && (steps.apply.outcome == 'failure' || steps.publish.outcome == 'failure') }}
         continue-on-error: true
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
-          "$RUNNER_TEMP/apply-binary/agentic-job" diagnostics handler-errors "$GH_AW_TMP/safe-output-errors.json" --output "$GITHUB_OUTPUT"
+          "$RUNNER_TEMP/apply-binary/agentic-job" diagnostics handler-errors "$GH_AW_TMP/publish-errors.json" "$GH_AW_TMP/safe-output-errors.json" \
+            --output "$GITHUB_OUTPUT"
       # A run that asked for a pull request and has none did not do what
       # it was for, and neither did one of whose outputs a handler failed,
       # nor one that handed back missing_data beside anything but noop. A
@@ -1067,6 +1120,9 @@ jobs:
         env:
           OUTCOME: ${{ steps.apply.outcome }}
           FAILED: ${{ steps.apply.outputs.items_failed }}
+          # agentic-job's own handlers, where the bounds route a type to them.
+          PUBLISHED: ${{ steps.publish.outcome }}
+          PUBLISH_FAILED: ${{ steps.publish.outputs.items_failed }}
           PROJECT_REFUSED: ${{ steps.apply.outputs.project-refused }}
           TREE: ${{ steps.trial.outputs.tree }}
           FORK: ${{ steps.fork.outputs.repo }}
@@ -1096,7 +1152,10 @@ jobs:
           fi
           asked=$(jq '[.items[] | select(.type == "create_pull_request")] | length' "$GH_AW_TMP/agent_output.json")
           opened=$(jq '.pull_request != null' "$GH_AW_TMP/applied.json")
-          if [ "$OUTCOME" != success ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
+          if [ "${PUBLISHED:-}" = failure ]; then
+            echo "::error::agentic-job's handlers failed ${PUBLISH_FAILED:-or refused all} of the routed outputs in $OUTPUT_REPO"
+          fi
+          if [ "$OUTCOME" != success ] || [ "${PUBLISHED:-}" = failure ] || { [ "$asked" != 0 ] && [ "$opened" != true ]; }; then
             echo "::error::the handlers ended in $OUTCOME with ${FAILED:-no count of} failed outputs in $OUTPUT_REPO (pull requests asked for: $asked, opened: $opened)"; exit 1
           fi
           # Only now, with nothing else wrong, is the run blocked rather than failed.

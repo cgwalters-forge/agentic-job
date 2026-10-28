@@ -257,6 +257,7 @@ impl Github {
                     patch: &pr.patch,
                     files: &pr.files,
                     head: None,
+                    committer: None,
                 },
                 None,
             )
