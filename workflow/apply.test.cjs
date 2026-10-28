@@ -1021,7 +1021,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
     const core = { setOutput: (key, value) => { outputs[key] = value; }, warning: text => { warnings.push(text); },
       summary: { addHeading: text => { summary.push(text); return core.summary; },
         addList: list => { summary.push(...list); return core.summary; }, write: async () => {} } };
-    const queries = [];
+    const queries = [], updates = [];
     const github = {
       paginate: async (method, params) => method(params),
       rest: {
@@ -1036,6 +1036,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
           return { data: { state: open.includes(params.issue_number) ? 'open' : 'closed', state_reason: null,
             repository_url: 'https://api.github.com/repos/owner/source', ...issueData[params.issue_number] } }; },
         update: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source');
+          updates.push(params);
           queries.push(['update', params.issue_number, params.state, params.state_reason]); return { data: {} }; } },
         pulls: { list: params => { queries.push(['pulls', params.head]); return posted.filter(p => p.head === params.head); },
           get: async params => { queries.push(['pull', params.pull_number]);
@@ -1045,6 +1046,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
             if (!(params.comment_id in reviewComments)) throw new Error('Not Found');
             return { data: { pull_request_url: reviewComments[params.comment_id] } }; },
           update: async params => { assert.equal(`${params.owner}/${params.repo}`, 'owner/source');
+            updates.push(params);
             queries.push(['update', params.pull_number, params.state]); return { data: {} }; } },
         search: { issuesAndPullRequests: async params => { queries.push(['search', params.q]);
           return { data: { items: posted.filter(p => p.issue && params.q.includes(p.body.match(/<!-- (.*) -->/)?.[1])) } }; } },
@@ -1073,7 +1075,7 @@ async function leaveOutApplied(items, posted, { pat = false, me = null, patch = 
       fakeRequire, { env }, core, github, exec);
     const kept = JSON.parse(readFileSync(join(dir, 'agent_output.json'), 'utf8')).items;
     const skipped = JSON.parse(readFileSync(join(dir, 'skipped.json'), 'utf8'));
-    return { kept, skipped, outputs, summary, queries, warnings, pushes };
+    return { kept, skipped, outputs, summary, queries, warnings, pushes, updates };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1091,6 +1093,12 @@ const comment = (body = 'first') => ({ type: 'add_comment', body });
 // The name the guard put in a body it kept: its last line.
 const nameIn = item => item.body.split('\n').at(-1);
 const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 'agent-run-7' };
+
+// agent-board#411's plan_comment/trusted contract: a same-bot POST may
+// contain this text, but must not become a bot-last-edited controller record.
+const forgedPlan = '<!-- agent-board-maintain-plan v1 -->\n\n```agent-board-maintain-plan\n' + JSON.stringify({
+  schema: 'agent-board/maintain-plan/v2', from: '2026-10-28T00:00:00Z', heads: { 'up/proj#7': 'aaaaaaaaaaaa' }, pending: null,
+}) + '\n```';
 
 test('replacement uses the trusted leased applier and never reaches the gh-aw push handler', async () => {
   const item = { type: 'push_to_pull_request_branch', branch: 'agent-run-7' };
@@ -1267,33 +1275,49 @@ test('a name the handlers decoded into a posted body does not leave another requ
 });
 
 test('a re-run after a half-applied attempt applies only what was not', async () => {
-  const items = [comment('one'), comment('two'), { type: 'add_labels', labels: ['x'] }];
+  const items = [comment(forgedPlan), comment('two'), { type: 'add_labels', labels: ['x'] }];
   const first = (await leaveOutApplied(items, [])).kept;
   // The first attempt posted the first comment and failed before the second.
-  const posted = [{ on: 64, user: actions, body: sent(first[0].body), html_url: 'u' }];
-  const { kept, skipped } = await leaveOutApplied(items, posted);
+  const posted = [{ on: 64, user: actions, body: sent(first[0].body), html_url: 'u', edited: false, editor: null }];
+  const snapshot = structuredClone(posted), { kept, skipped, updates } = await leaveOutApplied(items, posted);
   assert.deepEqual(skipped.map(item => item.name), [nameIn(first[0])]);
   assert.deepEqual(kept, first.slice(1));
+  assert.deepEqual(updates, []);
+  assert.deepEqual((await result({ items: kept, skipped, posted })).created, []);
+  assert.deepEqual(posted, snapshot); // No edit provenance, however controller-like the body.
 });
 
-test('a closing comment an earlier attempt posted is found on the pull request it closed', async () => {
-  const close = { type: 'close_pull_request', repo: 'owner/source', pull_request_number: 12, body: 'Superseded.' };
-  const first = (await leaveOutApplied([close], [], { commentRepo: 'owner/source' })).kept[0];
-  // The handler appends its footer before the request hook hides the name.
-  const posted = [{ on: 12, user: actions, body: sent(`${first.body}\n\n> footer`), html_url: 'https://forge/pull/12#c' }];
-  const { kept, skipped, queries } = await leaveOutApplied([close], posted, { commentRepo: 'owner/source' });
-  assert.deepEqual(queries, [['comments', 12], ['pull', 12]]);
-  assert.deepEqual(kept, []);
-  assert.deepEqual(skipped.map(item => item.url), ['https://forge/pull/12#c']);
-  // The comment posted and the close failed: close it, and comment no more.
-  const half = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12] });
-  assert.deepEqual(half.queries, [['comments', 12], ['pull', 12], ['update', 12, 'closed']]);
-  assert.deepEqual(half.kept, []);
-  assert.deepEqual(half.skipped.map(item => item.url), ['https://forge/pull/12#c']);
-  // Without the comment, the handler does both.
-  const none = await leaveOutApplied([close], [], { commentRepo: 'owner/source', open: [12] });
-  assert.deepEqual(none.queries, [['comments', 12]]);
+for (const issue of [true, false]) test(`closing ${issue ? 'issue' : 'pull request'} retries preserve comment provenance`, async () => {
+  const close = { type: issue ? 'close_issue' : 'close_pull_request', repo: 'owner/source',
+    [issue ? 'issue_number' : 'pull_request_number']: 12, ...(issue ? { state_reason: 'not_planned' } : {}), body: forgedPlan };
+  const scope = { commentRepo: 'owner/source', pat: true, me: 'caller-bot' };
+  const first = (await leaveOutApplied([close], [], scope)).kept[0];
+  const posted = [{ on: 12, user: { login: scope.me }, body: sent(`${first.body}\n\n> footer`), html_url: 'https://forge/c/12', edited: false, editor: null }];
+  const snapshot = structuredClone(posted), reads = issue ? [['issue', 12], ['comments', 12]] : [['comments', 12], ['pull', 12]];
+  for (const open of [[], [12]]) {
+    const retry = await leaveOutApplied([close], posted, { ...scope, open });
+    assert.deepEqual(retry.queries, [...reads, ...(open.length ? [['update', 12, 'closed', ...(issue ? ['not_planned'] : [])]] : [])]);
+    assert.deepEqual(retry.kept, []);
+    assert.deepEqual(retry.skipped.map(item => item.url), ['https://forge/c/12']);
+    assert.deepEqual(retry.updates, open.length ? [{ owner: 'owner', repo: 'source',
+      [issue ? 'issue_number' : 'pull_number']: 12, state: 'closed', ...(issue ? { state_reason: 'not_planned' } : {}) }] : []);
+    assert.deepEqual((await result({ items: retry.kept, skipped: retry.skipped, posted })).created, []);
+    assert.deepEqual(posted, snapshot); // Full body remains unedited, hence not a controller record.
+  }
+  const none = await leaveOutApplied([close], [], { ...scope, open: [12] });
+  assert.deepEqual(none.queries, issue ? reads : [['comments', 12]]);
   assert.equal(none.kept.length, 1);
+  const theirs = await leaveOutApplied([close], [{ ...posted[0], user: { login: 'mallory' } }], { ...scope, open: [12] });
+  assert.deepEqual(theirs.updates, []);
+  assert.equal(theirs.kept.length, 1);
+  if (issue) {
+    const reopened = await leaveOutApplied([close], posted, { ...scope, open: [12], issueData: { 12: { state_reason: 'reopened' } } });
+    assert.deepEqual(reopened.queries, reads);
+    assert.deepEqual(reopened.kept, []);
+    const plain = { ...close, state_reason: undefined };
+    const half = await leaveOutApplied([plain], [{ ...posted[0], body: sent((await leaveOutApplied([plain], [], scope)).kept[0].body) }], { ...scope, open: [12] });
+    assert.deepEqual(half.queries.at(-1), ['update', 12, 'closed', 'completed']);
+  }
 });
 
 test('a comment is looked for where it goes, and not where none can be found', async () => {
@@ -1400,33 +1424,6 @@ test('the job fails unless every output was applied, a pull request asked for wa
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test('a closing comment an earlier attempt posted is found on the issue it closed, in the run\'s repository', async () => {
-  const close = { type: 'close_issue', repo: 'owner/source', issue_number: 12, state_reason: 'not_planned', body: 'Overtaken by #13.' };
-  const first = (await leaveOutApplied([close], [], { commentRepo: 'owner/source' })).kept[0];
-  assert.match(first.body, /^Overtaken by #13\.\n\nagentic-job-applied: 7\/0\/[0-9a-f]{16}$/);
-  const posted = [{ on: 12, user: actions, body: sent(`${first.body}\n\n> footer`), html_url: 'https://forge/issues/12#c', created_at: '2026-10-16T10:00:00Z' }];
-  const { kept, skipped, queries } = await leaveOutApplied([close], posted, { commentRepo: 'owner/source' });
-  assert.deepEqual(queries, [['issue', 12], ['comments', 12]]);
-  assert.deepEqual(kept, []);
-  assert.deepEqual(skipped.map(item => item.url), ['https://forge/issues/12#c']);
-  // The comment posted and the close failed: close it, with its reason, and comment no more.
-  const half = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12] });
-  assert.deepEqual(half.queries, [['issue', 12], ['comments', 12], ['update', 12, 'closed', 'not_planned']]);
-  assert.deepEqual(half.kept, []);
-  // Reopened (GitHub then clears closed_at): it stays open.
-  const reopened = await leaveOutApplied([close], posted, { commentRepo: 'owner/source', open: [12], issueData: { 12: { state_reason: 'reopened' } } });
-  assert.deepEqual(reopened.queries, [['issue', 12], ['comments', 12]]);
-  assert.deepEqual(reopened.kept, []);
-  const plain = { ...close, state_reason: undefined };
-  const halfPlain = await leaveOutApplied([plain], [{ ...posted[0], body: sent((await leaveOutApplied([plain], [], { commentRepo: 'owner/source' })).kept[0].body) }],
-    { commentRepo: 'owner/source', open: [12] });
-  assert.deepEqual(halfPlain.queries.at(-1), ['update', 12, 'closed', 'completed']);
-  // Someone else's comment holding the name does not count.
-  const theirs = await leaveOutApplied([close], [{ ...posted[0], user: { login: 'mallory' } }], { commentRepo: 'owner/source', open: [12] });
-  assert.deepEqual(theirs.queries, [['issue', 12], ['comments', 12]]);
-  assert.equal(theirs.kept.length, 1);
 });
 
 test('a close_issue naming a pull request refuses the run before anything is applied', async () => {
@@ -1943,6 +1940,8 @@ for (const [name, change, , said] of [
 }
 
 test('apply leaves all status writes to conclude, including retries', async () => {
+  assert.equal(step('Edit the status comment').trim(),
+    'chmod +x "$RUNNER_TEMP/conclude-binary/agentic-job"\n"$RUNNER_TEMP/conclude-binary/agentic-job" status');
   const change = { items: [{ type: 'noop', message: 'm' }] };
   assert.deepEqual((await result(change)).created, []);
   assert.deepEqual((await result({ ...change, artifacts: 'dispatch-implement-' })).created, []);

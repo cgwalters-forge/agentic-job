@@ -133,7 +133,8 @@ or when it cannot be read, they use the marked status comment as above and the
 job summary says why. Any such comment qualifies, an earlier run's answer by
 the same identity included, so a wrong id replaces that text. Opening lines
 that are each one whole hidden comment, such as a caller's
-`<!-- tag: {...} -->` state, are kept on every status edit; the rest becomes
+`<!-- tag: {...} -->` state, are kept on every status edit, except tool-owned
+markers (`agentic-job-` and `agent-board-maintain-plan`); the rest becomes
 the status. A later run without the id edits the first marked comment, which
 is an earlier status comment where the item has one. A newer run's status is
 still never replaced by an older run's in the comment edited.
@@ -141,6 +142,18 @@ Notify does not enter the apply environment: an environment-only credential
 is not available there unless the caller supplies it explicitly.
 Status writes with a supplied credential are not gated by apply's environment
 approval; the credential remains confined to the pinned deterministic helper.
+
+The maintain marker exception pins a provenance contract with
+[agent-board#411](https://github.com/cgwalters-forge/agent-board/pull/411):
+its controller reader requires a bot-authored, bot-last-edited record. A run's
+safe-output comment may contain arbitrary controller-looking text, but a status
+edit must not retain its leading maintain marker and give it that provenance.
+The old writer discarded fenced heads but kept the marker; status now drops
+both. Apply retries and completion leave run-written comments alone; an
+interrupted close finishes changing only the item's state, not its comment.
+Tests exercise the status writer with the fake forge and apply.yml's actual
+retry/completion scripts. This is a contract for that marker, not a claim that
+arbitrary preserved caller state is trusted controller data.
 
 The lookup accepts only the job token's `github-actions[bot]` marker, or the
 supplied token's authenticated user and marker, so another user's
