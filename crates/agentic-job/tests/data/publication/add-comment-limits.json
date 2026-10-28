@@ -1,0 +1,121 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "add-comment-limits",
+  "attempts": [
+    {
+      "handler_config": {
+        "add_comment": {
+          "max": 1,
+          "target-repo": "owner/repo",
+          "target": "7"
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "add_comment",
+            "item_number": 7,
+            "body": "Related: https://github.com/owner/repo/issues/1 https://github.com/owner/repo/issues/2 https://github.com/owner/repo/issues/3 https://github.com/owner/repo/issues/4 https://github.com/owner/repo/issues/5 https://github.com/owner/repo/issues/6 https://github.com/owner/repo/issues/7 https://github.com/owner/repo/issues/8 https://github.com/owner/repo/issues/9 https://github.com/owner/repo/issues/10 https://github.com/owner/repo/issues/11 https://github.com/owner/repo/issues/12 https://github.com/owner/repo/issues/13 https://github.com/owner/repo/issues/14 https://github.com/owner/repo/issues/15 https://github.com/owner/repo/issues/16 https://github.com/owner/repo/issues/17 https://github.com/owner/repo/issues/18 https://github.com/owner/repo/issues/19 https://github.com/owner/repo/issues/20 https://github.com/owner/repo/issues/21 https://github.com/owner/repo/issues/22 https://github.com/owner/repo/issues/23 https://github.com/owner/repo/issues/24 https://github.com/owner/repo/issues/25 https://github.com/owner/repo/issues/26 https://github.com/owner/repo/issues/27 https://github.com/owner/repo/issues/28 https://github.com/owner/repo/issues/29 https://github.com/owner/repo/issues/30 https://github.com/owner/repo/issues/31 https://github.com/owner/repo/issues/32 https://github.com/owner/repo/issues/33 https://github.com/owner/repo/issues/34 https://github.com/owner/repo/issues/35 https://github.com/owner/repo/issues/36 https://github.com/owner/repo/issues/37 https://github.com/owner/repo/issues/38 https://github.com/owner/repo/issues/39 https://github.com/owner/repo/issues/40 https://github.com/owner/repo/issues/41 https://github.com/owner/repo/issues/42 https://github.com/owner/repo/issues/43 https://github.com/owner/repo/issues/44 https://github.com/owner/repo/issues/45 https://github.com/owner/repo/issues/46 https://github.com/owner/repo/issues/47 https://github.com/owner/repo/issues/48 https://github.com/owner/repo/issues/49 https://github.com/owner/repo/issues/50 https://github.com/owner/repo/issues/51\n\nagentic-job-applied: 4242/0/27723c2ce98f5338"
+          },
+          {
+            "type": "add_comment",
+            "item_number": 7,
+            "body": "The second.\n\nagentic-job-applied: 4242/1/3949280c17c35709"
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 1,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "0",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "1",
+          "items_skipped": "1",
+          "items_succeeded": "0",
+          "items_warnings": "0",
+          "processed_count": "0",
+          "result": "",
+          "status": "partial_success"
+        },
+        "annotations": [
+          "::warning::Comment validation failed: E008: Comment contains 51 links, maximum is 50. Reduce the number of URLs to 50 or fewer.",
+          "::error::✗ Message 1 (add_comment) failed: E008: Comment contains 51 links, maximum is 50. Reduce the number of URLs to 50 or fewer.",
+          "::warning::Skipping add_comment: max count of 1 reached",
+          "::warning::1 message(s) failed to process",
+          "::error::1 safe output(s) failed:%0A  - add_comment: E008: Comment contains 51 links, maximum is 50. Reduce the number of URLs to 50 or fewer."
+        ],
+        "summary": "<details>\n<summary>❌ Safe Output Processing Summary (0 applied, 1 skipped, 1 failed)</summary>\n\nProcessed 2 safe-output message(s).\n\nStatus: **partial_success**\n\nApplied: **0** · Skipped: **1** · Warnings: **0** · Failed: **1** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Failed | Add Comment | 1 | UNCLASSIFIED |\n| Skipped | Add Comment | 1 | Max count reached |\n\n<details>\n<summary>❌ Add Comment - Failed (Message 1)</summary>\n\n### Add Comment\n\n**Error:** `UNCLASSIFIED` (see the job logs for details)\n\n</details>\n\n<details>\n<summary>⚠️ Add Comment - Skipped (Message 2)</summary>\n\n### Add Comment\n\n**Reason Code:** `MAX_COUNT_REACHED`\n\n**Reason:** Max count reached\n\n</details>\n\n</details>\n\n",
+        "made": [],
+        "errors": {
+          "timestamp": "{time}",
+          "status": "failure",
+          "errorCode": "E099",
+          "message": "1 safe output(s) failed:\n  - add_comment: E008: Comment contains 51 links, maximum is 50. Reduce the number of URLs to 50 or fewer.",
+          "workflow": "agentic-job",
+          "run_id": "4242",
+          "failures": [
+            {
+              "type": "add_comment",
+              "error": "E008: Comment contains 51 links, maximum is 50. Reduce the number of URLs to 50 or fewer."
+            }
+          ]
+        }
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7/comments?per_page=100",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7/comments?per_page=100",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/collaborators?affiliation=direct&per_page=30",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7",
+          "api_version": "2026-03-10"
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}

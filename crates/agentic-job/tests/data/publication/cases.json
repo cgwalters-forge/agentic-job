@@ -1,0 +1,188 @@
+[
+  {
+    "name": "add-comment",
+    "about": "A comment on the run's item: links and mentions sanitized a second time, the footer, and the hidden name of what was applied.",
+    "config": {"add_comment": {"max": 1}},
+    "items": [{"type": "add_comment", "item_number": 7, "body": "Looked at it, @someone.\n\nSee [the log](https://evil.example/x), ftp://evil.example/y and https://docs.rs/serde.\n\n<!-- a hidden note -->\n\n```text\nftp://evil.example/kept-in-code\n```"}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "add-comment-rerun",
+    "about": "A re-run of the job: the guard pages through the item's comments, finds the name the first attempt posted on the second page and leaves the comment out.",
+    "attempts": 2,
+    "config": {"add_comment": {"max": 1}},
+    "items": [{"type": "add_comment", "item_number": 7, "body": "Done."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    },
+    "filler": {"/repos/owner/repo/issues/7/comments": 100}
+  },
+  {
+    "name": "add-comment-limits",
+    "about": "Over the handlers' limits: a second comment past `max`, and one with more links than gh-aw allows.",
+    "config": {"add_comment": {"max": 1}},
+    "items": [
+      {"type": "add_comment", "item_number": 7, "body": "Related: https://github.com/owner/repo/issues/1 https://github.com/owner/repo/issues/2 https://github.com/owner/repo/issues/3 https://github.com/owner/repo/issues/4 https://github.com/owner/repo/issues/5 https://github.com/owner/repo/issues/6 https://github.com/owner/repo/issues/7 https://github.com/owner/repo/issues/8 https://github.com/owner/repo/issues/9 https://github.com/owner/repo/issues/10 https://github.com/owner/repo/issues/11 https://github.com/owner/repo/issues/12 https://github.com/owner/repo/issues/13 https://github.com/owner/repo/issues/14 https://github.com/owner/repo/issues/15 https://github.com/owner/repo/issues/16 https://github.com/owner/repo/issues/17 https://github.com/owner/repo/issues/18 https://github.com/owner/repo/issues/19 https://github.com/owner/repo/issues/20 https://github.com/owner/repo/issues/21 https://github.com/owner/repo/issues/22 https://github.com/owner/repo/issues/23 https://github.com/owner/repo/issues/24 https://github.com/owner/repo/issues/25 https://github.com/owner/repo/issues/26 https://github.com/owner/repo/issues/27 https://github.com/owner/repo/issues/28 https://github.com/owner/repo/issues/29 https://github.com/owner/repo/issues/30 https://github.com/owner/repo/issues/31 https://github.com/owner/repo/issues/32 https://github.com/owner/repo/issues/33 https://github.com/owner/repo/issues/34 https://github.com/owner/repo/issues/35 https://github.com/owner/repo/issues/36 https://github.com/owner/repo/issues/37 https://github.com/owner/repo/issues/38 https://github.com/owner/repo/issues/39 https://github.com/owner/repo/issues/40 https://github.com/owner/repo/issues/41 https://github.com/owner/repo/issues/42 https://github.com/owner/repo/issues/43 https://github.com/owner/repo/issues/44 https://github.com/owner/repo/issues/45 https://github.com/owner/repo/issues/46 https://github.com/owner/repo/issues/47 https://github.com/owner/repo/issues/48 https://github.com/owner/repo/issues/49 https://github.com/owner/repo/issues/50 https://github.com/owner/repo/issues/51"},
+      {"type": "add_comment", "item_number": 7, "body": "The second."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "add-comment-failure",
+    "about": "The forge refuses the comment: the step fails and says so.",
+    "config": {"add_comment": {"max": 1}},
+    "items": [{"type": "add_comment", "item_number": 7, "body": "Done."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/issues/7/comments", "status": 500}]
+  },
+  {
+    "name": "create-issue",
+    "about": "A new issue, with its title prefix, labels and footer.",
+    "env": {"TITLE_PREFIX": "[agent] "},
+    "config": {"create_issue": {"max": 1}},
+    "items": [{"type": "create_issue", "title": "Flaky test in check", "body": "The test `check::patch` failed twice this week; see #7.", "labels": ["triage"]}]
+  },
+  {
+    "name": "create-issue-rerun",
+    "about": "A re-run: the guard's search finds the issue the first attempt opened, by its name, and does not open another.",
+    "attempts": 2,
+    "config": {"create_issue": {"max": 1}},
+    "items": [{"type": "create_issue", "title": "Flaky test in check", "body": "The test `check::patch` failed twice this week."}]
+  },
+  {
+    "name": "close-issue",
+    "about": "An issue closed as not planned, with the closing comment first.",
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done in #8.", "state_reason": "not_planned"}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "close-issue-half-closed",
+    "about": "The first attempt comments and then fails to close; the re-run finds its comment and closes the issue without a second one.",
+    "attempts": 2,
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done in #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"attempt": 1, "method": "PATCH", "path": "/repos/owner/repo/issues/7", "status": 502}]
+  },
+  {
+    "name": "close-issue-names-pull-request",
+    "about": "A close_issue naming a pull request: the guard refuses the run before anything is applied.",
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "close-pull-request",
+    "about": "A pull request closed, with the closing comment first.",
+    "config": {"close_pull_request": {"max": 1}},
+    "items": [{"type": "close_pull_request", "pull_request_number": 7, "body": "Superseded by #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [],
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": false, "merged": false, "user": {"login": "owner"}, "head": {"ref": "feature", "label": "owner:feature", "sha": "1111111111111111111111111111111111111111"}, "base": {"ref": "main"}, "html_url": "https://github.com/owner/repo/pull/7"}
+    }
+  },
+  {
+    "name": "close-pull-request-half-closed",
+    "about": "The first attempt comments and then fails to close; the re-run finds its comment and closes the pull request without a second one.",
+    "attempts": 2,
+    "config": {"close_pull_request": {"max": 1}},
+    "items": [{"type": "close_pull_request", "pull_request_number": 7, "body": "Superseded by #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [],
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": false, "merged": false, "user": {"login": "owner"}, "head": {"ref": "feature", "label": "owner:feature", "sha": "1111111111111111111111111111111111111111"}, "base": {"ref": "main"}, "html_url": "https://github.com/owner/repo/pull/7"}
+    },
+    "faults": [{"attempt": 1, "method": "PATCH", "path": "/repos/owner/repo/pulls/7", "status": 502}]
+  },
+  {
+    "name": "labels",
+    "about": "Labels added to and removed from an issue.",
+    "config": {"add_labels": {"max": 1, "allowed": ["triage", "docs"]}, "remove_labels": {"max": 1, "allowed": ["stale"]}},
+    "items": [
+      {"type": "add_labels", "item_number": 7, "labels": ["triage", "docs"]},
+      {"type": "remove_labels", "item_number": 7, "labels": ["stale"]}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [{"name": "stale"}], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    }
+  },
+  {
+    "name": "review-comment",
+    "about": "A review comment on the run's pull request, posted in one review of event COMMENT when the handlers are done.",
+    "config": {"create_pull_request_review_comment": {"max": 1}},
+    "items": [{"type": "create_pull_request_review_comment", "path": "src/lib.rs", "line": 2, "body": "This could overflow."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": false, "merged": false, "user": {"login": "owner"}, "head": {"ref": "feature", "label": "owner:feature", "sha": "1111111111111111111111111111111111111111", "repo": {"full_name": "owner/repo"}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"},
+      "/repos/owner/repo/pulls/7/files": [{"filename": "src/lib.rs", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@ -1,3 +1,3 @@\n pub fn add(a: u8, b: u8) -> u8 {\n-    a - b\n+    a + b\n }"}]
+    }
+  },
+  {
+    "name": "create-pull-request",
+    "about": "A draft pull request from the fork: the branch pushed with the patch's commit, then opened with the footer and the hidden name.",
+    "env": {"BRANCH_PREFIX": "", "TITLE_PREFIX": "[agent] "},
+    "config": {"create_pull_request": {"max": 1, "protected_files": ["CODEOWNERS"], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "create_pull_request", "title": "Fix the overflow", "body": "Checks the length first.", "branch": "agent-run-4242"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n\nThe sum of two bytes can overflow.\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
+    }
+  },
+  {
+    "name": "create-pull-request-rerun",
+    "about": "A re-run: the guard finds the open pull request the first attempt made from the fork's branch and does not open another.",
+    "attempts": 2,
+    "config": {"create_pull_request": {"max": 1, "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "create_pull_request", "title": "Fix the overflow", "body": "Checks the length first.", "branch": "agent-run-4242"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
+    }
+  },
+  {
+    "name": "push-to-pull-request-branch",
+    "about": "A commit pushed to the branch of a pull request from the fork.",
+    "env": {"BASE": "feature", "TREE": "{tree}"},
+    "config": {"push_to_pull_request_branch": {"max": 1, "target": "7", "head": "{head:feature}", "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "push_to_pull_request_branch", "branch": "feature", "message": "Address review"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "branches": {"feature": {"message": "lib: Add sub\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a - b\n}\n"}}},
+      "patch": {"base": "feature", "branch": "feature", "message": "sub: Saturate\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a.saturating_sub(b)\n}\n"}}
+    },
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "agentic-bot"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": true, "merged": false, "user": {"login": "agentic-bot"}, "head": {"ref": "feature", "label": "agentic-bot:feature", "sha": "{head:feature}", "repo": {"full_name": "agentic-bot/repo", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"}
+    }
+  },
+  {
+    "name": "no-write",
+    "about": "noop and missing_data: nothing is posted.",
+    "env": {"COMMENT_TARGET": ""},
+    "config": {"noop": {"max": 1}, "missing_data": {"max": 1}},
+    "items": [
+      {"type": "noop", "message": "Nothing to change: the test passes at main."},
+      {"type": "missing_data", "data_type": "log", "reason": "The failing job's log has expired."}
+    ]
+  }
+]

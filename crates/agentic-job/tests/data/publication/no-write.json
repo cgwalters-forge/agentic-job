@@ -1,0 +1,78 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "no-write",
+  "attempts": [
+    {
+      "handler_config": {
+        "noop": {
+          "max": 1
+        },
+        "missing_data": {
+          "max": 1
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "noop",
+            "message": "Nothing to change: the test passes at main."
+          },
+          {
+            "type": "missing_data",
+            "data_type": "log",
+            "reason": "The failing job's log has expired."
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "2",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "2",
+          "items_warnings": "0",
+          "processed_count": "2",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [],
+        "summary": "<details>\n<summary>✅ Safe Output Processing Summary (2 applied, 0 skipped, 0 failed)</summary>\n\nProcessed 2 safe-output message(s).\n\nStatus: **success**\n\nApplied: **2** · Skipped: **0** · Warnings: **0** · Failed: **0** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Success | Noop | 1 |  |\n| Success | Missing Data | 1 | The failing job's log has expired. |\n\n<details>\n<summary>✅ Noop - Success (Message 1)</summary>\n\n### Noop\n\n</details>\n\n<details>\n<summary>✅ Missing Data - Success (Message 2)</summary>\n\n### Missing Data\n\n</details>\n\n</details>\n\n",
+        "made": [],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}

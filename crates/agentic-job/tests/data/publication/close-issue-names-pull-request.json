@@ -1,0 +1,54 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "close-issue-names-pull-request",
+  "attempts": [
+    {
+      "handler_config": {
+        "close_issue": {
+          "max": 1,
+          "target-repo": "owner/repo",
+          "target": "*",
+          "issue_intent": false,
+          "allow_body": true
+        }
+      },
+      "guard": {
+        "exit": 1,
+        "outputs": {
+          "poster": "agentic-bot"
+        },
+        "annotations": [
+          "::error::Unhandled error: Error: a close_issue names #7, which is a pull request"
+        ],
+        "summary": "",
+        "items": [
+          {
+            "type": "close_issue",
+            "issue_number": 7,
+            "body": "Done."
+          }
+        ],
+        "skipped": null
+      },
+      "apply": null,
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7",
+          "api_version": ""
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}

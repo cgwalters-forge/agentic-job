@@ -139,7 +139,10 @@ embedded.
 fixtures. gh-aw's handlers come from its pinned setup action, not a
 vendored copy; `collect` is held to its collector at the same commit. Regenerate the rules with
 `node safe-outputs/validation.mjs GH_AW_CHECKOUT` when changing that pin,
-and `collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`.
+`collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`, and the
+[publication corpus](safe-outputs.md#the-publication-corpus) with
+`just publication-corpus`, which also follows apply.yml's
+`actions/github-script` pin.
 
 ## Tests and CI
 
