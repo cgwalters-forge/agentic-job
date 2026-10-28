@@ -1,15 +1,16 @@
 //! The probes of the network: the cloud metadata service, the egress
-//! proxy and the tailnet filter, from the host and from a rootless
-//! container.
+//! proxy, the tailnet filter and a session's bridge, from the host and
+//! from a rootless container.
 
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
 use super::{Attempt, CONTAINER_UID, Checker, Want};
 use crate::sandbox::enter::Output;
 use crate::sandbox::proxy::policy::{Policy, Request};
 use crate::sandbox::{egress, host, network};
+use crate::session::bridge;
 
 const METADATA_URL: &str = "http://169.254.169.254/metadata/instance?api-version=2021-02-01";
 
@@ -88,6 +89,12 @@ const OTHER_TAILNET_PORT: u16 = 22;
 const QUAD100: &[&str] = &["100.100.100.100", "fd7a:115c:a1e0::53"];
 
 const QUAD100_PORTS: &[u16] = &[53, 80, 8080];
+
+/// Where a session's bridge listens, and where `tailscale serve` passes
+/// its client on from, at the node's own tailnet addresses.
+const BRIDGE_HOST: &str = "127.0.0.1";
+
+const SERVE_PORT: u16 = HTTPS_PORT;
 
 fn metadata_attempts(user: &str, metadata: &[&str]) -> [Attempt; 2] {
     [
@@ -176,7 +183,7 @@ fn first_refused(policy: &Policy, requests: &[(&'static str, String)]) -> Option
 /// The probes that pull or run an image, which `[sandbox.check]
 /// containers = false` skips: those of the egress proxy and the tailnet
 /// where they are made at all.
-fn skipped_containers(egress: bool, tailnet: bool) -> Vec<&'static str> {
+fn skipped_containers(egress: bool, tailnet: bool, session: bool) -> Vec<&'static str> {
     let mut ids = vec![
         "container-pull",
         "container-build",
@@ -194,7 +201,60 @@ fn skipped_containers(egress: bool, tailnet: bool) -> Vec<&'static str> {
     if tailnet {
         ids.extend(["tailnet-container-direct", "tailnet-container:*"]);
     }
+    if session {
+        ids.push("session-bridge-container");
+    }
     ids
+}
+
+/// What of a session's bridge the sandbox user must not reach: the
+/// bridge on loopback, and the node's own tailnet addresses (`status`'s
+/// `Self`), from which serve passes a client on, at the bridge's port,
+/// where the check holds a listener as a control, and at serve's. None
+/// without `[session] listen`.
+fn bridge_targets(listen: bool, status: &serde_json::Value) -> Vec<(String, u16)> {
+    if !listen {
+        return Vec::new();
+    }
+    let own = status
+        .get("Self")
+        .and_then(|own| own.get("TailscaleIPs"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .flat_map(|addr| {
+            [bridge::PORT, SERVE_PORT]
+                .into_iter()
+                .map(move |port| (addr.to_owned(), port))
+        });
+    std::iter::once((BRIDGE_HOST.to_owned(), bridge::PORT))
+        .chain(own)
+        .collect()
+}
+
+/// A listener of the runner's user at `addr`:`port`, the control of a
+/// probe of it. Every check runs before `run` binds the bridge, so
+/// something already listening there is no bridge but whatever would be
+/// handed serve's connections: an error, not a control.
+fn hold(addr: &str, port: u16) -> Result<TcpListener> {
+    let ip: IpAddr = addr
+        .parse()
+        .with_context(|| format!("{addr:?} is not an IP address"))?;
+    TcpListener::bind((ip, port)).with_context(|| {
+        format!(
+            "listening at {}, where a session's bridge is to listen",
+            socket_text(addr, port)
+        )
+    })
+}
+
+fn socket_text(addr: &str, port: u16) -> String {
+    if addr.contains(':') {
+        format!("[{addr}]:{port}")
+    } else {
+        format!("{addr}:{port}")
+    }
 }
 
 impl Checker<'_> {
@@ -275,7 +335,7 @@ impl Checker<'_> {
             self.report.note(&format!(
                 "[sandbox.check] containers = false: not run, not passed: {}; the sandbox user \
                  can still run rootless Podman, whose subordinate uids' network goes unprobed",
-                skipped_containers(egress, tailnet).join(", ")
+                skipped_containers(egress, tailnet, self.config.session.listen).join(", ")
             ));
         } else {
             let got = self.sandbox_succeeds(&["podman", "pull", "-q", &image])?;
@@ -362,6 +422,86 @@ impl Checker<'_> {
         if tailnet {
             self.timed("tailnet", |this| this.tailnet())?;
         }
+        if self.config.session.listen {
+            self.timed("session-bridge", |this| this.session_bridge())?;
+        } else {
+            self.report
+                .note("no [session] listen, so no session bridge to probe");
+        }
+        Ok(())
+    }
+
+    /// A session's bridge, which lets in whoever `Tailscale-User-Login`
+    /// names: the sandbox user reaching it, on loopback or through serve
+    /// at the node's own tailnet address, could name the operator and
+    /// prompt the session it runs in. The runner's user holds a listener
+    /// at each target on the bridge's port, the control; serve's port has
+    /// none to show, and a note says so. The loopback control must hold:
+    /// without it, the bridge's refusal shows nothing.
+    fn session_bridge(&mut self) -> Result<()> {
+        let user = self.user()?.to_owned();
+        let status = self
+            .root
+            .tailscale_status()
+            .unwrap_or(serde_json::Value::Null);
+        let targets = bridge_targets(true, &status);
+        // Setup serves a session only on the tailnet: without its
+        // addresses, half of what the rules refuse would go unprobed.
+        self.report.expect(
+            Want::Succeed,
+            "session-bridge-tailnet",
+            "tailscale status gives this node's tailnet addresses, which serve passes a client on from",
+            targets.len() > 1,
+        );
+        // Held until the attempts are made. Serve passes clients on to
+        // loopback only, so a failure to listen there stops the check; at
+        // a tailnet address it leaves that probe without a control.
+        let mut listeners = Vec::new();
+        for (addr, port) in targets.iter().filter(|(_, port)| *port == bridge::PORT) {
+            match hold(addr, *port) {
+                Ok(listener) => listeners.push(listener),
+                Err(err) if addr != BRIDGE_HOST => self.report.note(&format!("{err:#}")),
+                Err(err) => return Err(err),
+            }
+        }
+        let bridge = socket_text(BRIDGE_HOST, bridge::PORT);
+        let probe = tcp_probe(BRIDGE_HOST, bridge::PORT);
+        let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
+        self.report.expect(
+            Want::Succeed,
+            "session-bridge-control",
+            format!("{} reaches {bridge} (control)", self.runner.name),
+            super::runner_reaches(&probe),
+        );
+        let mut attempts = Vec::new();
+        for (addr, port) in &targets {
+            let target = socket_text(addr, *port);
+            let probe = tcp_probe(addr, *port);
+            let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
+            if target != bridge {
+                attempts.push(Attempt::control(
+                    format!("session-bridge-control:{target}"),
+                    &target,
+                    &probe,
+                ));
+            }
+            attempts.push(Attempt::refused(
+                format!("session-bridge:{target}"),
+                format!("{user} can't reach a session's bridge at {target}"),
+                &probe,
+            ));
+        }
+        if self.runs_containers() {
+            attempts.push(Attempt::refused_in_container(
+                "session-bridge-container",
+                format!(
+                    "a container as subordinate uid {CONTAINER_UID} can't reach a session's bridge at {bridge}"
+                ),
+                &self.container(&probe),
+            ));
+        }
+        self.attempts(&attempts)?;
+        drop(listeners);
         Ok(())
     }
 
@@ -818,11 +958,7 @@ impl Checker<'_> {
             // Made together, and reported in this order: see `egress`.
             let mut attempts = Vec::new();
             for (addr, port) in targets {
-                let target = if addr.contains(':') {
-                    format!("[{addr}]:{port}")
-                } else {
-                    format!("{addr}:{port}")
-                };
+                let target = socket_text(&addr, port);
                 let probe = tcp_probe(&addr, port);
                 let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
                 attempts.extend([
@@ -1154,17 +1290,88 @@ mod tests {
             "egress-container-post",
         ];
         let tailnet = ["tailnet-container-direct", "tailnet-container:*"];
-        for (with_egress, with_tailnet) in
-            [(false, false), (true, false), (false, true), (true, true)]
-        {
+        let session = ["session-bridge-container"];
+        for (with_egress, with_tailnet, with_session) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
             let want: Vec<&str> = base
                 .iter()
                 .chain(egress.iter().filter(|_| with_egress))
                 .chain(tailnet.iter().filter(|_| with_tailnet))
+                .chain(session.iter().filter(|_| with_session))
                 .copied()
                 .collect();
-            assert_eq!(skipped_containers(with_egress, with_tailnet), want);
+            assert_eq!(
+                skipped_containers(with_egress, with_tailnet, with_session),
+                want
+            );
         }
+    }
+
+    /// The bridge's probes follow the configuration and the node's own
+    /// tailnet addresses: none without a session, loopback alone without
+    /// the tailnet, and each own address at the bridge's and serve's ports.
+    #[test]
+    fn session_bridge_probes_follow_the_configuration() {
+        let up: serde_json::Value = serde_json::from_str(
+            r#"{"Self": {"TailscaleIPs": ["100.72.1.2", "fd7a:115c:a1e0::1"]},
+                "Peer": {"a": {"TailscaleIPs": ["100.101.102.103"]}}}"#,
+        )
+        .unwrap();
+        let no_addresses: serde_json::Value =
+            serde_json::from_str(r#"{"Self": {"TailscaleIPs": []}}"#).unwrap();
+        let null = serde_json::Value::Null;
+        let loopback = ("127.0.0.1", 7790);
+        let cases = [
+            (false, &up, &[][..]),
+            (false, &null, &[]),
+            (true, &null, &[loopback]),
+            (true, &no_addresses, &[loopback]),
+            (
+                true,
+                &up,
+                &[
+                    loopback,
+                    ("100.72.1.2", 7790),
+                    ("100.72.1.2", 443),
+                    ("fd7a:115c:a1e0::1", 7790),
+                    ("fd7a:115c:a1e0::1", 443),
+                ],
+            ),
+        ];
+        for (listen, status, want) in cases {
+            let want: Vec<(String, u16)> = want
+                .iter()
+                .map(|&(addr, port)| (addr.to_owned(), port))
+                .collect();
+            assert_eq!(bridge_targets(listen, status), want, "{listen} {status}");
+        }
+        assert_eq!(
+            socket_text("fd7a:115c:a1e0::1", 443),
+            "[fd7a:115c:a1e0::1]:443"
+        );
+        assert_eq!(socket_text("127.0.0.1", 7790), "127.0.0.1:7790");
+    }
+
+    /// A port something already listens at is no control: whatever holds
+    /// it would be handed serve's connections.
+    #[test]
+    fn a_bridge_control_is_a_listener_of_the_checks_own() {
+        let first = hold("127.0.0.1", 0).unwrap();
+        let port = first.local_addr().unwrap().port();
+        let err = hold("127.0.0.1", port).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with(&format!("listening at 127.0.0.1:{port}, where")),
+            "{err:#}"
+        );
+        let err = hold("bridge", port).unwrap_err();
+        assert!(err.to_string().contains("not an IP address"), "{err:#}");
     }
 
     #[test]

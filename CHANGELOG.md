@@ -21,6 +21,10 @@ says what a caller may rely on across versions.
   results storage account `productionresultssa31`, alongside gh-aw's first
   twenty. Hosted runners now get this account, so `upload-artifact` failed
   (tracker#974).
+- With `[session] listen`, `sandbox check` probes that the sandbox user cannot
+  reach the session bridge on loopback or at the node's own tailnet addresses,
+  against a listener of the runner's user as the control
+  (docs/sandbox-check.md#a-sessions-bridge).
 - `.github/agentic-job/private-digest/` is a reference caller for a private
   repository: one digest comment on one issue, with the sandbox user, the
   egress allowlist and the job's read token. It is an example to copy and is
