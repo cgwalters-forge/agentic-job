@@ -354,6 +354,36 @@ jobs:
           tool: just@1.58.0
       - run: just claude-acp-test
 
+  # `agentic-job apply` against a real Forgejo (crates/agentic-job/tests/forgejo.rs):
+  # a throwaway service container on loopback, bootstrapped by the test,
+  # with no secret of this repository. Read-only job token. Not listed in
+  # required-checks until it has proven stable (workflow/ci.test.cjs
+  # excludes it by name until then). The image is pinned by hand: bump it
+  # to the next LTS release.
+  forgejo:
+    needs: changes
+    if: ${{ needs.changes.outputs.full == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    services:
+      forgejo:
+        # v15.0.11, the LTS release.
+        image: codeberg.org/forgejo/forgejo@sha256:5d050e6d623e540923ff54b1c0c7acf41c3f9174a6c7ad515cc0c63d703fcd22
+        env:
+          FORGEJO__security__INSTALL_LOCK: "true"
+          FORGEJO__server__ROOT_URL: http://127.0.0.1:3000/
+        ports:
+          - 127.0.0.1:3000:3000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked --test forgejo -- --ignored --nocapture
+        env:
+          AGENTIC_JOB_TEST_FORGEJO: http://127.0.0.1:3000
+          AGENTIC_JOB_TEST_FORGEJO_CONTAINER: ${{ job.services.forgejo.id }}
+
   # crates/agentic-job/tests/corpus: `collect` and `check` against gh-aw's
   # pinned handlers, with a mocked forge, and the old tree's check and the
   # new one on the same requests and hand-backs. The old tree is fetched

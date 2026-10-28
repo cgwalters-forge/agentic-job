@@ -162,9 +162,9 @@ test('the aggregate accepts a skip only under a gate that said false', () => {
   // The jq filter is folded into the step's environment, as GitHub does.
   const filter = required.slice(required.indexOf('          FILTER: >-\n'), required.indexOf('        run: >-\n'))
     .replace('          FILTER: >-\n', '').trim().split('\n').map(line => line.trim()).join(' ');
-  // Every job but the sentinels and the push-only one is aggregated, under exactly one gate.
+  // Every job but the sentinels, the push-only one and forgejo is aggregated, under exactly one gate.
   const all = ci.split('\njobs:\n')[1].match(/^  [a-z][a-z0-9-]*(?=:\n)/gm).map(name => name.trim())
-    .filter(name => !['required-checks', 'ci', 'secure-host-published'].includes(name));
+    .filter(name => !['required-checks', 'ci', 'secure-host-published', 'forgejo'].includes(name));
   assert.deepEqual(required.match(/needs: \[(.*)\]/)[1].split(', ').sort(), [...all].sort());
   assert.deepEqual(['changes', ...Object.values(gates).flat()].sort(), [...all].sort());
   for (const [gate, jobs] of Object.entries(gates)) {

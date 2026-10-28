@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- CI's new `forgejo` job runs `agentic-job apply` against a real Forgejo
+  15 LTS container: a comment and a pull request from the bot's fork, a
+  neutralized mention and a refused protected path, with a token scoped to
+  `write:repository` and `write:issue` (docs/safe-outputs.md#publishing-to-forgejo).
+  It is not yet a required check.
 - `run` no longer succeeds when the inference proxy no longer knows the
   run's token at its end (HTTP 401, as after a broker restart): it says
   `inference token revoked mid-run (broker restart?)` and exits 1, or 3
