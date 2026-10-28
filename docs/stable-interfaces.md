@@ -45,6 +45,10 @@ Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`
 ([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
 
+`status-comment` preserves opening whole-line hidden caller comments, except
+tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
+[status provenance contract](workflow.md).
+
 Not stable: `budget`, deprecated in favour of `budget-usd`;
 `fake-profile`, `expect-check-refusal` and
 `secure-host-image-artifact-id`, which exist for this repository's

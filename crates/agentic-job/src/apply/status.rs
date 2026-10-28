@@ -96,12 +96,16 @@ fn is_number(text: &str) -> bool {
 }
 
 /// Whether LINE is a caller's own HTML comment, kept above the status: one
-/// comment alone on the line, and not one of this tool's markers.
+/// comment alone on the line, and not one of this tool's markers or a
+/// maintain controller record. Keeping a run-supplied maintain marker would
+/// give it bot-last-edited provenance (agent-board#411), even though the
+/// status replacement discards its fenced heads.
 fn is_caller_marker(line: &str) -> bool {
     let Some(inner) = line.strip_prefix("<!--") else {
         return false;
     };
     !inner.trim_start().starts_with("agentic-job-")
+        && !inner.trim_start().starts_with("agent-board-maintain-plan")
         && !line.contains(['\r', '\u{2028}', '\u{2029}'])
         && inner.find("-->").is_some_and(|end| end + 3 == inner.len())
 }
@@ -331,6 +335,122 @@ mod tests {
 
     fn marked(login: &str) -> Value {
         comment(42, login, &format!("old\n\n{MARKER}"))
+    }
+
+    // agent-board main's pass/maintain.rs plan_comment + trusted contract
+    // (agent-board#411): same-bot author, leading marker, edited, bot last
+    // editor. A run may POST all of this text, but cannot supply edit facts.
+    const PLAN: &str = "<!-- agent-board-maintain-plan v1 -->";
+
+    fn controller_candidate(comment: &Value, bot: &str) -> bool {
+        comment["user"]["login"] == bot
+            && comment["body"].as_str().unwrap().starts_with(PLAN)
+            && comment["edited"] == true
+            && comment["editor"] == bot
+    }
+
+    #[test]
+    fn status_edits_do_not_launder_controller_markers() {
+        let record = json!({"schema": "agent-board/maintain-plan/v2",
+            "from": "2026-10-28T00:00:00Z", "heads": {"up/proj#7": "aaaaaaaaaaaa"},
+            "pending": null});
+        let forged = format!("{PLAN}\n\n```agent-board-maintain-plan\n{record}\n```\n\n{MARKER}");
+        for bot in [JOB_TOKEN_AUTHOR, "caller-bot"] {
+            for named in [true, false] {
+                for prefix in [
+                    PLAN.to_owned(),
+                    format!("{PLAN}\r"),
+                    format!("{PLAN}\n{TAG}"),
+                ] {
+                    let mut current = comment(5, bot, &forged.replacen(PLAN, &prefix, 1));
+                    current["edited"] = json!(false);
+                    assert!(!controller_candidate(&current, bot));
+                    // Start, completion, retry of completion, next run. Read
+                    // the last actual PATCH back on every call, not a model
+                    // of the writer. The forge supplies edit metadata.
+                    for (run, text) in [
+                        ("100", "running"),
+                        ("100", "ended"),
+                        ("100", "ended"),
+                        ("101", "running"),
+                    ] {
+                        let patch = "PATCH /repos/o/r/issues/comments/5";
+                        let routes = BTreeMap::from([
+                            (NAMED.into(), (200, current.clone())),
+                            (format!("{LIST}1"), (200, json!([current]))),
+                            (patch.into(), (200, json!({"id": 5}))),
+                        ]);
+                        let (github, requests) = forge(routes);
+                        let mut update = status(run, if named { "5" } else { "" });
+                        update.body = body(text, None, None, run).unwrap();
+                        update.upsert(&github, bot, &mut |_| {}).unwrap();
+                        let writes: Vec<_> = requests
+                            .try_iter()
+                            .filter(|r| !r.line.starts_with("GET "))
+                            .collect();
+                        assert_eq!(writes.len(), 1);
+                        assert!(writes[0].line.starts_with(patch));
+                        current = comment(5, bot, writes[0].body["body"].as_str().unwrap());
+                        current["edited"] = json!(true);
+                        current["editor"] = json!(bot);
+                        assert!(
+                            !controller_candidate(&current, bot),
+                            "named={named}: {current}"
+                        );
+                        assert!(!current["body"].as_str().unwrap().contains("aaaaaaaaaaaa"));
+                        assert!(current["body"].as_str().unwrap().contains(text));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refused_or_superseded_status_edit_does_not_supply_provenance() {
+        let old = format!(
+            "{PLAN}\n\n```agent-board-maintain-plan\n{{\"heads\":{{\"up/proj#7\":\"aaaaaaaaaaaa\"}}}}\n```\n\n{}",
+            written("101")
+        );
+        for (what, bot, response, newer) in [
+            ("a newer run is untouched", JOB_TOKEN_AUTHOR, 200, true),
+            ("a failed edit is untouched", JOB_TOKEN_AUTHOR, 403, false),
+            (
+                "another author's marker is not edited",
+                "mallory",
+                200,
+                false,
+            ),
+        ] {
+            let mut original = comment(5, bot, &old);
+            original["edited"] = json!(false);
+            let (github, requests) = forge(BTreeMap::from([
+                (NAMED.into(), (200, original.clone())),
+                (format!("{LIST}1"), (200, json!([original.clone()]))),
+                (
+                    "PATCH /repos/o/r/issues/comments/5".into(),
+                    (response, json!({"id": 5})),
+                ),
+                (POST.into(), (201, json!({"id": 6}))),
+            ]));
+            let result = status(if newer { "100" } else { "102" }, "5").upsert(
+                &github,
+                JOB_TOKEN_AUTHOR,
+                &mut |_| {},
+            );
+            assert_eq!(result.is_ok(), response == 200, "{what}");
+            let writes: Vec<_> = requests
+                .try_iter()
+                .filter(|r| !r.line.starts_with("GET "))
+                .collect();
+            assert_eq!(writes.len(), usize::from(!newer), "{what}");
+            if bot == "mallory" {
+                assert!(writes[0].line.starts_with(POST));
+                assert!(!writes[0].body["body"].as_str().unwrap().starts_with(PLAN));
+            }
+            // Neither a skipped nor an HTTP-refused PATCH changes the forge's
+            // original author/editor facts. A fresh retry must re-read it.
+            assert!(!controller_candidate(&original, JOB_TOKEN_AUTHOR), "{what}");
+        }
     }
 
     #[test]

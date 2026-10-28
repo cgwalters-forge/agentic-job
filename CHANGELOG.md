@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Status edits drop a run-supplied `agent-board-maintain-plan` marker rather
+  than give it bot-last-edited provenance. Fake-forge and workflow tests pin
+  this contract, including completion and retries; ordinary caller markers
+  are still preserved (docs/workflow.md).
 - CI's new `forgejo` job runs `agentic-job apply` against a real Forgejo
   15 LTS container: a comment and a pull request from the bot's fork, a
   neutralized mention and a refused protected path, with a token scoped to
