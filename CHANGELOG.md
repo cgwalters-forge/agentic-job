@@ -16,6 +16,15 @@ says what a caller may rely on across versions.
   real reviews are on, say whose approval and why. New:
   `agentic-job review carry`; `review submit --accepted` is optional for
   a carried approval (docs/review.md#carried-approvals).
+- A run the timeout stops no longer ends well when the agent answers the
+  cancel with `end_turn`, as opencode does, without the output the run
+  requires: the agent gets its hand-back turn, and a run that still hands
+  back nothing exits 124 with `the agent timed out without handing back a
+  result`, which the run action makes its error annotation. A review that
+  timed out with no verdict had concluded success, so nothing re-ran it
+  (#2149). opencode now has a `stall-timeout` of 600 seconds: one of its
+  model requests hung for 70 minutes, until the timeout, and a stall's
+  cancel it answers with `end_turn` is still a stall (docs/harness.md).
 - `agentic-job apply --forge forgejo` also publishes `add_labels`,
   `remove_labels`, `close_issue`, `close_pull_request` and `create_issue`,
   and writes nothing for `noop`, `missing_tool` and `missing_data` instead

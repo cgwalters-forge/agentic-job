@@ -30,9 +30,15 @@ env = { ANTHROPIC_MODEL = "opus" }
 
 # opencode speaks ACP natively; its model is a session config option. A
 # prompt sent during a turn reaches the model at its next step.
+# One of its model requests hung: a review sent nothing for 70 minutes
+# after its last tool call, and the proxy saw no request after it, until
+# the timeout (#2149). Its own tools have timeouts, and a tool call
+# running is not taken for a stall; ten minutes leaves a model room to
+# think silently.
 [opencode]
 command = ["opencode", "acp"]
 notices = true
+stall-timeout = 600
 
 # Vibe's ACP entrypoint enables project configuration unconditionally. Use
 # its library entrypoint with only the user source: a repository must not

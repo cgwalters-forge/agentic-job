@@ -253,8 +253,12 @@ command = ["opencode", "acp"]
             assert_eq!(spec.steering, steering, "{agent}");
             // Only Claude Code answers a turn it gave up on as done.
             assert_eq!(spec.provider_error.is_some(), agent == "claude", "{agent}");
-            // Only Vibe is known to stall in a model request.
-            let stall = (agent == "vibe").then_some(120);
+            // Only Vibe and opencode are known to stall in a model request.
+            let stall = match agent {
+                "vibe" => Some(120),
+                "opencode" => Some(600),
+                _ => None,
+            };
             assert_eq!(spec.stall_timeout, stall, "{agent}");
             // Only Vibe's rate-limit error is known by its code.
             let code = (agent == "vibe").then_some(-31001);
