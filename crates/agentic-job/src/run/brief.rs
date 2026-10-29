@@ -401,7 +401,7 @@ pub fn guide(
              requests refused; a field not listed is dropped.\n",
         );
         for name in allowed {
-            let fields = collect::field_guide(name)
+            let fields = collect::field_guide(name, policy.forge)
                 .unwrap_or_else(|| "as gh-aw's safe outputs define them".to_owned());
             let _ = writeln!(text, "  - `{name}`: {fields}");
         }

@@ -161,6 +161,11 @@ pub const NATIVE_OUTPUTS: &[&str] = &[
 /// could act on the wrong item.
 pub const ITEM_NUMBER: &str = "item_number";
 
+/// gh-aw's target fields that name the kind of item: an issue, and a pull
+/// request (on GitLab a merge request). On GitLab, `add_labels` and
+/// `remove_labels` name their item by exactly one of these.
+pub const KIND_TARGETS: &[&str] = &["issue_number", "pull_request_number"];
+
 impl Forge {
     /// The name a bounds file gives it.
     fn name(self) -> &'static str {
