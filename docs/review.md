@@ -330,6 +330,53 @@ be limited to pull requests, so a required `review` would hold each queued pull
 request until the queue's timeout removes it. How to report on a group is
 not designed.
 
+## Carried approvals
+
+Every push used to start a full review, and a rebase onto the base branch
+or a rustfmt-only commit cost as much as the change it moved
+([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)). With
+the repository variable `REVIEW_CARRY_APPROVAL=true` (unset is off), the
+`carry` job, on a `synchronize`, carries the previous head's approval to
+the new head instead of running the agent, when:
+
+- the previous head (the push's `before`) has the status `review`
+  `success`, set by the job token's bot, as the status job sets it after an
+  approval or a carried one; and
+- the new head's tree is exactly the approved changes replayed onto the
+  base branch: `git merge-tree` of the approved head, from its merge base
+  with the base branch onto the new head's, writes the new head's tree; or
+  it differs from that tree only in changed Rust files that are `rustfmt
+  --edition 2024`'s output for it, run without the trees' configuration.
+
+Tree equality, not `git patch-id`, which ignores whitespace and so
+indentation that changes what Python or YAML means; a rebase whose
+conflicts were resolved by hand is not carried. Anything else, more than
+100 changed files or a file over 1 MiB to format, or any failure (a head
+the forge no longer serves, no `rustfmt` on the runner) runs the review. A
+`/review` always runs one.
+
+`agentic-job review carry` fetches the base branch and both heads into a
+scratch repository with the job's read token (`contents: read`, and
+`statuses: read` for the previous head's status), and runs git and
+rustfmt from an empty directory, so no configuration, hook, attribute or
+toolchain file of the heads applies and nothing of theirs runs; rustfmt
+only parses the head's Rust files, outside the sandbox. The status then
+says `Approval of SHA carried forward: rebase` or `format`. Where
+[real reviews](#real-reviews-and-the-poll-contract) are on, `submit`
+submits an `APPROVED` review at the new head whose body, the binary's own
+text, names the approved head and why, so pollers and the ruleset see an
+approval of the current head; the status is success only once it is
+submitted. No comment is posted otherwise.
+
+What this trusts: the approved changes on a moved base were never reviewed
+against it, as with any approval kept across a rebase; `ci` and the other
+required checks still run on the new head. A formatter-only change is
+taken to mean nothing, which is not so for a `.rs` file read as data (a
+fixture) or for `line!()`, and a file of an older edition is formatted as
+2024's. Someone with write access can set a `review` status by hand, or
+have a workflow of a branch set one as the job token's bot, as such a
+workflow can already submit a review as that bot.
+
 ## Configuration
 
 `review.yml` has no network or inference setup of its own; the deployment
@@ -379,6 +426,7 @@ It needs these repository or organization variables, and with a broker no secret
 | `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
 | `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
+| `REVIEW_CARRY_APPROVAL` | optional, `true` carries an approval across a rebase or rustfmt-only push ([above](#carried-approvals)) |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
@@ -456,7 +504,12 @@ checked body with its run marker at the exact commit, stale heads, stopped or
 failed runs and noops, outputs that do not match the verdict, re-runs and
 lost responses that must not post twice, a 422 posted as the comment, inline
 comments placed in the review or moved to its body, and the status for each
-combination of check, verdict, apply and open pull requests at the head.
+combination of check, verdict, apply and open pull requests at the head,
+and a carried approval's review and status. `review::carry::tests` builds
+local repositories and covers which heads carry (a rebase, a recommit,
+formatter output, rebased or not) and which do not (another change,
+added spaces, a non-Rust or new file, a conflicting rebase, a failing
+formatter), with a stand-in for rustfmt, and which statuses approve.
 They use a fake API; actual forge writes are left to real workflow runs.
 
 `node --test workflow/review.test.cjs` checks, by reading `review.yml`, which job

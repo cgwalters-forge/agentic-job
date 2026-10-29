@@ -9,6 +9,13 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `review.yml`, with the repository variable `REVIEW_CARRY_APPROVAL=true`,
+  carries the previous head's approval to a push that is only that head
+  rebased onto the base branch or rustfmt's output of it, instead of
+  running the agent; the status `review`, and the submitted review where
+  real reviews are on, say whose approval and why. New:
+  `agentic-job review carry`; `review submit --accepted` is optional for
+  a carried approval (docs/review.md#carried-approvals).
 - `agentic-job apply --forge forgejo` also publishes `add_labels`,
   `remove_labels`, `close_issue`, `close_pull_request` and `create_issue`,
   and writes nothing for `noop`, `missing_tool` and `missing_data` instead

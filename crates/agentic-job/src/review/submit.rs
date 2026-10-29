@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::carry::Carried;
 use super::verdict::{self, Verdict, escape, inline_section, one_line, positive};
 use super::{REVIEW_COMMENT, SHA};
 
@@ -28,7 +29,7 @@ const MAX_PAGES: usize = 30;
 const DEFAULT_API: &str = "https://api.github.com";
 const DEFAULT_SERVER: &str = "https://github.com";
 // The job token's user, which posts what this job and apply post.
-const BOT: &str = "github-actions[bot]";
+pub(super) const BOT: &str = "github-actions[bot]";
 // Who else may have posted apply's comment: the PAT's user has write access.
 const WRITERS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
 // Why GitHub refused a submission, from its response body, never its
@@ -194,7 +195,7 @@ impl Api for Github {
 }
 
 /// A workflow command's message, kept to its one line.
-fn annotate(kind: &str, message: &str) {
+pub(super) fn annotate(kind: &str, message: &str) {
     let message = message
         .replace('%', "%25")
         .replace('\r', "%0D")
@@ -226,21 +227,22 @@ impl Run {
 }
 
 /// The status for one finished run, or why it sets none.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Status {
     Skip(String),
     Set {
         state: &'static str,
-        description: &'static str,
+        description: String,
     },
 }
 
 /// The commit status `review`, from the jobs' results and the open pull
 /// requests at the reviewed head. Success needs a checked APPROVE that was
-/// posted, as the submitted review or else apply's comment. A status
-/// belongs to the commit, so it is set only when the triggering pull
-/// request is the one open there (docs/review.md).
-fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Status {
+/// posted, as the submitted review or else apply's comment, or an approval
+/// the carry job carried, submitted as the review where real reviews are
+/// on. A status belongs to the commit, so it is set only when the
+/// triggering pull request is the one open there (docs/review.md).
+fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Result<Status> {
     if open != [run.pull] {
         let open = open
             .iter()
@@ -248,10 +250,22 @@ fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Statu
             .collect::<Vec<_>>()
             .join(", ");
         let open = if open.is_empty() { "none".into() } else { open };
-        return Status::Skip(format!(
+        return Ok(Status::Skip(format!(
             "No review status on {}: its open pull requests are {open}, not only #{}",
             run.head, run.pull
-        ));
+        )));
+    }
+    if let Some(carried) = Carried::read(env)? {
+        let (state, description) = if env("REAL_REVIEWS") == "true" && env("REVIEW_URL").is_empty()
+        {
+            (
+                "failure",
+                "The carried approval did not post; see the workflow run".to_owned(),
+            )
+        } else {
+            ("success", carried.status())
+        };
+        return Ok(Status::Set { state, description });
     }
     let posted = !env("REVIEW_URL").is_empty()
         || (env("APPLY_RESULT") == "success" && !env("RESULT_URL").is_empty());
@@ -264,7 +278,10 @@ fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Statu
             _ => ("failure", "The review did not approve this commit"),
         }
     };
-    Status::Set { state, description }
+    Ok(Status::Set {
+        state,
+        description: description.to_owned(),
+    })
 }
 
 /// Sets the status `review` on the head, after listing the open pull
@@ -278,7 +295,7 @@ pub fn report_status(env: &dyn Fn(&str) -> String, api: &dyn Api) -> Result<()> 
         .filter(|pull| pull["head"]["sha"] == run.head.as_str())
         .filter_map(|pull| pull["number"].as_u64())
         .collect();
-    match review_status(env, &run, &open) {
+    match review_status(env, &run, &open)? {
         Status::Skip(why) => annotate("notice", &why),
         Status::Set { state, description } => {
             api.post(
@@ -443,27 +460,38 @@ fn posted_url(server: &str, data: &Value, fallback: impl FnOnce(u64) -> String) 
 /// check's upload in this run, so what is submitted is exactly what check
 /// and the collector's sanitizing passed, never text read back from the
 /// forge. Nothing submitted (off, a noop, a run stopped at a limit, a moved
-/// head, a failed submission) leaves the comment to apply as before.
-pub fn submit(env: &dyn Fn(&str) -> String, output: &Value, api: &dyn Api) -> Result<String> {
+/// head, a failed submission) leaves the comment to apply as before. An
+/// approval the carry job carried has no OUTPUT: its body is ours.
+pub fn submit(
+    env: &dyn Fn(&str) -> String,
+    output: Option<&Value>,
+    api: &dyn Api,
+) -> Result<String> {
     if env("REAL_REVIEWS") != "true" {
         return Ok(String::new());
     }
     // Validated before any API call.
     let run = Run::read(env)?;
-    // apply-partial is false for a review (`review task`): a run stopped at
-    // a limit is not applied, so it is not submitted either.
-    let checked = env("VERDICT");
-    if env("CHECK_RESULT") != "success"
-        || env("AGENT_EXIT") != "0"
-        || !matches!(checked.as_str(), "APPROVE" | "CHANGES")
-    {
-        return Ok(String::new());
-    }
-    let verdict = verdict::check_outputs(output, &run.pull.to_string())?;
-    ensure!(
-        Verdict::word(verdict) == checked,
-        "Checked output does not match the checked verdict"
-    );
+    let (verdict, output) = if let Some(carried) = Carried::read(env)? {
+        (Some(Verdict::Approve), carried.output())
+    } else {
+        // apply-partial is false for a review (`review task`): a run
+        // stopped at a limit is not applied, so it is not submitted either.
+        let checked = env("VERDICT");
+        if env("CHECK_RESULT") != "success"
+            || env("AGENT_EXIT") != "0"
+            || !matches!(checked.as_str(), "APPROVE" | "CHANGES")
+        {
+            return Ok(String::new());
+        }
+        let output = output.context("Review submission requires check's accepted output")?;
+        let verdict = verdict::check_outputs(output, &run.pull.to_string())?;
+        ensure!(
+            Verdict::word(verdict) == checked,
+            "Checked output does not match the checked verdict"
+        );
+        (verdict, output.clone())
+    };
     let run_id = env("GITHUB_RUN_ID");
     ensure!(
         RUN_ID.is_match(&run_id),
@@ -749,9 +777,49 @@ mod tests {
         let env = environment(changes);
         submit(
             &|key| env.get(key).cloned().unwrap_or_default(),
-            output,
+            Some(output),
             fake,
         )
+    }
+
+    // A carried approval is submitted with our body, without check's
+    // output or the agent, and without real reviews nothing is submitted.
+    #[test]
+    fn a_carried_approval_is_submitted_with_its_own_body() {
+        let before = "b".repeat(40);
+        let carried = [
+            ("CARRIED_FROM", before.as_str()),
+            ("CARRIED_WHY", "rebase"),
+            ("CHECK_RESULT", "skipped"),
+            ("AGENT_EXIT", ""),
+            ("VERDICT", ""),
+            ("AGENT_JOB", ""),
+        ];
+        let fake = Fake::default();
+        let env = environment(&carried);
+        let env = |key: &str| env.get(key).cloned().unwrap_or_default();
+        assert_eq!(submit(&env, None, &fake).unwrap(), REVIEW_URL);
+        let body = format!(
+            "VERDICT: APPROVE\n\nNo new review ran: this head is the same changes rebased onto the base branch of {before}, which the review approved.\n\n> Generated by [review]({RUN}) for #12 at {HEAD}\n\n{MARKER}"
+        );
+        assert_eq!(
+            reviews(&fake),
+            [json!({"commit_id": HEAD, "event": "APPROVE", "body": body})]
+        );
+
+        let off = Fake::default();
+        let env = environment(&[carried.as_slice(), &[("REAL_REVIEWS", "")]].concat());
+        let env = |key: &str| env.get(key).cloned().unwrap_or_default();
+        assert_eq!(submit(&env, None, &off).unwrap(), "");
+        assert!(reviews(&off).is_empty());
+
+        let bad = environment(&[carried.as_slice(), &[("CARRIED_WHY", "squash")]].concat());
+        let bad = |key: &str| bad.get(key).cloned().unwrap_or_default();
+        assert!(submit(&bad, None, &Fake::default()).is_err());
+        // Not carried, a review needs check's output.
+        let env = environment(&[]);
+        let env = |key: &str| env.get(key).cloned().unwrap_or_default();
+        assert!(submit(&env, None, &Fake::default()).is_err());
     }
 
     fn reviews(fake: &Fake) -> Vec<Value> {
@@ -1193,7 +1261,23 @@ mod tests {
             ),
             ("REVIEW_URL", ""),
         ];
-        let set = |state, description| Status::Set { state, description };
+        let set = |state, description: &str| Status::Set {
+            state,
+            description: description.to_owned(),
+        };
+        let carried = "c".repeat(40);
+        let carried = [
+            ("CARRIED_FROM", carried.as_str()),
+            ("CARRIED_WHY", "format"),
+            ("CHECK_RESULT", "skipped"),
+            ("APPLY_RESULT", "skipped"),
+            ("RESULT_URL", ""),
+            ("VERDICT", ""),
+        ];
+        let carried_status = set(
+            "success",
+            "Approval of cccccccccccc carried forward: format",
+        );
         let approve = set("success", "The review approved this commit");
         let not_posted = set("failure", "The review did not post; see the workflow run");
         let skip = |open: &str| {
@@ -1255,6 +1339,37 @@ mod tests {
                 vec![147],
                 set("failure", "The review did not post; see the workflow run"),
             ),
+            (
+                "carried",
+                carried.to_vec(),
+                vec![147],
+                carried_status.clone(),
+            ),
+            (
+                "carried and submitted as the review",
+                [
+                    carried.as_slice(),
+                    &[("REAL_REVIEWS", "true"), ("REVIEW_URL", "https://x/1")],
+                ]
+                .concat(),
+                vec![147],
+                carried_status,
+            ),
+            (
+                "carried, not submitted",
+                [carried.as_slice(), &[("REAL_REVIEWS", "true")]].concat(),
+                vec![147],
+                set(
+                    "failure",
+                    "The carried approval did not post; see the workflow run",
+                ),
+            ),
+            (
+                "carried to a head another pull request has",
+                carried.to_vec(),
+                vec![147, 148],
+                skip("147, 148"),
+            ),
             ("no open pull request", vec![], vec![], skip("none")),
             (
                 "two open pull requests",
@@ -1267,7 +1382,11 @@ mod tests {
             let env: HashMap<&str, &str> = approved.iter().copied().chain(changes).collect();
             let env = |key: &str| env.get(key).copied().unwrap_or_default().to_owned();
             let run = Run::read(&env).unwrap();
-            assert_eq!(review_status(&env, &run, &open), expected, "{name}");
+            assert_eq!(
+                review_status(&env, &run, &open).unwrap(),
+                expected,
+                "{name}"
+            );
         }
         for (key, value) in [
             ("HEAD_SHA", "A".repeat(40)),

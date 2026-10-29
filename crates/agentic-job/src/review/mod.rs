@@ -11,8 +11,10 @@
 //! of the default branch, with the owner's merge policy after it.
 //!
 //! After the agent, `verdict` and `fold` read check's output (verdict.rs),
-//! and `submit` and `status` post the checked verdict (submit.rs).
+//! and `submit` and `status` post the checked verdict (submit.rs). In place
+//! of the agent, `carry` may carry the previous head's approval (carry.rs).
 
+mod carry;
 mod submit;
 mod verdict;
 
@@ -109,12 +111,21 @@ pub enum Command {
         #[arg(value_name = "FILE")]
         accepted: PathBuf,
     },
-    /// Submit the checked verdict in the environment as the pull request's
-    /// review, and append its URL, or none, to OUTPUT as `review-url`
-    Submit {
-        /// Check's accepted output
+    /// Append `from` and `why` to OUTPUT when the pull request's new head
+    /// carries the previous head's approval: a rebase onto the base, or
+    /// rustfmt's output, of it; nothing when the review is to run
+    Carry {
+        /// The step's $GITHUB_OUTPUT
         #[arg(long, value_name = "FILE")]
-        accepted: PathBuf,
+        output: PathBuf,
+    },
+    /// Submit the checked verdict in the environment, or the approval it
+    /// carried, as the pull request's review, and append its URL, or none,
+    /// to OUTPUT as `review-url`
+    Submit {
+        /// Check's accepted output; none for a carried approval
+        #[arg(long, value_name = "FILE")]
+        accepted: Option<PathBuf>,
         /// The step's $GITHUB_OUTPUT
         #[arg(long, value_name = "FILE")]
         output: PathBuf,
@@ -174,9 +185,13 @@ impl Command {
                 }
             }
             Self::Fold { accepted } => println!("{}", verdict::fold(read_output(accepted)?)),
+            Self::Carry { output } => {
+                carry::carry(&env, &submit::Github::from_env(&env)?, output)?;
+            }
             Self::Submit { accepted, output } => {
-                let accepted = read_output(accepted)?;
-                let url = submit::submit(&env, &accepted, &submit::Github::from_env(&env)?)?;
+                let accepted = accepted.as_deref().map(read_output).transpose()?;
+                let api = submit::Github::from_env(&env)?;
+                let url = submit::submit(&env, accepted.as_ref(), &api)?;
                 submit::write_output(output, &url)?;
             }
             Self::Status => submit::report_status(&env, &submit::Github::from_env(&env)?)?,
