@@ -1,6 +1,7 @@
 //! Last-mile notification filtering, after collection and before publication.
-//! Code is kept verbatim; no agent-selected identity is allowed to notify.
-//! On GitLab, quick actions are broken too, code included.
+//! Code is kept verbatim except on GitLab; no agent-selected identity is
+//! allowed to notify. On GitLab, mentions and quick actions are broken in
+//! code too, so differing Markdown parsers cannot bypass the filter.
 
 use std::sync::LazyLock;
 
@@ -60,7 +61,7 @@ pub(super) fn filter(body: &str, forge: &str) -> String {
         .find(|syntax| syntax.forge == forge)
         .expect("publisher has a syntax entry");
     let mut references = 0;
-    let filtered = outside_code(body, &mut |text, before, _| {
+    let mut filter_text = |text: &str, before: Option<char>, _: Option<char>| {
         let mut result = String::new();
         let mut end = 0;
         for token in TOKENS.find_iter(text) {
@@ -105,7 +106,15 @@ pub(super) fn filter(body: &str, forge: &str) -> String {
         }
         result.push_str(&text[end..]);
         result
-    });
+    };
+    // GitLab may parse escapes and fences differently from outside_code.
+    // Filter even purported code regions rather than trusting that they
+    // cannot notify (for example, backslash-escaped backticks are literal).
+    let filtered = if forge == "gitlab" {
+        filter_text(body, None, None)
+    } else {
+        outside_code(body, &mut filter_text)
+    };
     if syntax.quick_actions {
         quick_actions(&filtered)
     } else {
@@ -165,7 +174,8 @@ mod tests {
             ("gitlab", "é@all", "é@\u{200b}all"),
             ("forgejo", "path/@user", "path/@user"),
             ("gitlab", "user@example.com", "user@example.com"),
-            ("gitlab", "`@all`", "`@all`"),
+            ("gitlab", "`@all`", "`@\u{200b}all`"),
+            ("gitlab", r"\`@all\`", "\\`@\u{200b}all\\`"),
             ("forgejo", "user@example.com", "user@example.com"),
             ("forgejo", "see !12", "see !\u{200b}12"),
             ("forgejo", "Closes !12", "C\u{200b}loses !\u{200b}12"),

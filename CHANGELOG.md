@@ -21,7 +21,8 @@ says what a caller may rely on across versions.
   (`--comment-target-kind` says which), and `create_pull_request`, as a
   merge request from the bounds' fork, to GitLab with `GITLAB_TOKEN`.
   Every body has GitLab's mentions (`@all`, `@here`, groups) and quick
-  actions (a line starting with `/`) broken; other types and `--status`
+  actions (a line starting with `/`) broken, including inside code so
+  escaped delimiters cannot bypass the filter; other types and `--status`
   are refused (docs/safe-outputs.md#publishing-to-gitlab). On Forgejo
   too, a pull request's title now has its mentions broken.
 - `review.yml`, with the repository variable `REVIEW_HISTORY=true`, gives

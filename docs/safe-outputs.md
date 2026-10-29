@@ -1540,7 +1540,9 @@ Every body and merge request title has GitLab's mentions broken:
 `@user`, `@group/subgroup`, `@all` and `@here`, after anything but an
 ASCII letter, digit or `_` as GitLab reads them, so `x.@all` too (and a
 link such as `https://social.example/@user` gets the break as well). A
-pull request's title has its mentions broken on Forgejo too now. Every
+pull request's title has its mentions broken on Forgejo too now. On GitLab,
+mentions are broken inside code too: differing interpretations of escaped
+backticks or fences must not leave a live notification. Every
 body also has its
 [quick actions](https://docs.gitlab.com/user/project/quick_actions/)
 broken: a line starting with `/` (`/merge`, `/approve`, `/close`) after
