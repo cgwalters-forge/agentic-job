@@ -1243,6 +1243,10 @@ enum Next<R> {
     HandBack(Stop, String, Duration),
 }
 
+/// How an agent answers a cancel: opencode answers it with end_turn
+/// (#2149).
+const CANCEL_ANSWERS: [StopReason; 2] = [StopReason::Cancelled, StopReason::EndTurn];
+
 /// Asks the agent to stop its turn, and gives it a moment to answer the
 /// prompt (with stopReason "cancelled"); permission requests are cancelled
 /// meanwhile. The turn's answer, if it came.
@@ -1407,7 +1411,10 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 quiet_until = task.stall.map(quiet_for);
             }
             why = wait_stop(&mut stop) => {
-                return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut()).await;
+                // A conversation's client sees for itself what the agent
+                // left, as after the turn.
+                let output = task.output.as_ref().filter(|_| conversation.is_none());
+                return stop_turn(&cx, tap, &sid, &cancelling, why, response.as_mut(), output).await;
             }
             Some(nudge) = nudges.recv() => match nudge {
                 // An agent that would end its turn for a prompt sent
@@ -1485,8 +1492,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 let answer = cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await;
                 match answer {
                     // The turn ended by itself as the cancel went: that
-                    // answer stands.
-                    Some(r) if !matches!(&r, Ok(resp) if resp.stop_reason == StopReason::Cancelled) => {
+                    // answer stands, but not an end_turn: a silent turn
+                    // is not taken for finished.
+                    Some(r) if !matches!(&r, Ok(resp) if CANCEL_ANSWERS.contains(&resp.stop_reason)) => {
                         break Next::Answered(r, None);
                     }
                     Some(_) if first => {
@@ -1553,8 +1561,22 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     )]);
     match cancel_turn(&cx, &sid, &cancelling, response.as_mut()).await {
         Some(r) => match prompt_result(r, tap) {
-            // It was done just then.
-            ended if ended.outcome == Outcome::Success => return ended,
+            // It was done just then, if it left the output the run
+            // requires: opencode answers a cancel with end_turn, and a
+            // run that took that for done ended well on the timeout with
+            // nothing handed back (#2149). Without it, it hands back.
+            ended if ended.outcome == Outcome::Success => {
+                let missing = match &task.output {
+                    Some(check) => match has_output(check, &mut stop).await {
+                        Ok(missing) => missing.is_some(),
+                        Err(stopped) => return stopped,
+                    },
+                    None => false,
+                };
+                if !missing {
+                    return ended;
+                }
+            }
             ended if ended.outcome == Outcome::Cancelled => {}
             // An agent that answers a cancel with an error isn't asked
             // for more: the limit is still why the run ended.
@@ -1814,6 +1836,20 @@ async fn has_output(
     }
 }
 
+/// Whether CHECK finds the agent's output at a limit, within the grace a
+/// cancelled turn gets (the session has stopped, so `has_output` would not
+/// wait for it).
+async fn found_by_stop(check: &OutputCheck) -> bool {
+    let abandon = Abandon(Arc::default());
+    let (check, stopped) = (check.clone(), abandon.0.clone());
+    let found = tokio::time::timeout(
+        CANCEL_GRACE,
+        tokio::task::spawn_blocking(move || check(&stopped)),
+    )
+    .await;
+    matches!(found, Ok(Ok(None)))
+}
+
 /// After the task's turn ENDED well: if the agent left no output that the
 /// run requires, one more turn in which it is reminded, under the same
 /// limits. A run whose agent still left none fails, rather than end well
@@ -1847,7 +1883,7 @@ async fn remind(
             biased;
             r = &mut response => break prompt_result(r, tap),
             why = wait_stop(stop) => {
-                break stop_turn(cx, tap, sid, cancelling, why, response.as_mut()).await;
+                break stop_turn(cx, tap, sid, cancelling, why, response.as_mut(), Some(check)).await;
             }
             Some(nudge) = nudges.recv() => match nudge {
                 // The reminder is all the agent is to do now; an update
@@ -2023,7 +2059,7 @@ async fn converse(
                     break;
                 }
                 why = wait_stop(stop) => {
-                    let ended = stop_turn(cx, tap, sid, cancelling, why, response.as_mut()).await;
+                    let ended = stop_turn(cx, tap, sid, cancelling, why, response.as_mut(), None).await;
                     reply(&mut answer, Err(SESSION_ENDED.to_owned()));
                     return Talked::Ended(ended);
                 }
@@ -2079,7 +2115,8 @@ async fn converse(
 }
 
 /// Ends the turn at a limit. The caller then closes the connection and
-/// kills the agent.
+/// kills the agent. OUTPUT is the check of what the run requires, if the
+/// turn's end would be the run's.
 async fn stop_turn<F>(
     cx: &ConnectionTo<Agent>,
     tap: &Tap,
@@ -2087,6 +2124,7 @@ async fn stop_turn<F>(
     cancelling: &AtomicBool,
     why: Option<Stop>,
     turn: Turn<'_, F>,
+    output: Option<&OutputCheck>,
 ) -> Ended
 where
     F: Future<Output = Result<PromptResponse, agent_client_protocol::Error>>,
@@ -2097,11 +2135,20 @@ where
     let (_, msg) = stopped(&why);
     tap.log(&[format!("⚠ {msg}")]);
     let answer = cancel_turn(cx, sid, cancelling, turn).await;
-    match answer.map(|r| prompt_result(r, tap)) {
-        // The turn had ended before the cancel reached it: spending is
-        // reported after the fact, so the reply that crossed the limit is
-        // usually the last one, and what the agent finished stands.
-        Some(ended) if ended.outcome == Outcome::Success => {
+    let ended = answer
+        .map(|r| prompt_result(r, tap))
+        .filter(|ended| ended.outcome == Outcome::Success);
+    // The turn had ended before the cancel reached it: spending is
+    // reported after the fact, so the reply that crossed the limit is
+    // usually the last one, and what the agent finished stands. Not
+    // without the output the run requires: opencode answers a cancel with
+    // end_turn (#2149), and the limit is then why the run ended.
+    let finished = match output {
+        Some(check) if ended.is_some() => found_by_stop(check).await,
+        _ => ended.is_some(),
+    };
+    match ended {
+        Some(ended) if finished => {
             let msg = format!("{msg}; the agent had already ended its turn");
             tap.log(&[format!("⚠ {msg}")]);
             Ended {

@@ -297,8 +297,13 @@ answers the cancel with `end_turn`, the run ends well, exit state 0:
 its `harness.json` message says how far over it went, the run action
 warns and sets its `over-budget` output, and the status comment says so.
 A turn answered with `cancelled` is a stop as before. A turn that ends
-just as the timeout cancels it is treated the same way. The budget cannot
-refuse a reply in advance, because no one knows its cost before it
+just as the timeout, or another limit that asks for a hand-back, cancels
+it is treated the same way if the agent left the output the run
+requires; without it, the agent gets the turn to hand back in, since
+opencode answers any cancel with `end_turn` (#2149). A run the timeout
+stopped with nothing handed back exits 124, and `run` and the run action
+say `the agent timed out without handing back a result`. The budget
+cannot refuse a reply in advance, because no one knows its cost before it
 comes; `max-requests` is the cap that acts before a request is made.
 
 `max-repeats` (off unless set, 2 to 100) is for an agent stuck making
@@ -396,11 +401,13 @@ so that pacing charges the pool the run went on with.
 
 Nor is a task's turn that stalls left to the timeout. Vibe has no read
 timeout on its model requests, and one waited six minutes on idle
-connections before going on (#983). An agent entry with
-`stall-timeout` (seconds; Vibe's is 120, no other has one) has a turn in
-which nothing comes from the agent for that long, with no tool call
-running, cancelled and the task sent again once on the same session,
-labelled `stalled`, behind a note that the last turn stalled. A second
+connections before going on (#983), and an opencode review sent nothing
+for 70 minutes after its last tool call (#2149). An agent entry with
+`stall-timeout` (seconds; Vibe's is 120, opencode's 600, no other has
+one) has a turn in which nothing comes from the agent for that long,
+with no tool call running, cancelled and the task sent again once on the same session,
+labelled `stalled`, behind a note that the last turn stalled; a cancel
+answered with `end_turn`, as opencode answers one, is still a stall. A second
 stall, or a cancel the agent does not answer, fails the run with a
 message that starts `the agent stalled`, and `summary.json` files it as
 a `stall` failure rather than `agent_exit`. `stalls` and `stall_retries`

@@ -326,6 +326,7 @@ runs:
         EXIT: ${{ steps.run.outputs.exit }}
         CLASS: ${{ steps.run.outputs.failure-class }}
         PARTIAL: ${{ steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' }}
+        HANDED_BACK: ${{ steps.safe-outputs.outputs.artifact-id != '' }}
       run: |
         summary=$JOB_DIR/out/run/summary.json
         why=
@@ -344,5 +345,7 @@ runs:
         case "$EXIT/$PARTIAL" in
           0/*) ;;
           3/true | 124/true) echo "::warning::the run was stopped at a limit (exit state $EXIT)$why and handed back what it had" ;;
+          124/*) [ "$HANDED_BACK" = true ] || { echo "::error::the agent timed out without handing back a result$why"; exit 1; }
+            echo "::error::agentic-job run ended with exit state $EXIT$why"; exit 1 ;;
           *) echo "::error::agentic-job run ended with exit state $EXIT$why"; exit 1 ;;
         esac

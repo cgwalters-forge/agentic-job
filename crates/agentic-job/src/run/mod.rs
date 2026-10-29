@@ -1502,6 +1502,10 @@ impl Settled {
 const TOKEN_LOST: &str = "inference token revoked mid-run (broker restart?): the inference \
                           proxy no longer knew this run's token when it was ended";
 
+/// What a run the timeout stopped says when it hands back nothing: a
+/// review then has no verdict, and its caller must see a failure (#2149).
+const TIMED_OUT: &str = "the agent timed out without handing back a result";
+
 /// The signals that ask a job to stop.
 struct Signals {
     terminate: tokio::signal::unix::Signal,
@@ -1761,6 +1765,15 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                         Ok(false) if forgotten && exit == Exit::Success => {
                             eprintln!("error: {TOKEN_LOST}");
                             Exit::Failure
+                        }
+                        // Still 124, which a caller fails unless it was
+                        // handed something; said, as nothing was.
+                        Ok(false)
+                            if exit == Exit::Timeout
+                                && !plan.out.join(upload::SAFE_OUTPUTS_DIR).exists() =>
+                        {
+                            eprintln!("error: {TIMED_OUT}");
+                            exit
                         }
                         _ => exit,
                     };

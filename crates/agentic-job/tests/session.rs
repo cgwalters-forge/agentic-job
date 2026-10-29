@@ -745,29 +745,88 @@ fn reported_cost_over_budget() {
 
 /// The reply that crosses the budget is the turn's last: the agent's
 /// answer to the cancel is that its turn had ended, so its work stands
-/// and the overrun is only a warning.
+/// and the overrun is only a warning. Not where the output the run
+/// requires is missing: opencode answers any cancel with end_turn (#2149),
+/// so a limit's cancel so answered then ends the run at the limit.
 #[test]
 fn reported_cost_over_budget_after_the_turn_ended() {
-    let r = run(
-        &["script", "{dir}/script.json"],
-        Setup {
-            files: &[(
-                "script.json",
-                r#"[{"cost": {"usd": 0.5}}, {"sleep": 20}, {"stop": "end_turn"}]"#,
-            )],
-            timeout_s: 60,
-            budget_aic: Some(10.0),
-            ..Setup::default()
-        },
-    );
-    assert_result(&r, 0, "success");
-    let message = "over budget: spent 50.0 of 10 AIC; the agent had already ended its turn";
-    assert_eq!(r.result["message"], message);
-    assert!(r.log.contains(&format!("⚠ {message}")), "{}", r.log);
-    assert_eq!(r.result["stop_reason"], "end_turn");
-    assert_eq!(r.result["handed_back"], false);
-    // The cancel cut the sleep short.
-    assert!(r.elapsed < Duration::from_secs(15), "took {:?}", r.elapsed);
+    const OVER_BUDGET: &str = r#"[{"cost": {"usd": 0.5}}, {"sleep": 20}, {"stop": "end_turn"}]"#;
+    const WRITE_THEN_OVER_BUDGET: &str = r#"[
+      {"write": {"title": "Write", "path": "{cwd}/done.txt", "content": "done\n"}},
+      {"cost": {"usd": 0.5}}, {"sleep": 20}, {"stop": "end_turn"}
+    ]"#;
+    // A one-second timeout stops the turn before the session asks the
+    // agent to hand back, or as it does; either way it ends at the limit.
+    const TIMEOUT: &str = r#"[{"sleep": 20}, {"stop": "end_turn"}]"#;
+    // (name, script, timeout, budget, output, status, result, the message's start)
+    let cases = [
+        (
+            "no output required",
+            OVER_BUDGET,
+            60,
+            Some(10.0),
+            None,
+            0,
+            "success",
+            "over budget: spent 50.0 of 10 AIC; the agent had already ended its turn",
+        ),
+        (
+            "the required output is there",
+            WRITE_THEN_OVER_BUDGET,
+            60,
+            Some(10.0),
+            Some("work/done.txt"),
+            0,
+            "success",
+            "over budget: spent 50.0 of 10 AIC; the agent had already ended its turn",
+        ),
+        (
+            "the required output is missing",
+            OVER_BUDGET,
+            60,
+            Some(10.0),
+            Some("work/done.txt"),
+            3,
+            "budget",
+            "over budget: spent 50.0 of 10 AIC; cancelled",
+        ),
+        (
+            "the timeout with the required output missing",
+            TIMEOUT,
+            1,
+            None,
+            Some("work/done.txt"),
+            124,
+            "timeout",
+            "hit the timeout; ",
+        ),
+    ];
+    for (name, script, timeout_s, budget_aic, output, status, result, message) in cases {
+        let r = run(
+            &["script", "{dir}/script.json"],
+            Setup {
+                files: &[("script.json", script)],
+                timeout_s,
+                budget_aic,
+                output,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, status, result);
+        let got = r.result["message"].as_str().unwrap_or_default();
+        assert!(got.starts_with(message), "{name}: {got}");
+        if status == 0 {
+            assert!(r.log.contains(&format!("⚠ {message}")), "{name}: {}", r.log);
+            assert_eq!(r.result["stop_reason"], "end_turn", "{name}");
+            assert_eq!(r.result["handed_back"], false, "{name}");
+        }
+        // The cancel cut the sleep short.
+        assert!(
+            r.elapsed < Duration::from_secs(15),
+            "{name}: took {:?}",
+            r.elapsed
+        );
+    }
 }
 
 #[test]
@@ -1311,12 +1370,17 @@ fn hand_back_near_a_limit() {
         count_requests: bool,
         max_tasks: Option<usize>,
         max_repeats: Option<usize>,
+        /// The output the run requires, as in `Setup`.
+        output: Option<&'static str>,
         status: u8,
         result: &'static str,
         message: &'static str,
         notices: &'static [&'static str],
         handed_back: bool,
     }
+    // An agent that answers the cancel with end_turn, as opencode does
+    // (#2149), after leaving what the script holds before it.
+    let ends_turn = |before: &str| format!(r#"[{before}{{"sleep": 60}}, {{"stop": "end_turn"}}]"#);
     let over_requests = format!(
         r#"[{}, {{"sleep": 60}}, {{"say": "Not reached."}}]"#,
         use_requests(95)
@@ -1335,6 +1399,7 @@ fn hand_back_near_a_limit() {
             count_requests: true,
             max_tasks: None,
             max_repeats: None,
+            output: None,
             status: 3,
             result: "budget",
             message: "used 95 of 100 model requests; the agent handed back",
@@ -1350,6 +1415,7 @@ fn hand_back_near_a_limit() {
             count_requests: true,
             max_tasks: None,
             max_repeats: None,
+            output: None,
             status: 3,
             result: "budget",
             message: "used 95 of 100 model requests; cancelled",
@@ -1366,6 +1432,7 @@ fn hand_back_near_a_limit() {
             count_requests: false,
             max_tasks: Some(2),
             max_repeats: None,
+            output: None,
             status: 3,
             result: "budget",
             message: "started more than 2 subagent tasks; the agent handed back",
@@ -1383,6 +1450,7 @@ fn hand_back_near_a_limit() {
             count_requests: false,
             max_tasks: None,
             max_repeats: Some(3),
+            output: None,
             status: 3,
             result: "budget",
             message: "repeated one tool call 5 times; the agent handed back",
@@ -1398,11 +1466,44 @@ fn hand_back_near_a_limit() {
             count_requests: false,
             max_tasks: None,
             max_repeats: None,
+            output: None,
             status: 124,
             result: "timeout",
             message: "hit the timeout; the agent handed back",
             notices: &["60%", "80%", "hand back"],
             handed_back: true,
+        },
+        Case {
+            name: "the timeout's cancel answered with end_turn and no output",
+            script: ends_turn(""),
+            later: HAND_BACK,
+            timeout_s: 20,
+            count_requests: false,
+            max_tasks: None,
+            max_repeats: None,
+            output: Some("work/partial.txt"),
+            status: 124,
+            result: "timeout",
+            message: "hit the timeout; the agent handed back",
+            notices: &["60%", "80%", "hand back"],
+            handed_back: true,
+        },
+        Case {
+            name: "the timeout's cancel answered with end_turn after the output",
+            script: ends_turn(
+                r#"{"write": {"title": "Write", "path": "{cwd}/done.txt", "content": "done\n"}}, "#,
+            ),
+            later: HAND_BACK,
+            timeout_s: 20,
+            count_requests: false,
+            max_tasks: None,
+            max_repeats: None,
+            output: Some("work/done.txt"),
+            status: 0,
+            result: "success",
+            message: "",
+            notices: &["60%", "80%"],
+            handed_back: false,
         },
     ];
     for c in cases {
@@ -1415,11 +1516,16 @@ fn hand_back_near_a_limit() {
                 count_requests: c.count_requests,
                 max_tasks: c.max_tasks,
                 max_repeats: c.max_repeats,
+                output: c.output,
                 ..Setup::default()
             },
         );
         assert_result(&r, c.status, c.result);
-        assert_eq!(r.result["message"], c.message, "{name}");
+        assert_eq!(
+            r.result["message"].as_str().unwrap_or_default(),
+            c.message,
+            "{name}"
+        );
         assert_eq!(r.result["handed_back"], c.handed_back, "{name}");
         assert_eq!(r.notices(), c.notices, "{name}");
         assert!(!r.log.contains("Not reached"), "{name}: {}", r.log);
@@ -1439,9 +1545,11 @@ fn hand_back_near_a_limit() {
         );
         // The turn was cancelled before the agent was asked to hand back.
         let cancel = r.position(|x| x["msg"]["method"] == "session/cancel");
-        let asked =
-            r.position(|x| x["msg"]["params"]["_meta"]["botHarness"]["notice"] == "hand back");
-        assert!(cancel < asked, "{name}");
+        if c.notices.contains(&"hand back") {
+            let asked =
+                r.position(|x| x["msg"]["params"]["_meta"]["botHarness"]["notice"] == "hand back");
+            assert!(cancel < asked, "{name}");
+        }
         let digest = r.digest();
         assert_eq!(digest.notices, c.notices, "{name}");
         assert_eq!(digest.tasks > 2, c.max_tasks.is_some(), "{name}");
@@ -1790,14 +1898,18 @@ fn a_turn_that_ends_without_the_required_output() {
 
 /// A task's turn in which the agent sends nothing for its stall timeout,
 /// with no tool call running, is cancelled and the task sent again once on
-/// the same session; a second stall fails the run, saying so. A quiet tool
-/// call is no stall.
+/// the same session; a second stall fails the run, saying so, even where
+/// the agent answers the cancel with end_turn. A quiet tool call is no
+/// stall.
 #[test]
 fn a_stalled_turn_is_sent_again_once() {
     const STALL: &str = r#"[{"say": "Working."}, {"sleep": 60}]"#;
     const DONE: &str = r#"[{"say": "Done."}]"#;
     const QUIET_TOOL: &str =
         r#"[{"execute": {"title": "Bash", "command": "sleep 3"}}, {"say": "Done."}]"#;
+    // Leaves the output the run requires, then answers the cancel with
+    // end_turn, as opencode does (#2149): still a stall, not the end.
+    const PARTIAL_THEN_END_TURN: &str = r#"[{"write": {"title": "Write", "path": "{cwd}/partial.txt", "content": "partial\n"}}, {"sleep": 60}, {"stop": "end_turn"}]"#;
     // (name, first turn, later turns, result, the message's start, stalls, retries)
     let cases = [
         ("one stall, then done", STALL, DONE, "success", None, 1, 1),
@@ -1811,6 +1923,24 @@ fn a_stalled_turn_is_sent_again_once() {
             1,
         ),
         ("a quiet tool call", QUIET_TOOL, DONE, "success", None, 0, 0),
+        (
+            "a cancel answered with end_turn after a partial output",
+            PARTIAL_THEN_END_TURN,
+            DONE,
+            "success",
+            None,
+            1,
+            1,
+        ),
+        (
+            "two cancels answered with end_turn",
+            PARTIAL_THEN_END_TURN,
+            PARTIAL_THEN_END_TURN,
+            "failure",
+            Some("the agent stalled: nothing from it for 1s in its turn, and again"),
+            2,
+            1,
+        ),
     ];
     for (name, script, later, result, message, stalls, retries) in cases {
         let r = run(
@@ -1819,6 +1949,7 @@ fn a_stalled_turn_is_sent_again_once() {
                 files: &[("script.json", script), ("later.json", later)],
                 timeout_s: 60,
                 stall_s: Some(1),
+                output: (script == PARTIAL_THEN_END_TURN).then_some("work/partial.txt"),
                 ..Setup::default()
             },
         );
