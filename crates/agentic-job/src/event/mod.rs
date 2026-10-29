@@ -19,7 +19,7 @@
 //! commands (the body must start with the command) and its sanitized
 //! context, with one difference: the text is fenced.
 
-mod context;
+pub(crate) mod context;
 mod guards;
 
 /// What is not text stripped, as from an event's: also for the updates of

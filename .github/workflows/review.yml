@@ -267,6 +267,10 @@ jobs:
       runner: ${{ vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
       github-reads: true
       network: true
+      # With the variable REVIEW_HISTORY, the agent is given this pull
+      # request's earlier reviews by this job, as untrusted data, to settle
+      # their findings before raising new ones (docs/review.md#review-history).
+      review-history: ${{ vars.REVIEW_HISTORY == 'true' && format('{0}', github.event.pull_request.number || github.event.issue.number) || '' }}
 
   check:
     needs: [policy, agent]

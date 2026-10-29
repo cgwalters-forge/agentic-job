@@ -377,6 +377,67 @@ fixture) or for `line!()`, and a file of an older edition is formatted as
 have a workflow of a branch set one as the job token's bot, as such a
 workflow can already submit a review as that bot.
 
+## Review history
+
+Each round of review used to start fresh, without the review job's own
+earlier verdicts, so it could find a new edge case instead of checking
+the last ones, and every round of CHANGES cost a fix run and another
+review ([#2190](https://github.com/cgwalters-forge/agentic-job/issues/2190)).
+With the repository variable `REVIEW_HISTORY=true` (unset is off),
+`review.yml` passes the pull request's number to `agent.yml` as
+`review-history`. Before `secure-host`, and so before anything of the
+agent's runs, the agent job runs `agentic-job review history`, the policy
+job's binary, with the job's read-only token, which the agent gets
+anyway; `run --review-history` puts what it wrote in the agent's home as
+`review-history.json`, and the brief names it untrusted data. A failure to
+write it is a warning, and the review runs without it.
+
+The file holds, sanitized as an event's text is and cut to 4 KiB a text
+and 512 KiB in all:
+
+- `reviews`: the review job's verdicts, the latest ten, oldest first.
+  A verdict is a review by `github-actions[bot]` whose body starts with
+  `VERDICT:`, or apply's verdict comment (its `agentic-job-applied`
+  name) by that bot or someone with write access (below). Each has its head (the
+  review's commit, or the first of the pull request's commits a comment's
+  verdict names), its verdict
+  and body, and its `findings`: each line of the body tagged blocker,
+  important or nit, with the lines after it, then each inline comment, thirty
+  in all, with
+  an ID such as `R101.2` (`C` for a comment), the severity, and the file and
+  line where the comment is on one or the text names one (`src/a.rs:12`).
+  A finding a later verdict lists on a `Resolved:` line has `resolved_by`,
+  that verdict and its head. Also each verdict's `replies` to its inline
+  findings, and `commits_since`, the subjects of the commits after its
+  head, or `head_on_branch: false` where a force-push removed it.
+- `conversation`: the pull request's other comments, the latest thirty.
+- `last_reviewed_head`, the latest verdict's head.
+
+To fit, the oldest comments go first, then the oldest verdicts; the latest
+verdict stays, with its oldest replies and last findings dropped and
+`cut: true` where it must.
+
+Replies and conversation comments count only from someone with write
+access, by the forge's collaborator permission API (admin or write;
+`author_association` does not tell: an organization member may only read
+the repository), and the bot's own comments that apply did not post.
+Nothing apply posts counts: those are the words of other runs' agents,
+which read the pull request, posted with the job token or the PAT user's
+write access. Apply marks its comments but not its replies to a review
+thread, so no reply by the bot, or by an account that posted a marked
+comment on the pull request, counts either.
+
+Even so, nothing in the file settles a finding. The [task](../workflow/review.md)
+asks the reviewer to say first, per earlier finding, whether the new head
+resolves it, confirmed in its code and citing the commit, and to record
+each resolved one on a `Resolved:` line, so the next round's file carries
+it; a `resolved_by`, reply or comment is a claim to check, and a finding
+that still holds is raised again. Then it reviews the whole diff as before,
+looking first at code changed since the last review, and raises new
+findings wherever they are, saying why a blocker in code unchanged since
+the last review was missed. Check holds the verdict to its usual bounds;
+the `Resolved:` lines are text in it, which only the next history reads.
+
 ## Configuration
 
 `review.yml` has no network or inference setup of its own; the deployment
@@ -427,6 +488,7 @@ It needs these repository or organization variables, and with a broker no secret
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
 | `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
 | `REVIEW_CARRY_APPROVAL` | optional, `true` carries an approval across a rebase or rustfmt-only push ([above](#carried-approvals)) |
+| `REVIEW_HISTORY` | optional, `true` gives the agent the pull request's earlier reviews ([above](#review-history)) |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
