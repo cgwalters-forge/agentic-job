@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+use super::agent::Kind;
 use super::handback::OMITTED_BINARY_FILES;
 use super::inference::RECORD_SCHEMA;
 use super::prices::{Prices, Tokens};
@@ -50,6 +51,17 @@ const MAX_COST_MODELS: usize = 16;
 const PRICES_DATE_CHARS: usize = 10;
 /// At most this many of the slowest tool calls are listed.
 const MAX_SLOWEST: usize = 10;
+/// `cache_warning`: an OpenAI run (opencode's) that read less than this
+/// share of its input from the prompt cache over more than
+/// [`CACHE_WARNING_AFTER`] metered requests. Each request resends the
+/// whole conversation, so a stable prefix is mostly cache reads after the
+/// first few; Claude Code's runs read 97% from it on 28 October 2026
+/// (#2209).
+const CACHE_WARNING_RATIO: f64 = 0.5;
+/// The requests before which a cold cache is expected.
+const CACHE_WARNING_AFTER: u64 = 3;
+/// `cache_ratio` is kept to a hundredth.
+const RATIO_ROUNDING: f64 = 100.0;
 /// The fields `--meta` gives: on GitHub the run's id, attempt and URL,
 /// the caller's own name for the run, and the size of its machine.
 pub const META_FIELDS: &[&str] = &["run_id", "run_attempt", "run_url", "item", "cores"];
@@ -211,6 +223,17 @@ fn list_cost(record: Option<&Value>, agent_usd: Option<f64>, pricing: &str) -> V
         "partial": priced && partial,
         "models": if priced { Value::Object(models) } else { Value::Null },
     })
+}
+
+/// The share of the run's input tokens read from the prompt cache: null
+/// without both counts, or without input. Not rounded: `cache_ratio` is.
+fn cache_ratio(tokens: &Value) -> Option<f64> {
+    let cached = tokens["cache_read"].as_u64()?;
+    let all = tokens["input"]
+        .as_u64()?
+        .checked_add(cached)
+        .filter(|all| *all > 0)?;
+    Some(cached as f64 / all as f64)
 }
 
 /// Token counts from the `session/prompt` response (a draft ACP field).
@@ -417,8 +440,21 @@ pub fn summarize(inputs: &Inputs) -> Value {
     // The old tree counted turns in the log of a proxy on the runner,
     // which is gone; the field stays for its readers.
     s.insert("turns".into(), Value::Null);
+    let ratio = cache_ratio(&tokens);
+    // Only the proxy's count of requests: the agent's word does not say
+    // how many turns its tokens were spread over.
+    let cache_warning = measured.agent == Kind::Opencode.as_str()
+        && praxis["requests"]
+            .as_u64()
+            .is_some_and(|n| n > CACHE_WARNING_AFTER)
+        && ratio.is_some_and(|ratio| ratio < CACHE_WARNING_RATIO);
     s.insert("tokens".into(), tokens);
     s.insert("tokens_source".into(), source);
+    s.insert(
+        "cache_ratio".into(),
+        json!(ratio.map(|ratio| (ratio * RATIO_ROUNDING).round() / RATIO_ROUNDING)),
+    );
+    s.insert("cache_warning".into(), json!(cache_warning));
     s.insert("praxis".into(), praxis);
     // USD to AIC (1 AIC = $0.01), to a tenth.
     let aic = digest.cost_usd.map(|usd| (usd * 1000.0).round() / 10.0);
@@ -792,6 +828,32 @@ pub fn markdown(s: &Value) -> String {
                 text(&p["unmetered"])
             ),
         ]);
+    }
+    if let Some(ratio) = s["cache_ratio"].as_f64() {
+        let percent = (ratio * 100.0).round();
+        out.extend([
+            String::new(),
+            format!(
+                "Prompt cache: {percent}% of input tokens read from cache{}.",
+                if s["tokens_source"] == TOKENS_UNVERIFIED {
+                    " (agent-reported, unverified)"
+                } else {
+                    ""
+                }
+            ),
+        ]);
+        if s["cache_warning"] == true {
+            out.extend([
+                String::new(),
+                format!(
+                    "Warning: this OpenAI run read only {percent}% of its input from the prompt \
+                     cache, under {}% after more than {} requests: something before the new \
+                     turn changes between requests, or they are not routed to the same cache.",
+                    CACHE_WARNING_RATIO * 100.0,
+                    CACHE_WARNING_AFTER
+                ),
+            ]);
+        }
     }
     if let Some(tools) = s["tools"].as_object().filter(|t| !t.is_empty()) {
         out.extend([
@@ -1754,11 +1816,67 @@ Redacted 1 string(s).
             md.contains("Inference: praxis run finished, 1k tokens (600 cached), 3 metered request(s), 1 without usage."),
             "{md}"
         );
+        assert_eq!(s["cache_ratio"], 0.6);
+        assert!(
+            md.contains("Prompt cache: 60% of input tokens read from cache."),
+            "{md}"
+        );
         // Anything else is not a record.
         let s = summarize_with(Some(&json!({"schema": "other/v1"})));
         assert_eq!(s["praxis"], Value::Null);
         assert_eq!(s["tokens_source"], Value::Null);
-        assert!(!markdown(&s).contains("Inference:"));
+        assert_eq!(s["cache_ratio"], Value::Null);
+        let md = markdown(&s);
+        assert!(!md.contains("Inference:"));
+        assert!(!md.contains("Prompt cache:"));
+    }
+
+    /// An OpenAI run past its first turns that reads little from the
+    /// prompt cache is warned about. The first case is a review run of 28
+    /// October (40897324729), the second about Claude's share then.
+    #[test]
+    fn a_low_openai_cache_share_is_warned_about() {
+        const WARNING: &str = "Warning: this OpenAI run read only";
+        /// Agent, requests, uncached and cached input, share, warned.
+        type Case = (&'static str, Option<u64>, u64, u64, f64, bool);
+        let cases: &[Case] = &[
+            ("opencode", Some(64), 5_185_347, 1_857_664, 0.26, true),
+            ("opencode", Some(64), 300_000, 6_700_000, 0.96, false),
+            // At or before the third request, a cold cache is expected.
+            ("opencode", Some(3), 900, 100, 0.1, false),
+            ("opencode", Some(4), 900, 100, 0.1, true),
+            ("opencode", Some(4), 500, 500, 0.5, false),
+            // The share is compared before it is rounded.
+            ("opencode", Some(4), 5050, 4950, 0.5, true),
+            // No count of requests from the proxy, no warning.
+            ("opencode", None, 900, 100, 0.1, false),
+            // Claude's and Vibe's runs get the share, not the warning.
+            ("claude", Some(64), 900, 100, 0.1, false),
+            ("vibe", Some(64), 900, 100, 0.1, false),
+        ];
+        let records = initialize();
+        for &(agent, requests, input, cached, ratio, warned) in cases {
+            let record = json!({
+                "schema": RECORD_SCHEMA, "state": "finished", "requests": requests, "unmetered": 0,
+                "tokens": {"input": input, "cache_read": cached, "output": 1, "total": input + cached + 1},
+            });
+            let measured = Measured {
+                agent: agent.into(),
+                ..measured()
+            };
+            let s = summarize(&Inputs {
+                records: &records,
+                result: None,
+                measured: &measured,
+                outcome: &json!({}),
+                usage: Some(&record),
+            });
+            let case = format!("{agent} {requests:?} {input} {cached}");
+            assert_eq!(s["cache_ratio"], ratio, "{case}");
+            assert_eq!(s["cache_warning"], warned, "{case}");
+            let md = markdown(&s);
+            assert_eq!(md.contains(WARNING), warned, "{case}: {md}");
+        }
     }
 
     /// The agent's own count is used only as its word, and a session's
@@ -1820,7 +1938,10 @@ Redacted 1 string(s).
                 "usage": {"inputTokens": 10, "outputTokens": 5, "cachedReadTokens": 2}}}),
             ),
         ];
-        let measured = measured();
+        let measured = Measured {
+            agent: "opencode".into(),
+            ..measured()
+        };
         let done = result(Outcome::Success, None, false);
         let s = summarize(&Inputs {
             records: &records,
@@ -1829,6 +1950,12 @@ Redacted 1 string(s).
             outcome: &json!({}),
             usage: None,
         });
+        // The agent's share is given as its word, and warns of nothing.
+        assert_eq!(s["cache_ratio"], 0.17);
+        assert_eq!(s["cache_warning"], false);
+        assert!(markdown(&s).contains(
+            "Prompt cache: 17% of input tokens read from cache (agent-reported, unverified)."
+        ));
         assert_eq!(s["acp_protocol"], 1, "{s:#}");
         assert_eq!(s["agent_first_step_at"], 1.0);
         assert_eq!(s["agent_version"], "an-agent 1.2");
