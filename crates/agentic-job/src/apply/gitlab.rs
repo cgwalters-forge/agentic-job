@@ -516,6 +516,36 @@ mod tests {
         }
     }
 
+    /// Collection preserves Markdown escapes. Planning must not mistake
+    /// escaped backticks for code and leave a live mention for GitLab.
+    #[test]
+    fn escaped_code_mentions_after_collection() {
+        let mut policy = policy();
+        policy.forge = crate::policy::Forge::Gitlab;
+        let target = Target {
+            forge: Forge::Gitlab,
+            ..target(Some(5))
+        };
+        for body in [r"\`@all\`", r"\`@group/team\`", "```\n@here\n```"] {
+            let collected = crate::collect::collect(
+                &json!({"type": "add_comment", "body": body}).to_string(),
+                &crate::collect::config(&policy).unwrap(),
+                &|_| true,
+            );
+            assert!(collected.errors.is_empty(), "{:?}", collected.errors);
+            let items: Vec<Value> = collected.items.into_iter().map(Value::Object).collect();
+            let dir = checked(&items);
+            let ops = plan(dir.path(), &policy, &target).unwrap();
+            let [Op::Comment { body, .. }] = &ops[..] else {
+                panic!("expected a comment: {ops:?}");
+            };
+            assert!(body.contains("@\u{200b}"), "{body:?}");
+            for mention in ["@all", "@group/team", "@here"] {
+                assert!(!body.contains(mention), "{body:?}");
+            }
+        }
+    }
+
     /// Only a comment and a merge request are published; the others are
     /// refused before any request.
     #[test]
