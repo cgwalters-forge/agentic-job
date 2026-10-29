@@ -43,8 +43,9 @@ This repository's `secure-host` forwards to that action
 job's token; so does every `uses:` step. See
 [one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job).
 
-Two limits to know up front. Names still resolve on a hosted runner, so
-a process that wants to can leak data through DNS lookups. And one small
+Two limits to know up front. Names still resolve for the runner's user
+on a hosted runner, so a later step that wants to can leak data through
+DNS lookups. And one small
 root-owned helper stays, for what the sandbox itself needs.
 The action's [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md)
 list what is probed, and its [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md)
@@ -447,18 +448,23 @@ to five minutes on a hosted runner. Nobody but its authors has used it.
 ## Known gaps
 
 Behaviour that does not match what a new user would expect, each with
-the issue that tracks it, where one is filed.
+the issue that tracks it, where one is filed, or the page that explains it.
 
 - Steps after `secure-host` lose root but keep the job's tokens and an open
-  network ([#503](https://github.com/cgwalters-forge/agentic-job/issues/503)).
+  network ([one trust level for the rest of the job](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)).
   No agent job has `id-token`: a register job before it registers the run
   ([the run token](docs/workflow.md#the-run-token)).
-- The egress proxy has no read allowlist: any host may be read ([#116](https://github.com/cgwalters-forge/agentic-job/issues/116)).
-- Names resolve for the sandbox user on hosted runners, so data can leave
-  through DNS ([#21](https://github.com/cgwalters-forge/agentic-job/issues/21)).
+- The egress proxy lets any host be read unless its policy file sets
+  `[egress] mode = "allowlist"`, which is off by default
+  ([the sandbox user's network](docs/sandbox.md#what-setup-does-for-an-agent)).
+- `sandbox.close-resolved`, off by default and set by `hosted.toml`, closes
+  systemd-resolved to the sandbox user. The runner's user, which every
+  later step runs as, still resolves names, so data can leave through DNS
+  ([not claimed](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#not-claimed)).
 - The world-write policy is proven at run time on hosted Ubuntu 26.04
   ([CI's controls](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#run-time-controls-through-the-action-on-hosted-ubuntu-2604)),
-  not on RHEL 10 ([#136](https://github.com/cgwalters-forge/agentic-job/issues/136)).
+  not on RHEL 10, which the image admits but nothing has yet run it on
+  ([RHEL 10](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#rhel-10)).
 - The reusable workflow takes no model key or MCP credential, so a real
   agent needs a broker, until the runner's processes are kept from
   reading `run`'s environment and memory ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618);
