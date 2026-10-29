@@ -325,6 +325,19 @@ impl Github {
             "POST" => request(self.http.post(&url)),
             "PUT" => request(self.http.put(&url)),
             "PATCH" => request(self.http.patch(&url)),
+            "DELETE" => {
+                let builder = self.http.delete(&url);
+                let builder = if version.is_empty() {
+                    builder
+                } else {
+                    builder.header("x-github-api-version", version)
+                };
+                builder
+                    .header("authorization", &authorization)
+                    .header("accept", "application/vnd.github+json")
+                    .header("user-agent", "agentic-job")
+                    .call()
+            }
             _ => bail!("{method} is not a method this sends"),
         };
         let mut response = response.map_err(|err| {
@@ -375,9 +388,9 @@ impl Github {
     }
 
     /// [`Self::request`], tried again after a transient failure as gh-aw's
-    /// handler tries OPERATION, opening a pull request, again; a failure
-    /// is worded as its `withRetry` words one.
-    fn request_retrying(
+    /// handlers try OPERATION (opening a pull request, adding labels)
+    /// again; a failure is worded as its `withRetry` words one.
+    pub(super) fn request_retrying(
         &self,
         method: &str,
         path: &str,

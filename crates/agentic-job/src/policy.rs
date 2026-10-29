@@ -146,7 +146,14 @@ pub const NEUTRAL_OUTPUTS: &[&str] = &[
 /// The types apply can publish on GitHub with agentic-job's own handlers
 /// (`agentic-job publish`) in place of gh-aw's, where the bounds'
 /// `native_handlers` name them; every other type stays gh-aw's.
-pub const NATIVE_OUTPUTS: &[&str] = &["add_comment", CREATE_PULL_REQUEST];
+pub const NATIVE_OUTPUTS: &[&str] = &[
+    "add_comment",
+    CREATE_PULL_REQUEST,
+    "add_labels",
+    "remove_labels",
+    "close_issue",
+    "close_pull_request",
+];
 
 /// gh-aw's target field for an issue or a pull request alike. GitLab
 /// numbers the two apart (`#5` and `!5` are different items), so there a

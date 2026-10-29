@@ -9,6 +9,16 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `native_handlers` also takes `add_labels`, `remove_labels`,
+  `close_issue` and `close_pull_request`: agentic-job's own handlers
+  publish them as gh-aw's pinned handlers do, which the publication corpus
+  checks for each, now with cases for filtered and missing labels,
+  already closed and reopened issues, failed closing comments and a run
+  mixing both handlers across a re-run. A routed request must name its
+  item by number, and its labels must be plain ones, which `check`
+  enforces. Every other type, `push_to_pull_request_branch`,
+  `create_issue` and `create_pull_request_review_comment` among them,
+  stays gh-aw's (docs/safe-outputs.md#agentic-jobs-own-handlers).
 - `summary.json` gives `cache_ratio`, the share of the run's input read
   from the prompt cache, and `cache_warning`, true for an opencode run
   that read under half from it after more than three requests;

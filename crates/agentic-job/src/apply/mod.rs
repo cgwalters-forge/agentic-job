@@ -1,7 +1,8 @@
 //! `agentic-job apply`: publish what `check` accepted to a forge that is
 //! not GitHub, from a job of its own that holds the write token. GitHub's
 //! apply is still gh-aw's handlers in apply.yml, but for the types the
-//! bounds route to [`publish`] (`add_comment` and `create_pull_request`);
+//! bounds route to [`publish`] (comments, new pull requests, labels and
+//! closing);
 //! this is the first slice of moving publishing behind [`Publisher`]
 //! (#1346), for Forgejo and the outputs in [`SUPPORTED`], and for GitLab
 //! and those in [`GITLAB_SUPPORTED`]. On GitHub,

@@ -3,9 +3,9 @@
 //! agentic-job itself, as gh-aw's handlers at apply.yml's pin publish
 //! them: the same requests in the same order, with the same bodies, and
 //! the same records of them (`safe-output-items.jsonl`,
-//! `safe-output-errors.json`, the step's outputs and summary). For two
-//! types, `add_comment` and `create_pull_request`, on the [`Publisher`]
-//! for GitHub; `tests/data/publication` records what gh-aw sends.
+//! `safe-output-errors.json`, the step's outputs and summary). For the
+//! types of [`HANDLERS`], on the [`Publisher`] for GitHub and its client;
+//! `tests/data/publication` records what gh-aw sends.
 //!
 //! apply.yml runs this after the steps that edit the requests and the
 //! guard that leaves out what an earlier attempt applied, all of which
@@ -23,7 +23,8 @@
 //! run before the first write rather than do something else: a request
 //! after one of gh-aw's types, a field or setting this does not read, a
 //! temporary ID, a workflow input gh-aw reads from a file this ignores,
-//! or a mention it would look up. A pull request that fails is not
+//! a mention it would look up, or a label this cannot tell gh-aw would
+//! keep as written. A pull request that fails is not
 //! followed by the routed comments after it, which gh-aw would post with
 //! a note of its own; and nothing here falls back to opening an issue
 //! or commenting on a discussion. gh-aw reads settings this does not
@@ -40,7 +41,10 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use super::github::{Github, GithubPublisher, Refused};
-use super::{Made, Publisher, PullRequest, Report, read_report};
+use super::{
+    ADD_COMMENT, ADD_LABELS, CLOSE_ISSUE, CLOSE_PULL_REQUEST, Close, Kind as ItemKind, Made,
+    Publisher, PullRequest, REMOVE_LABELS, Report, read_report,
+};
 use crate::check::{self, handler_limits::LINK_RE};
 use crate::collect::markdown::outside_code;
 use crate::collect::sanitize::{
@@ -50,7 +54,151 @@ use crate::exit::Exit;
 use crate::files;
 use crate::policy::{CREATE_PULL_REQUEST, Policy};
 
-const ADD_COMMENT: &str = "add_comment";
+/// What this publishes of one type, as gh-aw's handler does.
+#[derive(Debug)]
+pub(crate) struct Handler {
+    pub output: &'static str,
+    /// The fields of a request this publishes as gh-aw does; any other is
+    /// refused. `repo` only as the handler's own.
+    fields: &'static [&'static str],
+    /// The settings apply.yml writes for the handler; any other is refused.
+    settings: &'static [&'static str],
+    /// Those of them that must be as given (JSON): what this does is all
+    /// it can do.
+    fixed: &'static [(&'static str, &'static str)],
+}
+
+/// The types `agentic-job publish` publishes, each where the bounds'
+/// `native_handlers` name it. A comment's numbers are those its fixed
+/// target ignores; a pull request's `base` is only the handler's own and
+/// its `labels` only empty.
+pub(crate) const HANDLERS: &[Handler] = &[
+    Handler {
+        output: ADD_COMMENT,
+        fields: &["type", "body", "item_number", "pr", "pr_number", "repo"],
+        settings: &["max", "target-repo", "target"],
+        fixed: &[],
+    },
+    Handler {
+        output: CREATE_PULL_REQUEST,
+        fields: &[
+            "type", "title", "body", "branch", "draft", "repo", "base", "labels",
+        ],
+        settings: &[
+            "max",
+            "protected_files",
+            "protect_top_level_dot_folders",
+            "protected_dot_folder_excludes",
+            "protected_files_policy",
+            "draft",
+            "max_patch_size",
+            "max_patch_files",
+            "signed_commits",
+            "fallback_as_issue",
+            "preserve_branch_name",
+            "auto_close_issue",
+            "target-repo",
+            "base_branch",
+            "branch_prefix",
+            "title_prefix",
+            "head-repo",
+            "allowed_repos",
+        ],
+        fixed: &[
+            ("signed_commits", "false"),
+            ("fallback_as_issue", "false"),
+            ("preserve_branch_name", "true"),
+            ("auto_close_issue", "false"),
+            ("protected_files_policy", r#""blocked""#),
+        ],
+    },
+    // The number alone names the item: no temporary ID, alias or fallback
+    // to the event's.
+    Handler {
+        output: ADD_LABELS,
+        fields: &["type", "repo", "item_number", "labels"],
+        settings: &[
+            "max",
+            "allowed",
+            "blocked",
+            "target-repo",
+            "target",
+            "issue_intent",
+            "create_if_missing",
+        ],
+        fixed: &[
+            ("target", r#""*""#),
+            ("issue_intent", "false"),
+            ("create_if_missing", "false"),
+        ],
+    },
+    Handler {
+        output: REMOVE_LABELS,
+        fields: &["type", "repo", "item_number", "labels"],
+        settings: &["max", "allowed", "blocked", "target-repo", "target"],
+        fixed: &[("target", r#""*""#)],
+    },
+    // No `duplicate_of` and no intent metadata, which gh-aw's handler would
+    // also act on.
+    Handler {
+        output: CLOSE_ISSUE,
+        fields: &["type", "repo", "issue_number", "body", "state_reason"],
+        settings: &["max", "target-repo", "target", "issue_intent", "allow_body"],
+        fixed: &[
+            ("target", r#""*""#),
+            ("issue_intent", "false"),
+            ("allow_body", "true"),
+        ],
+    },
+    Handler {
+        output: CLOSE_PULL_REQUEST,
+        fields: &["type", "repo", "pull_request_number", "body"],
+        settings: &["max", "target-repo", "target"],
+        fixed: &[("target", r#""*""#)],
+    },
+];
+
+/// The handler of OUTPUT, if this publishes it.
+pub(crate) fn handler(output: &str) -> Option<&'static Handler> {
+    HANDLERS.iter().find(|handler| handler.output == output)
+}
+
+/// The field naming the one item OUTPUT acts on, where it names one.
+fn number_field(output: &str) -> Option<&'static str> {
+    match output {
+        ADD_LABELS | REMOVE_LABELS => Some("item_number"),
+        CLOSE_ISSUE => Some("issue_number"),
+        CLOSE_PULL_REQUEST => Some("pull_request_number"),
+        _ => None,
+    }
+}
+
+/// The largest number JavaScript holds exactly, which gh-aw's handlers
+/// read a request's number as.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// `MAX_LABELS`: the most labels one add_labels may name.
+const MAX_LABELS: usize = 10;
+
+/// The longest label gh-aw's sanitizer keeps whole.
+const MAX_LABEL: usize = 64;
+
+/// The ways to close an issue gh-aw's handler takes, in its words.
+const STATE_REASONS: &[&str] = &["completed", "not_planned", "duplicate"];
+
+/// The workflow_dispatch inputs and repository_dispatch payload gh-aw's
+/// `resolveInvocationContext` reads the event from instead of the
+/// runner's: a label's records would name the item from them.
+const DISPATCH_CONTEXT_INPUTS: &[&str] = &[
+    "event_name",
+    "eventName",
+    "event_payload",
+    "eventPayload",
+    "aw_context",
+    "awContext",
+    "target_repo",
+    "targetRepo",
+];
 
 /// The `X-GitHub-Api-Version` gh-aw's handlers send (its constants.cjs).
 const API_VERSION: &str = "2026-03-10";
@@ -71,37 +219,6 @@ const FOOTER_INPUTS: &[&str] = &[
     "sandbox/firewall/logs",
     "mcp-logs/gateway.jsonl",
     "mcp-logs/rpc-messages.jsonl",
-];
-
-/// Each type's fields this publishes as gh-aw does; any other is refused.
-/// `repo` and a pull request's `base` only as the handler's own, `labels`
-/// only empty, and the comment's numbers, which its fixed target ignores.
-const COMMENT_FIELDS: &[&str] = &["type", "body", "item_number", "pr", "pr_number", "repo"];
-const PULL_REQUEST_FIELDS: &[&str] = &[
-    "type", "title", "body", "branch", "draft", "repo", "base", "labels",
-];
-
-/// Each type's settings, as apply.yml writes them for gh-aw's handler.
-const COMMENT_SETTINGS: &[&str] = &["max", "target-repo", "target"];
-const PULL_REQUEST_SETTINGS: &[&str] = &[
-    "max",
-    "protected_files",
-    "protect_top_level_dot_folders",
-    "protected_dot_folder_excludes",
-    "protected_files_policy",
-    "draft",
-    "max_patch_size",
-    "max_patch_files",
-    "signed_commits",
-    "fallback_as_issue",
-    "preserve_branch_name",
-    "auto_close_issue",
-    "target-repo",
-    "base_branch",
-    "branch_prefix",
-    "title_prefix",
-    "head-repo",
-    "allowed_repos",
 ];
 
 /// The handlers' sanitizer's own default bound.
@@ -338,26 +455,78 @@ impl Run {
     /// request or a discussion, as KIND reads the event: an issue's number
     /// first, which a pull request's handler takes only for an issue.
     fn triggering(&self, kind: &str) -> Result<Option<String>> {
-        let number = |key: &str| -> Result<Option<u64>> {
-            match &self.event[key]["number"] {
-                Value::Null => Ok(None),
-                Value::Number(n) if n.as_u64().is_some_and(|n| n > 0) => Ok(n.as_u64()),
-                Value::Number(n) if n.as_u64() == Some(0) => Ok(None),
-                other => bail!("the event's {key} number {other} is not one gh-aw writes as is"),
-            }
-        };
-        let issue = number("issue")?.filter(|_| {
+        let issue = self.event_number("issue")?.filter(|_| {
             kind == ADD_COMMENT
                 || self.event["issue"]["pull_request"].is_null()
                 || self.event["issue"]["pull_request"] == Value::Bool(false)
         });
         Ok(
-            match (issue, number("pull_request")?, number("discussion")?) {
+            match (
+                issue,
+                self.event_number("pull_request")?,
+                self.event_number("discussion")?,
+            ) {
                 (Some(n), _, _) | (None, Some(n), _) => Some(format!("#{n}")),
                 (None, None, Some(n)) => Some(format!("discussion #{n}")),
                 (None, None, None) => None,
             },
         )
+    }
+
+    /// The `#N` a closing comment's footer names: the event's issue, or
+    /// else its pull request (`buildCommentBody`).
+    fn closing_triggering(&self) -> Result<Option<String>> {
+        Ok(self
+            .event_number("issue")?
+            .or(self.event_number("pull_request")?)
+            .map(|n| format!("#{n}")))
+    }
+
+    /// The number of the event's KEY (`issue`, `pull_request`,
+    /// `discussion`), where it names one.
+    fn event_number(&self, key: &str) -> Result<Option<u64>> {
+        match &self.event[key]["number"] {
+            Value::Null => Ok(None),
+            Value::Number(n) if n.as_u64().is_some_and(|n| n > 0) => Ok(n.as_u64()),
+            Value::Number(n) if n.as_u64() == Some(0) => Ok(None),
+            other => bail!("the event's {key} number {other} is not one gh-aw writes as is"),
+        }
+    }
+
+    /// What gh-aw's label handlers call the item in their records
+    /// (`contextType`): a pull request where the event is one's, as
+    /// `resolveInvocationContext` reads it.
+    fn context_kind(&self) -> Result<&'static str> {
+        self.read_as_dispatched()?;
+        Ok(if truthy(&self.event["pull_request"]) {
+            "pull request"
+        } else {
+            "issue"
+        })
+    }
+
+    /// Refuses a dispatch whose inputs or payload gh-aw's
+    /// `resolveInvocationContext` would read the event from, or refuse
+    /// (a `target_repo` it does not allow), as the label and closing
+    /// handlers resolve their item.
+    fn read_as_dispatched(&self) -> Result<()> {
+        match self.event_name.as_str() {
+            "workflow_dispatch" => {
+                for input in DISPATCH_CONTEXT_INPUTS {
+                    ensure!(
+                        self.event["inputs"].get(input).is_none(),
+                        "the dispatch's input {input}, which gh-aw's handlers would read the \
+                         event from"
+                    );
+                }
+            }
+            "repository_dispatch" => ensure!(
+                !self.event["client_payload"].is_object(),
+                "the dispatch's client_payload, which gh-aw's handlers would read the event from"
+            ),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// The people the event names, who may be mentioned
@@ -447,6 +616,17 @@ impl Run {
             allowed.push(name);
         }
         Ok(allowed)
+    }
+}
+
+/// Whether JavaScript takes VALUE for true.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
     }
 }
 
@@ -581,13 +761,15 @@ fn split(items: &[Value], routed: &[String]) -> Result<Split, Vec<String>> {
                  it would change the run's order"
             ));
         }
-        let fields = if output == ADD_COMMENT {
-            COMMENT_FIELDS
-        } else {
-            PULL_REQUEST_FIELDS
+        let Some(handler) = handler(output) else {
+            errors.push(format!(
+                "the bounds route {output} to agentic-job publish, which does not publish it"
+            ));
+            continue;
         };
+        errors.extend(shape(output, map));
         for (key, value) in map {
-            if !fields.contains(&key.as_str()) {
+            if !handler.fields.contains(&key.as_str()) {
                 errors.push(format!(
                     "a {output} with the field {key:?}, which agentic-job publish does not publish"
                 ));
@@ -609,6 +791,70 @@ fn split(items: &[Value], routed: &[String]) -> Result<Split, Vec<String>> {
     } else {
         Err(errors)
     }
+}
+
+/// Why ITEM, a request of OUTPUT, is not one this publishes as gh-aw's
+/// handler would, from what it holds alone: its number other than a
+/// positive integer, a label other than a plain string the handler's
+/// sanitizer leaves as it is, or another way to close an issue.
+fn shape(output: &str, item: &Map<String, Value>) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(key) = number_field(output)
+        && !item
+            .get(key)
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > 0 && n <= MAX_SAFE_INTEGER)
+    {
+        errors.push(format!(
+            "a {output} without a positive integer {key}, which agentic-job publish requires"
+        ));
+    }
+    if matches!(output, ADD_LABELS | REMOVE_LABELS) {
+        match item.get("labels") {
+            None => {}
+            Some(Value::Array(labels)) => errors.extend(
+                labels
+                    .iter()
+                    .filter(|label| !label.as_str().is_some_and(plain_label))
+                    .map(|label| {
+                        format!(
+                            "a {output} with the label {label}, which agentic-job publish does \
+                             not publish (a plain label of at most {MAX_LABEL} letters, digits \
+                             and \" -_./:\")"
+                        )
+                    }),
+            ),
+            Some(_) => errors.push(format!("a {output} whose labels are not an array")),
+        }
+    }
+    if output == CLOSE_ISSUE
+        && let Some(reason) = item.get("state_reason")
+        && !reason.as_str().is_some_and(|reason| {
+            STATE_REASONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(reason))
+        })
+    {
+        errors.push(format!(
+            "a {output} with state_reason {reason}, which is not one of {}",
+            STATE_REASONS.join(", ")
+        ));
+    }
+    errors
+}
+
+/// Whether gh-aw's label sanitizer (`sanitizeLabelContent`, the cut to
+/// [`MAX_LABEL`]) leaves LABEL as it is, as for check's subset: no
+/// Unicode, entities, mentions or punctuation it would change, and no
+/// leading `-`, which it refuses.
+fn plain_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= MAX_LABEL
+        && label == label.trim()
+        && !label.starts_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b" -_./:".contains(&b))
 }
 
 /// Why `agentic-job publish` would refuse ITEMS whatever the forge holds:
@@ -645,12 +891,59 @@ enum Op {
         failure: Option<String>,
         pr: Box<PullRequest>,
     },
+    Labels {
+        index: usize,
+        max: u64,
+        request: LabelRequest,
+    },
+    Close {
+        index: usize,
+        max: u64,
+        /// The handler's `target-repo`.
+        repo: String,
+        /// The body as the request has it, empty for none.
+        close: Close,
+        /// An issue's, lowercase.
+        state_reason: Option<String>,
+        /// The `#N` the comment's footer names.
+        triggering: Option<String>,
+    },
+}
+
+/// A routed add_labels or remove_labels, decided.
+#[derive(Debug, Clone)]
+struct LabelRequest {
+    /// Added, or else removed.
+    add: bool,
+    /// The handler's `target-repo`.
+    repo: String,
+    number: u64,
+    /// As the request names them, in order: the handler counts them
+    /// before it drops any.
+    labels: Vec<String>,
+    /// The handler's `allowed` and `blocked` patterns.
+    allowed: Vec<String>,
+    blocked: Vec<String>,
+    /// What the handler calls the item (`contextType`).
+    kind: &'static str,
 }
 
 impl Op {
     fn index(&self) -> usize {
         match self {
-            Self::Comment { index, .. } | Self::PullRequest { index, .. } => *index,
+            Self::Comment { index, .. }
+            | Self::PullRequest { index, .. }
+            | Self::Labels { index, .. }
+            | Self::Close { index, .. } => *index,
+        }
+    }
+
+    fn max(&self) -> u64 {
+        match self {
+            Self::Comment { max, .. }
+            | Self::PullRequest { max, .. }
+            | Self::Labels { max, .. }
+            | Self::Close { max, .. } => *max,
         }
     }
 
@@ -658,6 +951,17 @@ impl Op {
         match self {
             Self::Comment { .. } => ADD_COMMENT,
             Self::PullRequest { .. } => CREATE_PULL_REQUEST,
+            Self::Labels { request, .. } if request.add => ADD_LABELS,
+            Self::Labels { .. } => REMOVE_LABELS,
+            Self::Close {
+                close:
+                    Close {
+                        kind: ItemKind::Issue,
+                        ..
+                    },
+                ..
+            } => CLOSE_ISSUE,
+            Self::Close { .. } => CLOSE_PULL_REQUEST,
         }
     }
 }
@@ -669,15 +973,19 @@ fn settings<'a>(handlers: &'a Map<String, Value>, output: &str) -> Result<&'a Ma
         .get(output)
         .and_then(Value::as_object)
         .with_context(|| format!("no handler configuration for {output}"))?;
-    let known = if output == ADD_COMMENT {
-        COMMENT_SETTINGS
-    } else {
-        PULL_REQUEST_SETTINGS
-    };
+    let handler = handler(output)
+        .with_context(|| format!("{output}, which agentic-job publish does not publish"))?;
     for key in config.keys() {
         ensure!(
-            known.contains(&key.as_str()),
+            handler.settings.contains(&key.as_str()),
             "the {output} handler setting {key:?}, which agentic-job publish does not read"
+        );
+    }
+    for (key, want) in handler.fixed {
+        let want: Value = serde_json::from_str(want).context("a fixed setting")?;
+        ensure!(
+            config.get(*key) == Some(&want),
+            "the {output} handler's {key} is not {want}, which is all agentic-job publish does"
         );
     }
     let max = config.get("max").and_then(Value::as_u64).unwrap_or(0);
@@ -712,8 +1020,11 @@ fn plan(
     run: &Run,
 ) -> Result<Vec<Op>, Vec<String>> {
     let mut errors = Vec::new();
-    // gh-aw's footer, which reads FOOTER_INPUTS, ends only routed requests.
-    let footer = !ours.is_empty();
+    // gh-aw's footer, which reads FOOTER_INPUTS, ends the routed comments,
+    // pull requests and closing comments.
+    let footer = ours
+        .iter()
+        .any(|routed| !matches!(check::item_type(&routed.item), ADD_LABELS | REMOVE_LABELS));
     let mut ops = Vec::new();
     let mut report: Option<Report> = None;
     for Routed { index, item } in ours {
@@ -721,6 +1032,79 @@ fn plan(
         let decided = settings(handlers, &output).and_then(|config| {
             same_repo(&item, setting(config, "target-repo")?)?;
             let max = config.get("max").and_then(Value::as_u64).unwrap_or(1);
+            let repo = setting(config, "target-repo")?.to_owned();
+            let number = || -> Result<u64> {
+                number_field(&output)
+                    .and_then(|key| item.get(key))
+                    .and_then(Value::as_u64)
+                    .context("the request's number")
+            };
+            if matches!(output.as_str(), ADD_LABELS | REMOVE_LABELS) {
+                let patterns = |key: &str| -> Result<Vec<String>> {
+                    let patterns: Vec<String> = match config.get(key) {
+                        None => Vec::new(),
+                        Some(value) => serde_json::from_value(value.clone()).with_context(|| {
+                            format!("the {output} handler's {key} is not a list of labels")
+                        })?,
+                    };
+                    // JavaScript folds the case of ASCII alone outside
+                    // Unicode mode, and some other characters to ASCII
+                    // when it lowercases (`K`, the Kelvin sign).
+                    ensure!(
+                        patterns.iter().all(|pattern| pattern.is_ascii()),
+                        "the {output} handler's {key} names a label that is not ASCII"
+                    );
+                    Ok(patterns)
+                };
+                let labels = item
+                    .get("labels")
+                    .map(|labels| serde_json::from_value(labels.clone()))
+                    .transpose()
+                    .context("the request's labels")?
+                    .unwrap_or_default();
+                return Ok(Op::Labels {
+                    index,
+                    max,
+                    request: LabelRequest {
+                        add: output == ADD_LABELS,
+                        repo,
+                        number: number()?,
+                        labels,
+                        allowed: patterns("allowed")?,
+                        blocked: patterns("blocked")?,
+                        kind: run.context_kind()?,
+                    },
+                });
+            }
+            if matches!(output.as_str(), CLOSE_ISSUE | CLOSE_PULL_REQUEST) {
+                let issue = output == CLOSE_ISSUE;
+                run.read_as_dispatched()?;
+                return Ok(Op::Close {
+                    triggering: run.closing_triggering()?,
+                    index,
+                    max,
+                    repo,
+                    close: Close {
+                        number: number()?,
+                        kind: if issue {
+                            ItemKind::Issue
+                        } else {
+                            ItemKind::PullRequest
+                        },
+                        body: item
+                            .get("body")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    },
+                    state_reason: issue.then(|| {
+                        item.get("state_reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("completed")
+                            .to_lowercase()
+                    }),
+                });
+            }
             if output == ADD_COMMENT {
                 let target = setting(config, "target")?;
                 ensure!(
@@ -778,18 +1162,6 @@ fn pull_request(
     policy: &Policy,
     run: &Run,
 ) -> Result<(PullRequest, Option<String>)> {
-    for (key, want) in [
-        ("signed_commits", json!(false)),
-        ("fallback_as_issue", json!(false)),
-        ("preserve_branch_name", json!(true)),
-        ("auto_close_issue", json!(false)),
-        ("protected_files_policy", json!("blocked")),
-    ] {
-        ensure!(
-            config.get(key) == Some(&want),
-            "the create_pull_request handler's {key} is not {want}, which is all agentic-job publish does"
-        );
-    }
     let draft = config
         .get("draft")
         .and_then(Value::as_bool)
@@ -1097,12 +1469,15 @@ fn xml_marker(run: &Run, run_url: &str) -> String {
 }
 
 /// gh-aw's default footer: who made it, for which item, and the search
-/// for what else the workflow made.
-fn footer(run: &Run, triggering: Option<&str>, history: &str) -> String {
+/// for what else the workflow made where there is one.
+fn footer(run: &Run, triggering: Option<&str>, history: Option<&str>) -> String {
     let run_url = run.run_url();
     let triggering = triggering.map(|n| format!(" for {n}")).unwrap_or_default();
+    let history = history
+        .map(|history| format!(" · [◷]({history})"))
+        .unwrap_or_default();
     format!(
-        "> Generated by [{}]({run_url}){triggering} · [◷]({history})\n\n{}",
+        "> Generated by [{}]({run_url}){triggering}{history}\n\n{}",
         run.workflow_name,
         xml_marker(run, &run_url)
     )
@@ -1272,6 +1647,16 @@ enum Kind {
 }
 
 impl Outcome {
+    fn succeeded(op: &Op, result: Value) -> Self {
+        Self {
+            output: op.output(),
+            index: op.index(),
+            kind: Kind::Success,
+            result,
+            error: None,
+        }
+    }
+
     fn failed(op: &Op, error: String) -> Self {
         Self {
             output: op.output(),
@@ -1312,9 +1697,7 @@ fn publish(
     let mut pushed_failed = None;
     for op in ops {
         let count = processed.entry(op.output()).or_default();
-        let max = match op {
-            Op::Comment { max, .. } | Op::PullRequest { max, .. } => *max,
-        };
+        let max = op.max();
         if *count >= max {
             outcomes.push(match op {
                 Op::Comment { .. } => Outcome::skipped(
@@ -1322,9 +1705,7 @@ fn publish(
                     json!({"success": false, "skipped": true, "reasonCode": "MAX_COUNT_REACHED",
                         "reason": "Max count reached", "error": format!("Max count of {max} reached")}),
                 ),
-                Op::PullRequest { .. } => {
-                    Outcome::failed(op, format!("Max count of {max} reached"))
-                }
+                _ => Outcome::failed(op, format!("Max count of {max} reached")),
             });
             continue;
         }
@@ -1345,6 +1726,23 @@ fn publish(
                 ..
             } => Outcome::failed(op, failure.clone()),
             Op::PullRequest { pr, .. } => pull_request_outcome(op, pr, defaults, publisher, run),
+            Op::Labels { request, .. } if request.add => add_labels(op, request, &publisher.github),
+            Op::Labels { request, .. } => remove_labels(op, request, &publisher.github),
+            Op::Close {
+                repo,
+                close,
+                state_reason,
+                triggering,
+                ..
+            } => close_item(
+                op,
+                repo,
+                close,
+                state_reason.as_deref(),
+                triggering.as_deref(),
+                &publisher.github,
+                run,
+            ),
         };
         if outcome.kind == Kind::Failed {
             let error = outcome.error.clone().unwrap_or_default();
@@ -1409,7 +1807,7 @@ fn comment(
         footer(
             run,
             triggering.as_deref(),
-            &history_url(run, repo, "issues")
+            Some(&history_url(run, repo, "issues"))
         )
     );
     let body = with_provenance(run, &body);
@@ -1522,7 +1920,7 @@ fn pull_request_body(
     let history = history_url(run, &publisher.repo, "pullrequests");
     let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
     lines.push(String::new());
-    lines.push(footer(run, triggering.as_deref(), &history));
+    lines.push(footer(run, triggering.as_deref(), Some(&history)));
     lines.push(String::new());
     lines.push(format!("<!-- gh-aw-workflow-id: {} -->", run.workflow_id));
     lines.push(String::new());
@@ -1542,39 +1940,428 @@ fn temporary_id() -> String {
     format!("aw_{id}")
 }
 
+/// Adds the labels of REQUEST, as gh-aw's handler does: no write where
+/// it would make none, and the item's state before and after recorded.
+fn add_labels(op: &Op, request: &LabelRequest, github: &Github) -> Outcome {
+    let LabelRequest {
+        repo,
+        number,
+        labels,
+        allowed,
+        blocked,
+        kind,
+        ..
+    } = request;
+    if labels.is_empty() {
+        let message = format!(
+            "No labels provided. Skipping add_labels. Provide at least one label from {}",
+            label_source(allowed, "the repository's available labels")
+        );
+        return Outcome::skipped(
+            op,
+            json!({"success": true, "skipped": true, "reasonCode": "NO_LABELS_PROVIDED",
+                "reason": "No labels provided", "number": number, "labelsAdded": [],
+                "message": message}),
+        );
+    }
+    if labels.len() > MAX_LABELS {
+        return Outcome::failed(
+            op,
+            format!(
+                "E003: Cannot add more than {MAX_LABELS} labels (received {})",
+                labels.len()
+            ),
+        );
+    }
+    let kept = kept_labels(labels, allowed, blocked, MAX_LABELS);
+    if kept.is_empty() {
+        return Outcome::succeeded(
+            op,
+            json!({"success": true, "number": number, "labelsAdded": [],
+                "message": "No valid labels found"}),
+        );
+    }
+    let issue = format!("/repos/{repo}/issues/{number}");
+    let before = match github.request("GET", &issue, None) {
+        Ok(found) => issue_state(&found),
+        Err(err) => return Outcome::failed(op, format!("{err:#}")),
+    };
+    let answer = match github.request_retrying(
+        "POST",
+        &format!("{issue}/labels"),
+        Some(&json!({"labels": kept})),
+        &format!("add_labels to {kind} #{number} in {repo}"),
+    ) {
+        Ok(answer) => answer,
+        Err(err) => return Outcome::failed(op, format!("{err:#}")),
+    };
+    let mut after = before.clone();
+    after["labels"] = json!(names_of(&answer, "name"));
+    Outcome::succeeded(
+        op,
+        json!({"success": true, "number": number, "repo": repo, "labelsAdded": kept,
+            "labels": label_records(&answer, &kept), "contextType": kind,
+            "before_state": before, "after_state": after}),
+    )
+}
+
+/// Removes the labels of REQUEST one at a time, as gh-aw's handler does:
+/// one the item does not have, or that the forge will not remove, is
+/// left, and the request succeeds.
+fn remove_labels(op: &Op, request: &LabelRequest, github: &Github) -> Outcome {
+    let LabelRequest {
+        repo,
+        number,
+        labels,
+        allowed,
+        blocked,
+        kind,
+        ..
+    } = request;
+    if labels.is_empty() {
+        let source = if allowed.is_empty() {
+            "the issue/PR's current labels".to_owned()
+        } else {
+            label_source(allowed, "")
+        };
+        return Outcome::failed(
+            op,
+            format!("No labels provided. Please provide at least one label from {source}"),
+        );
+    }
+    // The handler's `max` bounds the labels of one request too.
+    let max = usize::try_from(op.max()).unwrap_or(usize::MAX);
+    let kept = kept_labels(labels, allowed, blocked, max);
+    if kept.is_empty() {
+        return Outcome::succeeded(
+            op,
+            json!({"success": true, "number": number, "labelsRemoved": [],
+                "message": "No valid labels found"}),
+        );
+    }
+    let (mut removed, mut failed) = (Vec::new(), Vec::new());
+    for label in &kept {
+        let path = format!(
+            "/repos/{repo}/issues/{number}/labels/{}",
+            uri_component(label)
+        );
+        match github.request("DELETE", &path, None) {
+            Ok(_) => removed.push(label.clone()),
+            Err(err) => {
+                let error = format!("{err:#}");
+                if !(error.contains("Label does not exist") || error.contains("404")) {
+                    failed.push(json!({"label": label, "error": error}));
+                }
+            }
+        }
+    }
+    let mut result = json!({"success": true, "number": number, "labelsRemoved": removed});
+    if !failed.is_empty() {
+        result["failedLabels"] = json!(failed);
+    }
+    result["contextType"] = json!(kind);
+    Outcome::succeeded(op, result)
+}
+
+/// "the allowed list: [...]" of ALLOWED, or OTHERWISE where there are none.
+fn label_source(allowed: &[String], otherwise: &str) -> String {
+    if allowed.is_empty() {
+        return otherwise.to_owned();
+    }
+    format!("the allowed list: {}", json!(allowed))
+}
+
+/// What gh-aw's label handlers keep of LABELS (`validateLabels`): those
+/// no BLOCKED pattern matches and, where there are ALLOWED ones, one of
+/// them does, once each, the first MAX. [`plain_label`] holds each to
+/// what its sanitizer leaves as it is.
+fn kept_labels(
+    labels: &[String],
+    allowed: &[String],
+    blocked: &[String],
+    max: usize,
+) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for label in labels {
+        let blocked = blocked.iter().any(|pattern| matches_glob(label, pattern));
+        let allowed =
+            allowed.is_empty() || allowed.iter().any(|pattern| matches_glob(label, pattern));
+        if !blocked && allowed && !kept.contains(label) {
+            kept.push(label.clone());
+        }
+    }
+    kept.truncate(max);
+    kept
+}
+
+/// `matchesSimpleGlob`: TEXT is PATTERN, case ignored, `*` any run of
+/// characters. Both are ASCII here.
+fn matches_glob(text: &str, pattern: &str) -> bool {
+    if text.is_empty() || pattern.is_empty() {
+        return false;
+    }
+    if text.eq_ignore_ascii_case(pattern) {
+        return true;
+    }
+    let pattern: Vec<String> = pattern.split('*').map(regex::escape).collect();
+    Regex::new(&format!("(?i)^{}$", pattern.join(".*"))).is_ok_and(|glob| glob.is_match(text))
+}
+
+/// TEXT as octokit writes a path parameter: all but RFC 3986's unreserved
+/// characters percent-encoded.
+fn uri_component(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The KEY of each entry of LIST that has one, or the entry where it is
+/// text (`normalizeLabelNames`, `normalizeAssigneeLogins`).
+fn names_of(list: &Value, key: &str) -> Vec<String> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.as_str().or_else(|| entry[key].as_str()))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `extractIssueStateFromData`: what gh-aw records of ISSUE before and
+/// after it changes it.
+fn issue_state(issue: &Value) -> Value {
+    json!({
+        "title": issue["title"].as_str().unwrap_or_default(),
+        "body_hash": body_hash(issue["body"].as_str().unwrap_or_default()),
+        "state": issue["state"].as_str().unwrap_or_default(),
+        "labels": names_of(&issue["labels"], "name"),
+        "assignees": names_of(&issue["assignees"], "login"),
+    })
+}
+
+/// `hashNormalizedBody`: the SHA-256 of BODY with CRLF line ends, the
+/// spaces and tabs ending each line and the whitespace around it gone.
+fn body_hash(body: &str) -> String {
+    let body = body.replace("\r\n", "\n");
+    let lines: Vec<&str> = body
+        .split('\n')
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect();
+    ring::digest::digest(&ring::digest::SHA256, js_trim(&lines.join("\n")).as_bytes())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `buildLabelRecords`: each of NAMES with the IDs the forge's ANSWER
+/// gives the label of that name, case ignored, the last one listed.
+fn label_records(answer: &Value, names: &[String]) -> Vec<Value> {
+    let details: Vec<&Value> = answer
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|label| label["name"].is_string())
+        .collect();
+    names
+        .iter()
+        .map(|name| {
+            let mut record = Map::new();
+            record.insert("name".into(), json!(name));
+            let detail = details.iter().rev().find(|label| {
+                label["name"]
+                    .as_str()
+                    .is_some_and(|other| other.to_lowercase() == name.to_lowercase())
+            });
+            if let Some(detail) = detail {
+                if detail["id"].is_number() {
+                    record.insert("database_id".into(), detail["id"].clone());
+                }
+                if detail["node_id"].is_string() {
+                    record.insert("node_id".into(), detail["node_id"].clone());
+                } else if detail["id"].is_string() {
+                    record.insert("node_id".into(), detail["id"].clone());
+                }
+            }
+            Value::Object(record)
+        })
+        .collect()
+}
+
+/// Comments on and closes the item of CLOSE in REPO, as gh-aw's handlers
+/// do (`createCloseEntityHandler`): the comment first, even on an item
+/// closed already, which is not closed again. A pull request is closed
+/// even where its comment fails; an issue is not. The comment's footer
+/// names TRIGGERING.
+fn close_item(
+    op: &Op,
+    repo: &str,
+    close: &Close,
+    state_reason: Option<&str>,
+    triggering: Option<&str>,
+    github: &Github,
+    run: &Run,
+) -> Outcome {
+    let number = close.number;
+    if js_trim(&close.body).is_empty() {
+        return Outcome::failed(op, "No comment body provided".to_owned());
+    }
+    let body = sanitize_with(&close.body, MAX_SANITIZED, &Mentions::All, &|host| {
+        run.keeps_link(host)
+    });
+    let (noun, path) = match close.kind {
+        ItemKind::Issue => ("issue", format!("/repos/{repo}/issues/{number}")),
+        ItemKind::PullRequest => ("pull request", format!("/repos/{repo}/pulls/{number}")),
+    };
+    let entity = match github.request("GET", &path, None) {
+        Ok(entity) => entity,
+        Err(err) => return Outcome::failed(op, format!("{err:#}")),
+    };
+    let closed_already = entity["state"] == "closed";
+    let body = format!("{}\n\n{}\n", js_trim(&body), footer(run, triggering, None));
+    let comment = github.request(
+        "POST",
+        &format!("/repos/{repo}/issues/{number}/comments"),
+        Some(&json!({"body": hide_applied(&body)})),
+    );
+    let posted = match (comment, close.kind) {
+        (Ok(_), _) => true,
+        (Err(err), ItemKind::Issue) => {
+            return Outcome::failed(
+                op,
+                format!("ERR_API: Failed to add comment to {noun} #{number}: {err:#}"),
+            );
+        }
+        (Err(_), ItemKind::PullRequest) => false,
+    };
+    let closed = if closed_already {
+        entity
+    } else {
+        let change = match state_reason {
+            Some(reason) => json!({"state": "closed", "state_reason": reason}),
+            None => json!({"state": "closed"}),
+        };
+        match github.request("PATCH", &path, Some(&change)) {
+            Ok(closed) => closed,
+            Err(err) => return Outcome::failed(op, format!("{err:#}")),
+        }
+    };
+    Outcome::succeeded(
+        op,
+        match close.kind {
+            ItemKind::Issue => json!({"success": true, "number": closed["number"],
+                "url": closed["html_url"], "title": closed["title"],
+                "alreadyClosed": closed_already}),
+            ItemKind::PullRequest => json!({"success": true,
+                "pull_request_number": closed["number"], "pull_request_url": closed["html_url"],
+                "alreadyClosed": closed_already, "commentPosted": posted}),
+        },
+    )
+}
+
 /// The manifest entry of a success (`extractCreatedItemFromResult`).
 fn manifest_entry(outcome: &Outcome, timestamp: &str) -> Option<Value> {
-    if outcome.kind != Kind::Success {
+    let result = &outcome.result;
+    if outcome.kind != Kind::Success || ["staged", "skipped"].iter().any(|key| result[*key] == true)
+    {
         return None;
     }
-    let result = &outcome.result;
-    let (number, id) = match outcome.output {
-        ADD_COMMENT => (&result["itemNumber"], &result["commentId"]),
-        _ => (&result["number"], &result["id"]),
+    let first = |keys: &[&str], present: fn(&Value) -> bool| {
+        keys.iter()
+            .map(|key| &result[*key])
+            .find(|value| present(value))
+            .cloned()
     };
+    let set = |value: &Value| !value.is_null();
+    let url = first(
+        &[
+            "url",
+            "projectUrl",
+            "html_url",
+            "pull_request_url",
+            "review_url",
+            "issue_url",
+        ],
+        truthy,
+    );
+    let number = first(
+        &[
+            "number",
+            "pull_request_number",
+            "prNumber",
+            "issue_number",
+            "itemNumber",
+        ],
+        set,
+    );
+    let repo = first(&["repo", "_repo"], truthy);
+    let id = first(
+        &["id", "commentId", "comment_id", "review_id", "issue_id"],
+        set,
+    );
     let mut entry = Map::new();
     entry.insert("type".into(), json!(outcome.output));
-    entry.insert("url".into(), result["url"].clone());
-    if !number.is_null() {
+    if let Some(url) = url {
+        entry.insert("url".into(), url);
+    }
+    if let Some(number) = &number {
         entry.insert("number".into(), number.clone());
     }
-    entry.insert("repo".into(), result["repo"].clone());
+    if let Some(repo) = &repo {
+        entry.insert("repo".into(), repo.clone());
+    }
     entry.insert("provider".into(), json!("github"));
-    if !id.is_null() {
-        entry.insert("id".into(), id.clone());
+    if let Some(id) = id {
+        entry.insert("id".into(), id);
     }
-    let mut target = Map::new();
-    target.insert("provider".into(), json!("github"));
-    target.insert("repository".into(), result["repo"].clone());
-    if !number.is_null() {
-        target.insert("number".into(), number.clone());
+    if repo.is_some() || number.is_some() {
+        let mut target = Map::new();
+        target.insert("provider".into(), json!("github"));
+        if let Some(repo) = repo {
+            target.insert("repository".into(), repo);
+        }
+        if let Some(number) = number {
+            target.insert("number".into(), number);
+        }
+        if truthy(&result["contextType"]) {
+            target.insert("kind".into(), result["contextType"].clone());
+        }
+        entry.insert("target".into(), Value::Object(target));
     }
-    entry.insert("target".into(), Value::Object(target));
-    if let Some(temporary) = result.get("temporaryId") {
-        entry.insert("temporaryId".into(), temporary.clone());
+    if result["labels"].is_array() {
+        entry.insert("labels".into(), result["labels"].clone());
+    } else if let Some(added) = result["labelsAdded"].as_array() {
+        let labels: Vec<Value> = added.iter().map(|name| json!({"name": name})).collect();
+        entry.insert("labels".into(), json!(labels));
     }
-    if result["metadata"]["node_id"].is_string() {
-        entry.insert("metadata".into(), result["metadata"].clone());
+    if truthy(&result["temporaryId"]) {
+        entry.insert("temporaryId".into(), result["temporaryId"].clone());
+    }
+    // An answer without a node ID gives none, rather than a null one.
+    let metadata: Map<String, Value> = result["metadata"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !metadata.is_empty() {
+        entry.insert("metadata".into(), Value::Object(metadata));
+    }
+    for key in ["before_state", "after_state"] {
+        if truthy(&result[key]) {
+            entry.insert(key.into(), result[key].clone());
+        }
+    }
+    for key in ["labelsAdded", "labelsSuggested", "labelsBefore"] {
+        if result[key].is_array() {
+            entry.insert(key.into(), result[key].clone());
+        }
     }
     entry.insert("timestamp".into(), json!(timestamp));
     Some(Value::Object(entry))
@@ -1836,13 +2623,28 @@ fn summary(run: &Run, outcomes: &[Outcome], items: &[Value]) -> String {
                 if let Some(temporary) = result["temporaryId"].as_str() {
                     text += &format!("**Temporary ID:** `{temporary}`\n\n");
                 }
-                if let Some(title) = item["title"].as_str().filter(|title| !title.is_empty()) {
+                let title = [&result["title"], &item["title"]]
+                    .into_iter()
+                    .find_map(|title| title.as_str().filter(|title| !title.is_empty()));
+                if let Some(title) = title {
                     text += &format!("**Title:** {title}\n\n");
+                }
+                // `formatLabels` of the first that is set: an empty list
+                // is, and names none.
+                let labels = [&result["labelsAdded"], &result["labels"], &item["labels"]]
+                    .into_iter()
+                    .find(|labels| truthy(labels))
+                    .map(|labels| names_of(labels, "name"))
+                    .unwrap_or_default();
+                if !labels.is_empty() {
+                    text += &format!("**Labels:** {}\n\n", labels.join(", "));
                 }
             }
             Kind::Skipped | Kind::Failed => {
                 text += &target_line(run, result, item);
-                let code = result["reasonCode"].as_str();
+                let code = result["reasonCode"]
+                    .as_str()
+                    .or_else(|| result["errorCode"].as_str());
                 let reason = result["reason"].as_str();
                 if let Some(code) = code {
                     text += &format!("**Reason Code:** `{code}`\n\n");
@@ -1989,11 +2791,15 @@ pub(super) fn apply(
         Err(errors) => return refuse(errors),
     };
     // A refusal too, so before the remainder hands gh-aw the rest; only
-    // the routed requests read the event.
-    let defaults = if ops.is_empty() {
-        Ok(Vec::new())
-    } else {
+    // the routed comments and pull requests keep mentions, and so read
+    // the event's people.
+    let defaults = if ops
+        .iter()
+        .any(|op| matches!(op, Op::Comment { .. } | Op::PullRequest { .. }))
+    {
         run.default_mentions()
+    } else {
+        Ok(Vec::new())
     };
     let defaults = match defaults {
         Ok(defaults) => defaults,
@@ -2210,18 +3016,21 @@ mod tests {
 
     fn policy() -> Policy {
         let mut policy = crate::policy::tests::policy();
-        policy.native_handlers = vec![ADD_COMMENT.into(), CREATE_PULL_REQUEST.into()];
+        policy.native_handlers = crate::policy::NATIVE_OUTPUTS
+            .iter()
+            .map(|output| (*output).to_owned())
+            .collect();
         policy
     }
 
     /// What the loopback forge was sent, in order.
     type Sent = Arc<Mutex<Vec<Request>>>;
 
-    /// A forge holding SEED, which makes comments and pull requests as
-    /// publication.rs's does (IDs from 1001), and answers FAULTS' requests
-    /// with their status once.
+    /// A forge holding SEED, which makes comments and pull requests, adds
+    /// and removes labels and changes items as publication.rs's does (IDs
+    /// from 1001), and answers FAULTS' requests with their status once.
     fn forge(seed: &Value, faults: &[Value]) -> (Github, Sent) {
-        let seed = seed.as_object().cloned().unwrap_or_default();
+        let mut seed = seed.as_object().cloned().unwrap_or_default();
         let faults: Vec<(String, u16)> = faults
             .iter()
             .map(|fault| {
@@ -2253,6 +3062,33 @@ mod tests {
                 return (status, json!({"message": "injected failure"}).to_string());
             }
             let comments = Regex::new(r"^/repos/([^/]+/[^/]+)/issues/(\d+)/comments$").unwrap();
+            let labels = Regex::new(r"^(/repos/[^/]+/[^/]+/issues/\d+)/labels(?:/(.+))?$").unwrap();
+            let not_found = (404, json!({"message": "Not Found"}).to_string());
+            if let Some(caps) = labels.captures(path) {
+                let Some(issue) = seed.get_mut(&caps[1]) else {
+                    return not_found;
+                };
+                let held = issue["labels"].as_array_mut().unwrap();
+                match (method, caps.get(2)) {
+                    ("POST", None) => {
+                        for name in request.body["labels"].as_array().unwrap() {
+                            if !held.iter().any(|label| &label["name"] == name) {
+                                held.push(json!({"name": name}));
+                            }
+                        }
+                    }
+                    ("DELETE", Some(name)) => {
+                        let name = name.as_str().replace("%20", " ");
+                        let before = held.len();
+                        held.retain(|label| label["name"] != name.as_str());
+                        if held.len() == before {
+                            return not_found;
+                        }
+                    }
+                    _ => return not_found,
+                }
+                return (200, Value::Array(held.clone()).to_string());
+            }
             match method {
                 "GET" => match seed.get(path) {
                     Some(value) => (200, value.to_string()),
@@ -2280,7 +3116,16 @@ mod tests {
                     });
                     (201, pull.to_string())
                 }
-                _ => (404, json!({"message": "Not Found"}).to_string()),
+                "PATCH" => match seed.get_mut(path).and_then(Value::as_object_mut) {
+                    Some(item) => {
+                        for (key, value) in request.body.as_object().unwrap() {
+                            item.insert(key.clone(), value.clone());
+                        }
+                        (200, Value::Object(item.clone()).to_string())
+                    }
+                    None => not_found,
+                },
+                _ => not_found,
             }
         });
         let mut github = Github::new(&server, super::super::github::tests::TOKEN.to_owned())
@@ -2418,7 +3263,7 @@ mod tests {
             // part: tests/publication.rs runs both steps.
             let routed = case["native"].is_null()
                 && case["items"].as_array().unwrap().iter().all(|item| {
-                    [ADD_COMMENT, CREATE_PULL_REQUEST].contains(&item["type"].as_str().unwrap())
+                    crate::policy::NATIVE_OUTPUTS.contains(&item["type"].as_str().unwrap())
                 });
             if !routed {
                 continue;
@@ -2443,6 +3288,10 @@ mod tests {
             };
             for (at, attempt) in golden["attempts"].as_array().unwrap().iter().enumerate() {
                 let what = format!("{name}, attempt {}", at + 1);
+                // A guard that refused the run left neither step anything.
+                if attempt["guard"]["exit"] != 0 {
+                    continue;
+                }
                 let api = publisher.github.api_url().to_owned();
                 let run = run(at as u64 + 1, &api);
                 let records_dir = tempfile::tempdir().unwrap();
@@ -2458,6 +3307,21 @@ mod tests {
                 };
                 let items = attempt["guard"]["items"].as_array().unwrap();
                 let handlers = attempt["handler_config"].as_object().unwrap();
+                // What the guard changed, such as an issue an earlier
+                // attempt left open, as it changed it.
+                for write in attempt["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["step"] == "guard" && request["method"] != "GET")
+                {
+                    let (method, path) = (
+                        write["method"].as_str().unwrap(),
+                        write["path"].as_str().unwrap(),
+                    );
+                    let body = Some(&write["body"]).filter(|body| !body.is_null());
+                    publisher.github.request(method, path, body).unwrap();
+                }
                 sent.lock().unwrap().clear();
                 let policy = policy();
                 let inputs = Checked {
@@ -2577,7 +3441,7 @@ mod tests {
                 assert_eq!(&pushed(root.path(), branch), want, "{name}: pushed");
             }
         }
-        assert_eq!(compared, 7, "the corpus's cases of the routed types");
+        assert_eq!(compared, 21, "the corpus's cases of the routed types");
     }
 
     /// apply.yml's hook and `stripExecutionProvenance`, against what the
@@ -2624,6 +3488,11 @@ mod tests {
     fn pull_request_item() -> Value {
         json!({"type": CREATE_PULL_REQUEST, "title": "Fix it", "body": "Why.",
             "branch": "agent-run-4242"})
+    }
+
+    /// A request of a type gh-aw's handlers keep.
+    fn gh_aw_item() -> Value {
+        json!({"type": "create_issue", "title": "Flaky", "body": "Why."})
     }
 
     /// Each request goes to one set of handlers, the routed ones in the
@@ -2812,6 +3681,193 @@ mod tests {
         }
     }
 
+    /// Every type the bounds may route has a handler here, and no other.
+    #[test]
+    fn handlers_are_the_native_outputs() {
+        let ours: Vec<&str> = HANDLERS.iter().map(|handler| handler.output).collect();
+        assert_eq!(ours, crate::policy::NATIVE_OUTPUTS);
+    }
+
+    /// Labels and closing requests this cannot publish as gh-aw does are
+    /// refused from what they hold, where check can refuse them too, or
+    /// from the handlers' settings and the event before anything is
+    /// published.
+    #[test]
+    fn label_and_close_refusals() {
+        let routed = policy().native_handlers;
+        let labels = json!({"type": ADD_LABELS, "item_number": 7, "labels": ["triage"]});
+        let close = json!({"type": CLOSE_ISSUE, "issue_number": 7, "body": "Done."});
+        let with = |item: &Value, key: &str, value: Value| {
+            let mut item = item.clone();
+            item[key] = value;
+            item
+        };
+        for (item, want) in [
+            (
+                with(&labels, "item_number", json!("7")),
+                "positive integer item_number",
+            ),
+            (
+                with(&labels, "item_number", json!(0)),
+                "positive integer item_number",
+            ),
+            (
+                with(&labels, "issue_number", json!(7)),
+                "the field \"issue_number\"",
+            ),
+            (with(&labels, "labels", json!(["a@b"])), "the label \"a@b\""),
+            (
+                with(&labels, "labels", json!([" triage"])),
+                "the label \" triage\"",
+            ),
+            (
+                with(&labels, "labels", json!(["-triage"])),
+                "the label \"-triage\"",
+            ),
+            (
+                with(&labels, "labels", json!([{"name": "x"}])),
+                "the label {",
+            ),
+            (with(&labels, "labels", json!("triage")), "not an array"),
+            (
+                with(&close, "state_reason", json!("wontfix")),
+                "state_reason \"wontfix\"",
+            ),
+            (
+                with(&close, "duplicate_of", json!(8)),
+                "the field \"duplicate_of\"",
+            ),
+            (
+                json!({"type": CLOSE_PULL_REQUEST, "body": "Done."}),
+                "positive integer pull_request_number",
+            ),
+        ] {
+            let errors = split(std::slice::from_ref(&item), &routed).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
+        assert!(split(&[with(&close, "state_reason", json!("DUPLICATE"))], &routed).is_ok());
+
+        let handlers = json!({
+            ADD_LABELS: {"max": 1, "allowed": ["triage"], "target-repo": REPO, "target": "*",
+                "issue_intent": false, "create_if_missing": false},
+            CLOSE_ISSUE: {"max": 1, "target-repo": REPO, "target": "*", "issue_intent": false,
+                "allow_body": true},
+        });
+        type Change = fn(&mut Value, &mut Run);
+        let cases: &[(&Value, Change, &str)] = &[
+            (
+                &labels,
+                |handlers, _| handlers[ADD_LABELS]["create_if_missing"] = json!(true),
+                "create_if_missing is not false",
+            ),
+            (
+                &labels,
+                |handlers, _| handlers[ADD_LABELS]["max_labels"] = json!(3),
+                "\"max_labels\"",
+            ),
+            (
+                &labels,
+                |handlers, _| handlers[ADD_LABELS]["blocked"] = json!(["\u{212a}*"]),
+                "not ASCII",
+            ),
+            (
+                &labels,
+                |_, run| {
+                    run.event = json!({"inputs": {"event_payload": "{}"}});
+                },
+                "event_payload",
+            ),
+            (
+                &close,
+                |_, run| {
+                    run.event = json!({"inputs": {"target_repo": "other/repo"}});
+                },
+                "target_repo",
+            ),
+            (
+                &labels,
+                |_, run| {
+                    run.event_name = "repository_dispatch".into();
+                    run.event = json!({"client_payload": {}});
+                },
+                "client_payload",
+            ),
+            (
+                &close,
+                |_, run| run.event = json!({"issue": {"number": "7"}}),
+                "is not one gh-aw writes as is",
+            ),
+            (
+                &close,
+                |handlers, _| handlers[CLOSE_ISSUE]["state_reason"] = json!("not_planned"),
+                "\"state_reason\"",
+            ),
+            (
+                &close,
+                |handlers, _| handlers[CLOSE_ISSUE]["target"] = json!("triggering"),
+                "target is not \"*\"",
+            ),
+        ];
+        for (item, change, want) in cases {
+            let mut handlers = handlers.clone();
+            let mut run = run(1, "http://127.0.0.1:1");
+            change(&mut handlers, &mut run);
+            let Split { ours, .. } = split(&[(*item).clone()], &routed).unwrap();
+            let errors = plan(
+                ours,
+                handlers.as_object().unwrap(),
+                Path::new("/nonexistent"),
+                &policy(),
+                &run,
+            )
+            .unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
+    }
+
+    /// What gh-aw's label handlers keep, the path a label is removed at,
+    /// and the hash of a body they record.
+    #[test]
+    fn labels_as_gh_aw_keeps_them() {
+        let names = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        for (labels, allowed, blocked, max, want) in [
+            (&["a", "b", "a"][..], &[][..], &[][..], 10, &["a", "b"][..]),
+            (&["Bug", "docs"], &["bug"], &[], 10, &["Bug"]),
+            (
+                &["area: ci", "area/x", "kind"],
+                &["area*"],
+                &[],
+                10,
+                &["area: ci", "area/x"],
+            ),
+            (&["wontfix", "triage"], &[], &["WONT*"], 10, &["triage"]),
+            (&["a.b", "axb"], &["a.b"], &[], 10, &["a.b"]),
+            (&["a", "b", "c"], &[], &[], 2, &["a", "b"]),
+        ] {
+            assert_eq!(
+                kept_labels(&names(labels), &names(allowed), &names(blocked), max),
+                names(want),
+                "{labels:?} {allowed:?} {blocked:?}"
+            );
+        }
+        assert_eq!(uri_component("good first issue"), "good%20first%20issue");
+        assert_eq!(uri_component("area/ci: x_y.z~"), "area%2Fci%3A%20x_y.z~");
+        assert_eq!(
+            body_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(body_hash(" a \t\r\nb\n\n"), body_hash("a\nb"));
+        assert_ne!(body_hash("a\n b"), body_hash("a\nb"));
+    }
+
     /// A pull request that fails is not followed by the comments after
     /// it, as gh-aw's would be with its note; the comment before it is
     /// posted, and gh-aw's handlers are left the rest.
@@ -2833,12 +3889,12 @@ mod tests {
         let records = tempfile::tempdir().unwrap();
         let path = |file: &str| records.path().join(file);
         std::fs::write(path("output"), "").unwrap();
-        let labels = json!({"type": "add_labels", "labels": ["x"]});
+        let issue = gh_aw_item();
         let items = [
             comment_item(),
             pull_request_item(),
             comment_item(),
-            labels.clone(),
+            issue.clone(),
         ];
         let policy = policy();
         let ok = apply(
@@ -2875,7 +3931,7 @@ mod tests {
                 "POST /repos/owner/repo/issues/7/comments HTTP/1.1"
             ]
         );
-        assert_eq!(read_json(&path("remainder.json"))["items"], json!([labels]));
+        assert_eq!(read_json(&path("remainder.json"))["items"], json!([issue]));
         let errors = read_json(&path("errors.json"));
         assert_eq!(errors["failures"].as_array().unwrap().len(), 2);
         assert!(
@@ -2939,13 +3995,13 @@ mod tests {
     /// anything is published or gh-aw's handlers are left the rest.
     #[test]
     fn refusals_leave_gh_aw_nothing() {
-        let labels = json!({"type": "add_labels", "labels": ["x"]});
+        let issue = gh_aw_item();
         let mut heading = pull_request_item();
         heading["title"] = json!("Réparer");
         heading["body"] = json!("# Réparer\n\nA local reproduction.");
         for (items, bot, want) in [
-            (vec![comment_item(), labels.clone()], true, "look up"),
-            (vec![comment_item(), heading, labels], false, "not ASCII"),
+            (vec![comment_item(), issue.clone()], true, "look up"),
+            (vec![comment_item(), heading, issue], false, "not ASCII"),
         ] {
             let (root, checked, handlers) = pull_request_case();
             let (github, sent) = forge(&json!({}), &[]);
@@ -3064,5 +4120,16 @@ mod tests {
         );
         run.event = json!({"issue": {"number": "5"}});
         assert!(run.triggering(ADD_COMMENT).is_err());
+        // A closing comment names the event's issue, or else its pull
+        // request; the label handlers' records, a pull request's kind.
+        run.event =
+            json!({"issue": {"number": 5, "pull_request": {}}, "pull_request": {"number": 6}});
+        assert_eq!(run.closing_triggering().unwrap().as_deref(), Some("#5"));
+        assert_eq!(run.context_kind().unwrap(), "pull request");
+        run.event = json!({"pull_request": {"number": 6}, "discussion": {"number": 3}});
+        assert_eq!(run.closing_triggering().unwrap().as_deref(), Some("#6"));
+        run.event = json!({"discussion": {"number": 3}});
+        assert_eq!(run.closing_triggering().unwrap(), None);
+        assert_eq!(run.context_kind().unwrap(), "issue");
     }
 }
