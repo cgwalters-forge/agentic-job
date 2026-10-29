@@ -33,7 +33,8 @@ const WIRESERVER_DNS_PORT: u16 = 53;
 /// It is the VM's own host and answers at once where it answers at all.
 /// Where it does not (a hosted runner drops the packets), waiting out
 /// the whole of a request's time for the control added half a minute to
-/// every run.
+/// every run. This is the refusal's bound; the control has the shorter
+/// one of every control ([`super::CONTROL_LIMIT`]).
 const WIRESERVER_CONNECT_SECONDS: &str = "5";
 
 /// With the egress proxy: a write it must refuse, on a host that would
@@ -959,9 +960,10 @@ impl Checker<'_> {
             targets.extend(self_peerapi(&status));
             // Made together, and reported in this order: see `egress`.
             let mut attempts = Vec::new();
-            for (addr, port) in targets {
-                let target = socket_text(&addr, port);
-                let probe = tcp_probe(&addr, port);
+            let mut in_container = Vec::new();
+            for (addr, port) in &targets {
+                let target = socket_text(addr, *port);
+                let probe = tcp_probe(addr, *port);
                 let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
                 attempts.extend([
                     Attempt::control(format!("tailnet-control:{target}"), &target, &probe),
@@ -971,15 +973,11 @@ impl Checker<'_> {
                         &probe,
                     ),
                 ]);
-                if self.runs_containers() {
-                    attempts.push(Attempt::refused_in_container(
-                        format!("tailnet-container:{target}"),
-                        format!(
-                            "a container as subordinate uid {CONTAINER_UID} can't reach {target}"
-                        ),
-                        &self.container(&probe),
-                    ));
-                }
+                in_container.push(Attempt::refused_in_container(
+                    format!("tailnet-container:{target}"),
+                    format!("a container as subordinate uid {CONTAINER_UID} can't reach {target}"),
+                    &[],
+                ));
             }
             let port = OTHER_TAILNET_PORT.to_string();
             attempts.push(Attempt::refused(
@@ -987,9 +985,56 @@ impl Checker<'_> {
                 format!("{user} can't dial {host_v4}:{port} through tailscaled (tailscale nc)"),
                 &["timeout", "10", "tailscale", "nc", &host_v4, &port],
             ));
-            self.attempts(&attempts)?;
+            if !self.runs_containers() {
+                self.attempts(&attempts)?;
+                continue;
+            }
+            // The container's refusals in one container, beside the host's.
+            let this = &*self;
+            let (made, contained) = std::thread::scope(|scope| {
+                let lane = scope.spawn(|| this.tcp_refusals_in_one_container(&targets));
+                let made = this.made(&attempts);
+                let contained = lane
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                (made, contained)
+            });
+            let runner = self.runner.name.clone();
+            self.report.attempts(&runner, &attempts, &made?)?;
+            self.report.attempts(&runner, &in_container, &contained?)?;
         }
         Ok(())
+    }
+
+    /// Whether a rootless container reaches each of `targets`, all tried
+    /// at once from one container: one podman start in place of one each,
+    /// which made one after another were most of the tailnet's probes'
+    /// time. Each keeps [`tcp_probe`]'s timeout. `Err`, as for any
+    /// refusal in a container, where the session or podman did not get to
+    /// the probes, and where any probe has no result or did not start.
+    fn tcp_refusals_in_one_container(&self, targets: &[(String, u16)]) -> Result<Vec<bool>> {
+        let id = "tailnet-container";
+        let ports: Vec<String> = targets.iter().map(|(_, port)| port.to_string()).collect();
+        let mut argv = vec![
+            "sh",
+            "-c",
+            TCP_PROBES_SCRIPT,
+            "sh",
+            TCP_PROBE_SECONDS,
+            TCP_PROBE_SCRIPT,
+        ];
+        for ((addr, _), port) in targets.iter().zip(&ports) {
+            argv.extend([addr.as_str(), port.as_str()]);
+        }
+        let named: Vec<String> = targets
+            .iter()
+            .map(|(addr, port)| socket_text(addr, *port))
+            .collect();
+        let attempt = Attempt::refused_in_container(id, id, &[]);
+        crate::timed::stage("check", id, || {
+            let output = self.refusal_output(&attempt, &self.container(&argv))?;
+            tcp_probe_results(id, &String::from_utf8_lossy(&output.stdout), &named)
+        })
     }
 }
 
@@ -1027,10 +1072,10 @@ fn head<'a>(args: &[&'a str]) -> Vec<&'a str> {
 fn tcp_probe(addr: &str, port: u16) -> Vec<String> {
     [
         "timeout",
-        "10",
+        TCP_PROBE_SECONDS,
         "bash",
         "-c",
-        r#"exec 3<>"/dev/tcp/$1/$2""#,
+        TCP_PROBE_SCRIPT,
         "probe",
         addr,
         &port.to_string(),
@@ -1038,6 +1083,53 @@ fn tcp_probe(addr: &str, port: u16) -> Vec<String> {
     .iter()
     .map(|&arg| arg.to_owned())
     .collect()
+}
+
+const TCP_PROBE_SECONDS: &str = "10";
+
+const TCP_PROBE_SCRIPT: &str = r#"exec 3<>"/dev/tcp/$1/$2""#;
+
+/// [`tcp_probe`] of each address and port pair after its timeout and
+/// script, all at once: a line of the pair's index and its status for
+/// each, in the order they end.
+const TCP_PROBES_SCRIPT: &str = r#"s=$1 p=$2; shift 2; i=0
+while [ "$#" -ge 2 ]; do
+  (timeout "$s" bash -c "$p" probe "$1" "$2"; echo "$i $?") &
+  i=$((i + 1)); shift 2
+done
+wait"#;
+
+/// Whether each probe of [`TCP_PROBES_SCRIPT`], one for each of `targets`
+/// in order, connected, from its output. A probe with no line, or two, or
+/// one whose command did not start, is an error: its refusal would prove
+/// nothing.
+fn tcp_probe_results(id: &str, stdout: &str, targets: &[String]) -> Result<Vec<bool>> {
+    let mut codes: Vec<Option<i32>> = vec![None; targets.len()];
+    for line in stdout.lines() {
+        let parsed = line
+            .split_once(' ')
+            .and_then(|(index, code)| Some((index.parse::<usize>().ok()?, code.parse().ok()?)));
+        let (index, code) = parsed.with_context(|| format!("{id}: unexpected output {line:?}"))?;
+        let slot = codes
+            .get_mut(index)
+            .with_context(|| format!("{id}: a result for probe {index} of {}", targets.len()))?;
+        ensure!(slot.is_none(), "{id}:{}: two results", targets[index]);
+        *slot = Some(code);
+    }
+    codes
+        .into_iter()
+        .zip(targets)
+        .map(|(code, target)| {
+            let code = code.with_context(|| {
+                format!("{id}:{target}: no result, so its refusal proves nothing")
+            })?;
+            ensure!(
+                super::started(Some(code)),
+                "{id}:{target}: the probe did not run (exited {code}): its refusal proves nothing"
+            );
+            Ok(code == 0)
+        })
+        .collect()
 }
 
 /// Whether response headers are the egress proxy's own refusal: a 403
@@ -1139,6 +1231,86 @@ mod tests {
                 .write_all(b"FROM test-image\nRUN true\n")
                 .unwrap();
             assert_eq!(child.wait().unwrap().code(), Some(status));
+        }
+    }
+
+    /// The probes made at once report each under its own index: a
+    /// listener reached, a closed port refused.
+    #[test]
+    fn tcp_probes_at_once_report_each_target() {
+        let listener = hold("127.0.0.1", 0).unwrap();
+        let open = listener.local_addr().unwrap().port().to_string();
+        let closed = hold("127.0.0.1", 0)
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+            .to_string();
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                TCP_PROBES_SCRIPT,
+                "sh",
+                TCP_PROBE_SECONDS,
+                TCP_PROBE_SCRIPT,
+                "127.0.0.1",
+                &closed,
+                "127.0.0.1",
+                &open,
+                "127.0.0.1",
+                &closed,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            tcp_probe_results("t", &stdout, &["a".into(), "b".into(), "c".into()]).unwrap(),
+            [false, true, false]
+        );
+    }
+
+    /// A control is cut short; the refusals beside it keep their longer
+    /// timeouts.
+    #[test]
+    fn controls_are_bounded_below_their_refusals() {
+        use super::super::{CONTROL_LIMIT, bounded_control};
+        let seconds = |arg: &str| arg.parse::<u32>().unwrap();
+        let control = seconds(CONTROL_LIMIT.last().unwrap());
+        for refusal in [TCP_PROBE_SECONDS, WIRESERVER_CONNECT_SECONDS] {
+            assert!(control < seconds(refusal), "{refusal}");
+        }
+        let probe = tcp_probe("192.0.2.1", 22);
+        let probe: Vec<&str> = probe.iter().map(String::as_str).collect();
+        let bounded = bounded_control(&probe);
+        assert_eq!(bounded[..CONTROL_LIMIT.len()], *CONTROL_LIMIT);
+        assert_eq!(bounded[CONTROL_LIMIT.len()..], probe);
+    }
+
+    #[test]
+    fn tcp_probe_results_fail_closed() {
+        type Expected<'a> = Result<&'a [bool], &'a str>;
+
+        let cases: &[(&str, usize, Expected<'_>)] = &[
+            ("", 0, Ok(&[])),
+            ("1 1\n0 0\n", 2, Ok(&[true, false])),
+            ("0 124\n", 1, Ok(&[false])),
+            ("", 1, Err("t:a: no result")),
+            ("0 1\n", 2, Err("t:b: no result")),
+            ("0 1\n0 1\n", 1, Err("t:a: two results")),
+            ("2 1\n", 2, Err("a result for probe 2 of 2")),
+            ("0 127\n", 1, Err("t:a: the probe did not run (exited 127)")),
+            ("0 125\n", 1, Err("did not run")),
+            ("0 1 extra\n", 1, Err("unexpected output")),
+            ("refused\n", 1, Err("unexpected output")),
+        ];
+        let names = ["a".to_owned(), "b".to_owned()];
+        for (stdout, count, want) in cases {
+            match (tcp_probe_results("t", stdout, &names[..*count]), want) {
+                (Ok(got), Ok(want)) => assert_eq!(&got, want, "{stdout:?}"),
+                (Err(err), Err(want)) => assert!(err.to_string().contains(want), "{err:#}"),
+                (got, _) => panic!("{stdout:?}: {got:?}"),
+            }
         }
     }
 
