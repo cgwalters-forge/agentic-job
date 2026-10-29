@@ -27,6 +27,7 @@ pub mod forgejo;
 mod git;
 pub(crate) mod github;
 pub mod gitlab;
+pub mod inline;
 pub mod issue_reference;
 mod mentions;
 pub mod publish;
@@ -48,7 +49,7 @@ use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, ITEM_NUMBER, KIND_TARGETS, MISSING_DATA, NOOP,
+    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, ITEM_NUMBER, KIND_TARGETS, MISSING_DATA, NOOP,
     PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
 };
 
@@ -78,6 +79,7 @@ const NO_WRITE: &[&str] = &[NOOP, MISSING_TOOL, MISSING_DATA];
 /// whose closing or labelling is silently dropped looks done when it is
 /// not.
 const SUPPORTED: &[&str] = &[
+    CREATE_REVIEW_COMMENT,
     ADD_COMMENT,
     CREATE_PULL_REQUEST,
     PUSH_TO_PULL_REQUEST_BRANCH,
@@ -94,6 +96,7 @@ const SUPPORTED: &[&str] = &[
 /// What this publishes to GitLab: all of [`SUPPORTED`]. The others are
 /// refused, as there.
 const GITLAB_SUPPORTED: &[&str] = &[
+    CREATE_REVIEW_COMMENT,
     ADD_COMMENT,
     CREATE_PULL_REQUEST,
     PUSH_TO_PULL_REQUEST_BRANCH,
@@ -296,6 +299,7 @@ impl State {
 /// One write, everything about it decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
+    Inline(inline::InlineComment),
     Comment {
         issue: u64,
         body: String,
@@ -426,6 +430,12 @@ impl Made {
 /// The writes a forge does for apply. A comment and a pull request return
 /// what they made; the others the URL of what they made or changed.
 pub trait Publisher {
+    fn inline_comment(&self, comment: &inline::InlineComment) -> Result<String> {
+        anyhow::bail!(
+            "inline comments are not supported for #{}",
+            comment.target.number
+        )
+    }
     /// Refuses OP when what the forge says makes it one apply must not
     /// write (another kind of item, another repository's, a label the
     /// repository lacks), reading only. [`publish`] asks this of every op
@@ -463,6 +473,8 @@ pub struct Target<'a> {
 /// memory) are check's and decide nothing here.
 #[derive(Debug, Deserialize)]
 struct Report {
+    #[serde(default)]
+    inline_target: Option<inline::CheckedTarget>,
     ok: bool,
     errors: Vec<String>,
     items: Vec<Map<String, Value>>,
@@ -559,6 +571,12 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
         }
         let text = |key: &str| item.get(key).and_then(Value::as_str);
         match output {
+            CREATE_REVIEW_COMMENT => {
+                match inline::plan(item, report.inline_target.as_ref(), policy, target) {
+                    Ok(comment) => ops.push(Op::Inline(comment)),
+                    Err(err) => errors.push(format!("{err:#}")),
+                }
+            }
             ADD_COMMENT => match (target.comment_target, text("body")) {
                 (None, _) => errors.push(
                     "an add_comment, and the caller gave no --comment-target for it".to_owned(),
@@ -612,6 +630,25 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
             errors.push(format!("--status-sha {sha:?} is not a full commit SHA"));
         }
     }
+    // A push moves the head the inline comments were checked against, and
+    // their anchors with it: refuse both rather than fail halfway.
+    let inline: Vec<u64> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Inline(comment) => Some(comment.target.number),
+            _ => None,
+        })
+        .collect();
+    for op in &ops {
+        if let Op::Push(push) = op
+            && inline.contains(&push.number)
+        {
+            errors.push(format!(
+                "a push_to_pull_request_branch and inline comments on #{}: the push moves the head the comments were checked against",
+                push.number
+            ));
+        }
+    }
     // The policy has no secondary pull request off GitHub.
     if report.secondary_patch.is_some() {
         errors.push("a secondary pull request off GitHub".to_owned());
@@ -626,7 +663,7 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
         ops.sort_by_key(|op| match op {
             Op::PullRequest(_) | Op::Push(_) => 0,
             Op::Issue(_) => 1,
-            Op::Comment { .. } => 2,
+            Op::Comment { .. } | Op::Inline(_) => 2,
             Op::Labels(_) => 3,
             Op::Close(_) => 4,
             Op::Status(_) => 5,
@@ -1074,6 +1111,7 @@ pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
     let mut made = Vec::new();
     for op in ops {
         let url = match op {
+            Op::Inline(comment) => publisher.inline_comment(comment),
             Op::Comment { issue, body } => publisher.comment(*issue, body).map(|made| made.url),
             Op::PullRequest(pr) => publisher.open_pull_request(pr).map(|made| made.url),
             Op::Push(push) => publisher.push_to_branch(push),
@@ -1437,6 +1475,7 @@ mod tests {
                 Op::PullRequest(pr) => pr.body,
                 Op::Issue(issue) => issue.body,
                 Op::Close(close) => close.body,
+                Op::Inline(comment) => comment.body,
                 Op::Labels(_) | Op::Push(_) | Op::Status(_) => unreachable!(),
             };
             assert!(body.starts_with(
@@ -1980,6 +2019,49 @@ mod tests {
     }
 
     const PUSH_PATCH: &str = "aw-agent-run-12.patch";
+
+    /// A push moves the head inline comments on its own pull request were
+    /// checked against, so both are refused; comments elsewhere are not.
+    #[test]
+    fn push_and_inline_on_one_item() {
+        for (forge, number, refused) in [
+            (Forge::Forgejo, 42, true),
+            (Forge::Forgejo, 64, false),
+            (Forge::Gitlab, 42, true),
+            (Forge::Gitlab, 64, false),
+        ] {
+            let dir = checked_push(&[
+                push_item(),
+                json!({"type": CREATE_REVIEW_COMMENT, "repo": "bootc-dev/bootc",
+                    "pull_request_number": number, "path": "src/x", "line": 2, "body": "Finding."}),
+            ]);
+            let path = dir.path().join(REPORT_FILE);
+            let mut report: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            report["inline_target"] =
+                json!({"repo": "bootc-dev/bootc", "number": number, "head": HEAD});
+            std::fs::write(&path, report.to_string()).unwrap();
+            let mut policy = push_policy();
+            policy.safe_outputs.others.insert(
+                CREATE_REVIEW_COMMENT.to_owned(),
+                OutputLimit {
+                    max: 1,
+                    ..OutputLimit::default()
+                },
+            );
+            policy.forge = crate::policy::Forge::Forgejo;
+            let mut target = target(Some(number));
+            if forge == Forge::Gitlab {
+                on_gitlab(dir.path(), &mut policy, &mut target);
+            }
+            match plan(dir.path(), &policy, &target) {
+                Err(errors) if refused => {
+                    assert!(errors.join(";").contains("moves the head"), "{errors:?}")
+                }
+                Ok(ops) if !refused => assert!(matches!(ops[1], Op::Inline(_)), "{ops:?}"),
+                other => panic!("{forge:?} #{number}: {other:?}"),
+            }
+        }
+    }
 
     /// A push run's policy: pull request 42's branch `agent-run-12` at
     /// `HEAD`, from the bounds' fork, with a comment allowed.

@@ -36,7 +36,9 @@
 //! take `issue_number` and `pull_request_number`, as GitLab numbers issues
 //! and merge requests apart ([`forge_fields`]), and a request whose
 //! `issue_number` or `pull_request_number` its type does not take there is
-//! refused rather than dropped. Elsewhere the fields are gh-aw's alone.
+//! refused rather than dropped. Neutral inline comments also refuse unmapped
+//! fields before sanitization can drop range or review semantics. Elsewhere
+//! the fields are gh-aw's alone.
 //!
 //! It is also what `handback check` validates the requests with in the
 //! session, so the agent is told of a field error in the words the check
@@ -1698,6 +1700,12 @@ fn request(
             known.join(", ")
         ));
     };
+    if forge != Forge::Github && kind == CREATE_REVIEW_COMMENT {
+        // Dropping a range or review field would silently turn the finding
+        // into a different operation before check could refuse it.
+        crate::apply::inline::field_names(&item)
+            .map_err(|err| format!("Line {line}: {kind}: {err:#}"))?;
+    }
     let extra = forge_fields(forge, of.name);
     // Dropped, a target naming an issue or a merge request would leave
     // the request to act on another item, or on none it names.

@@ -1,0 +1,13 @@
+{
+  "iid": 9,
+  "project_id": 1,
+  "target_project_id": 1,
+  "state": "opened",
+  "sha": "2222222222222222222222222222222222222222",
+  "diff_refs": {
+    "base_sha": "1111111111111111111111111111111111111111",
+    "start_sha": "3333333333333333333333333333333333333333",
+    "head_sha": "2222222222222222222222222222222222222222"
+  },
+  "web_url": "https://gitlab.example/owner/name/-/merge_requests/9"
+}

@@ -42,6 +42,10 @@ const LABELS_PER_PAGE: usize = 50;
 /// thousand is refused rather than read without end.
 const MAX_LABEL_PAGES: usize = 20;
 
+/// Reviews asked for a page, and the most pages of a pull request's read.
+const REVIEWS_PER_PAGE: usize = 50;
+const MAX_REVIEW_PAGES: usize = 20;
+
 pub struct Forgejo {
     /// `SERVER/api/v1`.
     api: String,
@@ -310,6 +314,25 @@ impl Api<'_> {
     /// Sends METHOD, with BODY for a POST, a PATCH or a PUT, to PATH under
     /// the API, and returns the JSON of a successful answer, null for none.
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+        let text = self.request_text(method, path, body)?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text)
+            .with_context(|| format!("{method} {path}: the response is not JSON"))
+    }
+
+    pub fn request_text(&self, method: &str, path: &str, body: Option<&Value>) -> Result<String> {
+        self.request_text_with_headers(method, path, body)
+            .map(|(_, text)| text)
+    }
+
+    fn request_text_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(ureq::http::HeaderMap, String)> {
         let url = format!("{}{path}", self.url);
         let authorization = self.authorization;
         let json = body.map(Value::to_string).unwrap_or_default();
@@ -371,16 +394,113 @@ impl Api<'_> {
                 git::shown(&[self.token], &text)
             );
         }
-        // A DELETE's 204.
-        if text.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text)
-            .with_context(|| format!("{method} {path}: the response is not JSON"))
+        Ok((response.headers().clone(), text))
     }
 }
 
 impl Forgejo {
+    /// Reuse the fixed repository identity; an iid alone is not an authority.
+    fn inline_target(&self, comment: &super::inline::InlineComment) -> Result<()> {
+        let target = &comment.target;
+        ensure!(
+            target.repo.eq_ignore_ascii_case(&self.repo),
+            "foreign inline target"
+        );
+        let path = format!("/repos/{}/pulls/{}", self.repo, target.number);
+        let answer = self.send(&path, None)?;
+        ensure!(
+            answer["number"].as_u64() == Some(target.number)
+                && answer["base"]["repo"]["full_name"]
+                    .as_str()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&self.repo)),
+            "inline target is not a pull request of {}",
+            self.repo
+        );
+        ensure!(answer["state"] == "open", "inline target is not open");
+        ensure!(
+            answer["head"]["sha"] == target.head,
+            "inline target head is stale"
+        );
+        Ok(())
+    }
+
+    fn inline_position(&self, comment: &super::inline::InlineComment) -> Result<()> {
+        self.inline_target(comment)?;
+        let path = format!("/repos/{}/pulls/{}.diff", self.repo, comment.target.number);
+        let diff = Api {
+            http: &self.http,
+            url: &self.api,
+            authorization: &format!("token {}", self.token),
+            token: &self.token,
+        }
+        .request_text(GET, &path, None)?;
+        let patch = super::inline::forgejo_patch(&diff, &comment.path)?;
+        super::inline::position(&patch, comment)?;
+        self.no_pending_review(comment.target.number)?;
+        self.inline_target(comment)
+    }
+
+    /// Forgejo adds a new review's comments to the token user's pending
+    /// review and submits all of it, publishing draft comments no check
+    /// read. The list shows the token user's own pending reviews, and an
+    /// administrator's everyone's: refused too, failing closed.
+    /// Forgejo filters other users' drafts after database pagination, so
+    /// even an empty page is not proof of completion. Require every review
+    /// in its unfiltered total count to be visible, or refuse the scan.
+    fn no_pending_review(&self, number: u64) -> Result<()> {
+        let mut seen = 0;
+        let mut total = None;
+        for page in 1..=MAX_REVIEW_PAGES {
+            let path = format!(
+                "/repos/{}/pulls/{number}/reviews?page={page}&limit={REVIEWS_PER_PAGE}",
+                self.repo
+            );
+            let (headers, text) = Api {
+                http: &self.http,
+                url: &self.api,
+                authorization: &format!("token {}", self.token),
+                token: &self.token,
+            }
+            .request_text_with_headers(GET, &path, None)?;
+            let count = headers
+                .get("x-total-count")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .with_context(|| format!("GET {path}: missing or invalid review total count"))?;
+            ensure!(
+                total.is_none_or(|total| total == count),
+                "#{number} review total changed during the scan"
+            );
+            total = Some(count);
+            let answer: Value = serde_json::from_str(&text)
+                .with_context(|| format!("GET {path}: the response is not JSON"))?;
+            let reviews = answer
+                .as_array()
+                .with_context(|| format!("GET {path}: the response is not reviews"))?;
+            ensure!(
+                reviews.iter().all(|review| review["state"] != "PENDING"),
+                "#{number} has a pending review by the apply identity, which an inline comment would submit"
+            );
+            ensure!(
+                reviews.len() <= REVIEWS_PER_PAGE,
+                "too many reviews on a page"
+            );
+            seen += reviews.len();
+            ensure!(seen <= count, "#{number} review total is inconsistent");
+            if seen == count {
+                return Ok(());
+            }
+            ensure!(
+                !reviews.is_empty(),
+                "#{number} review scan is incomplete: some reviews are hidden"
+            );
+        }
+        bail!(
+            "#{number} has more reviews than apply reads ({})",
+            MAX_REVIEW_PAGES * REVIEWS_PER_PAGE
+        )
+    }
+
     /// SERVER is the forge's address, `https://forge.example` or one
     /// under a path; REPO the policy's, which it has checked.
     pub fn new(server: &str, repo: &str, token: String, allow_http: &[String]) -> Result<Self> {
@@ -668,8 +788,38 @@ impl Forgejo {
 }
 
 impl Publisher for Forgejo {
+    fn inline_comment(&self, comment: &super::inline::InlineComment) -> Result<String> {
+        self.inline_position(comment)?;
+        let path = format!(
+            "/repos/{}/pulls/{}/reviews",
+            self.repo, comment.target.number
+        );
+        let (old, new) = if comment.left {
+            (comment.line, 0)
+        } else {
+            (0, comment.line)
+        };
+        let answer = self.send(
+            &path,
+            Some(&json!({
+                "commit_id": comment.target.head, "event": "COMMENT",
+                "comments": [{"path": comment.path, "body": comment.body,
+                    "old_position": old, "new_position": new}],
+            })),
+        )?;
+        answer["html_url"]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| {
+                format!("POST {path}: review may have been created, but response has no html_url")
+            })
+    }
+
     fn preflight(&self, op: &Op) -> Result<()> {
         match op {
+            Op::Inline(comment) => {
+                self.inline_position(comment)?;
+            }
             // The push makes its own checks, and it is the first write.
             Op::Comment { .. } | Op::PullRequest(_) => {}
             Op::Issue(issue) => {
@@ -882,6 +1032,16 @@ pub(super) mod tests {
         count: usize,
         mut answer: impl FnMut(&Request) -> (u16, String) + Send + 'static,
     ) -> (String, mpsc::Receiver<Request>) {
+        serve_with_headers(count, move |request| {
+            let (status, body) = answer(request);
+            (status, String::new(), body)
+        })
+    }
+
+    pub(in crate::apply) fn serve_with_headers(
+        count: usize,
+        mut answer: impl FnMut(&Request) -> (u16, String, String) + Send + 'static,
+    ) -> (String, mpsc::Receiver<Request>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
         let (sent, received) = mpsc::channel();
@@ -919,13 +1079,13 @@ pub(super) mod tests {
                         serde_json::from_slice(&request).unwrap()
                     },
                 };
-                let (status, body) = answer(&request);
+                let (status, headers, body) = answer(&request);
                 // A test that stopped listening has its answer already.
                 let _ = sent.send(request);
                 let mut stream = stream;
                 write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();

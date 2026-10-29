@@ -1302,6 +1302,75 @@ such as `noop`, `missing_tool` and `missing_data`, it wraps them in code.
 For Forgejo and GitLab, the applier is `apply`, described below.
 On GitHub, gh-aw's handlers remain the applier.
 
+### Neutral inline comments
+
+An agent misled by repository text must not comment on another PR/MR or
+attach a finding to a newer revision it never read. Off GitHub,
+`create_pull_request_review_comment` therefore reuses the fixed comment
+destination guards and requires the trusted check job to supply the
+admitted head, never one taken from agent output:
+
+```text
+agentic-job check --policy policy.json --outputs OUT --collected collected.json \
+  --report report.json --comment-repo OWNER/NAME --comment-target NUMBER \
+  --review-head SHA
+```
+
+The type remains off unless bounds list
+`create_pull_request_review_comment = { max = N }` under `[outputs]`.
+`check` records `inline_target: {repo, number, head}` in its trusted upload.
+Apply requires that repository and number to match policy and its own
+`--comment-target`; it does not accept a head from the request. This adds
+no write permission to the agent or check jobs: only apply holds the token.
+No existing non-GitHub workflow caller enables this output by default.
+
+The request uses the existing `repo`, `pull_request_number`, `path`, `line`,
+optional `side` (`LEFT` or `RIGHT`, default `RIGHT`) and `body` fields.
+`start_line`, `start_side` and every other unmapped field are refused before
+collection can drop them, and again in check, not shortened to one line.
+Count limits, the 65,000-character
+body bound, the existing comment length/link envelope (including reserved
+footer space), mention filtering and GitLab quick-action escaping still apply.
+Check measures the escaped text against that envelope; apply also bounds the
+final body including its actual footer to 65,000 UTF-16 units before any write.
+
+Forgejo reads the PR identity and head and a bounded raw `.diff`, validates
+the file and line against complete hunk lengths, then reads the head again.
+Forgejo folds a new review's comments into the token user's pending review
+and submits its draft comments too, which no check read, so apply reads at
+most 20 pages of 50 reviews and refuses when any is `PENDING`. The scan must
+account for the unfiltered `X-Total-Count`; hidden reviews, missing or changing
+counts and incomplete scans fail closed, even when a filtered page is empty.
+It posts one `COMMENT` review per operation with `commit_id` and an
+`old_position` or `new_position` line number. GitLab resolves the repository
+path to its project ID and reads only `merge_requests`, never `issues` with
+a colliding iid. It requires current `diff_refs.base_sha`, `start_sha` and
+`head_sha`, reads at most 20 pages of 100 diff files (each response at most
+1 MiB), validates the anchor, and rereads the target and diff refs. Its
+discussion position includes both paths and all three SHAs, with both old
+and new line numbers for context, or one for a deletion/addition.
+
+Both mappings preflight every operation before any write and repeat their
+checks immediately before posting. Stale heads, foreign/closed items,
+missing files, missing/truncated diffs, ambiguous positions and out-of-diff
+lines fail closed. A `push_to_pull_request_branch` and inline comments on the
+same PR/MR are refused together when planning: the push would move the head
+the comments were checked against. Forgejo's raw diff is limited to 1 MiB; quoted paths it
+cannot represent are refused. The forge APIs have no conditional-write
+head lease: an update racing the last read can make the pinned comment
+outdated, but cannot retarget its commit. No approval, reviewer assignment,
+reply or thread resolution is added.
+
+Loopback tests replay stored API-shaped JSON and diff fixtures for both
+mappings, both sides and context lines, colliding iids, moved heads,
+refusals before writes and partial failures. These fixtures are not live
+forge captures. CI's `forgejo` job does not yet post inline comments, and
+there is no GitLab one; live-forge inline-review coverage (diff endpoint,
+position semantics, review listing and paging) remains follow-up work, not
+proof supplied by the loopback tests. A failed later
+write names already published URLs; retrying may duplicate comments because
+these publishers do not add deduplication markers.
+
 ### Publishing to Forgejo
 
 ```text
@@ -1329,7 +1398,8 @@ CI's `forgejo` job runs apply with only those against a Forgejo LTS container,
 in [crates/agentic-job/tests/forgejo.rs](../crates/agentic-job/tests/forgejo.rs).
 
 It publishes `add_comment`, to `--comment-target` in the repository,
-`create_pull_request`, `push_to_pull_request_branch`
+`create_pull_request`, `create_pull_request_review_comment`
+([neutral inline comments](#neutral-inline-comments)), `push_to_pull_request_branch`
 ([below](#pushing-to-a-pull-requests-branch-on-forgejo)), and the issue and label types
 [below](#labels-issues-and-closing-on-forgejo); `noop`, `missing_tool` and
 `missing_data` write nothing. Any other type is refused by
@@ -1529,6 +1599,10 @@ re-run with a pull request or a push is refused at its branch; one with
 comments or a new issue posts them again) and reviews.
 
 ### Publishing to GitLab
+
+Also publishes `create_pull_request_review_comment` as head-bound discussions
+([neutral inline comments](#neutral-inline-comments)), independently of the
+plain note's `--comment-target-kind`; inline comments always target an MR.
 
 ```text
 GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJECT \

@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Forgejo and GitLab `apply` now publish the neutral
+  `create_pull_request_review_comment` output, off unless bounded in policy.
+  `check --review-head SHA` binds it to the caller's fixed PR/MR and admitted
+  head; apply refuses foreign targets, stale heads, unavailable or
+  out-of-diff anchors, a push to the same PR/MR and, on Forgejo, a pending
+  review it would submit, before writing. Forgejo uses line positions in a
+  comment-only review; GitLab uses discussion positions with base/start/head
+  SHAs. Multiline fields are refused, not silently shortened. No approvals,
+  reviewer assignments or thread-resolution operations are added.
 - `agentic-job apply --forge gitlab` also publishes
   `push_to_pull_request_branch`, one commit on the policy's open merge
   request's branch in the bounds' fork, under the same patch, head and
