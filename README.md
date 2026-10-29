@@ -336,7 +336,8 @@ and `AGENT_RUNNER`, a runner label as JSON. A runner other than hosted
 and the network route to it are the deployment's, not agentic-job's. In
 this project's own deployment the broker is on a tailnet, and the route is
 either a disposable self-hosted runner on it or a hosted `ubuntu-26.04`
-job that joins it before `secure-host`, in the
+deployment with a network join in both the register job and the agent job
+(before `secure-host`), in the
 [composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own)
 or as `review.yml`'s [network step](docs/review.md#configuration). Another
 deployment brings its own. agentic-job provisions no runners: a

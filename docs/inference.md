@@ -18,7 +18,7 @@ key, one that `run` serves itself ([below](#a-provider-api-key)). The
 agent sees the same thing either way: an address and a token for the run.
 The [README](../README.md#inference) sums up what each needs.
 
-`tests/inference.rs` exercises registration with a mock proxy. Real-agent
+[`tests/inference.rs`](../crates/agentic-job/tests/inference.rs) exercises registration with a mock proxy. Real-agent
 deployment evidence is reported in the [README](../README.md#what-is-real-today).
 This page describes the client protocol, not the broker's current deployment.
 
@@ -65,9 +65,11 @@ another ([workflow.md](workflow.md#what-a-caller-provides)).
 The first two speak praxis-credential-broker's run API; which jobs may
 register is the broker's
 [run-token policy](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/run-token-policy.yaml),
-whose default audience is `praxis-credential-broker`. `run` clones
-the target first and registers second, so a clone that fails leaves no
-registration behind. It expects 201 with a `token` and a `usage`
+whose default audience is `praxis-credential-broker`. When `run` registers
+for itself, it clones the target first, so a clone that fails leaves no
+registration behind. With the reusable workflow's earlier `register` job,
+registration precedes the clone; if the agent job never takes over the
+token, the broker must expire it. Registration expects 201 with a `token` and a `usage`
 record. A try that gets no answer, a 429 or a 5xx is repeated, four
 tries three seconds apart, and stops if the run is told to stop; any
 other answer fails at once. A 404 is such a failure, not a proxy that
