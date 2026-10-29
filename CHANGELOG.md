@@ -9,6 +9,14 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `review.yml`, with the repository variable `REVIEW_HISTORY=true`, gives
+  the review agent the pull request's earlier verdicts by the review job,
+  their findings and the replies to them, the commits since each and the
+  conversation's comments, sanitized, as an untrusted
+  `~/review-history.json`; the review task has it settle earlier findings
+  first and record resolved ones on `Resolved:` lines. New:
+  `agentic-job review history`, `run --review-history` and `agent.yml`'s
+  `review-history` input (docs/review.md#review-history).
 - `sandbox.close-resolved`, off by default, closes systemd-resolved to
   every user but root and the runner's, so the sandbox user cannot send
   data out in a name lookup around the egress proxy; both `hosted.toml`

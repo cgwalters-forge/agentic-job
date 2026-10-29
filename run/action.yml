@@ -4,7 +4,9 @@ description: >-
   run is (the repository, the review head, the artifact names) is the policy job's run.json
 inputs:
   job-dir:
-    description: The directory prepare wrote, holding policy.json, task.md, meta.json and the policy job's run.json
+    description: >-
+      The directory prepare wrote, holding policy.json, task.md, meta.json and the policy job's
+      run.json, and for a review agent.yml's review-history.json where it wrote one
     default: ${{ github.workspace }}/.agentic-job
   agent-user:
     description: >-
@@ -216,6 +218,8 @@ runs:
         state=0
         [ -z "$REVIEW_HEAD" ] || set -- --review-head "$REVIEW_HEAD"
         [ -z "$WATCH_ITEM" ] || set -- "$@" --watch-item "$WATCH_ITEM"
+        # What agent.yml's `review-history` wrote, for a review.
+        [ -z "$REVIEW_HEAD" ] || [ ! -e "$JOB_DIR/review-history.json" ] || set -- "$@" --review-history "$JOB_DIR/review-history.json"
         # The policy job's binary, which prepare downloaded: the secure-host
         # image installs its own in /usr/local/bin over the one prepare put
         # there, and that is the pinned release's, not this commit's.

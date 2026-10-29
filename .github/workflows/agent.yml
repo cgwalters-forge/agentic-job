@@ -36,6 +36,12 @@ on:
           commit, as root before secure-host: review.yml's step for reaching the inference proxy
         type: boolean
         default: false
+      review-history:
+        description: >-
+          For review.yml: the pull request whose earlier reviews by the review job `run` puts in
+          the agent's home as review-history.json. Empty for none
+        type: string
+        default: ""
       agent-user:
         description: >-
           `runner` runs the agent as the runner's user, as every step after secure-host is;
@@ -141,6 +147,20 @@ jobs:
         with:
           binary-artifact-id: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           policy-artifact-id: ${{ fromJSON(inputs.policy).policy-artifact-id }}
+      # With `review-history`: the pull request's earlier reviews, from the
+      # forge with this job's read-only token, which the agent gets anyway,
+      # by the policy job's binary before anything of the agent's runs. It
+      # is sanitized and named untrusted (docs/review.md#review-history);
+      # a failure leaves the review without it rather than without a review.
+      - name: The pull request's earlier reviews
+        if: ${{ inputs.review-history != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ inputs.review-history }}
+          HEAD_SHA: ${{ fromJSON(inputs.policy).review-head }}
+        run: |
+          agentic-job review history --output .agentic-job/review-history.json ||
+            { rm -f .agentic-job/review-history.json; echo '::warning::the review runs without its earlier reviews'; }
       # No caller code may run with open egress while private source is in
       # this checkout, including when the requested target is public.
       # Only the runner's user is refused what needs a second user.

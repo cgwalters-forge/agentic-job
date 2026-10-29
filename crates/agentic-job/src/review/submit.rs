@@ -31,7 +31,7 @@ const DEFAULT_SERVER: &str = "https://github.com";
 // The job token's user, which posts what this job and apply post.
 pub(super) const BOT: &str = "github-actions[bot]";
 // Who else may have posted apply's comment: the PAT's user has write access.
-const WRITERS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
+pub(super) const WRITERS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
 // Why GitHub refused a submission, from its response body, never its
 // headers or URL: one line, bounded, as an annotation is.
 const REFUSAL_MESSAGE_MAX: usize = 400;
@@ -204,14 +204,14 @@ pub(super) fn annotate(kind: &str, message: &str) {
 }
 
 /// The reviewed pull request and head, from the job's environment.
-struct Run {
-    repo: String,
-    pull: u64,
-    head: String,
+pub(super) struct Run {
+    pub(super) repo: String,
+    pub(super) pull: u64,
+    pub(super) head: String,
 }
 
 impl Run {
-    fn read(env: &dyn Fn(&str) -> String) -> Result<Self> {
+    pub(super) fn read(env: &dyn Fn(&str) -> String) -> Result<Self> {
         let head = env("HEAD_SHA");
         let pull = positive(&Value::String(env("PULL")));
         let (Some(pull), true) = (pull, SHA.is_match(&head)) else {

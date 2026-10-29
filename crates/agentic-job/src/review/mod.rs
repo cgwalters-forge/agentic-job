@@ -13,8 +13,10 @@
 //! After the agent, `verdict` and `fold` read check's output (verdict.rs),
 //! and `submit` and `status` post the checked verdict (submit.rs). In place
 //! of the agent, `carry` may carry the previous head's approval (carry.rs).
+//! Before it, `history` may write the earlier reviews it reads (history.rs).
 
 mod carry;
+pub mod history;
 mod submit;
 mod verdict;
 
@@ -119,6 +121,14 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         output: PathBuf,
     },
+    /// Write the pull request's earlier verdicts by the review job, their
+    /// findings and the replies to them, the commits since each and the
+    /// conversation's comments, by the bot and people with write access,
+    /// sanitized, as the review agent's review-history.json
+    History {
+        #[arg(long, value_name = "FILE")]
+        output: PathBuf,
+    },
     /// Submit the checked verdict in the environment, or the approval it
     /// carried, as the pull request's review, and append its URL, or none,
     /// to OUTPUT as `review-url`
@@ -187,6 +197,9 @@ impl Command {
             Self::Fold { accepted } => println!("{}", verdict::fold(read_output(accepted)?)),
             Self::Carry { output } => {
                 carry::carry(&env, &submit::Github::from_env(&env)?, output)?;
+            }
+            Self::History { output } => {
+                history::write(&env, &submit::Github::from_env(&env)?, output)?;
             }
             Self::Submit { accepted, output } => {
                 let accepted = accepted.as_deref().map(read_output).transpose()?;

@@ -234,20 +234,25 @@ pub fn check_outputs(output: &Value, number: &str) -> Result<Option<Verdict>> {
         "Review output must be a comment on the triggering pull request"
     );
     let body = body.unwrap_or_default();
-    let line = body.split('\n').next().unwrap_or_default();
-    let verdict = VERDICT.captures(line).map(|c| c[1].to_owned());
-    let Some(verdict) = verdict.filter(|_| !BOTH.is_match(line)) else {
+    let Some(verdict) = of_body(body) else {
         bail!("Review comment must start with VERDICT: APPROVE or VERDICT: CHANGES");
     };
     ensure!(
         utf16_len(body) + utf16_len(&inline_section(inline)) <= REVIEW_BODY_MAX,
         "Review comment and inline comments together must be at most {REVIEW_BODY_MAX} characters"
     );
-    Ok(Some(if verdict == "APPROVE" {
+    Ok(Some(verdict))
+}
+
+/// The verdict BODY's first line names, if it is one line naming one.
+pub(super) fn of_body(body: &str) -> Option<Verdict> {
+    let line = body.split('\n').next().unwrap_or_default();
+    let verdict = VERDICT.captures(line).filter(|_| !BOTH.is_match(line))?;
+    Some(if &verdict[1] == "APPROVE" {
         Verdict::Approve
     } else {
         Verdict::Changes
-    }))
+    })
 }
 
 /// What apply posts when nothing was submitted: the verdict comment with
