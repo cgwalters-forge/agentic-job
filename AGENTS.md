@@ -4,6 +4,8 @@ agentic-job hardens a CI host so it can run untrusted steps, including a coding 
 Its Rust CLI and reusable workflow separate the agent from credentials and check its outputs on another machine before applying them.
 Start with the [README](README.md) for usage, limitations and topic documentation.
 
+**Run `just fmt` and then `just check` before every commit you hand back; a change that fails `just check` isn't done.**
+
 ## Layout
 
 - `crates/agentic-job/`: CLI, policy, event admission, sessions, sandbox, run, check and audit code.
@@ -21,14 +23,15 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 
 ## Build and checks
 
-Run from the repository root on Linux with Git and a C compiler/linker.
+Run from the repository root on Linux with Git, just and a C compiler/linker.
 The workspace uses Rust edition 2024 and requires Rust 1.88 or newer;
 use stable Rust, Node 22 and Python 3.11+ (`tomllib`). Cargo needs network
 access on a cold cache; ordinary tests use local fixtures and loopback mock
 services, not a real inference service or forge credential.
 
 The following commands are from [CI](.github/workflows/ci.yml), except the
-explicit CLI spelling of the Markdown action.
+explicit CLI spelling of the Markdown action; `just check` runs the fmt,
+clippy and test commands, as CI's `rust` job does.
 Observed wall times on one unprivileged runner are guidance, not CI guarantees:
 
 - `cargo build --locked`: 19 seconds with dependencies already checked.

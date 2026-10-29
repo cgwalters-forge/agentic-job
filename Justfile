@@ -6,6 +6,15 @@ set positional-arguments := true
 test-feed-refresh:
     cargo test --locked -p agentic-job --bin refresh-feed
 
+fmt:
+    cargo fmt --all
+
+# What CI's rust job runs; nothing slower or networked beyond Cargo's fetch.
+check:
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo test --workspace --locked
+
 refresh-feed:
     cargo run --quiet --locked -p agentic-job --bin refresh-feed -- update
 
