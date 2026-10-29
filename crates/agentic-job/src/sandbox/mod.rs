@@ -40,6 +40,25 @@ pub mod check {
     }
 }
 
+/// secure-host's runner confinement probes, with agentic-job's configuration
+/// and exit states, like `check`.
+pub mod probe {
+    pub use ::secure_host::check::confine::*;
+
+    use anyhow::Result;
+
+    use crate::config::Config;
+    use crate::exit::Exit;
+
+    pub fn run(args: &Args) -> Result<Exit> {
+        Ok(if ::secure_host::check::confine::run::<Config>(args)? {
+            Exit::Success
+        } else {
+            Exit::Failure
+        })
+    }
+}
+
 /// secure-host's timed setup and probes, its status an exit state.
 pub mod timed {
     pub use ::secure_host::timed::*;
@@ -155,6 +174,9 @@ pub enum Command {
     /// Print the local sockets and ports this user connects to; `check` runs it as the sandbox user
     #[command(hide = true)]
     ProbeLocal,
+    /// Probe, as the runner's user, the routes a step has before and after the lock; CI's `confined` job runs it
+    #[command(hide = true)]
+    Probe(probe::Args),
     /// Run the egress proxy; `setup` starts it as its own user unless `egress.rust-proxy = false`
     #[command(hide = true)]
     EgressProxy(proxy::Args),
@@ -167,6 +189,7 @@ impl Command {
             Self::Check(args) => check::run(args),
             Self::Timed(args) => timed::run(args),
             Self::ProbeLocal => local::run().map(|()| Exit::Success),
+            Self::Probe(args) => probe::run(args),
             Self::EgressProxy(args) => proxy::run(args).map(|()| Exit::Success),
         }
     }

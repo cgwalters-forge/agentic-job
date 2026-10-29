@@ -31,10 +31,14 @@ use crate::enter::{Entry, Output};
 use crate::host::{self, User};
 use crate::root::Root;
 
+pub mod confine;
 mod net;
 mod on_host;
 mod record;
 mod runner;
+
+pub(crate) use net::metadata_request;
+pub(crate) use runner::sudo_rules;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -628,7 +632,7 @@ fn in_order<R: Send>(
 }
 
 /// Whether the runner's user, this process, succeeds at `argv`.
-fn runner_reaches(argv: &[&str]) -> bool {
+pub(crate) fn runner_reaches(argv: &[&str]) -> bool {
     host::command(argv)
         .map(|mut command| host::succeeds(&mut command))
         .unwrap_or(false)
@@ -636,7 +640,7 @@ fn runner_reaches(argv: &[&str]) -> bool {
 
 /// What the runner's user, this process, prints running `argv`: empty
 /// when it could not be run.
-fn runner_stdout(argv: &[&str]) -> String {
+pub(crate) fn runner_stdout(argv: &[&str]) -> String {
     host::command(argv)
         .and_then(|mut command| Ok(command.stdin(std::process::Stdio::null()).output()?))
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())

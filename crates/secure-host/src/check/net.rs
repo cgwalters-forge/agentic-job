@@ -291,7 +291,7 @@ impl Checker<'_> {
             format!("{user} reaches {url} (control)"),
             got,
         );
-        let metadata = direct(&["-H", "Metadata:true", METADATA_URL]);
+        let metadata = metadata_request();
         if self.config.sandbox.deny_runner_metadata() {
             // The runner's user is the control everywhere else, and here
             // it is refused too: the probes say less, and say so.
@@ -511,7 +511,7 @@ impl Checker<'_> {
     /// user to probe beside it (`sandbox.create-user = false`).
     pub(super) fn runner_metadata(&mut self) -> Result<()> {
         let runner = self.runner.name.clone();
-        let metadata = direct(&["-H", "Metadata:true", METADATA_URL]);
+        let metadata = metadata_request();
         let metadata_v6 = direct(METADATA_V6);
         let requests = [&metadata, &metadata_v6];
         let results = super::concurrently(&requests, |argv| super::runner_reaches(argv));
@@ -1002,6 +1002,13 @@ fn curl<'a>(args: &[&'a str]) -> Vec<&'a str> {
 /// Not through the egress proxy, whatever the environment says.
 fn direct<'a>(args: &[&'a str]) -> Vec<&'a str> {
     [CURL, &["--noproxy", "*"], args].concat()
+}
+
+/// The metadata service at its IPv4 address, not through the egress
+/// proxy: what the sandbox user and, with `sandbox.deny-runner-metadata`,
+/// the runner's user must not reach.
+pub(crate) fn metadata_request() -> Vec<&'static str> {
+    direct(&["-H", "Metadata:true", METADATA_URL])
 }
 
 /// Through it, failing on an error status: the proxy answers 502 when it

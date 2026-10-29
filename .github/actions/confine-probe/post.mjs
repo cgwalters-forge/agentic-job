@@ -1,6 +1,8 @@
 // The action's post step, which the runner registers when the main step
 // starts and runs after the job's last step: a downloaded action's post
 // step runs the same way, as the runner's user, after the lock.
-import { probe } from './probe.mjs';
+import { spawnSync } from 'node:child_process';
 
-await probe('confined', 'post');
+const { status, error } = spawnSync('agentic-job', ['sandbox', 'probe', 'confined', 'post'], { stdio: 'inherit' });
+if (error) throw error;
+process.exitCode = status ?? 1;
