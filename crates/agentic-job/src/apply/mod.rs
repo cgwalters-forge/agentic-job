@@ -3,7 +3,8 @@
 //! apply is still gh-aw's handlers in apply.yml, but for the types the
 //! bounds route to [`publish`] (`add_comment` and `create_pull_request`);
 //! this is the first slice of moving publishing behind [`Publisher`]
-//! (#1346), for Forgejo, and for the outputs in [`SUPPORTED`]. On GitHub,
+//! (#1346), for Forgejo and the outputs in [`SUPPORTED`], and for GitLab
+//! and those in [`GITLAB_SUPPORTED`]. On GitHub,
 //! [`secondary`] opens the policy's secondary pull request after the
 //! handlers.
 //!
@@ -24,6 +25,7 @@
 pub mod forgejo;
 mod git;
 pub(crate) mod github;
+pub mod gitlab;
 pub mod issue_reference;
 mod mentions;
 pub mod publish;
@@ -55,6 +57,9 @@ pub const REPORT_FILE: &str = "report.json";
 /// argument, which any user of the machine can read in `/proc`.
 pub const TOKEN_ENV: &str = "FORGEJO_TOKEN";
 
+/// GitLab's, as [`TOKEN_ENV`] is Forgejo's.
+pub const GITLAB_TOKEN_ENV: &str = "GITLAB_TOKEN";
+
 const ADD_COMMENT: &str = "add_comment";
 const CREATE_ISSUE: &str = "create_issue";
 const ADD_LABELS: &str = "add_labels";
@@ -79,6 +84,17 @@ const SUPPORTED: &[&str] = &[
     REMOVE_LABELS,
     CLOSE_ISSUE,
     CLOSE_PULL_REQUEST,
+    NOOP,
+    MISSING_TOOL,
+    MISSING_DATA,
+];
+
+/// What this publishes to GitLab, of [`SUPPORTED`]: what GitLab can be
+/// told without its labels, its issue numbers or a status. The others are
+/// refused, as there.
+const GITLAB_SUPPORTED: &[&str] = &[
+    ADD_COMMENT,
+    CREATE_PULL_REQUEST,
     NOOP,
     MISSING_TOOL,
     MISSING_DATA,
@@ -137,9 +153,52 @@ static COMMIT_RE: LazyLock<Regex> =
 /// `WORK_IN_PROGRESS_PREFIXES`).
 pub const DRAFT_PREFIX: &str = "WIP: ";
 
+/// What GitLab reads as a draft merge request, which it will not merge;
+/// it has no longer taken `WIP:` since 16.0.
+pub const GITLAB_DRAFT_PREFIX: &str = "Draft: ";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Forge {
     Forgejo,
+    Gitlab,
+}
+
+impl Forge {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Forgejo => "Forgejo",
+            Self::Gitlab => "GitLab",
+        }
+    }
+
+    /// Its syntax in [`mentions`].
+    fn syntax(self) -> &'static str {
+        match self {
+            Self::Forgejo => "forgejo",
+            Self::Gitlab => "gitlab",
+        }
+    }
+
+    fn supported(self) -> &'static [&'static str] {
+        match self {
+            Self::Forgejo => SUPPORTED,
+            Self::Gitlab => GITLAB_SUPPORTED,
+        }
+    }
+
+    fn draft_prefix(self) -> &'static str {
+        match self {
+            Self::Forgejo => DRAFT_PREFIX,
+            Self::Gitlab => GITLAB_DRAFT_PREFIX,
+        }
+    }
+
+    fn token_env(self) -> &'static str {
+        match self {
+            Self::Forgejo => TOKEN_ENV,
+            Self::Gitlab => GITLAB_TOKEN_ENV,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -162,6 +221,10 @@ pub struct Args {
     /// The issue or pull request a comment goes to, from the caller
     #[arg(long, value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
     pub comment_target: Option<u64>,
+    /// What --comment-target numbers, on GitLab, where an issue and a
+    /// merge request may share a number
+    #[arg(long, value_enum, requires = "comment_target")]
+    pub comment_target_kind: Option<Kind>,
     /// The run's page, linked from the footer of what is posted
     #[arg(long, value_name = "URL")]
     pub run_url: String,
@@ -255,8 +318,9 @@ pub struct CommitStatus {
 }
 
 /// What an issue number names. Forgejo numbers issues and pull requests
-/// together, so a request for one may name the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// together, so a request for one may name the other; GitLab numbers them
+/// apart (`#5` and `!5`), so only the caller can say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Kind {
     Issue,
     PullRequest,
@@ -300,8 +364,8 @@ pub struct PullRequest {
     pub branch: String,
     pub title: String,
     pub body: String,
-    /// Opened as a draft: on Forgejo, which has no such flag, the title
-    /// says so too ([`DRAFT_PREFIX`]).
+    /// Opened as a draft: on Forgejo and GitLab, which have no such flag,
+    /// the title says so too ([`DRAFT_PREFIX`], [`GITLAB_DRAFT_PREFIX`]).
     pub draft: bool,
     pub patch: Vec<u8>,
     /// The paths the patch names, as check read them: the only paths the
@@ -363,6 +427,7 @@ pub trait Publisher {
 /// Where the trusted caller has apply publish.
 #[derive(Debug, Clone, Copy)]
 pub struct Target<'a> {
+    pub forge: Forge,
     pub repo: &'a str,
     pub push_repo: Option<&'a str>,
     pub comment_target: Option<u64>,
@@ -405,6 +470,15 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
             target.repo, policy.repo
         ));
     }
+    // A policy for GitHub lets through what GitLab reads otherwise, such
+    // as an `item_number` that may be an issue's or a merge request's.
+    // Forgejo's callers predate the policy's `forge`, and are not held to it.
+    if target.forge == Forge::Gitlab && policy.forge != crate::policy::Forge::Gitlab {
+        errors.push(format!(
+            "apply publishes to GitLab, and the policy is for {:?}",
+            policy.forge
+        ));
+    }
     if let Err(err) = footer(target.run_url) {
         errors.push(format!("{err:#}"));
     }
@@ -432,9 +506,10 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
         *counts.entry(check::item_type(item)).or_default() += 1;
     }
     for (output, count) in counts {
-        if !SUPPORTED.contains(&output) {
+        if !target.forge.supported().contains(&output) {
             errors.push(format!(
-                "an output of type {output:?}, which apply does not publish to Forgejo"
+                "an output of type {output:?}, which apply does not publish to {}",
+                target.forge.name()
             ));
         }
         match policy.safe_outputs.max_of(output) {
@@ -468,7 +543,10 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
                 (_, None) => errors.push("an add_comment without a body".to_owned()),
                 (Some(issue), Some(body)) => ops.push(Op::Comment {
                     issue,
-                    body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
+                    body: with_footer(
+                        &mentions::filter(body, target.forge.syntax()),
+                        target.run_url,
+                    ),
                 }),
             },
             CREATE_PULL_REQUEST => match pull_request(checked, policy, &report, item, target) {
@@ -482,7 +560,7 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
                 }
             }
             output if NO_WRITE.contains(&output) => {}
-            _ => match metadata(item, target.run_url) {
+            _ => match metadata(item, target.forge, target.run_url) {
                 Ok(Some(op)) => ops.push(op),
                 Ok(None) => {}
                 Err(err) => errors.push(format!("{err:#}")),
@@ -501,7 +579,9 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
     }
     // The caller's alone: no request of the run names a commit status.
     if let Some((state, sha)) = target.status {
-        if COMMIT_RE.is_match(sha) {
+        if target.forge == Forge::Gitlab {
+            errors.push("--status, which apply does not set on GitLab".to_owned());
+        } else if COMMIT_RE.is_match(sha) {
             ops.push(Op::Status(CommitStatus {
                 sha: sha.to_owned(),
                 state,
@@ -586,12 +666,20 @@ fn pull_request(
         push_repo: push_repo.to_owned(),
         private: policy.private,
         branch: branch.to_owned(),
-        title: if draft {
-            format!("{DRAFT_PREFIX}{title}")
-        } else {
-            title.to_owned()
-        },
-        body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
+        // GitLab notifies on a title's mentions too, `@all` among them.
+        title: format!(
+            "{}{}",
+            if draft {
+                target.forge.draft_prefix()
+            } else {
+                ""
+            },
+            mentions::filter(title, target.forge.syntax())
+        ),
+        body: with_footer(
+            &mentions::filter(body, target.forge.syntax()),
+            target.run_url,
+        ),
         draft,
         patch: bytes,
         files,
@@ -768,7 +856,7 @@ fn unmapped(item: &Map<String, Value>, output: &str) -> Result<()> {
 /// target and labels are held to the policy by
 /// [`check::redirections_to`], as every request is; what the forge says
 /// of them, by [`Publisher::preflight`]. None for a type with no op.
-fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
+fn metadata(item: &Map<String, Value>, forge: Forge, run_url: &str) -> Result<Option<Op>> {
     let output = check::item_type(item);
     if !FIELDS.iter().any(|(name, _)| *name == output) {
         return Ok(None);
@@ -788,7 +876,10 @@ fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
     };
     let body = || -> Result<String> {
         let body = required("body", MAX_BODY_CHARS)?;
-        Ok(with_footer(&mentions::filter(body, "forgejo"), run_url))
+        Ok(with_footer(
+            &mentions::filter(body, forge.syntax()),
+            run_url,
+        ))
     };
     let number = |key: &str| {
         item.get(key)
@@ -818,7 +909,7 @@ fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
     };
     Ok(Some(match output {
         CREATE_ISSUE => Op::Issue(NewIssue {
-            title: mentions::filter(required("title", MAX_TITLE_CHARS)?, "forgejo"),
+            title: mentions::filter(required("title", MAX_TITLE_CHARS)?, forge.syntax()),
             body: body()?,
             labels: labels()?,
         }),
@@ -958,15 +1049,28 @@ pub fn run(args: &Args) -> Result<Exit> {
         );
     }
     let policy = Policy::load(&args.policy)?;
-    let token = std::env::var(TOKEN_ENV).unwrap_or_default();
-    anyhow::ensure!(!token.is_empty(), "{TOKEN_ENV} is not set");
-    let publisher = match args.forge {
+    let token_env = args.forge.token_env();
+    let token = std::env::var(token_env).unwrap_or_default();
+    anyhow::ensure!(!token.is_empty(), "{token_env} is not set");
+    let publisher: Box<dyn Publisher> = match args.forge {
         Forge::Forgejo => {
-            forgejo::Forgejo::new(&args.server, &policy.repo, token, &policy.allow_http)?
-                .recovering(args.recover_pushed_commit.clone())
+            anyhow::ensure!(
+                args.comment_target_kind.is_none(),
+                "--comment-target-kind is GitLab's: Forgejo numbers issues and pull requests together"
+            );
+            Box::new(
+                forgejo::Forgejo::new(&args.server, &policy.repo, token, &policy.allow_http)?
+                    .recovering(args.recover_pushed_commit.clone()),
+            )
         }
+        Forge::Gitlab => Box::new(
+            gitlab::Gitlab::new(&args.server, &policy.repo, token, &policy.allow_http)?
+                .recovering(args.recover_pushed_commit.clone())
+                .commenting_on(args.comment_target_kind),
+        ),
     };
     let target = Target {
+        forge: args.forge,
         repo: &args.repo,
         push_repo: args.push_repo.as_deref(),
         comment_target: args.comment_target,
@@ -982,7 +1086,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             return Ok(Exit::Failure);
         }
     };
-    for url in publish(&ops, &publisher)? {
+    for url in publish(&ops, publisher.as_ref())? {
         println!("{url}");
     }
     Ok(Exit::Success)
@@ -1157,12 +1261,48 @@ mod tests {
 
     pub(super) fn target(comment_target: Option<u64>) -> Target<'static> {
         Target {
+            forge: Forge::Forgejo,
             repo: "bootc-dev/bootc",
             push_repo: Some(PUSH_REPO),
             comment_target,
             run_url: RUN,
             status: None,
         }
+    }
+
+    /// A run on GitLab, under a policy for GitLab.
+    fn on_gitlab(_: &Path, policy: &mut Policy, target: &mut Target<'static>) {
+        policy.forge = crate::policy::Forge::Gitlab;
+        target.forge = Forge::Gitlab;
+    }
+
+    /// On GitLab a draft is a `Draft:` title, and no line of a body runs a
+    /// quick action.
+    #[test]
+    fn accepted_on_gitlab() {
+        let body = "Why.\n/merge\n/assign @all";
+        let dir = checked(&[
+            json!({"type": "add_comment", "body": body}),
+            json!({"type": "create_pull_request", "title": "Fix it @all", "body": body, "branch": BRANCH}),
+        ]);
+        let (mut policy, mut target) = (policy(), target(Some(64)));
+        on_gitlab(dir.path(), &mut policy, &mut target);
+        let ops = plan(dir.path(), &policy, &target).unwrap();
+        let want = format!(
+            "Why.\n\u{200b}/merge\n\u{200b}/assign @\u{200b}all\n\n> Generated by [agentic-job]({RUN})"
+        );
+        let Op::PullRequest(pr) = &ops[0] else {
+            panic!("{ops:?}")
+        };
+        assert_eq!(pr.title, "Draft: Fix it @\u{200b}all");
+        assert_eq!(pr.body, want);
+        assert_eq!(
+            ops[1],
+            Op::Comment {
+                issue: 64,
+                body: want
+            }
+        );
     }
 
     #[test]
@@ -1481,6 +1621,31 @@ mod tests {
                 &[comment_item()],
                 |_, _, target| target.run_url = "javascript:alert(1)",
                 "not a plain http(s) link",
+            ),
+            // GitLab: a GitLab policy, comments and merge requests only,
+            // and no status.
+            (
+                &[comment_item()],
+                |_, _, target| target.forge = Forge::Gitlab,
+                "apply publishes to GitLab, and the policy is for Github",
+            ),
+            (
+                &[labels_item(ADD_LABELS)],
+                on_gitlab,
+                "\"add_labels\", which apply does not publish to GitLab",
+            ),
+            (
+                &[close_item()],
+                on_gitlab,
+                "\"close_issue\", which apply does not publish to GitLab",
+            ),
+            (
+                &[comment_item()],
+                |dir, policy, target| {
+                    on_gitlab(dir, policy, target);
+                    target.status = Some((State::Success, HEAD));
+                },
+                "--status, which apply does not set on GitLab",
             ),
             (
                 &[comment_item()],

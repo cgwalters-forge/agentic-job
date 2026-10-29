@@ -248,83 +248,68 @@ fn segment(name: &str) -> String {
     name.bytes().map(|b| format!("%{b:02X}")).collect()
 }
 
-impl Forgejo {
-    /// SERVER is the forge's address, `https://forge.example` or one
-    /// under a path; REPO the policy's, which it has checked.
-    pub fn new(server: &str, repo: &str, token: String, allow_http: &[String]) -> Result<Self> {
-        let server = server.trim_end_matches('/');
-        let rest = server
-            .strip_prefix("https://")
-            .or_else(|| server.strip_prefix("http://"));
-        // Credentials, a query or a fragment in the address would go to
-        // git and the API as written; the token is the only credential.
+/// SERVER, a forge's address, `https://forge.example` or one under a
+/// path, without a trailing `/`: refused unless plain, and on HTTP unless
+/// loopback or named in the bounds' ALLOW_HTTP.
+pub(super) fn server<'a>(server: &'a str, allow_http: &[String]) -> Result<&'a str> {
+    let server = server.trim_end_matches('/');
+    let rest = server
+        .strip_prefix("https://")
+        .or_else(|| server.strip_prefix("http://"));
+    // Credentials, a query or a fragment in the address would go to
+    // git and the API as written; the token is the only credential.
+    ensure!(
+        rest.is_some_and(|rest| !rest.is_empty()
+            && !rest
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || "@?#\\".contains(c))),
+        "--server {server:?} is not a plain http(s) address"
+    );
+    if let Some(rest) = server.strip_prefix("http://") {
+        let authority = rest.split('/').next().unwrap_or_default();
+        // Unapproved HTTP would expose the publish token. Match the whole
+        // authority (including port), as clone URLs do, not a DNS suffix.
+        // Literal loopback addresses remain available for local fixtures.
+        let loopback = matches!(authority, "127.0.0.1" | "[::1]")
+            || authority
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|address| address.ip().is_loopback());
         ensure!(
-            rest.is_some_and(|rest| !rest.is_empty()
-                && !rest
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || "@?#\\".contains(c))),
-            "--server {server:?} is not a plain http(s) address"
+            loopback || crate::policy::allows_http(allow_http, authority),
+            "--server requires HTTPS except for literal loopback addresses or a host named in the bounds' allow_http"
         );
-        if let Some(rest) = server.strip_prefix("http://") {
-            let authority = rest.split('/').next().unwrap_or_default();
-            // Unapproved HTTP would expose the publish token. Match the whole
-            // authority (including port), as clone URLs do, not a DNS suffix.
-            // Literal loopback addresses remain available for local fixtures.
-            let loopback = matches!(authority, "127.0.0.1" | "[::1]")
-                || authority
-                    .parse::<std::net::SocketAddr>()
-                    .is_ok_and(|address| address.ip().is_loopback());
-            ensure!(
-                loopback || crate::policy::allows_http(allow_http, authority),
-                "--server requires HTTPS except for literal loopback addresses or a host named in the bounds' allow_http"
-            );
-        }
-        let http = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .proxy(None)
-            // The token is not to follow a redirect anywhere.
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build()
-            .into();
-        Ok(Self {
-            api: format!("{server}/api/v1"),
-            git: server.to_owned(),
-            repo: repo.to_owned(),
-            token,
-            http,
-            recover_pushed_commit: None,
-        })
     }
+    Ok(server)
+}
 
-    /// Only the trusted deployment may supply this, never agent output.
-    pub fn recovering(mut self, recover: Option<String>) -> Self {
-        self.recover_pushed_commit = recover;
-        self
-    }
+/// The HTTP client of a forge's API.
+pub(super) fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .proxy(None)
+        // The token is not to follow a redirect anywhere.
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
 
-    /// What git fetches REPO from, or pushes to it at.
-    fn remote(&self, repo: &str) -> String {
-        format!("{}/{repo}.git", self.git)
-    }
+/// A forge's API at a URL, and the token it is called with.
+pub(super) struct Api<'a> {
+    pub http: &'a ureq::Agent,
+    pub url: &'a str,
+    /// The `Authorization` header: the forge's own scheme.
+    pub authorization: &'a str,
+    /// Scrubbed from every error.
+    pub token: &'a str,
+}
 
-    /// TEXT without the token.
-    fn scrub(&self, text: &str) -> String {
-        text.replace(&self.token, "[token]")
-    }
-
-    /// Sends a GET, or a POST of BODY, to PATH under the API, and returns
-    /// the JSON of a successful answer.
-    fn send(&self, path: &str, body: Option<&Value>) -> Result<Value> {
-        let method = if body.is_some() { POST } else { GET };
-        self.request(method, path, body)
-    }
-
+impl Api<'_> {
     /// Sends METHOD, with BODY for a POST or a PATCH, to PATH under the
     /// API, and returns the JSON of a successful answer, null for none.
-    fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-        let url = format!("{}{path}", self.api);
-        let authorization = format!("token {}", self.token);
+    pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+        let url = format!("{}{path}", self.url);
+        let authorization = self.authorization;
         let json = body.map(Value::to_string).unwrap_or_default();
         let response = match method {
             POST => self
@@ -355,9 +340,10 @@ impl Forgejo {
                 .call(),
             _ => bail!("{method} {path}: not a request apply makes"),
         };
+        let scrub = |text: &str| text.replace(self.token, "[token]");
         let mut response = match response {
             Ok(response) => response,
-            Err(err) => bail!("{method} {path}: {}", self.scrub(&err.to_string())),
+            Err(err) => bail!("{method} {path}: {}", scrub(&err.to_string())),
         };
         let status = response.status();
         let text = match response
@@ -367,13 +353,13 @@ impl Forgejo {
             .read_to_string()
         {
             Ok(text) => text,
-            Err(err) => bail!("{method} {path}: {}", self.scrub(&err.to_string())),
+            Err(err) => bail!("{method} {path}: {}", scrub(&err.to_string())),
         };
         if !status.is_success() {
             bail!(
                 "{method} {path}: HTTP {}: {}",
                 status.as_u16(),
-                self.shown(&text)
+                git::shown(&[self.token], &text)
             );
         }
         // A DELETE's 204.
@@ -382,6 +368,57 @@ impl Forgejo {
         }
         serde_json::from_str(&text)
             .with_context(|| format!("{method} {path}: the response is not JSON"))
+    }
+}
+
+impl Forgejo {
+    /// SERVER is the forge's address, `https://forge.example` or one
+    /// under a path; REPO the policy's, which it has checked.
+    pub fn new(server: &str, repo: &str, token: String, allow_http: &[String]) -> Result<Self> {
+        let server = self::server(server, allow_http)?;
+        Ok(Self {
+            api: format!("{server}/api/v1"),
+            git: server.to_owned(),
+            repo: repo.to_owned(),
+            token,
+            http: agent(),
+            recover_pushed_commit: None,
+        })
+    }
+
+    /// Only the trusted deployment may supply this, never agent output.
+    pub fn recovering(mut self, recover: Option<String>) -> Self {
+        self.recover_pushed_commit = recover;
+        self
+    }
+
+    /// What git fetches REPO from, or pushes to it at.
+    fn remote(&self, repo: &str) -> String {
+        format!("{}/{repo}.git", self.git)
+    }
+
+    /// TEXT without the token.
+    fn scrub(&self, text: &str) -> String {
+        text.replace(&self.token, "[token]")
+    }
+
+    /// Sends a GET, or a POST of BODY, to PATH under the API, and returns
+    /// the JSON of a successful answer.
+    fn send(&self, path: &str, body: Option<&Value>) -> Result<Value> {
+        let method = if body.is_some() { POST } else { GET };
+        self.request(method, path, body)
+    }
+
+    /// Sends METHOD, with BODY for a POST or a PATCH, to PATH under the
+    /// API, and returns the JSON of a successful answer, null for none.
+    fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+        Api {
+            http: &self.http,
+            url: &self.api,
+            authorization: &format!("token {}", self.token),
+            token: &self.token,
+        }
+        .request(method, path, body)
     }
 
     /// POSTs BODY to PATH under the API and returns what it made.
@@ -419,11 +456,6 @@ impl Forgejo {
                 None
             },
         })
-    }
-
-    /// TEXT as an error shows it: see [`git::shown`].
-    fn shown(&self, text: &str) -> String {
-        git::shown(&[&self.token], text)
     }
 
     /// Refuses a push repository that is not a fork of the repository, as
