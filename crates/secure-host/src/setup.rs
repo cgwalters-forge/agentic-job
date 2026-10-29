@@ -1536,6 +1536,11 @@ impl PackageManager {
             Self::Apt => {
                 let mut command = Command::new("apt-get");
                 command.env("DEBIAN_FRONTEND", "noninteractive");
+                // needrestart's process scan after dpkg took about 10 s on
+                // slow hosted runners. Suspended, a service whose library
+                // an install upgrades keeps the old one until it restarts,
+                // which on a runner that lasts one job is the job.
+                command.env("NEEDRESTART_SUSPEND", "1");
                 command.args(["install", "-y", "--no-install-recommends", "--"]);
                 command
             }
@@ -2013,6 +2018,27 @@ mod tests {
                 "--",
                 "just",
                 "gcc"
+            ]
+        );
+        let envs = |command: &Command| -> Vec<(String, String)> {
+            command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    Some((
+                        key.to_string_lossy().into_owned(),
+                        value?.to_string_lossy().into_owned(),
+                    ))
+                })
+                .collect()
+        };
+        assert!(envs(&PackageManager::Dnf.install(&packages)).is_empty());
+        let mut apt = envs(&PackageManager::Apt.install(&packages));
+        apt.sort();
+        assert_eq!(
+            apt,
+            [
+                ("DEBIAN_FRONTEND".to_owned(), "noninteractive".to_owned()),
+                ("NEEDRESTART_SUSPEND".to_owned(), "1".to_owned())
             ]
         );
     }

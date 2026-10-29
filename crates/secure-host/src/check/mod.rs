@@ -75,6 +75,12 @@ enum Mode {
 /// session of the sandbox user's, and some start a container.
 const CONCURRENT_PROBES: usize = 8;
 
+/// Put before a control the runner's user makes beside a refusal. Every
+/// control that connected on hosted runners did so in under 0.05 s; one
+/// that cannot connect (a dropped packet, a port nothing serves) cost
+/// the refusal's whole timeout, tens of seconds of every check.
+const CONTROL_LIMIT: &[&str] = &["timeout", "--kill-after=1", "3"];
+
 const CANARY_BYTES: usize = 12;
 
 /// Put before every command a probe runs as the sandbox user.
@@ -519,25 +525,30 @@ impl Checker<'_> {
     /// most of the time of a refusal is its own way into the sandbox,
     /// which the next one need not wait for.
     fn attempts(&mut self, attempts: &[Attempt]) -> Result<()> {
-        let this = &*self;
-        let results = in_order(attempts, |attempt| {
-            let argv: Vec<&str> = attempt.argv.iter().map(String::as_str).collect();
-            match attempt.kind {
-                AttemptKind::Control => Ok(runner_reaches(&argv)),
-                AttemptKind::Refused | AttemptKind::RefusedInContainer => {
-                    this.refusal_succeeds(attempt, &argv)
-                }
-            }
-        })?;
+        let results = self.made(attempts)?;
         self.report.attempts(&self.runner.name, attempts, &results)
     }
 
-    /// Whether the sandbox user succeeds at `attempt`'s `argv`, which it
-    /// must not. `Err` when its session never got to `argv`: sudo, the
-    /// helper, run0 or PAM failing to start one, which a status alone
+    /// Whether each of `attempts` succeeded, unreported: see
+    /// [`Self::attempts`].
+    fn made(&self, attempts: &[Attempt]) -> Result<Vec<bool>> {
+        in_order(attempts, |attempt| {
+            let argv: Vec<&str> = attempt.argv.iter().map(String::as_str).collect();
+            match attempt.kind {
+                AttemptKind::Control => Ok(runner_reaches(&bounded_control(&argv))),
+                AttemptKind::Refused | AttemptKind::RefusedInContainer => {
+                    Ok(self.refusal_output(attempt, &argv)?.success())
+                }
+            }
+        })
+    }
+
+    /// What the sandbox user's `attempt` at `argv`, which must not
+    /// succeed, came to. `Err` when its session never got to `argv`: sudo,
+    /// the helper, run0 or PAM failing to start one, which a status alone
     /// would report as a refusal that holds; and, for one in a container,
     /// when podman did not start the container or its command.
-    fn refusal_succeeds(&self, attempt: &Attempt, argv: &[&str]) -> Result<bool> {
+    fn refusal_output(&self, attempt: &Attempt, argv: &[&str]) -> Result<Output> {
         let id = &attempt.id;
         let output = self.sandbox(&[&["sh", "-c", ENTER_SCRIPT, ENTERED], argv].concat(), b"")?;
         ensure!(
@@ -552,12 +563,12 @@ impl Checker<'_> {
             output.status,
             bounded_stderr(&output.stderr)
         );
-        Ok(output.success())
+        Ok(output)
     }
 }
 
 /// The line a refusal's session prints to its standard error before it
-/// makes the attempt: see [`Checker::refusal_succeeds`].
+/// makes the attempt: see [`Checker::refusal_output`].
 const ENTERED: &str = "agentic-job-sandbox-entered";
 
 /// Prints its `$0`, [`ENTERED`], and becomes the attempt.
@@ -632,6 +643,13 @@ fn runner_reaches(argv: &[&str]) -> bool {
     host::command(argv)
         .map(|mut command| host::succeeds(&mut command))
         .unwrap_or(false)
+}
+
+/// `argv`, a control's, cut short after [`CONTROL_LIMIT`]: one that has
+/// not connected by then is only a note, while the refusal it stands
+/// beside keeps its own, longer timeout.
+fn bounded_control<'a>(argv: &[&'a str]) -> Vec<&'a str> {
+    [CONTROL_LIMIT, argv].concat()
 }
 
 /// What the runner's user, this process, prints running `argv`: empty

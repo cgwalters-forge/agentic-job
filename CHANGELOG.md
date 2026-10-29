@@ -29,6 +29,12 @@ says what a caller may rely on across versions.
   escaped delimiters cannot bypass the filter; other types and `--status`
   are refused (docs/safe-outputs.md#publishing-to-gitlab). On Forgejo
   too, a pull request's title now has its mentions broken.
+- `sandbox setup` and `sandbox check` take less time in the slow tail
+  of hosted runs: apt installs suspend needrestart's process scan, the
+  network stage cuts a runner's control short after 3 seconds (one that
+  has not connected is a note, as before), and the tailnet's refusals
+  from a container are made at once in one container. Every probe and
+  refusal timeout stays.
 - `review.yml`, with the repository variable `REVIEW_HISTORY=true`, gives
   the review agent the pull request's earlier verdicts by the review job,
   their findings and the replies to them, the commits since each and the
