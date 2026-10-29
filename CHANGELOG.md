@@ -9,6 +9,13 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Runs with agent `claude` whose `run` is newer than the pinned
+  secure-host image, such as `review.yml` at a commit of main, start
+  again. Since the attribution change below they stopped on
+  "managed-settings.json is not what this run's configuration calls
+  for": the image's release writes the managed settings without the
+  attribution switches, which are now in the user settings `run` writes
+  in the agent's home.
 - `review.yml`, with the repository variable `REVIEW_HISTORY=true`, gives
   the review agent the pull request's earlier verdicts by the review job,
   their findings and the replies to them, the commits since each and the
@@ -132,7 +139,8 @@ says what a caller may rely on across versions.
   dispatched reviews, label activation, push, status comments and issue
   linking moved from workflow JavaScript into the binary.
 - Claude Code's own commit and pull request attribution is turned off in
-  agent runs; the run's configured trailers are the only credit.
+  agent runs, so the run's configured trailers are its only credit
+  unless the target repository's settings turn it back on.
 - The run action's setup duration report is gone.
 - The egress proxy refuses an address a refused name resolves to before
   its domain allowlist, so the error names the right cause.

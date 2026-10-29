@@ -231,7 +231,10 @@ The implementation recipe is:
    project configuration. Tokens belong only in the private home file
    (0600, directory 0700), never root-owned managed settings, argv or logs.
    If managed settings are needed, provide them through `managed_settings`
-   for `sandbox setup`; `run` cannot write them after hardening.
+   for `sandbox setup`; `run` cannot write them after hardening. Keep
+   them to what holds inference and permissions: in an agent job setup is
+   the pinned secure-host image's release, older than `run` between
+   releases, and `run` refuses any difference.
 3. In `run/launch.rs`, add the agent's launch behavior: read the run's
    configuration, set only the required environment, and execute the
    registry command. Extend `KEPT` only for non-secret model settings that

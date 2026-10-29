@@ -9,7 +9,7 @@
 //! its token and run any command; what contains it is the sandbox user
 //! and the egress proxy.
 //!
-//! **Claude Code** gets three files, none taken from anywhere but this
+//! **Claude Code** gets four files, none taken from anywhere but this
 //! binary and the run:
 //!
 //! - [`CLAUDE_ENV_FILE`], the environment that points it at the proxy,
@@ -22,6 +22,8 @@
 //!   limited to managed ones, of which there are none, which keeps every
 //!   command and edit a permission request the session answers and
 //!   records;
+//! - [`CLAUDE_SETTINGS_FILE`], its user settings, which turn off its own
+//!   attribution ([`claude_user_settings`]);
 //! - [`CLAUDE_INSTRUCTIONS_FILE`], its instructions for an unattended
 //!   run.
 //!
@@ -65,6 +67,7 @@ use crate::config;
 /// In the sandbox user's home.
 pub const CLAUDE_ENV_FILE: &str = ".config/agentic-job/claude-env.json";
 pub const CLAUDE_INSTRUCTIONS_FILE: &str = ".claude/CLAUDE.md";
+pub const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
 pub const OPENCODE_CONFIG_DIR: &str = ".config/opencode";
 pub const OPENCODE_CONFIG_FILE: &str = ".config/opencode/opencode.json";
 pub const OPENCODE_INSTRUCTIONS_FILE: &str = ".config/opencode/AGENTS.md";
@@ -666,13 +669,13 @@ pub fn claude_env(endpoint: &Endpoint, token: &Token) -> BTreeMap<&'static str, 
 /// a target repository's settings cannot then send the conversation
 /// elsewhere.
 ///
-/// They also turn off Claude Code's own credit in what the agent writes,
-/// so that the run's configured trailers are the only ones: empty
-/// `attribution.commit` and `attribution.pr` hide its `Co-Authored-By`
-/// trailer and its "Generated with Claude Code" line. The deprecated
-/// `includeCoAuthoredBy: false` (since 2.0.62) does the same for older
-/// versions, which only read that key; newer ones ignore it once
-/// `attribution` is set.
+/// `sandbox setup` writes them, and in an agent job that is the pinned
+/// secure-host image's binary, a release, while `run` is the policy
+/// job's, which may be newer: `run` refuses any difference, so a key
+/// added here stops every such run until the pin moves to a release that
+/// writes it (#2194); `front` already waits for one. What is not about
+/// where inference goes or what the agent may run without asking belongs
+/// in [`claude_user_settings`].
 pub fn claude_managed_settings(endpoint: &Endpoint) -> Value {
     let base = if endpoint.front {
         format!("{}{}", api_key::front_url(), api_key::FRONT_ANTHROPIC)
@@ -699,6 +702,20 @@ pub fn claude_managed_settings(endpoint: &Endpoint) -> Value {
         "allowManagedHooksOnly": true,
         "allowManagedPermissionRulesOnly": true,
         "permissions": {"defaultMode": "default", "disableBypassPermissionsMode": "disable"},
+    })
+}
+
+/// Claude Code's user settings, which `run` writes in the agent's home.
+/// They turn off its own credit in what the agent writes, so that the
+/// run's configured trailers are the only ones: empty
+/// `attribution.commit` and `attribution.pr` hide its `Co-Authored-By`
+/// trailer and its "Generated with Claude Code" line. The deprecated
+/// `includeCoAuthoredBy: false` (since 2.0.62) does the same for older
+/// versions, which only read that key; newer ones ignore it once
+/// `attribution` is set. A target repository's settings could turn the
+/// credit back on, which only adds a line to the agent's text.
+pub fn claude_user_settings() -> Value {
+    json!({
         "attribution": {"commit": "", "pr": ""},
         "includeCoAuthoredBy": false,
     })
@@ -712,6 +729,10 @@ pub fn claude(endpoint: &Endpoint, token: &Token, source: &Source) -> Configurat
             HomeFile {
                 path: CLAUDE_ENV_FILE,
                 content: Some(pretty(&json!({"env": claude_env(endpoint, token)}))),
+            },
+            HomeFile {
+                path: CLAUDE_SETTINGS_FILE,
+                content: Some(pretty(&claude_user_settings())),
             },
             HomeFile {
                 path: CLAUDE_INSTRUCTIONS_FILE,
@@ -1375,15 +1396,16 @@ mod tests {
     }
 
     /// Parses CONFIGURATION's managed settings, which `run` checks,
-    /// asserting they equal those `sandbox setup` writes for CONFIGURED
-    /// and turn off Claude Code's own attribution.
+    /// asserting they equal those `sandbox setup` writes for CONFIGURED,
+    /// and that its user settings turn off Claude Code's own attribution.
     fn written_managed_settings(configuration: &Configuration, configured: &Endpoint) -> Value {
         let written = managed_settings(Kind::Claude, Some(configured));
         assert_eq!(configuration.managed, written);
-        let managed: Value = serde_json::from_str(&written.unwrap().1).unwrap();
-        assert_eq!(managed["attribution"], json!({"commit": "", "pr": ""}));
-        assert_eq!(managed["includeCoAuthoredBy"], false);
-        managed
+        assert_eq!(
+            json_file(configuration, CLAUDE_SETTINGS_FILE),
+            json!({"attribution": {"commit": "", "pr": ""}, "includeCoAuthoredBy": false})
+        );
+        serde_json::from_str(&written.unwrap().1).unwrap()
     }
 
     /// Claude Code starts with the proxy and the run token and no other
@@ -1419,8 +1441,6 @@ mod tests {
                 "allowManagedHooksOnly": true,
                 "allowManagedPermissionRulesOnly": true,
                 "permissions": {"defaultMode": "default", "disableBypassPermissionsMode": "disable"},
-                "attribution": {"commit": "", "pr": ""},
-                "includeCoAuthoredBy": false,
             })
         );
         let holders: Vec<_> = got

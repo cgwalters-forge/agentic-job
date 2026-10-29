@@ -815,6 +815,72 @@ mod tests {
         }
     }
 
+    /// A review with agent `claude` on the shipped runner configuration,
+    /// composed as review.yml's policy job and agent.yml compose it: the
+    /// managed settings `sandbox setup` writes from the host's file are
+    /// those `run` expects (#2194). In the agent job setup is the pinned
+    /// secure-host image's release and `run` the policy job's build, so
+    /// both must also be what that release writes, byte for byte;
+    /// changing them waits for a pin to an image that writes the new
+    /// ones. `inference.front`, which v0.6.3 does not know, already does.
+    #[test]
+    fn a_claude_review_gets_the_managed_settings_the_pinned_image_writes() {
+        let hosted = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/agentic-job/hosted.toml"
+        );
+        let review = [
+            "agent.name=claude",
+            "inference.url=http://broker.example:8080",
+            "inference.register=github-oidc",
+            "inference.audience=broker",
+        ];
+        let full = compose(&args(Some(hosted), &review, LIMITS, &[])).unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(full.as_bytes()).unwrap();
+        let host = Args {
+            host: true,
+            no_script: true,
+            ..args(file.path().to_str(), &[], &[], &[])
+        };
+        let host = Config::parse(&compose(&host).unwrap()).unwrap();
+        let written = crate::sandbox::setup::managed_settings(&host).unwrap();
+        let checked = Config::parse(&full).unwrap().check().unwrap();
+        let token = crate::run::inference::Token::new(&"t".repeat(64)).unwrap();
+        let expected = crate::run::agent::generate(
+            checked.kind,
+            checked.endpoint.as_ref(),
+            Some(&token),
+            None,
+            &crate::run::agent::Source::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .managed;
+        assert_eq!(written, expected);
+
+        let (path, content) = written.unwrap();
+        assert_eq!(path, "/etc/claude-code/managed-settings.json");
+        // What v0.6.3's `claude_managed_settings` writes for this file.
+        let released = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "http://broker.example:8080/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "praxis-substitute:anthropic",
+                "CLAUDE_CODE_USE_BEDROCK": "",
+                "CLAUDE_CODE_USE_VERTEX": "",
+                "CLAUDE_CODE_USE_FOUNDRY": "",
+                "DISABLE_AUTOUPDATER": "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            },
+            "allowManagedHooksOnly": true,
+            "allowManagedPermissionRulesOnly": true,
+            "permissions": {"defaultMode": "default", "disableBypassPermissionsMode": "disable"},
+        });
+        // As bytes, as `run` compares them: the keys in the same order.
+        let released = serde_json::to_string_pretty(&released).unwrap() + "\n";
+        assert_eq!(content, released);
+    }
+
     /// The shipped runner configuration commits as GitHub's Actions bot,
     /// whose noreply address GitHub attributes to it, for any caller:
     /// an address of an unregistered login is attributed to no one.

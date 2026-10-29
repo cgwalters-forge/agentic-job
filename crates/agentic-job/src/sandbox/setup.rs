@@ -198,16 +198,21 @@ fn session_name(status: &serde_json::Value) -> Result<&str> {
     Ok(name)
 }
 
-/// The agent's managed settings, root's, from the same configuration
-/// `run` will read: `run` has no root to write them with. A
-/// configuration that names no agent `run` could start is `run`'s to
-/// refuse, not setup's.
-fn write_managed_settings(config: &Config) -> Result<()> {
+/// The path and content of the agent's managed settings for CONFIG, if
+/// it has any. A configuration that names no agent `run` could start is
+/// `run`'s to refuse, not setup's.
+pub(crate) fn managed_settings(config: &Config) -> Result<Option<(&'static str, String)>> {
     let Ok(kind) = Kind::parse(&config.agent.name) else {
-        return Ok(());
+        return Ok(None);
     };
     let endpoint = Endpoint::from_config(&config.inference)?;
-    if let Some((path, content)) = agent::managed_settings(kind, endpoint.as_ref()) {
+    Ok(agent::managed_settings(kind, endpoint.as_ref()))
+}
+
+/// The agent's managed settings, root's, from the same configuration
+/// `run` will read: `run` has no root to write them with.
+fn write_managed_settings(config: &Config) -> Result<()> {
+    if let Some((path, content)) = managed_settings(config)? {
         let path = Path::new(path);
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
