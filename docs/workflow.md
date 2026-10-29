@@ -498,17 +498,20 @@ workflow's for the broker.
 `tailscale-oauth-client-id`, `tailscale-audience` and `tailscale-tags`
 are gone, and so is the workflow's own `tailscale/github-action` step.
 A caller that joined a tailnet with them now writes its agent job as
-above and joins with an action of its own choosing, pinned by commit,
-as its privileged step. A copy of `agentic-job.yml` kept for such a step is no longer needed,
+above, with a network join in register as well as before secure-host in
+the agent job. Use an action of your own choosing, pinned by commit;
+the agent job's join must need no identity token or long-lived secret.
+A copy of `agentic-job.yml` kept for such a step is no longer needed,
 nor a variable set in place of `job.workflow_*`: the policy call's
 `source-repository` and `source-sha` outputs name the source. A caller
 that set none of them changes nothing. Join without the network's DNS;
 `sandbox setup` refuses a resolver on the tailnet.
 
-A caller-owned agent job is the caller's workflow file, so its identity
-token's `job_workflow_ref` names that file, not `agentic-job.yml`. A
-`called_workflows` entry for `agentic-job.yml` no longer matches it, and
-the broker has to admit the calling repository's own workflows instead
+A composed caller registers in its own job, not in the agent job, which
+must have no `id-token`. Its registration identity no longer names
+`agentic-job.yml` as `job_workflow_ref`, so a `called_workflows` entry for
+that file no longer matches. The broker must admit the registering
+workflow instead
 ([inference admission](inference.md#which-workflows-a-broker-admits)).
 
 ### Migrating an agent job of your own off secure-host's agent steps
@@ -1020,7 +1023,8 @@ cannot reach a private proxy.
   the exact commit pinned by the caller (`job_workflow_sha`), and the calling
   repository's numeric id (not just its name). Update that entry when the
   workflow pin changes. An agent job of your own is your workflow's, not
-  a called one: the broker admits it by your repository instead. See [inference admission](inference.md#which-workflows-a-broker-admits).
+  a called one: its separate register job needs broker admission for the
+  workflow it runs in. See [inference admission](inference.md#which-workflows-a-broker-admits).
 - **Agent programs and limits:** `agent: claude` defaults to
   `@agentclientprotocol/claude-agent-acp@0.88.0` (the ACP adapter, which brings
   the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
@@ -2181,6 +2185,7 @@ put under its own directory after the gate. The agent was the same user,
 so they treat everything else on the machine as its.
 
 **Where the binary comes from.**
+For branch and full-commit workflow pins,
 [`secure-host/binary.sh`](../secure-host/binary.sh) hashes the content,
 modes and names of `Cargo.lock`, `Cargo.toml`, `crates`, `egress`, the
 skills it installs (`skills`, `workflow/review.md`) and itself (it decides what a release holds) at the caller's pinned commit.
@@ -2196,6 +2201,9 @@ Replacing release assets, signing from a PR or using another workflow
 cannot substitute a binary. The trust anchor is GitHub's attestation
 service and this repository's main-branch publishing workflow, not a
 mutable release tag or the caller repository's cache.
+Version-tagged workflow pins instead select the version's release and
+`release.yml` attestation, as described at the
+[start of this page](#running-it-on-github).
 
 Only a missing manifest (HTTP 404) falls back to building, with a notice
 that it takes about two minutes. A download or verification failure stops
