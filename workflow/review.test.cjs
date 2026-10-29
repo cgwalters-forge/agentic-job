@@ -122,8 +122,8 @@ test('caller and write job retain the trusted-source boundary', () => {
   // detector, never in the agent's job.
   const jobs = Object.fromEntries(caller.split('\njobs:\n')[1].split(/\n(?=  [a-z]+:\n)/)
     .map(job => [job.match(/^\s*([a-z]+):/)[1], job]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
-  for (const [name, writes] of Object.entries({ policy: [], register: ['id-token'], agent: [], check: ['id-token'],
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'carry', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
+  for (const [name, writes] of Object.entries({ policy: [], carry: [], register: ['id-token'], agent: [], check: ['id-token'],
     refusal: ['pull-requests'], submit: ['pull-requests'], apply: ['pull-requests'], status: ['statuses'] })) {
     const granted = [...jobs[name].split('\n    permissions:\n')[1].matchAll(/^      ([a-z-]+): write$/gm)].map(m => m[1]);
     assert.deepEqual(granted, writes, name);
@@ -135,29 +135,29 @@ test('caller and write job retain the trusted-source boundary', () => {
     if (name !== 'apply') assert.doesNotMatch(secrets, /secrets/, name);
   }
   assert.match(jobs.register, /ref: \$\{\{ needs.policy.outputs.ref \}\}/);
-  assert.match(jobs.agent, /policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
+  assert.match(jobs.agent, /if: \$\{\{ !cancelled\(\) && needs.register.result == 'success' [\s\S]*policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}/);
   for (const [, action] of caller.matchAll(/^ +(?:- )?uses: ([^.\s]\S*)/gm)) assert.match(action, /@[0-9a-f]{40}$/, action);
   // The status takes the verdict check.yml set and the head policy
   // admitted, nothing the agent wrote. The only code it runs is the policy
   // job's binary of the pinned source, never the head, and the only upload
   // it reads is that binary.
   assert.doesNotMatch(jobs.status, /needs\.agent\.outputs|needs\.check\.outputs\.artifact|pull_request\.head|needs\.policy\.outputs\.ref\b/);
-  assert.deepEqual([...jobs.status.matchAll(/artifact-ids: (.*)/g)].map(m => m[1]), ['${{ needs.policy.outputs.binary-artifact-id }}']);
+  for (const job of [jobs.status, jobs.carry]) assert.deepEqual([...job.matchAll(/artifact-ids: (.*)/g)].map(m => m[1]), ['${{ needs.policy.outputs.binary-artifact-id }}']);
   assert.match(jobs.status, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
-  assert.match(jobs.status, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
+  for (const job of [jobs.status, jobs.submit, jobs.carry]) assert.match(job, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
+  assert.match(jobs.carry, /if: >-\n\s+\$\{\{ vars.REVIEW_CARRY_APPROVAL == 'true' && [\s\S]*agentic-job" review carry --output "\$GITHUB_OUTPUT"/);
   assert.match(jobs.status, /"\$RUNNER_TEMP\/bin\/agentic-job" review status/);
   assert.match(jobs.status, /REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}/);
   // The verdict is posted once: as the review, or else as apply's comment.
   // The review's body is check's accepted upload, from the pinned source's
   // code, and only a checked verdict is submitted.
-  assert.match(jobs.apply, /if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.submit.outputs.review-url == '' \}\}/);
+  assert.match(jobs.apply, /if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.carry.outputs.from == '' && needs.submit.outputs.review-url == '' \}\}/);
   assert.match(jobs.submit, /vars.AGENT_REAL_REVIEWS == 'true'/);
-  assert.match(jobs.submit, /needs.check.result == 'success' && needs.check.outputs.artifact-id != '' &&\s+needs.policy.outputs.binary-artifact-id != ''/);
+  assert.match(jobs.submit, /binary-artifact-id != '' && \(needs.carry.outputs.from != '' \|\|\s+\(needs.check.result == 'success' && needs.check.outputs.artifact-id != ''/);
   assert.deepEqual([...jobs.submit.matchAll(/artifact-ids: (.*)/g)].map(m => m[1]),
     ['${{ needs.policy.outputs.binary-artifact-id }}', '${{ needs.check.outputs.artifact-id }}']);
-  assert.match(jobs.submit, /"\$RUNNER_TEMP\/bin\/agentic-job" review submit --accepted "\$RUNNER_TEMP\/checked\/agent_output.json"/);
+  assert.match(jobs.submit, /accepted=\(--accepted "\$RUNNER_TEMP\/checked\/agent_output.json"\)\n.*\n\s+"\$RUNNER_TEMP\/bin\/agentic-job" review submit "\$\{accepted\[@\]\}"/);
   assert.match(jobs.submit, /VERDICT: \$\{\{ needs.check.outputs.verdict \}\}/);
-  assert.match(jobs.submit, /HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}/);
   assert.match(jobs.submit, /AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}/);
   // The footer's job link is the agent job's own ID, from Actions.
   assert.match(jobs.submit, /AGENT_JOB: \$\{\{ needs.agent.outputs.job \}\}/);

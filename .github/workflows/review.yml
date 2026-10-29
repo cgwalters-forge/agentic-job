@@ -143,15 +143,56 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/agentic-job"
           "$RUNNER_TEMP/bin/agentic-job" status
 
+  # With the variable REVIEW_CARRY_APPROVAL, a push whose new head is the
+  # approved previous head rebased onto the base branch, or rustfmt's
+  # output of it, carries that approval instead of running the agent: a
+  # rebase or format-only push used to cost a full review (#2163). The
+  # previous head must have the status `review` success by the job
+  # token's bot; the comparison is exact (`agentic-job review carry`,
+  # docs/review.md#carried-approvals). git and rustfmt read the heads as
+  # data in a scratch directory; nothing of theirs runs. Anything else,
+  # or a failure here, runs the review. A `/review` always runs one.
+  carry:
+    needs: policy
+    if: >-
+      ${{ vars.REVIEW_CARRY_APPROVAL == 'true' && github.event_name == 'pull_request_target' &&
+          github.event.action == 'synchronize' && needs.policy.outputs.admitted == 'true' &&
+          needs.policy.outputs.binary-artifact-id != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    # The repository to fetch the heads and base from, and the previous
+    # head's statuses.
+    permissions:
+      contents: read
+      statuses: read
+    outputs:
+      from: ${{ steps.carry.outputs.from }}
+      why: ${{ steps.carry.outputs.why }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
+          path: ${{ runner.temp }}/bin
+      - name: Compare the new head with the approved one
+        id: carry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ needs.policy.outputs.review-head }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/agentic-job"
+          "$RUNNER_TEMP/bin/agentic-job" review carry --output "$GITHUB_OUTPUT"
+
   # As agentic-job.yml's register job: the run's registration at the
   # inference proxy under `github-oidc`, out of the agent's job, which
   # then holds no `id-token`. The agent is the runner's user there, and
   # with that permission could mint identity tokens for any audience.
   # This job also runs the caller's network step, from the base commit,
-  # since it has to reach the proxy too.
+  # since it has to reach the proxy too. Not for a carried approval.
   register:
-    needs: policy
-    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    needs: [policy, carry]
+    if: ${{ !cancelled() && needs.policy.outputs.admitted == 'true' && needs.carry.outputs.from == '' }}
     runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
     timeout-minutes: 10
     permissions:
@@ -204,7 +245,9 @@ jobs:
   # gets.
   agent:
     needs: [policy, register]
-    if: ${{ needs.policy.outputs.admitted == 'true' }}
+    # A status function, as without one a skipped carry job above register
+    # would skip this one too.
+    if: ${{ !cancelled() && needs.register.result == 'success' && needs.policy.outputs.admitted == 'true' }}
     # Only admitted runs enter the group. Only automatic PR events
     # supersede a review; a comment must not cancel one.
     concurrency:
@@ -249,13 +292,15 @@ jobs:
   # submitted, apply posts the comment, with every inline finding in it.
   # A 422 refusal submits nothing and posts that comment itself, with why
   # GitHub refused, so the pull request is not left without an explanation.
+  # A carried approval is submitted with the binary's own body, saying
+  # which head's approval it carries and why; no agent ran.
   submit:
-    needs: [policy, agent, check]
+    needs: [policy, carry, agent, check]
     if: >-
       ${{ !cancelled() && vars.AGENT_REAL_REVIEWS == 'true' && needs.policy.outputs.review-head != '' &&
-          needs.check.result == 'success' && needs.check.outputs.artifact-id != '' &&
-          needs.policy.outputs.binary-artifact-id != '' &&
-          contains(fromJSON('["APPROVE", "CHANGES"]'), needs.check.outputs.verdict) }}
+          needs.policy.outputs.binary-artifact-id != '' && (needs.carry.outputs.from != '' ||
+          (needs.check.result == 'success' && needs.check.outputs.artifact-id != '' &&
+          contains(fromJSON('["APPROVE", "CHANGES"]'), needs.check.outputs.verdict))) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     # The pull request, its files (to place inline comments), comments and
@@ -274,6 +319,7 @@ jobs:
           artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
           path: ${{ runner.temp }}/bin
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.carry.outputs.from == '' }}
         with:
           artifact-ids: ${{ needs.check.outputs.artifact-id }}
           path: ${{ runner.temp }}/checked
@@ -288,18 +334,23 @@ jobs:
           AGENT_EXIT: ${{ needs.agent.outputs.exit }}
           AGENT_JOB: ${{ needs.agent.outputs.job }}
           REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
+          CARRIED_FROM: ${{ needs.carry.outputs.from }}
+          CARRIED_WHY: ${{ needs.carry.outputs.why }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/agentic-job"
-          "$RUNNER_TEMP/bin/agentic-job" review submit --accepted "$RUNNER_TEMP/checked/agent_output.json" --output "$GITHUB_OUTPUT"
+          accepted=(--accepted "$RUNNER_TEMP/checked/agent_output.json")
+          [ -z "$CARRIED_FROM" ] || accepted=()
+          "$RUNNER_TEMP/bin/agentic-job" review submit "${accepted[@]}" --output "$GITHUB_OUTPUT"
 
   # The one comment on the pull request, unless the verdict was submitted as
   # the review: the only job given a secret, the optional SAFE_OUTPUTS_PAT,
   # else the job token. `actions: read` lets it confirm the checked outputs
   # are check's. Not on cancellation: one landing after a submission but
-  # before its output was set would post the verdict twice.
+  # before its output was set would post the verdict twice. A carried
+  # approval has no comment: the status, or the submitted review, says why.
   apply:
-    needs: [policy, agent, check, submit]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.submit.outputs.review-url == '' }}
+    needs: [policy, carry, agent, check, submit]
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.carry.outputs.from == '' && needs.submit.outputs.review-url == '' }}
     uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
@@ -328,9 +379,10 @@ jobs:
   # request's title and body reach the agent. So anyone could open a
   # second pull request with someone else's head and talk its review into
   # APPROVE. The status is set only when the triggering pull request is the
-  # one open pull request at that head.
+  # one open pull request at that head. A carried approval is success,
+  # once submitted where real reviews are on, and says which head's it was.
   status:
-    needs: [policy, agent, check, submit, apply]
+    needs: [policy, carry, agent, check, submit, apply]
     # Not without the binary's ID either, which would download every upload.
     if: ${{ !cancelled() && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' }}
     runs-on: ubuntu-26.04
@@ -353,6 +405,9 @@ jobs:
           APPLY_RESULT: ${{ needs.apply.result }}
           RESULT_URL: ${{ needs.apply.outputs.result-url }}
           REVIEW_URL: ${{ needs.submit.outputs.review-url }}
+          REAL_REVIEWS: ${{ vars.AGENT_REAL_REVIEWS }}
+          CARRIED_FROM: ${{ needs.carry.outputs.from }}
+          CARRIED_WHY: ${{ needs.carry.outputs.why }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/agentic-job"

@@ -795,7 +795,7 @@ test('review.yml runs the caller\'s network step once a job, if any, before secu
   const body = review.split(/^jobs:\n/m)[1];
   const jobs = Object.fromEntries(body.split(/^(?=  [-\w]+:\n)/m)
     .map(text => [text.match(/^  ([-\w]+):\n/)[1], text]));
-  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
+  assert.deepEqual(Object.keys(jobs), ['policy', 'refusal', 'carry', 'register', 'agent', 'check', 'submit', 'apply', 'status']);
   for (const [name, text] of Object.entries(jobs)) {
     if (name !== 'register') assert.ok(!text.includes(step), name);
   }
