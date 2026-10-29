@@ -58,6 +58,9 @@ const LABELS_PER_PAGE: usize = 100;
 /// thousand is refused rather than read without end.
 const MAX_LABEL_PAGES: usize = 20;
 
+const DIFFS_PER_PAGE: usize = 100;
+const MAX_DIFF_PAGES: usize = 20;
+
 /// What separates a scoped label's scope from its value: GitLab keeps one
 /// label of a scope on an item, and removes its other when adding one.
 const SCOPE: &str = "::";
@@ -197,6 +200,104 @@ fn joined(names: &[String]) -> Result<String> {
 }
 
 impl Gitlab {
+    /// Resolve by repository path, then hold the MR to that project's ID.
+    /// Issues with a colliding iid are never consulted.
+    fn inline_target(
+        &self,
+        comment: &super::inline::InlineComment,
+    ) -> Result<(u64, String, Value)> {
+        let target = &comment.target;
+        ensure!(
+            target.repo.eq_ignore_ascii_case(&self.repo),
+            "foreign inline target"
+        );
+        let project = self.project(&self.repo)?;
+        let path = format!("/projects/{}/merge_requests/{}", project.id, target.number);
+        let answer = self.request(GET, &path, None)?;
+        ensure!(
+            answer["iid"].as_u64() == Some(target.number)
+                && answer["project_id"].as_u64() == Some(project.id)
+                && answer["target_project_id"].as_u64() == Some(project.id),
+            "inline target is not a merge request of {}",
+            self.repo
+        );
+        ensure!(answer["state"] == OPENED, "inline target is not open");
+        ensure!(answer["sha"] == target.head, "inline target head is stale");
+        let refs = &answer["diff_refs"];
+        for key in ["base_sha", "start_sha", "head_sha"] {
+            ensure!(
+                refs[key]
+                    .as_str()
+                    .is_some_and(|sha| super::COMMIT_RE.is_match(sha)),
+                "inline target lacks diff_refs {key}"
+            );
+        }
+        ensure!(refs["head_sha"] == target.head, "inline diff head is stale");
+        let url = answer["web_url"]
+            .as_str()
+            .context("inline target has no web_url")?;
+        Ok((project.id, url.to_owned(), refs.clone()))
+    }
+
+    fn inline_position(
+        &self,
+        comment: &super::inline::InlineComment,
+    ) -> Result<(u64, String, Value)> {
+        let (project, url, refs) = self.inline_target(comment)?;
+        let mut found = None;
+        let mut complete = false;
+        for page in 1..=MAX_DIFF_PAGES {
+            let path = format!(
+                "/projects/{project}/merge_requests/{}/diffs?page={page}&per_page={DIFFS_PER_PAGE}",
+                comment.target.number
+            );
+            let answer = self.request(GET, &path, None)?;
+            let files = answer
+                .as_array()
+                .context("MR diffs response is not an array")?;
+            ensure!(
+                files.len() <= DIFFS_PER_PAGE,
+                "MR diff page exceeds its limit"
+            );
+            for file in files {
+                let old = file["old_path"].as_str().context("diff has no old_path")?;
+                let new = file["new_path"].as_str().context("diff has no new_path")?;
+                if new != comment.path {
+                    continue;
+                }
+                ensure!(found.is_none(), "ambiguous file in diff");
+                ensure!(
+                    file["too_large"] != true && file["collapsed"] != true,
+                    "inline file diff is unavailable"
+                );
+                let patch = file["diff"].as_str().context("inline file has no diff")?;
+                let line = super::inline::position(patch, comment)?;
+                let mut position = json!({"position_type": "text",
+                    "base_sha": refs["base_sha"], "start_sha": refs["start_sha"],
+                    "head_sha": refs["head_sha"], "old_path": old, "new_path": new});
+                if let Some(old) = line.old {
+                    position["old_line"] = old.into();
+                }
+                if let Some(new) = line.new {
+                    position["new_line"] = new.into();
+                }
+                found = Some(position);
+            }
+            if files.len() < DIFFS_PER_PAGE {
+                complete = true;
+                break;
+            }
+        }
+        ensure!(complete, "MR has more diff pages than apply reads");
+        let position = found.context("inline comment file is absent from the diff")?;
+        let (current_project, _, current_refs) = self.inline_target(comment)?;
+        ensure!(
+            current_project == project && current_refs == refs,
+            "inline diff changed while reading"
+        );
+        Ok((project, url, position))
+    }
+
     /// SERVER is GitLab's address, `https://gitlab.example` or one under a
     /// path; REPO the policy's project path, which it has checked.
     pub fn new(server: &str, repo: &str, token: String, allow_http: &[String]) -> Result<Self> {
@@ -558,8 +659,34 @@ impl Gitlab {
 }
 
 impl Publisher for Gitlab {
+    fn inline_comment(&self, comment: &super::inline::InlineComment) -> Result<String> {
+        let (project, url, position) = self.inline_position(comment)?;
+        let path = format!(
+            "/projects/{project}/merge_requests/{}/discussions",
+            comment.target.number
+        );
+        let answer = self.request(
+            POST,
+            &path,
+            Some(&json!({"body": comment.body, "position": position})),
+        )?;
+        let id = answer["notes"]
+            .as_array()
+            .and_then(|notes| notes.first())
+            .and_then(|note| note["id"].as_u64())
+            .with_context(|| {
+                format!(
+                    "POST {path}: discussion may have been created, but response has no note id"
+                )
+            })?;
+        Ok(format!("{url}#note_{id}"))
+    }
+
     fn preflight(&self, op: &Op) -> Result<()> {
         match op {
+            Op::Inline(comment) => {
+                self.inline_position(comment)?;
+            }
             Op::Comment { issue, .. } => {
                 self.item(*issue, self.comment_kind()?)?;
             }

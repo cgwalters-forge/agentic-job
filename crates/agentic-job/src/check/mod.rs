@@ -95,6 +95,9 @@ pub struct Args {
     /// Fixed issue or pull request number for comments
     #[arg(long, requires = "comment_repo", value_name = "NUMBER", value_parser = clap::value_parser!(u64).range(1..))]
     pub comment_target: Option<u64>,
+    /// Admitted PR/MR head for neutral inline comments; never read from agent output
+    #[arg(long, requires = "comment_target", value_name = "SHA")]
+    pub review_head: Option<String>,
     /// The identifier `run` was given (`--meta`'s `run_id`): the only run
     /// whose branch a secondary pull request may be on
     #[arg(long, value_name = "ID")]
@@ -104,6 +107,8 @@ pub struct Args {
 /// What `check` decided. `--report` holds this as JSON.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_target: Option<crate::apply::inline::CheckedTarget>,
     pub ok: bool,
     /// Every reason for a refusal.
     pub errors: Vec<String>,
@@ -172,6 +177,7 @@ impl Verdict {
         let mut seen = BTreeSet::new();
         errors.retain(|error| seen.insert(error.clone()));
         Self {
+            inline_target: None,
             ok: errors.is_empty(),
             errors,
             items,
@@ -471,6 +477,12 @@ pub(crate) fn redirections_to(
         }
     }
     if REVIEW_THREAD_OUTPUTS.contains(&output) {
+        if output == crate::policy::CREATE_REVIEW_COMMENT
+            && policy.forge != Forge::Github
+            && let Err(err) = crate::apply::inline::fields(item, policy.forge)
+        {
+            problems.push(format!("{err:#}"));
+        }
         // On the run's triggering pull request only: apply gives the
         // handlers its number as their target, so a request cannot name
         // another, and the handlers (and apply, for a reply) refuse a
@@ -1406,13 +1418,27 @@ fn verdict_of(
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
     let comment = args.comment_repo.as_deref().zip(args.comment_target);
-    let verdict = check_outputs_to(
+    let mut verdict = check_outputs_to(
         &args.outputs,
         &args.collected,
         &policy,
         comment,
         args.run_id.as_deref(),
     )?;
+    if policy.forge != crate::policy::Forge::Github
+        && verdict
+            .items
+            .iter()
+            .any(|item| item_type(item) == crate::policy::CREATE_REVIEW_COMMENT)
+    {
+        match crate::apply::inline::checked_target(comment, args.review_head.as_deref(), &policy) {
+            Ok(target) => verdict.inline_target = Some(target),
+            Err(err) => {
+                verdict.errors.push(format!("{err:#}"));
+                verdict.ok = false;
+            }
+        }
+    }
     if let Some(report) = &args.report {
         let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;
         std::fs::write(report, json + "\n")

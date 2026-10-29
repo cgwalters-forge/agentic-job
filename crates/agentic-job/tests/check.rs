@@ -9,6 +9,103 @@ use serde_json::Value;
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn neutral_inline_comments_record_only_the_trusted_head_and_item() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    for forge in ["forgejo", "gitlab"] {
+        let bounds = dir.path().join("bounds.toml");
+        std::fs::write(&bounds, format!(
+            "forge = \"{forge}\"\nhosts = [\"forge.example\"]\nrepos = [\"owner/name\"]\nbases = [\"main\"]\nmax_outputs = 2\nmax_patch_bytes = 4096\nmax_patch_files = 2\n[outputs]\ncreate_pull_request_review_comment = {{ max = 2 }}\n"
+        )).unwrap();
+        let made = Command::new(BIN)
+            .args([
+                "policy",
+                "--repo",
+                "owner/name",
+                "--clone-url",
+                "https://forge.example/owner/name",
+                "--base",
+                "main",
+                "--kind",
+                "analysis",
+                "--outputs",
+                "create_pull_request_review_comment",
+                "--max-outputs",
+                "2",
+                "--allow",
+            ])
+            .arg(&bounds)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let policy = dir.path().join("policy.json");
+        std::fs::write(&policy, made.stdout).unwrap();
+        let item = serde_json::json!({"type": "create_pull_request_review_comment", "repo": "owner/name",
+            "pull_request_number": 9, "path": "src/x", "line": 2, "body": "Finding."});
+        std::fs::write(out.join("outputs.jsonl"), item.to_string()).unwrap();
+        let collected = dir.path().join("collected.json");
+        let result = Command::new(BIN)
+            .arg("collect")
+            .arg("--policy")
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report = dir.path().join("report.json");
+        for (head, accepted) in [
+            (None, false),
+            (Some("bad"), false),
+            (Some("2222222222222222222222222222222222222222"), true),
+        ] {
+            let mut command = Command::new(BIN);
+            command
+                .arg("check")
+                .arg("--policy")
+                .arg(&policy)
+                .arg("--outputs")
+                .arg(&out)
+                .arg("--collected")
+                .arg(&collected)
+                .arg("--report")
+                .arg(&report)
+                .args(["--comment-repo", "owner/name", "--comment-target", "9"]);
+            if let Some(head) = head {
+                command.args(["--review-head", head]);
+            }
+            let result = command.output().unwrap();
+            assert_eq!(
+                result.status.success(),
+                accepted,
+                "{forge}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let verdict: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+            if accepted {
+                assert_eq!(
+                    verdict["inline_target"],
+                    serde_json::json!({"repo": "owner/name", "number": 9, "head": head})
+                );
+            } else {
+                assert!(verdict["inline_target"].is_null());
+            }
+        }
+    }
+}
+
+#[test]
 fn analysis_comments_use_the_callers_destination_without_a_checkout() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out");

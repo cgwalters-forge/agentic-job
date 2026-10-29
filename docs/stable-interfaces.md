@@ -132,6 +132,15 @@ GitLab, `agentic-job collect` takes those two fields for the label types
 and refuses an `issue_number` or `pull_request_number` a type does not
 take there, rather than drop it.
 
+Both non-GitHub publishers also accept `create_pull_request_review_comment`
+when listed with a `max` in bounds. Check requires the trusted caller's
+`--comment-repo`, `--comment-target` and `--review-head` and records
+`inline_target: {repo, number, head}` in its report; apply requires the same
+fixed target. Only single-line `path`, `line`, optional `side` (`RIGHT` by
+default), and `body` anchors are mapped. Multiline fields are refused.
+Apply validates the current PR/MR identity, head and diff before any write
+and rechecks before posting. See [neutral inline comments](safe-outputs.md#neutral-inline-comments).
+
 ## Hand-back files
 
 What a producer leaves for `run` to take

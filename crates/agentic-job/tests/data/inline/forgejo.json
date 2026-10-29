@@ -1,0 +1,7 @@
+{
+  "number": 9,
+  "state": "open",
+  "base": {"repo": {"full_name": "owner/name"}},
+  "head": {"sha": "2222222222222222222222222222222222222222"},
+  "html_url": "https://forge.example/owner/name/pulls/9"
+}
