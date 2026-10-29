@@ -57,7 +57,7 @@ pub enum Command {
     Apply(crate::apply::Args),
     /// Link checked pull requests to the caller's issue before publication
     LinkIssue(crate::apply::issue_reference::Args),
-    /// Publish on GitHub, as gh-aw's handlers would, the checked comments and pull request the policy's native_handlers route here
+    /// Publish on GitHub, as gh-aw's handlers would, the checked outputs the policy's native_handlers route here
     Publish(crate::apply::publish::Args),
     /// Open the policy's checked secondary pull request on GitHub, from SAFE_OUTPUTS_PAT's fork, after apply's handlers
     SecondaryPullRequest(crate::apply::secondary::Args),

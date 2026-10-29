@@ -128,7 +128,7 @@
   },
   {
     "name": "comment-and-labels",
-    "about": "A comment, then labels on the same issue: with native_handlers the comment is agentic-job's and the labels gh-aw's, published in this order.",
+    "about": "A comment, then labels on the same issue, published in this order: with native_handlers, both by agentic-job.",
     "config": {"add_comment": {"max": 1}, "add_labels": {"max": 1, "allowed": ["triage"]}},
     "items": [
       {"type": "add_comment", "item_number": 7, "body": "Triaged, @owner."},
@@ -252,5 +252,103 @@
       {"type": "noop", "message": "Nothing to change: the test passes at main."},
       {"type": "missing_data", "data_type": "log", "reason": "The failing job's log has expired."}
     ]
+  },
+  {
+    "name": "labels-filtered",
+    "about": "What the label handlers leave out: a label the allowed list does not name, one a blocked pattern matches, one named twice, an add_labels past `max`, and a label the item does not have, whose removal fails and is reported but fails nothing. A label's name is percent-encoded in the path that removes it.",
+    "config": {"add_labels": {"max": 1, "allowed": ["triage", "wont*"], "blocked": ["wont*"]}, "remove_labels": {"max": 2, "allowed": ["stale", "good first issue"]}},
+    "items": [
+      {"type": "add_labels", "item_number": 7, "labels": ["triage", "wontfix", "docs", "triage"]},
+      {"type": "add_labels", "item_number": 7, "labels": ["triage"]},
+      {"type": "remove_labels", "item_number": 7, "labels": ["good first issue", "stale"]}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [{"name": "stale"}], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    }
+  },
+  {
+    "name": "labels-failure",
+    "about": "The forge refuses the labels: add_labels fails without a retry, and the remove_labels after it is still published.",
+    "config": {"add_labels": {"max": 1, "allowed": ["triage"]}, "remove_labels": {"max": 1, "allowed": ["stale"]}},
+    "items": [
+      {"type": "add_labels", "item_number": 7, "labels": ["triage"]},
+      {"type": "remove_labels", "item_number": 7, "labels": ["stale"]}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [{"name": "stale"}], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/issues/7/labels", "status": 422}]
+  },
+  {
+    "name": "labels-then-comment",
+    "about": "Labels, then a comment, with add_labels alone agentic-job's: its step adds the labels and leaves gh-aw's the comment, published after them.",
+    "native": ["add_labels"],
+    "config": {"add_labels": {"max": 1, "allowed": ["triage"]}, "add_comment": {"max": 1}},
+    "items": [
+      {"type": "add_labels", "item_number": 7, "labels": ["triage"]},
+      {"type": "add_comment", "item_number": 7, "body": "Triaged."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "close-issue-already-closed",
+    "about": "An issue someone closed already: the closing comment is posted, and the issue is not closed again.",
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done in #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "closed", "state_reason": "completed", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "close-issue-comment-failure",
+    "about": "The forge refuses the closing comment: the issue is left open and the step fails.",
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done in #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/issues/7/comments", "status": 500}]
+  },
+  {
+    "name": "close-pull-request-comment-failure",
+    "about": "The forge refuses the closing comment on a pull request, which is closed all the same.",
+    "config": {"close_pull_request": {"max": 1}},
+    "items": [{"type": "close_pull_request", "pull_request_number": 7, "body": "Superseded by #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [],
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": false, "merged": false, "user": {"login": "owner"}, "head": {"ref": "feature", "label": "owner:feature", "sha": "1111111111111111111111111111111111111111"}, "base": {"ref": "main"}, "html_url": "https://github.com/owner/repo/pull/7"}
+    },
+    "faults": [{"method": "POST", "path": "/repos/owner/repo/issues/7/comments", "status": 500}]
+  },
+  {
+    "name": "close-issue-reopened",
+    "about": "A re-run after someone reopened the issue an earlier attempt closed: the guard finds that attempt's comment and leaves the issue open, and nothing is published.",
+    "config": {"close_issue": {"max": 1}},
+    "items": [{"type": "close_issue", "issue_number": 7, "body": "Done in #8."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "state_reason": "reopened", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [{"id": 900, "body": "Done in #8.\n\n<!-- agentic-job-applied: 4242/0/c8425ed2f2f184f8 -->", "user": {"login": "agentic-bot", "type": "User"}}]
+    }
+  },
+  {
+    "name": "labels-and-close-rerun",
+    "about": "Labels and a closed issue, the first attempt failing to close after its comment: the re-run's guard closes the issue without a second comment, and the labels are added again, which changes nothing.",
+    "attempts": 2,
+    "config": {"add_labels": {"max": 1, "allowed": ["triage"]}, "close_issue": {"max": 1}},
+    "items": [
+      {"type": "add_labels", "item_number": 7, "labels": ["triage"]},
+      {"type": "close_issue", "issue_number": 7, "body": "Done."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"attempt": 1, "method": "PATCH", "path": "/repos/owner/repo/issues/7", "status": 502}]
   }
 ]

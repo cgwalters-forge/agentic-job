@@ -694,8 +694,9 @@ bounds both files must name it. A top-level `forge` (`github` by default,
 organization bounds, both files must name the same one. A top-level `allowed_domains` is
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
-A top-level `native_handlers`, empty by default, lists `add_comment` or
-`create_pull_request` for apply to publish with
+A top-level `native_handlers`, empty by default, lists `add_comment`,
+`create_pull_request`, `add_labels`, `remove_labels`, `close_issue` or
+`close_pull_request` for apply to publish with
 [agentic-job's own handlers](#agentic-jobs-own-handlers) on GitHub rather
 than gh-aw's; each must be a type the bounds allow, and with
 organization bounds a type is routed only where both files name it.
@@ -1163,8 +1164,10 @@ and the commits pushed. They cover `add_comment`, `create_pull_request`,
 `create_pull_request_review_comment`, `noop` and `missing_data`; the
 footer and execution marker, the applied name and its digest, the second
 sanitizing, a `max` and a link limit, a re-run finding its comment on a
-second page, re-runs of an issue and a pull request, half-closed issues
-and pull requests, and failures of the forge and of the guard.
+second page, re-runs of an issue and a pull request, half-closed,
+reopened and already closed issues and pull requests, labels left out
+by the allowed list, a blocked pattern, a repeat or a missing label, and
+failures of the forge and of the guard.
 
 The golden files name the gh-aw and github-script commits they were
 recorded at, and the ordinary test suite fails when apply.yml pins
@@ -1175,11 +1178,12 @@ lines and records the corpus again with `just publication-corpus`,
 which needs node 24, as github-script runs on, and replaces
 `/tmp/gh-aw`. Review the diff: it is the change in what gets published.
 
-The same job runs each case again with its `add_comment` and
-`create_pull_request` routed to [agentic-job's own
-handlers](#agentic-jobs-own-handlers): apply.yml's two steps for them,
-then gh-aw's, have to make the recorded writes, in the recorded order,
-and the same `safe-output-items.jsonl` and pushed commits. The ordinary
+The same job runs each case again with its types that
+[agentic-job's own handlers](#agentic-jobs-own-handlers) publish routed
+to them (or only those a case names, to mix the two): apply.yml's two
+steps for them, then gh-aw's, have to make the recorded writes, in the
+recorded order, and the same `safe-output-items.jsonl` and pushed
+commits. A type is routed only once its cases match. The ordinary
 suite runs those two steps on each case's recorded requests without the
 pinned code, and the unit tests in `apply/publish.rs` hold the rest of
 what gh-aw's handler step records to the corpus: its outputs, summary
@@ -1187,23 +1191,36 @@ and error report.
 
 ### agentic-job's own handlers
 
-Bounds that list `add_comment` or `create_pull_request` in
+Bounds that list `add_comment`, `create_pull_request`, `add_labels`,
+`remove_labels`, `close_issue` or `close_pull_request` in
 `native_handlers` ([the bounds](#the-bounds-and-the-policy)) have apply
 publish those types with `agentic-job publish` instead of gh-aw's
-handlers, in a step of policy's binary before gh-aw's: a port of the two
+handlers, in a step of policy's binary before gh-aw's: a port of those
 handlers at the pin, on the GitHub [`Publisher`](../crates/agentic-job/src/apply/github.rs)
-that holds apply's token. It is off by default; every other type stays
-gh-aw's, and so does everything before the handlers (the fork step, the
-patch's trial, the partial note, the issue link and the guard against
-re-runs).
+and its client, which hold apply's token. It is off by default; every
+other type stays gh-aw's, and so does everything before the handlers
+(the fork step, the patch's trial, the partial note, the issue link and
+the guard against re-runs, which also finishes a half-closed item).
+`push_to_pull_request_branch`, `create_issue` and
+`create_pull_request_review_comment` are not ported yet: their corpus
+cases pass through gh-aw's handlers alone.
 
 What it sends is what gh-aw's handlers send: the second sanitizing with
-the same mentions allowed (the item's author and the event's people),
-the footer, the workflow and execution markers, the applied name hidden
-as apply.yml's hook hides it, the comment limits, the title prefix, the
-draft setting, and the branch pushed to the `head-repo` the fork step
-chose, committed by the job's git identity. It writes the same
-`safe-output-items.jsonl` entries, step outputs (`created_pr_number`,
+the same mentions allowed (the item's author and the event's people;
+none in a closing comment), the footer, the workflow and execution
+markers, the applied name hidden as apply.yml's hook hides it, the
+comment limits, the title prefix, the draft setting, and the branch
+pushed to the `head-repo` the fork step chose, committed by the job's
+git identity. Labels are filtered by the handler's `allowed` and
+`blocked` patterns, at most 10 added in one request, or removed one at
+a time, at most the handler's `max`: a label the item lacks is skipped,
+and one the forge will not remove reported without failing the
+request. A closing
+comment is posted first, even on an item someone closed already, which
+is not closed again; a pull request is closed even where its comment
+fails, an issue is not. It writes the same
+`safe-output-items.jsonl` entries (with an item's state before and after
+its labels change), step outputs (`created_pr_number`,
 `created_pr_url`, `comment_id`, `items_failed` and the rest), summary and
 `safe-output-errors.json`, as `publish-errors.json`; the [publication
 corpus](#the-publication-corpus) holds it to all of them.
@@ -1216,11 +1233,16 @@ the run's order. Where gh-aw's handlers would do something it does not,
 it refuses the whole run before the first write, and gh-aw's step is
 given no request: a request after another type, a field or handler
 setting it does not read (a comment's `comment_id` or `reply_to_id`, a
-pull request's labels, stack fields or another base), a temporary ID
-(`#aw_`), a mention gh-aw would look up, or a file gh-aw's footer would
-read in `/tmp/gh-aw`. `check` (and so `handback check`) refuses the
-order, the fields and the temporary IDs, which depend on the requests
-alone, while the agent can still change them. A run with no routed request is given to gh-aw's step
+pull request's labels, stack fields or another base, a closed issue's
+`duplicate_of`, labels' intent metadata or `create_if_missing`), a
+temporary ID (`#aw_`), an item named other than by a positive integer
+number, a label other than a plain one of at most 64 letters, digits,
+spaces and `-_./:`, a label pattern that is not ASCII, a dispatch whose
+inputs gh-aw would read the event from, a mention gh-aw would look up,
+or a file gh-aw's footer would read in `/tmp/gh-aw`. `check` (and so
+`handback check`) refuses the order, the fields, the numbers, the labels
+and the temporary IDs, which depend on the requests alone, while the
+agent can still change them. A run with no routed request is given to gh-aw's step
 whole, held to none of these. A failure is not answered as gh-aw would answer it:
 a pull request the forge refuses opens no fallback issue, a comment on
 something that is not an issue or pull request is not retried on a

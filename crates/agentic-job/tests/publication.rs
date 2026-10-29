@@ -18,10 +18,11 @@
 //! sent to a real forge. The forge's starting state and its failures are
 //! the case's input; everything in the golden files is recorded.
 //!
-//! Each case is run again with the bounds routing its `add_comment` and
-//! `create_pull_request` to agentic-job's own handlers (`agentic-job
-//! publish`), whose two steps then run before gh-aw's: together they have
-//! to write what gh-aw's handlers alone did, in the same order. Without
+//! Each case is run again with the bounds routing its types of
+//! [`NATIVE`] (or its `native` alone) to agentic-job's own handlers
+//! (`agentic-job publish`), whose two steps then run before gh-aw's:
+//! together they have to write what gh-aw's handlers alone did, in the
+//! same order, and the same record of what was made. Without
 //! the pinned checkouts, `routed_steps_publish_first_and_leave_the_rest`
 //! runs those two steps alone, on the recorded guard's output.
 //!
@@ -1133,7 +1134,7 @@ fn github_script(
 }
 
 /// The types `agentic-job publish` handles.
-const NATIVE: &[&str] = &["add_comment", "create_pull_request"];
+const NATIVE: &[&str] = agentic_job::policy::NATIVE_OUTPUTS;
 
 /// The types CASE's bounds route away from gh-aw's handlers: its
 /// `native`, or else those of [`NATIVE`] it configures.

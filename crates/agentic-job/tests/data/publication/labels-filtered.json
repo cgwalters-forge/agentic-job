@@ -1,0 +1,214 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "labels-filtered",
+  "attempts": [
+    {
+      "handler_config": {
+        "add_labels": {
+          "max": 1,
+          "allowed": [
+            "triage",
+            "wont*"
+          ],
+          "blocked": [
+            "wont*"
+          ],
+          "target-repo": "owner/repo",
+          "target": "*",
+          "issue_intent": false,
+          "create_if_missing": false
+        },
+        "remove_labels": {
+          "max": 2,
+          "allowed": [
+            "stale",
+            "good first issue"
+          ],
+          "target-repo": "owner/repo",
+          "target": "*"
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "add_labels",
+            "item_number": 7,
+            "labels": [
+              "triage",
+              "wontfix",
+              "docs",
+              "triage"
+            ]
+          },
+          {
+            "type": "add_labels",
+            "item_number": 7,
+            "labels": [
+              "triage"
+            ]
+          },
+          {
+            "type": "remove_labels",
+            "item_number": 7,
+            "labels": [
+              "good first issue",
+              "stale"
+            ]
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 1,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "2",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "1",
+          "items_skipped": "0",
+          "items_succeeded": "2",
+          "items_warnings": "0",
+          "processed_count": "2",
+          "result": "",
+          "status": "partial_success"
+        },
+        "annotations": [
+          "::warning::Skipping add_labels: max count of 1 reached",
+          "::error::✗ Message 2 (add_labels) failed: Max count of 1 reached",
+          "::warning::Failed to remove label \"good first issue\": Not Found",
+          "::warning::1 message(s) failed to process",
+          "::error::1 safe output(s) failed:%0A  - add_labels: Max count of 1 reached"
+        ],
+        "summary": "<details>\n<summary>❌ Safe Output Processing Summary (2 applied, 0 skipped, 1 failed)</summary>\n\nProcessed 3 safe-output message(s).\n\nStatus: **partial_success**\n\nApplied: **2** · Skipped: **0** · Warnings: **0** · Failed: **1** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Success | Add Labels | 1 |  |\n| Failed | Add Labels | 1 | UNCLASSIFIED |\n| Success | Remove Labels | 1 |  |\n\n<details>\n<summary>✅ Add Labels - Success (Message 1)</summary>\n\n### Add Labels\n\n**Target:** [owner/repo#7](https://github.com/owner/repo/issues/7)\n\n**Labels:** triage\n\n</details>\n\n<details>\n<summary>❌ Add Labels - Failed (Message 2)</summary>\n\n### Add Labels\n\n**Error:** `UNCLASSIFIED` (see the job logs for details)\n\n</details>\n\n<details>\n<summary>✅ Remove Labels - Success (Message 3)</summary>\n\n### Remove Labels\n\n**Target:** [owner/repo#7](https://github.com/owner/repo/issues/7)\n\n**Labels:** good first issue, stale\n\n</details>\n\n</details>\n\n",
+        "made": [
+          {
+            "type": "add_labels",
+            "number": 7,
+            "repo": "owner/repo",
+            "provider": "github",
+            "target": {
+              "provider": "github",
+              "repository": "owner/repo",
+              "number": 7,
+              "kind": "issue"
+            },
+            "labels": [
+              {
+                "name": "triage"
+              }
+            ],
+            "before_state": {
+              "title": "An issue",
+              "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "state": "open",
+              "labels": [
+                "stale"
+              ],
+              "assignees": []
+            },
+            "after_state": {
+              "title": "An issue",
+              "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "state": "open",
+              "labels": [
+                "stale",
+                "triage"
+              ],
+              "assignees": []
+            },
+            "labelsAdded": [
+              "triage"
+            ],
+            "timestamp": "{time}"
+          },
+          {
+            "type": "remove_labels",
+            "number": 7,
+            "provider": "github",
+            "target": {
+              "provider": "github",
+              "number": 7,
+              "kind": "issue"
+            },
+            "timestamp": "{time}"
+          }
+        ],
+        "errors": {
+          "timestamp": "{time}",
+          "status": "failure",
+          "errorCode": "E099",
+          "message": "1 safe output(s) failed:\n  - add_labels: Max count of 1 reached",
+          "workflow": "agentic-job",
+          "run_id": "4242",
+          "failures": [
+            {
+              "type": "add_labels",
+              "error": "Max count of 1 reached"
+            }
+          ]
+        }
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "POST",
+          "path": "/repos/owner/repo/issues/7/labels",
+          "api_version": "2026-03-10",
+          "body": {
+            "labels": [
+              "triage"
+            ]
+          },
+          "keys": [
+            "labels"
+          ]
+        },
+        {
+          "step": "apply",
+          "method": "DELETE",
+          "path": "/repos/owner/repo/issues/7/labels/good%20first%20issue",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "DELETE",
+          "path": "/repos/owner/repo/issues/7/labels/stale",
+          "api_version": "2026-03-10"
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}

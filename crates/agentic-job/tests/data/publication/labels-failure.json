@@ -1,0 +1,151 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "labels-failure",
+  "attempts": [
+    {
+      "handler_config": {
+        "add_labels": {
+          "max": 1,
+          "allowed": [
+            "triage"
+          ],
+          "target-repo": "owner/repo",
+          "target": "*",
+          "issue_intent": false,
+          "create_if_missing": false
+        },
+        "remove_labels": {
+          "max": 1,
+          "allowed": [
+            "stale"
+          ],
+          "target-repo": "owner/repo",
+          "target": "*"
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "result": ""
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "add_labels",
+            "item_number": 7,
+            "labels": [
+              "triage"
+            ]
+          },
+          {
+            "type": "remove_labels",
+            "item_number": 7,
+            "labels": [
+              "stale"
+            ]
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 1,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "1",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "1",
+          "items_skipped": "0",
+          "items_succeeded": "1",
+          "items_warnings": "0",
+          "processed_count": "1",
+          "result": "",
+          "status": "partial_success"
+        },
+        "annotations": [
+          "::error::Failed to add labels: ERR_API: [{time}] add_labels to issue #7 in owner/repo failed (attempt 1)%0A%0AOriginal error: injected failure%0ARetryable: false%0ASuggestion: This error cannot be resolved by retrying. Please check the error details and fix the underlying issue.",
+          "::error::✗ Message 1 (add_labels) failed: ERR_API: [{time}] add_labels to issue #7 in owner/repo failed (attempt 1)%0A%0AOriginal error: injected failure%0ARetryable: false%0ASuggestion: This error cannot be resolved by retrying. Please check the error details and fix the underlying issue.",
+          "::warning::1 message(s) failed to process",
+          "::error::1 safe output(s) failed:%0A  - add_labels: ERR_API: [{time}] add_labels to issue #7 in owner/repo failed (attempt 1)%0A%0AOriginal error: injected failure%0ARetryable: false%0ASuggestion: This error cannot be resolved by retrying. Please check the error details and fix the underlying issue."
+        ],
+        "summary": "<details>\n<summary>❌ Safe Output Processing Summary (1 applied, 0 skipped, 1 failed)</summary>\n\nProcessed 2 safe-output message(s).\n\nStatus: **partial_success**\n\nApplied: **1** · Skipped: **0** · Warnings: **0** · Failed: **1** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Failed | Add Labels | 1 | ERR_API |\n| Success | Remove Labels | 1 |  |\n\n<details>\n<summary>❌ Add Labels - Failed (Message 1)</summary>\n\n### Add Labels\n\n**Error:** `ERR_API` (see the job logs for details)\n\n</details>\n\n<details>\n<summary>✅ Remove Labels - Success (Message 2)</summary>\n\n### Remove Labels\n\n**Target:** [owner/repo#7](https://github.com/owner/repo/issues/7)\n\n**Labels:** stale\n\n</details>\n\n</details>\n\n",
+        "made": [
+          {
+            "type": "remove_labels",
+            "number": 7,
+            "provider": "github",
+            "target": {
+              "provider": "github",
+              "number": 7,
+              "kind": "issue"
+            },
+            "timestamp": "{time}"
+          }
+        ],
+        "errors": {
+          "timestamp": "{time}",
+          "status": "failure",
+          "errorCode": "E099",
+          "message": "1 safe output(s) failed:\n  - add_labels: ERR_API: [{time}] add_labels to issue #7 in owner/repo failed (attempt 1)\n\nOriginal error: injected failure\nRetryable: false\nSuggestion: This error cannot be resolved by retrying. Please check the error details and fix the underlying issue.",
+          "workflow": "agentic-job",
+          "run_id": "4242",
+          "failures": [
+            {
+              "type": "add_labels",
+              "error": "ERR_API: [{time}] add_labels to issue #7 in owner/repo failed (attempt 1)\n\nOriginal error: injected failure\nRetryable: false\nSuggestion: This error cannot be resolved by retrying. Please check the error details and fix the underlying issue."
+            }
+          ]
+        }
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/issues/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "POST",
+          "path": "/repos/owner/repo/issues/7/labels",
+          "api_version": "2026-03-10",
+          "body": {
+            "labels": [
+              "triage"
+            ]
+          },
+          "keys": [
+            "labels"
+          ]
+        },
+        {
+          "step": "apply",
+          "method": "DELETE",
+          "path": "/repos/owner/repo/issues/7/labels/stale",
+          "api_version": "2026-03-10"
+        }
+      ]
+    }
+  ],
+  "pushed": {}
+}
