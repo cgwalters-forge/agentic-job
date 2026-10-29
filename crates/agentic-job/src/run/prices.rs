@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn lookup() {
         let prices = Prices::builtin().unwrap();
-        assert_eq!(prices.date, "2026-10-24");
+        assert_eq!(prices.date, "2026-10-29");
         let gpt = prices.rates("gpt-5.5");
         for (model, want) in [
             ("gpt-5.5", gpt),
@@ -143,6 +143,30 @@ mod tests {
         }
         assert!(gpt.is_some());
         assert_ne!(prices.rates("gpt-5"), None);
+    }
+
+    /// The gpt-6.x models as runs report them: with the provider prefix
+    /// and the published dotted name, or dashed.
+    #[test]
+    fn run_models() {
+        let prices = Prices::builtin().unwrap();
+        let rates = |input, cached_input, output| {
+            Some(Rates {
+                input,
+                cached_input,
+                output,
+            })
+        };
+        for (model, want) in [
+            ("praxis/gpt-6.1-sol", rates(2.0, 0.10, 10.0)),
+            ("gpt-6-1-sol", rates(2.0, 0.10, 10.0)),
+            ("praxis/gpt-6-astra", rates(10.0, 1.0, 50.0)),
+            ("praxis/gpt-6-luna", rates(0.10, 0.01, 0.50)),
+            ("gpt-6.1-sol-mini", None),
+            ("gpt-6", None),
+        ] {
+            assert_eq!(prices.rates(model), want, "{model}");
+        }
     }
 
     #[test]

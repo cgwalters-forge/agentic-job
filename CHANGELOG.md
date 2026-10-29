@@ -9,6 +9,8 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Run costs price `gpt-6.1-sol`, `gpt-6-astra` and `gpt-6-luna` at
+  OpenAI's standard-tier list prices instead of reporting them unpriced.
 - `native_handlers` also takes `add_labels`, `remove_labels`,
   `close_issue` and `close_pull_request`: agentic-job's own handlers
   publish them as gh-aw's pinned handlers do, which the publication corpus
