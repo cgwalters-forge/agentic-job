@@ -29,6 +29,14 @@ says what a caller may rely on across versions.
   (#2149). opencode now has a `stall-timeout` of 600 seconds: one of its
   model requests hung for 70 minutes, until the timeout, and a stall's
   cancel it answers with `end_turn` is still a stall (docs/harness.md).
+- `agentic-job apply --forge forgejo` publishes `push_to_pull_request_branch`:
+  one commit on the policy's open pull request's branch, only in the bounds'
+  `push_repo` fork, only at the head the run was asked for, without force and
+  under a lease on that head, so a branch that moved is refused. Its new
+  `--status STATE --status-sha SHA` sets the caller's commit status, context
+  `agentic-job`, after every other write; no request can ask for one
+  (docs/safe-outputs.md#pushing-to-a-pull-requests-branch-on-forgejo,
+  docs/safe-outputs.md#commit-statuses-on-forgejo).
 - `agentic-job apply --forge forgejo` also publishes `add_labels`,
   `remove_labels`, `close_issue`, `close_pull_request` and `create_issue`,
   and writes nothing for `noop`, `missing_tool` and `missing_data` instead

@@ -14,6 +14,10 @@
 //! write ([`plan`]), and what only the forge can say (an item's kind, a
 //! label's ID) is asked before it too ([`Publisher::preflight`]), so a
 //! refusal leaves the forge as it was.
+//!
+//! The caller may also have it set a commit status, after every other
+//! write ([`Op::Status`]): its state, commit and link are the caller's,
+//! and its context is [`STATUS_CONTEXT`]. No request can ask for one.
 
 pub mod forgejo;
 mod git;
@@ -37,7 +41,9 @@ use serde_json::{Map, Value};
 use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, MISSING_DATA, NOOP, PatchRules, Policy};
+use crate::policy::{
+    CREATE_PULL_REQUEST, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
+};
 
 /// Check's verdict, as the check job uploads it.
 pub const REPORT_FILE: &str = "report.json";
@@ -64,6 +70,7 @@ const NO_WRITE: &[&str] = &[NOOP, MISSING_TOOL, MISSING_DATA];
 const SUPPORTED: &[&str] = &[
     ADD_COMMENT,
     CREATE_PULL_REQUEST,
+    PUSH_TO_PULL_REQUEST_BRANCH,
     CREATE_ISSUE,
     ADD_LABELS,
     REMOVE_LABELS,
@@ -91,7 +98,17 @@ const FIELDS: &[(&str, &[&str])] = &[
         CLOSE_PULL_REQUEST,
         &["type", "repo", "pull_request_number", "body"],
     ),
+    // The commit's message is the patch's; the others name the policy's
+    // pull request and branch, or are refused by check's rules.
+    (
+        PUSH_TO_PULL_REQUEST_BRANCH,
+        &["type", "repo", "pull_request_number", "branch", "message"],
+    ),
 ];
+
+/// The context of every commit status apply writes: the caller's, never
+/// a request's, so that a branch protection rule naming it can trust it.
+pub const STATUS_CONTEXT: &str = "agentic-job";
 
 /// The collector's bounds on a title and a body, in characters
 /// (`safe-outputs/validation.json`), held again before the footer.
@@ -151,16 +168,87 @@ pub struct Args {
     /// Open the PR for this exact previously pushed commit, without pushing again
     #[arg(long, value_name = "SHA")]
     pub recover_pushed_commit: Option<String>,
+    /// After every other write, set this commit status, context `agentic-job`, on --status-sha
+    #[arg(long, value_enum, requires = "status_sha")]
+    pub status: Option<State>,
+    /// The commit the caller's --status is for
+    #[arg(long, value_name = "SHA", requires = "status")]
+    pub status_sha: Option<String>,
+}
+
+/// A commit status's state: those GitHub and Forgejo both have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum State {
+    Pending,
+    Success,
+    Failure,
+    Error,
+}
+
+impl State {
+    /// Its name in the forge's API.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Error => "error",
+        }
+    }
+
+    /// The status's description: fixed, as nothing a run wrote goes in it.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Pending => "The run is in progress",
+            Self::Success => "The run succeeded",
+            Self::Failure => "The run failed",
+            Self::Error => "The run could not finish",
+        }
+    }
 }
 
 /// One write, everything about it decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    Comment { issue: u64, body: String },
+    Comment {
+        issue: u64,
+        body: String,
+    },
     PullRequest(PullRequest),
+    Push(BranchPush),
     Issue(NewIssue),
     Labels(LabelChange),
     Close(Close),
+    /// The caller's, never a request's.
+    Status(CommitStatus),
+}
+
+/// One commit on the open pull request's branch the policy names, in the
+/// bounds' fork, at the head the run was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPush {
+    /// The policy's pull request.
+    pub number: u64,
+    /// The bounds' `push_repo`, which the pull request must be from.
+    pub push_repo: String,
+    /// As [`PullRequest::private`].
+    pub private: bool,
+    /// The pull request's branch: the policy's `base`.
+    pub branch: String,
+    /// The policy's pinned head: what the branch must hold, and the commit
+    /// check read the patch against.
+    pub head: String,
+    pub patch: Vec<u8>,
+    /// As [`PullRequest::files`].
+    pub files: Vec<String>,
+}
+
+/// A commit status with [`STATUS_CONTEXT`], linking the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitStatus {
+    pub sha: String,
+    pub state: State,
+    pub target_url: String,
 }
 
 /// What an issue number names. Forgejo numbers issues and pull requests
@@ -227,12 +315,16 @@ pub trait Publisher {
     /// Pushes the patch to a new branch of the fork and opens a pull
     /// request from it.
     fn open_pull_request(&self, pr: &PullRequest) -> Result<String>;
+    /// Pushes the patch on the pull request's branch, and returns the pull
+    /// request's URL.
+    fn push_to_branch(&self, push: &BranchPush) -> Result<String>;
     fn create_issue(&self, issue: &NewIssue) -> Result<String>;
     /// Adds the labels the item lacks, or removes those it has; with
     /// nothing to change, writes nothing.
     fn change_labels(&self, change: &LabelChange) -> Result<String>;
     /// Comments and closes; an item closed already gets neither.
     fn close(&self, close: &Close) -> Result<String>;
+    fn status(&self, status: &CommitStatus) -> Result<String>;
 }
 
 /// Where the trusted caller has apply publish.
@@ -242,6 +334,8 @@ pub struct Target<'a> {
     pub push_repo: Option<&'a str>,
     pub comment_target: Option<u64>,
     pub run_url: &'a str,
+    /// The commit status the caller sets, and the commit it is for.
+    pub status: Option<(State, &'a str)>,
 }
 
 /// check's [`check::Verdict`], read back. Unknown fields (warnings,
@@ -348,6 +442,12 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
                 Ok(pr) => ops.push(Op::PullRequest(pr)),
                 Err(err) => errors.push(format!("{err:#}")),
             },
+            PUSH_TO_PULL_REQUEST_BRANCH => {
+                match branch_push(checked, policy, &report, item, target) {
+                    Ok(push) => ops.push(Op::Push(push)),
+                    Err(err) => errors.push(format!("{err:#}")),
+                }
+            }
             output if NO_WRITE.contains(&output) => {}
             _ => match metadata(item, target.run_url) {
                 Ok(Some(op)) => ops.push(op),
@@ -356,12 +456,27 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
             },
         }
     }
+    let carriers = [CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH];
     let carried = report
         .items
         .iter()
-        .any(|item| check::item_type(item) == CREATE_PULL_REQUEST);
+        .any(|item| carriers.contains(&check::item_type(item)));
     if report.patch.is_some() && !carried {
-        errors.push("a patch without a create_pull_request".to_owned());
+        errors.push(
+            "a patch without a create_pull_request or push_to_pull_request_branch".to_owned(),
+        );
+    }
+    // The caller's alone: no request of the run names a commit status.
+    if let Some((state, sha)) = target.status {
+        if COMMIT_RE.is_match(sha) {
+            ops.push(Op::Status(CommitStatus {
+                sha: sha.to_owned(),
+                state,
+                target_url: target.run_url.to_owned(),
+            }));
+        } else {
+            errors.push(format!("--status-sha {sha:?} is not a full commit SHA"));
+        }
     }
     // The policy has no secondary pull request off GitHub.
     if report.secondary_patch.is_some() {
@@ -370,14 +485,17 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
     if errors.is_empty() {
         // The pull request first: its push makes the last checks, against
         // the repository (base commit, applied paths, a new branch), and a
-        // refusal there is to leave no comment pointing at nothing. Closing
-        // last, as what a reader is least able to undo.
+        // refusal there is to leave no comment pointing at nothing; a push
+        // to a pull request's branch alike. Closing last of the requests,
+        // as what a reader is least able to undo, and then the caller's
+        // status, which is to say how all of it went.
         ops.sort_by_key(|op| match op {
-            Op::PullRequest(_) => 0,
+            Op::PullRequest(_) | Op::Push(_) => 0,
             Op::Issue(_) => 1,
             Op::Comment { .. } => 2,
             Op::Labels(_) => 3,
             Op::Close(_) => 4,
+            Op::Status(_) => 5,
         });
         Ok(ops)
     } else {
@@ -402,12 +520,112 @@ fn pull_request(
     item: &Map<String, Value>,
     target: &Target<'_>,
 ) -> Result<PullRequest> {
-    // The branch goes to a fork, never the target, whose own CI would run
-    // it with the target's secrets; and to the fork the bounds name, not
-    // one the caller's command line or the hand-back chose.
-    let push_repo = target
-        .push_repo
-        .context("a create_pull_request, and the caller gave no --push-repo for its branch")?;
+    let push_repo = bound_fork(policy, target, CREATE_PULL_REQUEST)?;
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .with_context(|| format!("a create_pull_request without a {key}"))
+    };
+    let (title, body, branch) = (text("title")?, text("body")?, text("branch")?);
+    anyhow::ensure!(
+        plain_branch(branch) && branch != policy.base,
+        "a create_pull_request for branch {branch:?}, which apply does not push"
+    );
+    let pr_rules = policy
+        .safe_outputs
+        .create_pull_request
+        .as_ref()
+        .context("a create_pull_request, which the policy does not allow")?;
+    let (bytes, base_commit, files) = checked_patch(
+        checked,
+        policy,
+        report,
+        CREATE_PULL_REQUEST,
+        branch,
+        pr_rules.rules(),
+    )?;
+    // Complete work under `ready_when_complete` opens ready, as on
+    // GitHub; anything else a draft.
+    let draft = pr_rules.draft && !(pr_rules.ready_when_complete && report.checkpoint.is_none());
+    Ok(PullRequest {
+        base: policy.base.clone(),
+        base_commit,
+        push_repo: push_repo.to_owned(),
+        private: policy.private,
+        branch: branch.to_owned(),
+        title: if draft {
+            format!("{DRAFT_PREFIX}{title}")
+        } else {
+            title.to_owned()
+        },
+        body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
+        patch: bytes,
+        files,
+    })
+}
+
+/// The push of `item` to the open pull request the policy names, with its
+/// patch read again as [`pull_request`]'s is. The pull request, its
+/// branch and its head are the policy's, which the policy job read from
+/// the forge and held to the bounds' `branches`; none is the hand-back's.
+fn branch_push(
+    checked: &Path,
+    policy: &Policy,
+    report: &Report,
+    item: &Map<String, Value>,
+    target: &Target<'_>,
+) -> Result<BranchPush> {
+    let output = PUSH_TO_PULL_REQUEST_BRANCH;
+    let push_repo = bound_fork(policy, target, output)?;
+    unmapped(item, output)?;
+    let push = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .with_context(|| format!("a {output}, which the policy does not allow"))?;
+    // GitHub's apply marks the pull request ready; Forgejo has no draft
+    // to take back, and a `WIP:` title is not apply's to edit.
+    anyhow::ensure!(
+        !push.ready_when_complete,
+        "a {output} under ready_when_complete, which apply does not mark ready on Forgejo"
+    );
+    let pull = &push.target;
+    let number = pull
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0 && number.to_string() == *pull)
+        .with_context(|| format!("the policy's pull request {pull:?} is not a number"))?;
+    let branch = &policy.base;
+    anyhow::ensure!(
+        plain_branch(branch),
+        "a {output} to branch {branch:?}, which apply does not push"
+    );
+    let (patch, base_commit, files) =
+        checked_patch(checked, policy, report, output, branch, push.rules())?;
+    // check holds base.json to the pinned head too; held here as well, as
+    // the push's lease is on it.
+    anyhow::ensure!(
+        base_commit == push.head,
+        "check read the patch against {base_commit}, not the head {} the run was asked for",
+        push.head
+    );
+    Ok(BranchPush {
+        number,
+        push_repo: push_repo.to_owned(),
+        private: policy.private,
+        branch: branch.clone(),
+        head: base_commit,
+        patch,
+        files,
+    })
+}
+
+/// The fork a branch is pushed to: never the target, whose own CI would
+/// run it with the target's secrets, and the one the bounds name, not one
+/// the caller's command line or the hand-back chose.
+fn bound_fork<'a>(policy: &Policy, target: &Target<'a>, output: &str) -> Result<&'a str> {
+    let missing = || format!("a {output}, and the caller gave no --push-repo for its branch");
+    let push_repo = target.push_repo.with_context(missing)?;
     anyhow::ensure!(
         !owner(push_repo).eq_ignore_ascii_case(owner(&policy.repo)),
         "--push-repo {push_repo} is of the owner of {}; its branch goes to another owner's fork",
@@ -421,30 +639,34 @@ fn pull_request(
         "--push-repo {push_repo} is not the push_repo the bounds name ({})",
         policy.push_repo.as_deref().unwrap_or("none")
     );
-    let text = |key: &str| {
-        item.get(key)
-            .and_then(Value::as_str)
-            .with_context(|| format!("a create_pull_request without a {key}"))
-    };
-    let (title, body, branch) = (text("title")?, text("body")?, text("branch")?);
-    anyhow::ensure!(
-        BRANCH_RE.is_match(branch)
-            && !branch.contains("..")
-            && !branch.contains("//")
-            && !branch.ends_with(['/', '.'])
-            && !branch.ends_with(".lock")
-            && branch != policy.base,
-        "a create_pull_request for branch {branch:?}, which apply does not push"
-    );
-    let pr_rules = policy
-        .safe_outputs
-        .create_pull_request
-        .as_ref()
-        .context("a create_pull_request, which the policy does not allow")?;
+    Ok(push_repo)
+}
+
+/// Whether git and the forge both take BRANCH as written, and neither
+/// can read it as an option or a path out of `refs/heads/`.
+fn plain_branch(branch: &str) -> bool {
+    BRANCH_RE.is_match(branch)
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.ends_with(['/', '.'])
+        && !branch.ends_with(".lock")
+}
+
+/// The patch check accepted for OUTPUT's BRANCH, read again and held to
+/// RULES and the bounds' `commit_author`, as check held it: its bytes,
+/// its base commit and the paths it names.
+fn checked_patch(
+    checked: &Path,
+    policy: &Policy,
+    report: &Report,
+    output: &str,
+    branch: &str,
+    rules: PatchRules<'_>,
+) -> Result<(Vec<u8>, String, Vec<String>)> {
     let patch = report
         .patch
         .as_ref()
-        .context("a create_pull_request, and check accepted no patch")?;
+        .with_context(|| format!("a {output}, and check accepted no patch"))?;
     anyhow::ensure!(
         patch.commit_files.is_none(),
         "a replacement series, which apply does not push to Forgejo"
@@ -452,7 +674,7 @@ fn pull_request(
     let name = check::patch_file_name(branch);
     anyhow::ensure!(
         patch.file == name,
-        "check accepted the patch {:?}, and the pull request's is {name}",
+        "check accepted the patch {:?}, and the {output}'s is {name}",
         patch.file
     );
     anyhow::ensure!(
@@ -471,7 +693,7 @@ fn pull_request(
     );
     let rules = PatchRules {
         commit_author: policy.commit_author.as_deref(),
-        ..pr_rules.rules()
+        ..rules
     };
     let PatchReading { problems, files } =
         check::read_patch(&String::from_utf8_lossy(&bytes), &rules, &patch.base_commit);
@@ -484,36 +706,16 @@ fn pull_request(
         files == patch.files,
         "the patch {name} names other paths than check reported"
     );
-    // Complete work under `ready_when_complete` opens ready, as on
-    // GitHub; anything else a draft.
-    let draft = pr_rules.draft && !(pr_rules.ready_when_complete && report.checkpoint.is_none());
-    Ok(PullRequest {
-        base: policy.base.clone(),
-        base_commit: patch.base_commit.clone(),
-        push_repo: push_repo.to_owned(),
-        private: policy.private,
-        branch: branch.to_owned(),
-        title: if draft {
-            format!("{DRAFT_PREFIX}{title}")
-        } else {
-            title.to_owned()
-        },
-        body: with_footer(&mentions::filter(body, "forgejo"), target.run_url),
-        patch: bytes,
-        files,
-    })
+    Ok((bytes, patch.base_commit.clone(), files))
 }
 
-/// The op of an issue, label or close request, its every field mapped or
-/// refused, and its text filtered as a comment's is. Its repository,
-/// target and labels are held to the policy by
-/// [`check::redirections_to`], as every request is; what the forge says
-/// of them, by [`Publisher::preflight`]. None for a type with no op.
-fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
-    let output = check::item_type(item);
-    let Some((_, fields)) = FIELDS.iter().find(|(name, _)| *name == output) else {
-        return Ok(None);
-    };
+/// Refuses a field of ITEM, of OUTPUT in [`FIELDS`], that apply does not
+/// map onto Forgejo.
+fn unmapped(item: &Map<String, Value>, output: &str) -> Result<()> {
+    let fields = FIELDS
+        .iter()
+        .find(|(name, _)| *name == output)
+        .map_or(&[][..], |(_, fields)| fields);
     let unmapped: Vec<&str> = item
         .keys()
         .map(String::as_str)
@@ -524,6 +726,20 @@ fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
         "a {output} with {}, which apply does not map onto Forgejo",
         unmapped.join(", ")
     );
+    Ok(())
+}
+
+/// The op of an issue, label or close request, its every field mapped or
+/// refused, and its text filtered as a comment's is. Its repository,
+/// target and labels are held to the policy by
+/// [`check::redirections_to`], as every request is; what the forge says
+/// of them, by [`Publisher::preflight`]. None for a type with no op.
+fn metadata(item: &Map<String, Value>, run_url: &str) -> Result<Option<Op>> {
+    let output = check::item_type(item);
+    if !FIELDS.iter().any(|(name, _)| *name == output) {
+        return Ok(None);
+    }
+    unmapped(item, output)?;
     let required = |key: &str, max: usize| -> Result<&str> {
         let text = item
             .get(key)
@@ -683,9 +899,11 @@ pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
         let url = match op {
             Op::Comment { issue, body } => publisher.comment(*issue, body),
             Op::PullRequest(pr) => publisher.open_pull_request(pr),
+            Op::Push(push) => publisher.push_to_branch(push),
             Op::Issue(issue) => publisher.create_issue(issue),
             Op::Labels(change) => publisher.change_labels(change),
             Op::Close(close) => publisher.close(close),
+            Op::Status(status) => publisher.status(status),
         };
         match url {
             Ok(url) => made.push(url),
@@ -719,6 +937,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         push_repo: args.push_repo.as_deref(),
         comment_target: args.comment_target,
         run_url: &args.run_url,
+        status: args.status.zip(args.status_sha.as_deref()),
     };
     let ops = match plan(&args.checked, &policy, &target) {
         Ok(ops) => ops,
@@ -744,6 +963,7 @@ mod tests {
     use super::*;
     use crate::check::BASE_COMMIT_HEADER;
     use crate::policy::OutputLimit;
+    use crate::policy::tests::HEAD;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
     const BRANCH: &str = "agent-run-7";
@@ -907,6 +1127,7 @@ mod tests {
             push_repo: Some(PUSH_REPO),
             comment_target,
             run_url: RUN,
+            status: None,
         }
     }
 
@@ -931,7 +1152,7 @@ mod tests {
                 Op::PullRequest(pr) => pr.body,
                 Op::Issue(issue) => issue.body,
                 Op::Close(close) => close.body,
-                Op::Labels(_) => unreachable!(),
+                Op::Labels(_) | Op::Push(_) | Op::Status(_) => unreachable!(),
             };
             assert!(body.starts_with(
                 "@\u{200b}user @\u{200b}org/team !\u{200b}12 `@code` user@example.com"
@@ -1414,6 +1635,205 @@ mod tests {
         }
     }
 
+    const PUSH_PATCH: &str = "aw-agent-run-12.patch";
+
+    /// A push run's policy: pull request 42's branch `agent-run-12` at
+    /// `HEAD`, from the bounds' fork, with a comment allowed.
+    fn push_policy() -> Policy {
+        let mut policy = crate::policy::tests::push_policy_to(PUSH_REPO);
+        policy.safe_outputs.others.insert(
+            ADD_COMMENT.to_owned(),
+            OutputLimit {
+                max: 1,
+                ..OutputLimit::default()
+            },
+        );
+        policy
+    }
+
+    fn push_item() -> Value {
+        json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix it\n\nWhy.",
+            "branch": "agent-run-12"})
+    }
+
+    /// A checked upload of a push's ITEMS, with the patch check would
+    /// report, against the pull request's head.
+    fn checked_push(items: &[Value]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let patch = patch().replace(BASE, HEAD);
+        std::fs::write(dir.path().join(PUSH_PATCH), &patch).unwrap();
+        let report = json!({
+            "ok": true, "errors": [], "items": items,
+            "patch": {"file": PUSH_PATCH, "bytes": patch.len(), "base_commit": HEAD,
+                "files": ["src/x"]},
+        });
+        std::fs::write(dir.path().join(REPORT_FILE), report.to_string()).unwrap();
+        dir
+    }
+
+    /// The push to the policy's pull request, then the caller's status
+    /// after every other write; and every refusal before any.
+    #[test]
+    fn pushes() {
+        let dir = checked_push(&[comment_item(), push_item()]);
+        let status = Target {
+            status: Some((State::Success, HEAD)),
+            ..target(Some(64))
+        };
+        let ops = plan(dir.path(), &push_policy(), &status).unwrap();
+        assert_eq!(ops.len(), 3, "{ops:?}");
+        assert_eq!(
+            ops[0],
+            Op::Push(BranchPush {
+                number: 42,
+                push_repo: PUSH_REPO.to_owned(),
+                private: false,
+                branch: "agent-run-12".to_owned(),
+                head: HEAD.to_owned(),
+                patch: patch().replace(BASE, HEAD).into_bytes(),
+                files: vec!["src/x".to_owned()],
+            })
+        );
+        assert!(matches!(ops[1], Op::Comment { .. }), "{ops:?}");
+        assert_eq!(
+            ops[2],
+            Op::Status(CommitStatus {
+                sha: HEAD.to_owned(),
+                state: State::Success,
+                target_url: RUN.to_owned(),
+            })
+        );
+
+        type Change = fn(&Path, &mut Policy, &mut Target<'static>);
+        let none: Change = |_, _, _| {};
+        let cases: &[(Value, Change, &str)] = &[
+            (
+                push_item(),
+                |_, _, target| target.push_repo = None,
+                "a push_to_pull_request_branch, and the caller gave no --push-repo",
+            ),
+            (
+                push_item(),
+                |_, _, target| target.push_repo = Some("other/bootc"),
+                "--push-repo other/bootc is not the push_repo the bounds name (bot/bootc)",
+            ),
+            (
+                push_item(),
+                |_, policy, target| {
+                    policy.push_repo = Some("bootc-dev/fork".to_owned());
+                    target.push_repo = Some("bootc-dev/fork");
+                },
+                "is of the owner of bootc-dev/bootc",
+            ),
+            // The pull request and branch are the policy's.
+            (
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "m", "branch": "main"}),
+                none,
+                "with branch \"main\", which is not the policy's",
+            ),
+            (
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "m",
+                    "branch": "agent-run-12", "pull_request_number": 43}),
+                none,
+                "with pull_request_number 43, which is not the policy's pull request",
+            ),
+            (
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "m",
+                    "branch": "agent-run-12", "force": true}),
+                none,
+                "a push_to_pull_request_branch with force, which apply does not map",
+            ),
+            (
+                push_item(),
+                |_, policy, _| {
+                    let push = policy.safe_outputs.push_to_pull_request_branch.as_mut();
+                    push.unwrap().target = "042".to_owned();
+                },
+                "the policy's pull request \"042\" is not a number",
+            ),
+            // The patch is on the head the run was asked for.
+            (
+                push_item(),
+                |dir, _, _| {
+                    std::fs::write(dir.join(PUSH_PATCH), patch()).unwrap();
+                    let path = dir.join(REPORT_FILE);
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(&path, text.replace(HEAD, BASE)).unwrap();
+                },
+                "check read the patch against 1111111111111111111111111111111111111111, not the head 2222",
+            ),
+            (
+                push_item(),
+                |dir, _, _| {
+                    let protected = patch()
+                        .replace(BASE, HEAD)
+                        .replace("src/x", ".forgejo/workflows/x.yml");
+                    std::fs::write(dir.join(PUSH_PATCH), &protected).unwrap();
+                    let path = dir.join(REPORT_FILE);
+                    let mut report: Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    report["patch"]["bytes"] = protected.len().into();
+                    report["patch"]["files"] = json!([".forgejo/workflows/x.yml"]);
+                    std::fs::write(path, report.to_string()).unwrap();
+                },
+                "the patch aw-agent-run-12.patch: ",
+            ),
+            (
+                push_item(),
+                |_, policy, _| {
+                    policy.commit_author = Some("Bot <bot@example.org>".to_owned());
+                },
+                "the patch aw-agent-run-12.patch: ",
+            ),
+            (
+                push_item(),
+                |dir, _, _| {
+                    let path = dir.join(REPORT_FILE);
+                    let mut report: Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    report["patch"]["commit_files"] = json!([["src/x"]]);
+                    std::fs::write(path, report.to_string()).unwrap();
+                },
+                "a replacement series, which apply does not push to Forgejo",
+            ),
+            (
+                push_item(),
+                |_, policy, _| {
+                    let push = policy.safe_outputs.push_to_pull_request_branch.as_mut();
+                    push.unwrap().ready_when_complete = true;
+                },
+                "under ready_when_complete, which apply does not mark ready on Forgejo",
+            ),
+            (
+                push_item(),
+                |_, _, target| target.status = Some((State::Failure, "main")),
+                "--status-sha \"main\" is not a full commit SHA",
+            ),
+            // A check run is GitHub's, and a status is never a request's.
+            (
+                json!({"type": "create_check_run", "name": "agentic-job", "conclusion": "success"}),
+                none,
+                "\"create_check_run\", which apply does not publish to Forgejo",
+            ),
+            (
+                json!({"type": "set_status", "state": "success"}),
+                none,
+                "\"set_status\", which apply does not publish to Forgejo",
+            ),
+        ];
+        for (item, change, want) in cases {
+            let dir = checked_push(std::slice::from_ref(item));
+            let mut policy = push_policy();
+            let mut target = target(Some(64));
+            change(dir.path(), &mut policy, &mut target);
+            let errors = plan(dir.path(), &policy, &target).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{item}: {errors:?}"
+            );
+        }
+    }
+
     #[derive(Default)]
     struct Recording {
         calls: RefCell<Vec<String>>,
@@ -1435,6 +1855,12 @@ mod tests {
         }
         fn open_pull_request(&self, pr: &PullRequest) -> Result<String> {
             self.call(format!("pull {}", pr.branch))
+        }
+        fn push_to_branch(&self, push: &BranchPush) -> Result<String> {
+            self.call(format!("push {} {}", push.number, push.branch))
+        }
+        fn status(&self, status: &CommitStatus) -> Result<String> {
+            self.call(format!("status {}", status.state.name()))
         }
         fn create_issue(&self, issue: &NewIssue) -> Result<String> {
             self.call(format!("issue {}", issue.labels.join(",")))

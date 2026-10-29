@@ -1,6 +1,7 @@
 //! The push both publishers make: a checked patch applied on its base
 //! commit, fetched from the repository, and pushed to a new branch of a
-//! fork, with git given only the configuration set here. The token goes
+//! fork, or on a pull request's branch at the head the run was asked
+//! for, with git given only the configuration set here. The token goes
 //! in one header through git's environment, which other users cannot
 //! read, never a URL or an argument, and is scrubbed from every error.
 
@@ -59,7 +60,8 @@ pub(super) struct Git<'a> {
 
 /// One push of a checked patch.
 pub(super) struct Push<'a> {
-    /// What git fetches `base` from: the repository, never the fork.
+    /// What git fetches `base` from: the repository, never the fork, for
+    /// a new branch; the fork, for its own branch.
     pub from: &'a str,
     pub base: &'a str,
     /// The commit check read the patch against, on `base`.
@@ -70,6 +72,9 @@ pub(super) struct Push<'a> {
     pub patch: &'a [u8],
     /// The paths check read in the patch: the only ones it may change.
     pub files: &'a [String],
+    /// What `branch` must hold in `to`, `base_commit` too: None for a new
+    /// branch, which must not exist.
+    pub head: Option<&'a str>,
 }
 
 impl Git<'_> {
@@ -142,8 +147,17 @@ impl Git<'_> {
     /// re-run, or anyone's branch of that name, is refused rather than
     /// overwritten. With RECOVER, a commit an earlier attempt pushed,
     /// pushes nothing and requires the branch to hold exactly that commit.
+    /// With the push's `head`, the branch must hold exactly that, and gets
+    /// one commit on it, under a lease on it: a branch that moved, by a
+    /// re-run's push or anyone's, is refused, never forced.
     /// Returns the pushed commit.
     pub fn push(&self, push: &Push<'_>, recover: Option<&str>) -> Result<String> {
+        if let Some(head) = push.head {
+            ensure!(
+                head == push.base_commit && recover.is_none(),
+                "a push to an existing branch is on its head, and has no recovery"
+            );
+        }
         let dir = tempfile::tempdir().context("making a directory for the push")?;
         let dir = dir.path();
         self.run(dir, &["init", "-q"], None)?;
@@ -221,13 +235,25 @@ impl Git<'_> {
             );
             return Ok(commit);
         }
-        ensure!(existing.trim().is_empty(), "{target} exists already");
+        match push.head {
+            Some(head) => ensure!(
+                existing.trim() == format!("{head}\t{target}"),
+                "{target} is no longer at {head}, the head the run was asked for: it moved, and is not pushed over"
+            ),
+            None => ensure!(existing.trim().is_empty(), "{target} exists already"),
+        }
+        // The lease is the head, or no branch: what was read, still there
+        // as the push lands. The lease would allow a push that is not a
+        // fast forward; the commit is one only as it was made on the head.
         self.run(
             dir,
             &[
                 "push",
                 "-q",
-                &format!("--force-with-lease={target}:"),
+                &format!(
+                    "--force-with-lease={target}:{}",
+                    push.head.unwrap_or_default()
+                ),
                 push.to,
                 &format!("HEAD:{target}"),
             ],

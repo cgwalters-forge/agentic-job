@@ -1142,8 +1142,8 @@ pub struct Policy {
     /// author `check` lets a patch name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_author: Option<String>,
-    /// The bounds' `push_repo`, where a pull request is asked for: the
-    /// only repository Forgejo's `apply` pushes its branch to.
+    /// The bounds' `push_repo`, where a pull request or a push is asked
+    /// for: the only repository Forgejo's `apply` pushes a branch to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_repo: Option<String>,
     /// A repository that is not public: `run` holds the machine to the
@@ -1951,9 +1951,12 @@ impl Bounds {
         // The fork is never the target: a branch pushed to the target runs
         // its CI as the repository's own, with its secrets. Nor is it the
         // target's owner's: Forgejo reads a pull request's head of that
-        // owner as the target's own branch.
+        // owner as the target's own branch. A pull request's branch and a
+        // push to one both go to that fork.
+        let to_fork =
+            types.contains(&CREATE_PULL_REQUEST) || types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
         if let Some(push_repo) = &self.push_repo
-            && types.contains(&CREATE_PULL_REQUEST)
+            && to_fork
             && same_owner(push_repo, repo)
         {
             errors.push(format!(
@@ -2165,10 +2168,7 @@ impl Bounds {
             max_patch_bytes: self.max_patch_bytes,
             safe_outputs,
             commit_author: self.commit_author.clone(),
-            push_repo: self
-                .push_repo
-                .clone()
-                .filter(|_| types.contains(&CREATE_PULL_REQUEST)),
+            push_repo: self.push_repo.clone().filter(|_| to_fork),
             private,
             allowed_domains: link_domains().to_vec(),
             memory: self.memory.clone(),
@@ -4843,6 +4843,36 @@ max_patch_files = 10
     /// `agent-run-12`, at [`HEAD`].
     pub(crate) fn push_policy() -> Policy {
         push_bounds().compile(&push_request()).unwrap()
+    }
+
+    /// [`push_policy`] from the caller's and the organization's bounds,
+    /// which both name FORK for the branch.
+    pub(crate) fn push_policy_to(fork: &str) -> Policy {
+        let bounds = Bounds {
+            push_repo: Some(fork.to_owned()),
+            ..push_bounds()
+        };
+        let own = bounds.compile(&push_request()).unwrap();
+        intersect(own, bounds.compile(&push_request()).unwrap()).unwrap()
+    }
+
+    /// A push keeps the bounds' fork, which is never of the target's owner.
+    #[test]
+    fn push_keeps_the_fork() {
+        let policy = push_policy_to("bot/bootc");
+        assert_eq!(policy.push_repo.as_deref(), Some("bot/bootc"));
+        policy.validate().unwrap();
+        let bounds = Bounds {
+            push_repo: Some("bootc-dev/fork".to_owned()),
+            ..push_bounds()
+        };
+        let errors = bounds.compile(&push_request()).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("not another owner's fork")),
+            "{errors:?}"
+        );
     }
 
     #[test]
