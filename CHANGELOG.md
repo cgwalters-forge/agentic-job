@@ -21,6 +21,16 @@ says what a caller may rely on across versions.
   enforces. Every other type, `push_to_pull_request_branch`,
   `create_issue` and `create_pull_request_review_comment` among them,
   stays gh-aw's (docs/safe-outputs.md#agentic-jobs-own-handlers).
+- `agentic-job apply --forge gitlab` also publishes `create_issue`,
+  `close_issue`, `close_pull_request`, `add_labels` and `remove_labels`.
+  GitLab numbers issues and merge requests apart, so on GitLab a label
+  request names its item by exactly one of `issue_number` and
+  `pull_request_number` (`item_number` stays refused there), which
+  `agentic-job collect` now takes for those types; it refuses an
+  `issue_number` or `pull_request_number` a type does not take there
+  instead of dropping it. Every label must already exist in the project
+  by its exact name, as GitLab would create it; a re-run changes nothing
+  more (docs/safe-outputs.md#publishing-to-gitlab).
 - `summary.json` gives `cache_ratio`, the share of the run's input read
   from the prompt cache, and `cache_warning`, true for an opencode run
   that read under half from it after more than three requests;

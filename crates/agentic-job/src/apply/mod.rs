@@ -48,7 +48,8 @@ use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
+    CREATE_PULL_REQUEST, ITEM_NUMBER, KIND_TARGETS, MISSING_DATA, NOOP,
+    PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
 };
 
 /// Check's verdict, as the check job uploads it.
@@ -90,22 +91,28 @@ const SUPPORTED: &[&str] = &[
     MISSING_DATA,
 ];
 
-/// What this publishes to GitLab, of [`SUPPORTED`]: what GitLab can be
-/// told without its labels, its issue numbers or a status. The others are
-/// refused, as there.
+/// What this publishes to GitLab, of [`SUPPORTED`]: all but a push to a
+/// merge request's branch. The others are refused, as there.
 const GITLAB_SUPPORTED: &[&str] = &[
     ADD_COMMENT,
     CREATE_PULL_REQUEST,
+    CREATE_ISSUE,
+    ADD_LABELS,
+    REMOVE_LABELS,
+    CLOSE_ISSUE,
+    CLOSE_PULL_REQUEST,
     NOOP,
     MISSING_TOOL,
     MISSING_DATA,
 ];
 
-/// The fields apply maps onto Forgejo, of those gh-aw's rules let each
-/// type hold (`safe-outputs/validation.json`). Another is refused, never
-/// dropped: `create_issue`'s `temporary_id`, `parent`, `blocked_by` and
-/// `fields` and `close_issue`'s `confidence`, `rationale`, `suggest` and
-/// `duplicate_of` would each be left undone.
+/// The fields apply maps onto Forgejo and GitLab, of those gh-aw's rules
+/// let each type hold (`safe-outputs/validation.json`). Another is
+/// refused, never dropped: `create_issue`'s `temporary_id`, `parent`,
+/// `blocked_by` and `fields` and `close_issue`'s `confidence`,
+/// `rationale`, `suggest` and `duplicate_of` would each be left undone.
+/// On GitLab the label types name their item by its kind instead
+/// ([`GITLAB_LABEL_FIELDS`]).
 const FIELDS: &[(&str, &[&str])] = &[
     (CREATE_ISSUE, &["type", "repo", "title", "body", "labels"]),
     (ADD_LABELS, &["type", "repo", "item_number", "labels"]),
@@ -124,6 +131,17 @@ const FIELDS: &[(&str, &[&str])] = &[
         PUSH_TO_PULL_REQUEST_BRANCH,
         &["type", "repo", "pull_request_number", "branch", "message"],
     ),
+];
+
+/// The fields of `add_labels` and `remove_labels` on GitLab, which numbers
+/// issues and merge requests apart: exactly one of the two targets, never
+/// `item_number`, which could be either.
+const GITLAB_LABEL_FIELDS: &[&str] = &[
+    "type",
+    "repo",
+    "issue_number",
+    "pull_request_number",
+    "labels",
 ];
 
 /// The context of every commit status apply writes: the caller's, never
@@ -339,6 +357,9 @@ pub struct NewIssue {
 pub struct LabelChange {
     /// An issue or a pull request.
     pub item: u64,
+    /// Which, where the forge numbers the two apart (GitLab): the
+    /// request's target field says. None where they share numbers.
+    pub kind: Option<Kind>,
     pub add: bool,
     /// Distinct names, as check admitted them, in their own case.
     pub labels: Vec<String>,
@@ -700,7 +721,7 @@ fn branch_push(
 ) -> Result<BranchPush> {
     let output = PUSH_TO_PULL_REQUEST_BRANCH;
     let push_repo = bound_fork(policy, target, output)?;
-    unmapped(item, output)?;
+    unmapped(item, output, target.forge)?;
     let push = policy
         .safe_outputs
         .push_to_pull_request_branch
@@ -833,12 +854,15 @@ fn checked_patch(
 }
 
 /// Refuses a field of ITEM, of OUTPUT in [`FIELDS`], that apply does not
-/// map onto Forgejo.
-fn unmapped(item: &Map<String, Value>, output: &str) -> Result<()> {
-    let fields = FIELDS
-        .iter()
-        .find(|(name, _)| *name == output)
-        .map_or(&[][..], |(_, fields)| fields);
+/// map onto FORGE.
+fn unmapped(item: &Map<String, Value>, output: &str, forge: Forge) -> Result<()> {
+    let fields = match output {
+        ADD_LABELS | REMOVE_LABELS if forge == Forge::Gitlab => GITLAB_LABEL_FIELDS,
+        _ => FIELDS
+            .iter()
+            .find(|(name, _)| *name == output)
+            .map_or(&[][..], |(_, fields)| fields),
+    };
     let unmapped: Vec<&str> = item
         .keys()
         .map(String::as_str)
@@ -846,8 +870,9 @@ fn unmapped(item: &Map<String, Value>, output: &str) -> Result<()> {
         .collect();
     anyhow::ensure!(
         unmapped.is_empty(),
-        "a {output} with {}, which apply does not map onto Forgejo",
-        unmapped.join(", ")
+        "a {output} with {}, which apply does not map onto {}",
+        unmapped.join(", "),
+        forge.name()
     );
     Ok(())
 }
@@ -862,7 +887,7 @@ fn metadata(item: &Map<String, Value>, forge: Forge, run_url: &str) -> Result<Op
     if !FIELDS.iter().any(|(name, _)| *name == output) {
         return Ok(None);
     }
-    unmapped(item, output)?;
+    unmapped(item, output, forge)?;
     let required = |key: &str, max: usize| -> Result<&str> {
         let text = item
             .get(key)
@@ -917,19 +942,45 @@ fn metadata(item: &Map<String, Value>, forge: Forge, run_url: &str) -> Result<Op
         ADD_LABELS | REMOVE_LABELS => {
             let labels = labels()?;
             anyhow::ensure!(!labels.is_empty(), "a {output} without labels");
+            // Forgejo numbers issues and pull requests together; GitLab
+            // apart, so there the request names which, and only once.
+            let (target, kind) = match forge {
+                Forge::Forgejo => (number(ITEM_NUMBER)?, None),
+                Forge::Gitlab => {
+                    let named: Vec<&str> = KIND_TARGETS
+                        .iter()
+                        .copied()
+                        .filter(|key| item.contains_key(*key))
+                        .collect();
+                    let [key] = named[..] else {
+                        anyhow::bail!(
+                            "a {output} on GitLab names its item by exactly one of {}",
+                            KIND_TARGETS.join(" and ")
+                        );
+                    };
+                    let kind = if key == KIND_TARGETS[0] {
+                        Kind::Issue
+                    } else {
+                        Kind::PullRequest
+                    };
+                    (number(key)?, Some(kind))
+                }
+            };
             Op::Labels(LabelChange {
-                item: number("item_number")?,
+                item: target,
+                kind,
                 add: output == ADD_LABELS,
                 labels,
             })
         }
         CLOSE_ISSUE => {
-            // Forgejo records no reason, so only gh-aw's default means
-            // the same there.
+            // Neither Forgejo nor GitLab records a reason, so only gh-aw's
+            // default means the same there.
             if let Some(reason) = item.get("state_reason") {
                 anyhow::ensure!(
                     reason == "completed",
-                    "a close_issue with state_reason {reason}, which Forgejo does not record"
+                    "a close_issue with state_reason {reason}, which {} does not record",
+                    forge.name()
                 );
             }
             Op::Close(Close {
@@ -943,7 +994,7 @@ fn metadata(item: &Map<String, Value>, forge: Forge, run_url: &str) -> Result<Op
             kind: Kind::PullRequest,
             body: body()?,
         }),
-        _ => anyhow::bail!("a {output}, which apply does not map onto Forgejo"),
+        _ => anyhow::bail!("a {output}, which apply does not map onto {}", forge.name()),
     }))
 }
 
@@ -1205,6 +1256,7 @@ mod tests {
         let labels = |add| {
             Op::Labels(LabelChange {
                 item: 5,
+                kind: None,
                 add,
                 labels: vec!["triage".to_owned()],
             })
@@ -1304,6 +1356,64 @@ mod tests {
                 body: want
             }
         );
+    }
+
+    /// On GitLab a label request's item is of the kind its field names,
+    /// and every title and body has its mentions and quick actions broken.
+    #[test]
+    fn metadata_on_gitlab() {
+        let text = "Done. @all\n/close\n  /label ~release";
+        let dir = checked(&[
+            json!({"type": ADD_LABELS, "repo": REPO, "issue_number": 5, "labels": ["triage"]}),
+            json!({"type": REMOVE_LABELS, "repo": REPO, "pull_request_number": 5,
+                "labels": ["bug"]}),
+            json!({"type": CREATE_ISSUE, "repo": REPO, "title": "/close @here", "body": text}),
+            json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 5, "body": text}),
+            json!({"type": CLOSE_PULL_REQUEST, "repo": REPO, "pull_request_number": 5,
+                "body": text}),
+            json!({"type": NOOP, "message": "Nothing else."}),
+        ]);
+        let (mut policy, mut target) = (policy(), target(None));
+        on_gitlab(dir.path(), &mut policy, &mut target);
+        let ops = plan(dir.path(), &policy, &target).unwrap();
+        let body = format!(
+            "Done. @\u{200b}all\n\u{200b}/close\n  \u{200b}/label ~release\n\n> Generated by [agentic-job]({RUN})"
+        );
+        let change = |kind, add, label: &str| {
+            Op::Labels(LabelChange {
+                item: 5,
+                kind: Some(kind),
+                add,
+                labels: vec![label.to_owned()],
+            })
+        };
+        let close = |kind| {
+            Op::Close(Close {
+                number: 5,
+                kind,
+                body: body.clone(),
+            })
+        };
+        assert_eq!(
+            ops,
+            [
+                Op::Issue(NewIssue {
+                    title: "\u{200b}/close @\u{200b}here".to_owned(),
+                    body: body.clone(),
+                    labels: vec![],
+                }),
+                change(Kind::Issue, true, "triage"),
+                change(Kind::PullRequest, false, "bug"),
+                close(Kind::Issue),
+                close(Kind::PullRequest),
+            ]
+        );
+        // No-write outcomes alone stay no-write on GitLab too.
+        let dir = checked(&[
+            json!({"type": NOOP, "message": "Nothing to do."}),
+            json!({"type": MISSING_DATA, "reason": "No logs."}),
+        ]);
+        assert_eq!(plan(dir.path(), &policy, &target).unwrap(), []);
     }
 
     #[test]
@@ -1623,8 +1733,8 @@ mod tests {
                 |_, _, target| target.run_url = "javascript:alert(1)",
                 "not a plain http(s) link",
             ),
-            // GitLab: a GitLab policy, comments and merge requests only,
-            // and no status.
+            // GitLab: a GitLab policy, labels on an item of a named kind,
+            // no push and no status.
             (
                 &[comment_item()],
                 |_, _, target| target.forge = Forge::Gitlab,
@@ -1633,12 +1743,60 @@ mod tests {
             (
                 &[labels_item(ADD_LABELS)],
                 on_gitlab,
-                "\"add_labels\", which apply does not publish to GitLab",
+                "a add_labels with item_number, which this forge cannot resolve",
             ),
             (
-                &[close_item()],
+                &[labels_item(REMOVE_LABELS)],
                 on_gitlab,
-                "\"close_issue\", which apply does not publish to GitLab",
+                "a remove_labels with item_number, which apply does not map onto GitLab",
+            ),
+            (
+                &[json!({"type": ADD_LABELS, "repo": REPO, "issue_number": 5,
+                    "pull_request_number": 5, "labels": ["triage"]})],
+                on_gitlab,
+                "a add_labels on GitLab names its item by exactly one of issue_number and pull_request_number",
+            ),
+            (
+                &[json!({"type": ADD_LABELS, "repo": REPO, "labels": ["triage"]})],
+                on_gitlab,
+                "a add_labels on GitLab names its item by exactly one of",
+            ),
+            (
+                &[
+                    json!({"type": ADD_LABELS, "repo": "other/repo", "pull_request_number": 5,
+                    "labels": ["triage"]}),
+                ],
+                on_gitlab,
+                "a add_labels with repo \"other/repo\", which is not the policy's",
+            ),
+            (
+                &[
+                    json!({"type": ADD_LABELS, "repo": REPO, "pull_request_number": 5,
+                    "labels": ["release"]}),
+                ],
+                on_gitlab,
+                "label \"release\", outside the policy's label limits",
+            ),
+            (
+                &[
+                    json!({"type": REMOVE_LABELS, "repo": REPO, "issue_number": 5, "labels": ["triage"]}),
+                    json!({"type": REMOVE_LABELS, "repo": REPO, "pull_request_number": 5, "labels": ["triage"]}),
+                ],
+                on_gitlab,
+                "2 outputs of type \"remove_labels\", over 1",
+            ),
+            (
+                &[
+                    json!({"type": CLOSE_ISSUE, "repo": REPO, "issue_number": 6, "body": "b",
+                    "state_reason": "not_planned"}),
+                ],
+                on_gitlab,
+                "state_reason \"not_planned\", which GitLab does not record",
+            ),
+            (
+                &[push_item()],
+                on_gitlab,
+                "\"push_to_pull_request_branch\", which apply does not publish to GitLab",
             ),
             (
                 &[comment_item()],

@@ -89,7 +89,12 @@ fn matches_gh_aws_collector() {
             items.pop();
         }
         let errors: Vec<String> = serde_json::from_value(want.remove("errors").unwrap()).unwrap();
-        let got = collect(&read("outputs.jsonl"), &config, &keeps_public);
+        let got = collect(
+            &read("outputs.jsonl"),
+            &config,
+            Forge::Github,
+            &keeps_public,
+        );
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(got.errors, errors, "{name}: errors");
         assert_eq!(got.items.len(), items.len(), "{name}: how many items");
@@ -123,10 +128,96 @@ fn refusals_of_its_own() {
         ),
     ];
     for (line, want) in cases {
-        let got = collect(line, &config, &keeps_public);
+        let got = collect(line, &config, Forge::Github, &keeps_public);
         assert_eq!(got.items, Vec::<Map<String, Value>>::new(), "{line}");
         assert_eq!(got.errors, [want], "{line}");
     }
+}
+
+/// On GitLab a label request keeps a target of its kind, and a kind-named
+/// target its type does not take there is refused, not dropped; GitHub's
+/// and Forgejo's collector stays gh-aw's, which drops it.
+#[test]
+fn kind_named_targets_by_forge() {
+    let config = object(json!({
+        "add_labels": {"max": 5}, "remove_labels": {"max": 5},
+        "add_comment": {"max": 1}, "close_issue": {"max": 1},
+    }));
+    let labels = r#"{"type":"add_labels","labels":["bug"],"issue_number":5}"#;
+    let merge_request = r#"{"type":"remove_labels","labels":["bug"],"pull_request_number":"5"}"#;
+    let comment = r#"{"type":"add_comment","body":"x","issue_number":5}"#;
+    let close = r#"{"type":"close_issue","body":"x","issue_number":5,"pull_request_number":5}"#;
+    // The line, the forge, the item it keeps, or the refusal.
+    let cases: &[(&str, Forge, Result<Value, &str>)] = &[
+        (
+            labels,
+            Forge::Gitlab,
+            Ok(json!({"type": "add_labels", "labels": ["bug"], "issue_number": 5})),
+        ),
+        (
+            merge_request,
+            Forge::Gitlab,
+            Ok(json!({"type": "remove_labels", "labels": ["bug"], "pull_request_number": 5})),
+        ),
+        (
+            labels,
+            Forge::Github,
+            Ok(json!({"type": "add_labels", "labels": ["bug"]})),
+        ),
+        (
+            labels,
+            Forge::Forgejo,
+            Ok(json!({"type": "add_labels", "labels": ["bug"]})),
+        ),
+        (
+            comment,
+            Forge::Github,
+            Ok(json!({"type": "add_comment", "body": "x"})),
+        ),
+        (
+            r#"{"type":"add_labels","labels":["bug"],"issue_number":0}"#,
+            Forge::Gitlab,
+            Err("Line 1: add_labels 'issue_number' must be a valid positive integer"),
+        ),
+        (
+            comment,
+            Forge::Gitlab,
+            Err(
+                "Line 1: add_comment 'issue_number' is not a field of add_comment on GitLab, and would be dropped",
+            ),
+        ),
+        (
+            close,
+            Forge::Gitlab,
+            Err(
+                "Line 1: close_issue 'pull_request_number' is not a field of close_issue on GitLab, and would be dropped",
+            ),
+        ),
+    ];
+    for (line, forge, want) in cases {
+        let got = collect(line, &config, *forge, &keeps_public);
+        match want {
+            Ok(item) => {
+                assert_eq!(got.errors, Vec::<String>::new(), "{line} {forge:?}");
+                assert_eq!(got.items, [object(item.clone())], "{line} {forge:?}");
+            }
+            Err(error) => {
+                assert!(got.items.is_empty(), "{line} {forge:?}");
+                assert_eq!(got.errors.len(), 1, "{line} {forge:?}");
+                assert!(
+                    got.errors[0].starts_with(error),
+                    "{forge:?}: {:?}",
+                    got.errors
+                );
+            }
+        }
+    }
+    // The guide names what GitLab takes, and not what check refuses there.
+    let guide = field_guide("add_labels", Forge::Gitlab).unwrap();
+    assert!(guide.contains("`issue_number`") && guide.contains("`pull_request_number`"));
+    assert!(!guide.contains("item_number"), "{guide}");
+    let guide = field_guide("add_labels", Forge::Github).unwrap();
+    assert!(guide.contains("item_number") && !guide.contains("issue_number"));
 }
 
 #[test]

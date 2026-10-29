@@ -36,8 +36,9 @@ pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, HIDE_COMMENT, MARK_READY, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH,
-    PatchRules, Policy, REVIEW_THREAD_OUTPUTS, Secondary, update_fields,
+    CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, KIND_TARGETS, MARK_READY, MISSING_DATA, NOOP,
+    PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy, REVIEW_THREAD_OUTPUTS, Secondary,
+    update_fields,
 };
 use crate::redact;
 
@@ -588,9 +589,21 @@ pub(crate) fn redirections_to(
         }
     }
     let single_target = target_key(output);
+    let kind_named;
     let targets: &[&str] = match output {
         "close_pull_request" => &["pull_request_number"],
         "link_sub_issue" => &["parent_issue_number", "sub_issue_number"],
+        // GitLab numbers issues and merge requests apart, so a label
+        // request names which by its field: exactly one, as another is
+        // refused below as an unsupported target.
+        "add_labels" | "remove_labels" if policy.forge == Forge::Gitlab => {
+            kind_named = [KIND_TARGETS
+                .iter()
+                .copied()
+                .find(|key| item.contains_key(*key))
+                .unwrap_or(KIND_TARGETS[0])];
+            &kind_named
+        }
         _ => single_target.as_slice(),
     };
     if !targets.is_empty() {
@@ -1488,6 +1501,63 @@ mod tests {
                 accepted,
                 "{forge:?} {fields}: {problems:?}"
             );
+        }
+    }
+
+    /// A label request names one item explicitly: by `item_number` where
+    /// issues and pull requests are numbered together, and on GitLab by
+    /// exactly one target of its kind.
+    #[test]
+    fn label_targets_by_forge() {
+        let label = |forge, fields: Value| {
+            let policy = Policy { forge, ..policy() };
+            let mut item = fields.as_object().unwrap().clone();
+            item.insert("type".into(), json!("remove_labels"));
+            item.insert("repo".into(), json!(policy.repo));
+            item.insert("labels".into(), json!(["bug"]));
+            redirections_to(&item, &policy, None)
+        };
+        // The forge, the target fields, and a part of the refusal.
+        let cases: &[(Forge, Value, Option<&str>)] = &[
+            (Forge::Github, json!({"item_number": 5}), None),
+            (Forge::Forgejo, json!({"item_number": 5}), None),
+            (
+                Forge::Forgejo,
+                json!({"issue_number": 5}),
+                Some("requires a positive integer item_number"),
+            ),
+            (Forge::Gitlab, json!({"issue_number": 5}), None),
+            (Forge::Gitlab, json!({"pull_request_number": 5}), None),
+            (
+                Forge::Gitlab,
+                json!({"item_number": 5}),
+                Some("requires a positive integer issue_number"),
+            ),
+            (
+                Forge::Gitlab,
+                json!({"issue_number": 5, "pull_request_number": 5}),
+                Some("with unsupported target field pull_request_number"),
+            ),
+            (
+                Forge::Gitlab,
+                json!({}),
+                Some("requires a positive integer issue_number"),
+            ),
+            (
+                Forge::Gitlab,
+                json!({"pull_request_number": "5"}),
+                Some("requires a positive integer pull_request_number"),
+            ),
+        ];
+        for (forge, fields, refusal) in cases {
+            let problems = label(*forge, fields.clone());
+            match refusal {
+                None => assert!(problems.is_empty(), "{forge:?} {fields}: {problems:?}"),
+                Some(refusal) => assert!(
+                    problems.iter().any(|problem| problem.contains(refusal)),
+                    "{forge:?} {fields}: {problems:?}"
+                ),
+            }
         }
     }
 

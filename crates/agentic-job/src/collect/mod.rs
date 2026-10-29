@@ -32,6 +32,12 @@
 //! `view`). Refusing them here would refuse what gh-aw takes; `check`
 //! holds each to the policy, and refuses what it does not allow.
 //!
+//! On GitLab, the policy's forge, `add_labels` and `remove_labels` also
+//! take `issue_number` and `pull_request_number`, as GitLab numbers issues
+//! and merge requests apart ([`forge_fields`]), and a request whose
+//! `issue_number` or `pull_request_number` its type does not take there is
+//! refused rather than dropped. Elsewhere the fields are gh-aw's alone.
+//!
 //! It is also what `handback check` validates the requests with in the
 //! session, so the agent is told of a field error in the words the check
 //! job refuses it in. [`field_guide`] tells it the fields.
@@ -52,8 +58,8 @@ use crate::check::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
 use crate::exit::Exit;
 use crate::files::{self, ReadError};
 use crate::policy::{
-    CREATE_REVIEW_COMMENT, HIDE_COMMENT, HIDE_REASONS, MARK_READY, PUSH_TO_PULL_REQUEST_BRANCH,
-    Policy, REPLY_TO_REVIEW_COMMENT, RESOLVE_REVIEW_THREAD,
+    CREATE_REVIEW_COMMENT, Forge, HIDE_COMMENT, HIDE_REASONS, KIND_TARGETS, MARK_READY,
+    PUSH_TO_PULL_REQUEST_BRANCH, Policy, REPLY_TO_REVIEW_COMMENT, RESOLVE_REVIEW_THREAD,
 };
 
 #[derive(Debug, clap::Args)]
@@ -431,6 +437,20 @@ const COMMENT_FIELDS: &[Field] = &[
     choice("target", &["status"]),
     pattern("temporary_id", &TEMPORARY_ID),
 ];
+
+/// What the label types may name their item by on GitLab, besides gh-aw's
+/// fields: a target of its kind. gh-aw's rules give them only
+/// `item_number`, which `check` refuses there, as GitLab numbers issues
+/// and merge requests apart.
+const GITLAB_LABEL_TARGETS: &[Field] = &[positive("issue_number"), positive("pull_request_number")];
+
+/// The fields a request of type NAME may have on FORGE besides gh-aw's.
+fn forge_fields(forge: Forge, name: &str) -> &'static [Field] {
+    match (forge, name) {
+        (Forge::Gitlab, "add_labels" | "remove_labels") => GITLAB_LABEL_TARGETS,
+        _ => &[],
+    }
+}
 
 const PROJECT_FIELDS: &[Field] = &[
     field(
@@ -1463,16 +1483,18 @@ impl Custom {
 
 impl OutputType {
     /// ITEM, from line LINE, as gh-aw's `validateItem` passes it on: its
-    /// type and its fields, each validated, and nothing else.
+    /// type and its fields, and the forge's EXTRA, each validated, and
+    /// nothing else.
     fn validate(
         &self,
         item: &Map<String, Value>,
+        extra: &[Field],
         line: usize,
         keeps_link: &dyn Fn(&str) -> bool,
     ) -> Result<Map<String, Value>, String> {
         // `normalizeBlankOptionalFields`, before the custom rule too.
         let mut item = item.clone();
-        for field in self.fields {
+        for field in self.fields.iter().chain(extra) {
             if item
                 .get(field.name)
                 .is_some_and(|value| field.blank_means_absent(value))
@@ -1489,7 +1511,7 @@ impl OutputType {
         let mut validated = Map::new();
         validated.insert("type".into(), self.name.into());
         let mut first_error = None;
-        for field in self.fields {
+        for field in self.fields.iter().chain(extra) {
             let value = item.get(field.name);
             match field.validate(value, self, line, &sanitize) {
                 Ok(Some(valid)) => {
@@ -1529,14 +1551,17 @@ impl OutputType {
     }
 }
 
-/// The fields of the output type NAME, as [`collect`] validates them, for
-/// the agent's guide: `` `body` (string, required, …), `item_number`
-/// (number or string) ``. None for a type it does not validate.
-pub fn field_guide(name: &str) -> Option<String> {
+/// The fields of the output type NAME, as [`collect`] validates them on
+/// FORGE and `check` lets them through, for the agent's guide:
+/// `` `body` (string, required, …), `item_number` (number or string) ``.
+/// None for a type it does not validate.
+pub fn field_guide(name: &str, forge: Forge) -> Option<String> {
     let of = TYPES.iter().find(|of| of.name == name)?;
     let fields: Vec<String> = of
         .fields
         .iter()
+        .chain(forge_fields(forge, name))
+        .filter(|field| !forge.refuses_field(field.name))
         .map(|field| format!("`{}` ({})", field.name, field.rule.describe()))
         .collect();
     Some(fields.join(", "))
@@ -1571,7 +1596,7 @@ pub fn collect_dir(outputs: &Path, policy: &Policy) -> Result<Collected> {
         Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => bail!("{} {err}", path.display()),
     };
-    Ok(collect(&text, &config(policy)?, &|host| {
+    Ok(collect(&text, &config(policy)?, policy.forge, &|host| {
         policy.keeps_link_to(host)
     }))
 }
@@ -1590,10 +1615,12 @@ fn is_probe(message: Option<&Value>) -> bool {
 
 /// What gh-aw's collector makes of TEXT, the lines of an `outputs.jsonl`,
 /// under CONFIG, the policy's `safe_outputs` as its `config.json`, with
-/// https links kept to the hosts KEEPS_LINK takes.
+/// https links kept to the hosts KEEPS_LINK takes, and the fields of
+/// FORGE's profile ([`forge_fields`]).
 pub fn collect(
     text: &str,
     config: &Map<String, Value>,
+    forge: Forge,
     keeps_link: &dyn Fn(&str) -> bool,
 ) -> Collected {
     let config: Map<String, Value> = config
@@ -1607,7 +1634,7 @@ pub fn collect(
             continue;
         }
         let taken = &collected.items;
-        match request(index + 1, line_text, &config, taken, keeps_link) {
+        match request(index + 1, line_text, &config, forge, taken, keeps_link) {
             Ok(Some(item)) => collected.items.push(item),
             Ok(None) => {}
             Err(error) => collected.errors.push(error),
@@ -1622,6 +1649,7 @@ fn request(
     line: usize,
     text: &str,
     config: &Map<String, Value>,
+    forge: Forge,
     taken: &[Map<String, Value>],
     keeps_link: &dyn Fn(&str) -> bool,
 ) -> Result<Option<Map<String, Value>>, String> {
@@ -1670,7 +1698,24 @@ fn request(
             known.join(", ")
         ));
     };
-    of.validate(&item, line, keeps_link).map(Some)
+    let extra = forge_fields(forge, of.name);
+    // Dropped, a target naming an issue or a merge request would leave
+    // the request to act on another item, or on none it names.
+    if forge == Forge::Gitlab
+        && let Some(key) = KIND_TARGETS.iter().find(|key| {
+            item.contains_key(**key)
+                && !of
+                    .fields
+                    .iter()
+                    .chain(extra)
+                    .any(|field| field.name == **key)
+        })
+    {
+        return Err(format!(
+            "Line {line}: {kind} '{key}' is not a field of {kind} on GitLab, and would be dropped"
+        ));
+    }
+    of.validate(&item, extra, line, keeps_link).map(Some)
 }
 
 pub fn run(args: &Args) -> Result<Exit> {

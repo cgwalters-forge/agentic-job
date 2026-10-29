@@ -169,7 +169,9 @@ These operations are bounded to the run's exact `repo`, admitted by the caller's
 repository bounds, and their per-type `max` and the total `max_outputs`. They do
 not use `output-repo` or fall back to the triggering event's issue. Requests must
 include that explicit `repo` and a positive integer `issue_number` for
-`close_issue`, or `item_number` for `add_labels` and `remove_labels` (issues or pull requests).
+`close_issue`, or `item_number` for `add_labels` and `remove_labels` (issues or pull requests;
+on GitLab exactly one of `issue_number` and `pull_request_number` instead:
+[neutral profile](#neutral-profile)).
 Temporary IDs, target aliases and duplicate relationships are refused.
 
 ```toml
@@ -1540,9 +1542,9 @@ publishes to a GitLab project through its REST API v4, as
 and pre-write checks. The token comes only from `GITLAB_TOKEN` and goes
 only in an `Authorization: Bearer` header (to git as `oauth2` over
 Basic, through its environment). The policy must be for GitLab
-(`forge = "gitlab"`). It publishes two types, and writes nothing for
-`noop`, `missing_tool` and `missing_data`; any other type is refused, as
-is `--status`:
+(`forge = "gitlab"`). It publishes the types below, and writes nothing
+for `noop`, `missing_tool` and `missing_data`;
+`push_to_pull_request_branch` is refused, as is `--status`:
 
 - `add_comment` is a note on the caller's issue or merge request.
   GitLab numbers the two apart (`#5` and `!5`), so the caller names the
@@ -1557,6 +1559,35 @@ is `--status`:
   project as its `target_project_id`. The fork must be GitLab's fork of
   that project (`forked_from_project`), and private unless the project
   is public and the run is not private. A draft is a `Draft:` title.
+- `add_labels` and `remove_labels` change the labels of the issue or the
+  merge request their `issue_number` or `pull_request_number` names:
+  exactly one of the two, never `item_number`
+  ([neutral profile](#neutral-profile)). `close_issue` closes the issue
+  its `issue_number` names, and `close_pull_request` the merge request
+  its `pull_request_number` names. `create_issue` opens an issue. These
+  are held to the rules Forgejo's are
+  ([labels, issues and closing on Forgejo](#labels-issues-and-closing-on-forgejo)):
+  the policy's explicit `repo`, each type's `max`, the label lists, the
+  fields apply maps, and a `state_reason` of `completed` only, as GitLab
+  records no reason either.
+
+Before the first write, apply reads each item as a note's is read: by
+its iid under the issues or the merge requests of the project's path,
+of the kind its request names, refused unless GitLab answers for that
+iid of that project. GitLab creates a label it is given and lacks, so
+apply reads the project's labels (its groups' included) and refuses one
+it lacks by that exact name, a name with a comma, which GitLab reads as
+two, and two of one [scope](https://docs.gitlab.com/user/project/labels/#scoped-labels)
+(`scope::value`), or an addition that would remove a label of the
+item's scope: GitLab keeps one label of a scope, and no request names
+that removal. It reads them again just before its own write. A label is
+added only if the item lacks it and removed only if it has it, in one
+update (`PUT` with `add_labels` or `remove_labels`), and the answer must
+show the change, as GitLab ignores labels a token may not set; a new
+issue's alike. Closing posts the body as a note, then sets
+`state_event` to `close`; an item already closed, or a merge request
+merged, gets neither, and a locked merge request is refused. If closing
+fails after the note, the error names it, and a re-run notes again.
 
 Every body and merge request title has GitLab's mentions broken:
 `@user`, `@group/subgroup`, `@all` and `@here`, after anything but an
@@ -1575,9 +1606,9 @@ The length and link limits are the same as Forgejo's.
 
 Not done, each a later slice of
 [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786):
-labels, issues and closing, pushes to an open merge request, commit
-statuses, review discussions, and an end-to-end test against a GitLab
-instance.
+pushes to an open merge request, commit statuses, review discussions,
+re-run detection for notes and new issues, and an end-to-end test
+against a GitLab instance.
 
 ## Neutral profile
 
@@ -1623,11 +1654,18 @@ issues and pull requests together, so gh-aw's `item_number` is one
 item there. GitLab's `#5` and `!5` are different items, so `check`
 refuses an `item_number` on GitLab. A type whose target must name its
 kind there uses gh-aw's `issue_number` or `pull_request_number` where it
-has them. `add_comment`, `add_labels` and `remove_labels` have only
-`item_number` in gh-aw's rules, and the collector drops a field its
-rules do not list, so on GitLab a comment goes only to the run's own
-item, and labels cannot be applied, until a GitLab collector admits a
-kind-named target for them.
+has them. `add_labels` and `remove_labels` have only `item_number` in
+gh-aw's rules, so on GitLab the collector also takes `issue_number` and
+`pull_request_number` for them, and `check` requires exactly one, of the
+policy's explicit `repo`. The collector drops a field its rules do not
+list; on GitLab it refuses instead a request with an `issue_number` or a
+`pull_request_number` that its type does not take there (an
+`add_comment`'s, or a `close_issue`'s `pull_request_number`), whose
+target would otherwise be lost. A comment goes only to the run's own
+item, whose kind the caller names. GitHub's and Forgejo's requests are
+collected as before. The contract stays 1: no policy changes, and a
+binary of before, given such a request, drops the target and `check`
+refuses the request for lacking one.
 
 The bounds that already exist are neutral: `hosts`, `repos`, `bases`,
 `max_outputs`, each type's `max`, push `branches`, label lists,
@@ -1648,6 +1686,6 @@ a fork identity that may push, and an upstream one that may only open
 pull requests. On Forgejo and GitLab those can be two tokens.
 
 The Forgejo publisher above implements only its listed subset of this
-contract, and the [GitLab one](#publishing-to-gitlab) only `add_comment`
-and `create_pull_request`, with GitLab's mentions and quick actions
-broken.
+contract, and the [GitLab one](#publishing-to-gitlab) all of it but
+`push_to_pull_request_branch` and `create_pull_request_review_comment`,
+with GitLab's mentions and quick actions broken.

@@ -2,14 +2,24 @@
 //! caller's issue or merge request, and a merge request from a branch
 //! pushed over git to the fork the bounds name, opened on the fork with
 //! the repository as its `target_project_id`. Never a branch of the
-//! repository itself, for the reason Forgejo's publisher gives.
+//! repository itself, for the reason Forgejo's publisher gives. Also an
+//! issue, labels added to or removed from an issue or a merge request,
+//! and one closed with a note saying why.
 //!
 //! GitLab numbers issues and merge requests apart within a project (`#5`
 //! and `!5`, each an `iid`), so a note's target kind is the caller's
-//! (`--comment-target-kind`), never guessed from the number. A project is
+//! (`--comment-target-kind`), and a label change's or a closing's is its
+//! request's target field, never guessed from the number. A project is
 //! read by its URL-encoded path, its answer held to that path, and then
 //! written to by the ID read, so that a project renamed or moved away is
 //! not written to.
+//!
+//! GitLab creates a label it is given and lacks, so every label is looked
+//! for among the project's (its groups' included) by its exact name before
+//! any write, and again just before its own; apply creates none. A label
+//! is added only where the item lacks it and removed only where it has it,
+//! and closing writes nothing to an item closed or merged already, so a
+//! re-run changes nothing more.
 //!
 //! The text is filtered before it gets here ([`super::mentions`]):
 //! GitLab's mentions, `@all` and `@here` among them, and its quick
@@ -20,12 +30,12 @@
 //! an argument; git gets it as `oauth2` over Basic through its
 //! environment, and every error is scrubbed of it.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
-use super::forgejo::{self, Api};
+use super::forgejo::{self, Api, PUT};
 use super::git::{Git, Push};
 use super::{
     BranchPush, Close, CommitStatus, Kind, LabelChange, Made, NewIssue, Op, Publisher, PullRequest,
@@ -37,6 +47,22 @@ const POST: &str = "POST";
 /// The user git sends a token as: GitLab takes any for an access token,
 /// and this one for an OAuth token.
 const GIT_USER: &str = "oauth2";
+
+/// Labels asked for a page: GitLab's most.
+const LABELS_PER_PAGE: usize = 100;
+
+/// The most pages of a project's labels read: one with more than two
+/// thousand is refused rather than read without end.
+const MAX_LABEL_PAGES: usize = 20;
+
+/// What separates a scoped label's scope from its value: GitLab keeps one
+/// label of a scope on an item, and removes its other when adding one.
+const SCOPE: &str = "::";
+
+/// An item's state that GitLab takes no closing for: done already.
+const DONE: &[&str] = &["closed", "merged"];
+
+const OPENED: &str = "opened";
 
 pub struct Gitlab {
     /// `SERVER/api/v4`.
@@ -93,6 +119,63 @@ fn reference(kind: Kind, number: u64) -> String {
         Kind::Issue => format!("#{number}"),
         Kind::PullRequest => format!("!{number}"),
     }
+}
+
+/// What GitLab says of an issue or a merge request of the project.
+#[derive(Debug)]
+struct Item {
+    /// The project's ID, which a write goes to.
+    project: u64,
+    url: String,
+    /// `opened`, `closed`, or a merge request's `merged` or `locked`.
+    state: String,
+    /// Its labels' names.
+    labels: Vec<String>,
+}
+
+/// LABELS read out of an answer: names, as GitLab gives an item's, or
+/// objects with a `name`, as it gives a project's.
+fn label_names(labels: &Value) -> Option<Vec<String>> {
+    labels
+        .as_array()?
+        .iter()
+        .map(|label| {
+            label
+                .as_str()
+                .or_else(|| label["name"].as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A scoped label's scope.
+fn scope(name: &str) -> Option<&str> {
+    name.rsplit_once(SCOPE)
+        .map(|(scope, _)| scope)
+        .filter(|scope| !scope.is_empty())
+}
+
+/// Refuses LABELS when two share a scope: GitLab would keep only one.
+fn one_of_each_scope(labels: &[String]) -> Result<()> {
+    for (i, label) in labels.iter().enumerate() {
+        if let Some(shared) = scope(label)
+            && let Some(other) = labels[i + 1..]
+                .iter()
+                .find(|other| scope(other) == Some(shared))
+        {
+            bail!("labels {label:?} and {other:?} share the scope {shared:?}");
+        }
+    }
+    Ok(())
+}
+
+/// NAMES as GitLab takes a list of labels: separated by commas, which no
+/// label of GitLab's has.
+fn joined(names: &[String]) -> Result<String> {
+    if let Some(name) = names.iter().find(|name| name.contains(',')) {
+        bail!("label {name:?} has a comma, which GitLab reads as two labels");
+    }
+    Ok(names.join(","))
 }
 
 impl Gitlab {
@@ -197,9 +280,9 @@ impl Gitlab {
         Ok((target, fork))
     }
 
-    /// The repository's project ID and the page of NUMBER of KIND in it,
-    /// refused unless GitLab answers for it as that item of this project.
-    fn item(&self, number: u64, kind: Kind) -> Result<(u64, String)> {
+    /// NUMBER of KIND in the repository's project, refused unless GitLab
+    /// answers for it as that item of this project.
+    fn item(&self, number: u64, kind: Kind) -> Result<Item> {
         let project = self.project(&self.repo)?;
         let path = format!(
             "/projects/{}/{}/{number}",
@@ -214,10 +297,134 @@ impl Gitlab {
             reference(kind, number),
             project.path
         );
-        let url = answer["web_url"]
-            .as_str()
-            .with_context(|| format!("GET {path}: the response has no web_url"))?;
-        Ok((project.id, url.to_owned()))
+        let missing = |what: &str| format!("GET {path}: the response has no {what}");
+        Ok(Item {
+            project: project.id,
+            url: answer["web_url"]
+                .as_str()
+                .map(str::to_owned)
+                .with_context(|| missing("web_url"))?,
+            state: answer["state"]
+                .as_str()
+                .map(str::to_owned)
+                .with_context(|| missing("state"))?,
+            labels: label_names(&answer["labels"]).with_context(|| missing("labels"))?,
+        })
+    }
+
+    /// The labels of project PROJECT, its groups' included, every page.
+    fn project_labels(&self, project: u64) -> Result<Vec<String>> {
+        let mut labels = Vec::new();
+        for page in 1..=MAX_LABEL_PAGES {
+            let path = format!("/projects/{project}/labels?page={page}&per_page={LABELS_PER_PAGE}");
+            let answer = self.request(GET, &path, None)?;
+            let found = label_names(&answer)
+                .with_context(|| format!("GET {path}: the response is not labels"))?;
+            if found.is_empty() {
+                return Ok(labels);
+            }
+            labels.extend(found);
+        }
+        bail!(
+            "{} has more labels than apply reads ({})",
+            self.repo,
+            MAX_LABEL_PAGES * LABELS_PER_PAGE
+        )
+    }
+
+    /// Refuses NAMES unless project PROJECT has a label of each, by that
+    /// exact name: GitLab would create one it lacks, and apply creates
+    /// none. Nor two of one scope, of which GitLab would keep one.
+    fn resolve(&self, project: u64, names: &[String]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        joined(names)?;
+        one_of_each_scope(names)?;
+        let labels = self.project_labels(project)?;
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| !labels.contains(name))
+            .map(|name| format!("{name:?}"))
+            .collect();
+        ensure!(
+            missing.is_empty(),
+            "{} has no label {}; apply creates none",
+            self.repo,
+            missing.join(", ")
+        );
+        Ok(())
+    }
+
+    /// The item CHANGE is to, and the labels it still adds to it or
+    /// removes from it: one the item has, or lacks, is no change.
+    fn label_change(&self, change: &LabelChange) -> Result<(Item, Kind, Vec<String>)> {
+        let kind = change
+            .kind
+            .context("a label change on GitLab that does not name its item's kind")?;
+        let item = self.item(change.item, kind)?;
+        if !change.add {
+            let labels = change
+                .labels
+                .iter()
+                .filter(|name| item.labels.contains(name))
+                .cloned()
+                .collect();
+            return Ok((item, kind, labels));
+        }
+        self.resolve(item.project, &change.labels)?;
+        let labels: Vec<String> = change
+            .labels
+            .iter()
+            .filter(|name| !item.labels.contains(name))
+            .cloned()
+            .collect();
+        // No request names the removal GitLab would make for a label of
+        // a scope the item has another of.
+        for label in &labels {
+            if let Some(shared) = scope(label)
+                && let Some(replaced) = item.labels.iter().find(|has| scope(has) == Some(shared))
+            {
+                bail!(
+                    "adding {label:?} to {} would remove {replaced:?}, of its scope {shared:?}",
+                    reference(kind, change.item)
+                );
+            }
+        }
+        Ok((item, kind, labels))
+    }
+
+    /// Item NUMBER of KIND to close, and whether it is still open: refused
+    /// if neither open nor done already, such as a locked merge request.
+    fn to_close(&self, number: u64, kind: Kind) -> Result<(Item, bool)> {
+        let item = self.item(number, kind)?;
+        let open = item.state == OPENED;
+        ensure!(
+            open || DONE.contains(&item.state.as_str()),
+            "{} is {}, which apply does not close",
+            reference(kind, number),
+            item.state
+        );
+        Ok((item, open))
+    }
+
+    /// Posts BODY as a note on ITEM, NUMBER of KIND.
+    fn note(&self, item: &Item, kind: Kind, number: u64, body: &str) -> Result<Made> {
+        let path = format!(
+            "/projects/{}/{}/{number}/notes",
+            item.project,
+            collection(kind)
+        );
+        let answer = self.request(POST, &path, Some(&json!({"body": body})))?;
+        let id = answer["id"]
+            .as_u64()
+            .with_context(|| format!("POST {path}: the response names no note id"))?;
+        Ok(Made {
+            url: format!("{}#note_{id}", item.url),
+            number: None,
+            id: Some(id),
+            node_id: None,
+        })
     }
 
     /// The kind of the caller's comment target: refused without one.
@@ -273,10 +480,17 @@ impl Publisher for Gitlab {
             }
             // The push makes its own checks, and it is the first write.
             Op::PullRequest(_) => {}
+            Op::Issue(issue) => {
+                let project = self.project(&self.repo)?;
+                self.resolve(project.id, &issue.labels)?;
+            }
+            Op::Labels(change) => {
+                self.label_change(change)?;
+            }
+            Op::Close(close) => {
+                self.to_close(close.number, close.kind)?;
+            }
             Op::Push(_) => return Err(unsupported("a push to a merge request's branch")),
-            Op::Issue(_) => return Err(unsupported("an issue")),
-            Op::Labels(_) => return Err(unsupported("a label change")),
-            Op::Close(_) => return Err(unsupported("closing")),
             Op::Status(_) => return Err(unsupported("a commit status")),
         }
         Ok(())
@@ -285,21 +499,12 @@ impl Publisher for Gitlab {
     /// GitLab's note has no page of its own: it is the item's, at the
     /// note's anchor. The item is read again, as a moment may have passed
     /// since the preflight, and the note goes to the project by the ID
-    /// read, which a rename since cannot point elsewhere.
+    /// read, which a rename since cannot point elsewhere; every other
+    /// write here alike.
     fn comment(&self, issue: u64, body: &str) -> Result<Made> {
         let kind = self.comment_kind()?;
-        let (project, url) = self.item(issue, kind)?;
-        let path = format!("/projects/{project}/{}/{issue}/notes", collection(kind));
-        let answer = self.request(POST, &path, Some(&json!({"body": body})))?;
-        let id = answer["id"]
-            .as_u64()
-            .with_context(|| format!("POST {path}: the response names no note id"))?;
-        Ok(Made {
-            url: format!("{url}#note_{id}"),
-            number: None,
-            id: Some(id),
-            node_id: None,
-        })
+        let item = self.item(issue, kind)?;
+        self.note(&item, kind, issue, body)
     }
 
     fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
@@ -349,16 +554,82 @@ impl Publisher for Gitlab {
         Err(unsupported("a push to a merge request's branch"))
     }
 
-    fn create_issue(&self, _: &NewIssue) -> Result<String> {
-        Err(unsupported("an issue"))
+    /// GitLab leaves out the labels of a token that may not set them and
+    /// still creates the issue, so the answer's labels are compared.
+    fn create_issue(&self, issue: &NewIssue) -> Result<String> {
+        let project = self.project(&self.repo)?;
+        self.resolve(project.id, &issue.labels)?;
+        let path = format!("/projects/{}/issues", project.id);
+        let mut fields = json!({"title": issue.title, "description": issue.body});
+        if !issue.labels.is_empty() {
+            fields["labels"] = joined(&issue.labels)?.into();
+        }
+        let answer = self.request(POST, &path, Some(&fields))?;
+        let url = answer["web_url"]
+            .as_str()
+            .with_context(|| format!("POST {path}: the response names no web_url"))?;
+        let labelled = label_names(&answer["labels"]).unwrap_or_default();
+        ensure!(
+            issue.labels.iter().all(|name| labelled.contains(name)),
+            "created {url} without all of its labels {}",
+            issue.labels.join(", ")
+        );
+        Ok(url.to_owned())
     }
 
-    fn change_labels(&self, _: &LabelChange) -> Result<String> {
-        Err(unsupported("a label change"))
+    /// One update, of the labels still to change, and its answer compared,
+    /// as GitLab ignores the labels of a token that may not set them.
+    fn change_labels(&self, change: &LabelChange) -> Result<String> {
+        let (item, kind, labels) = self.label_change(change)?;
+        if labels.is_empty() {
+            return Ok(item.url);
+        }
+        let key = if change.add {
+            "add_labels"
+        } else {
+            "remove_labels"
+        };
+        let path = format!(
+            "/projects/{}/{}/{}",
+            item.project,
+            collection(kind),
+            change.item
+        );
+        let answer = self.request(PUT, &path, Some(&json!({key: joined(&labels)?})))?;
+        let now = label_names(&answer["labels"])
+            .with_context(|| format!("PUT {path}: the response has no labels"))?;
+        ensure!(
+            labels.iter().all(|name| now.contains(name) == change.add),
+            "{} did not get its labels {} {}",
+            item.url,
+            if change.add { "added" } else { "removed" },
+            labels.join(", ")
+        );
+        Ok(item.url)
     }
 
-    fn close(&self, _: &Close) -> Result<String> {
-        Err(unsupported("closing"))
+    /// The note goes first, as on Forgejo: a failure in between leaves the
+    /// item open with the reason on it, and a re-run, without a marker to
+    /// find it by, notes again. Its quick actions were broken in `plan`.
+    fn close(&self, close: &Close) -> Result<String> {
+        let (number, kind) = (close.number, close.kind);
+        let (item, open) = self.to_close(number, kind)?;
+        if !open {
+            return Ok(item.url);
+        }
+        let note = self.note(&item, kind, number, &close.body)?;
+        let path = format!("/projects/{}/{}/{number}", item.project, collection(kind));
+        let closed = || -> Result<()> {
+            let answer = self.request(PUT, &path, Some(&json!({"state_event": "close"})))?;
+            ensure!(
+                answer["state"] == "closed",
+                "PUT {path}: {} is not closed",
+                reference(kind, number)
+            );
+            Ok(())
+        };
+        closed().with_context(|| format!("after commenting {}", note.url))?;
+        Ok(item.url)
     }
 
     fn status(&self, _: &CommitStatus) -> Result<String> {
@@ -368,7 +639,7 @@ impl Publisher for Gitlab {
 
 #[cfg(test)]
 mod tests {
-    use super::super::forgejo::tests::{mock, repository, sh};
+    use super::super::forgejo::tests::{mock, repository, serve, sh};
     use super::super::tests::{checked, policy, target};
     use super::super::{Forge, Target, plan};
     use super::*;
@@ -397,10 +668,11 @@ mod tests {
         project(1, "owner/name", "public", None)
     }
 
-    /// Item IID of KIND in project PROJECT, as GitLab answers for it.
+    /// Item IID of KIND in project PROJECT, as GitLab answers for it: open
+    /// and without labels.
     fn item(kind: Kind, iid: u64, project: u64) -> Value {
         json!({
-            "iid": iid, "project_id": project,
+            "iid": iid, "project_id": project, "state": "opened", "labels": [],
             "web_url": format!("https://gitlab.example/owner/name/-/{}/{iid}", collection(kind)),
         })
     }
@@ -530,6 +802,7 @@ mod tests {
             let collected = crate::collect::collect(
                 &json!({"type": "add_comment", "body": body}).to_string(),
                 &crate::collect::config(&policy).unwrap(),
+                policy.forge,
                 &|_| true,
             );
             assert!(collected.errors.is_empty(), "{:?}", collected.errors);
@@ -546,35 +819,465 @@ mod tests {
         }
     }
 
-    /// Only a comment and a merge request are published; the others are
-    /// refused before any request.
+    /// A push to a merge request's branch, a commit status, and a label
+    /// change of no kind are refused before any request.
     #[test]
     fn other_ops_are_refused() {
         let gitlab = gitlab("http://127.0.0.1:1");
+        let (_root, pr) = repository();
         let ops = [
-            Op::Issue(NewIssue {
-                title: "t".into(),
-                body: "b".into(),
-                labels: vec![],
-            }),
+            (
+                Op::Push(BranchPush {
+                    number: 5,
+                    push_repo: pr.push_repo,
+                    private: false,
+                    branch: pr.branch,
+                    head: pr.base_commit.clone(),
+                    patch: pr.patch,
+                    files: pr.files,
+                }),
+                "a push to a merge request's branch, which apply does not publish to GitLab",
+            ),
+            (
+                Op::Status(CommitStatus {
+                    sha: pr.base_commit,
+                    state: super::super::State::Success,
+                    target_url: "https://x".into(),
+                }),
+                "a commit status, which apply does not publish to GitLab",
+            ),
+            (
+                Op::Labels(LabelChange {
+                    item: 5,
+                    kind: None,
+                    add: true,
+                    labels: vec!["bug".into()],
+                }),
+                "a label change on GitLab that does not name its item's kind",
+            ),
+        ];
+        for (op, want) in ops {
+            let err = format!("{:#}", gitlab.preflight(&op).unwrap_err());
+            assert_eq!(err, want);
+        }
+    }
+
+    /// A project in a subgroup, whose path is one encoded segment.
+    const NESTED: &str = "group/sub/name";
+    const NESTED_PROJECT: &str = "GET /api/v4/projects/group%2Fsub%2Fname";
+    const LABELS: &str = "GET /api/v4/projects/1/labels?page=1&per_page=100";
+    const ISSUE_URL: &str = "https://gitlab.example/group/sub/name/-/issues/5";
+    const MR_URL: &str = "https://gitlab.example/group/sub/name/-/merge_requests/5";
+    const CREATED_URL: &str = "https://gitlab.example/group/sub/name/-/issues/8";
+    const PUT_ISSUE: &str = "PUT /api/v4/projects/1/issues/5";
+    const PUT_MR: &str = "PUT /api/v4/projects/1/merge_requests/5";
+    const NOTE_ISSUE: &str = "POST /api/v4/projects/1/issues/5/notes";
+    const NOTE_MR: &str = "POST /api/v4/projects/1/merge_requests/5/notes";
+    const CREATE: &str = "POST /api/v4/projects/1/issues";
+
+    fn route(request: &super::super::forgejo::tests::Request) -> String {
+        request.line.trim_end_matches(" HTTP/1.1").to_owned()
+    }
+
+    /// Issue or merge request 5 of the nested project, in STATE, with
+    /// LABELS.
+    fn nested(kind: Kind, state: &str, labels: &[&str]) -> Value {
+        json!({
+            "iid": 5, "project_id": 1, "state": state, "labels": labels,
+            "web_url": match kind {
+                Kind::Issue => ISSUE_URL,
+                Kind::PullRequest => MR_URL,
+            },
+        })
+    }
+
+    /// GitLab with the nested project, whose labels are triage, bug,
+    /// priority::1 and priority::2, and whose issue 5 and merge request 5
+    /// are ISSUE and MERGE_REQUEST. An update answers with the item as it
+    /// leaves it; a new issue is answered without `triage`, as for a token
+    /// that may not set it. Every write in FAILING fails, with the token
+    /// in its answer.
+    fn gitlab_of(
+        issue: Value,
+        merge_request: Value,
+        failing: &'static [&'static str],
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
+    ) {
+        serve(64, move |request| {
+            let line = route(request);
+            if failing.contains(&line.as_str()) {
+                let answer = json!({"message": format!("failure {TOKEN}")});
+                return (500, answer.to_string());
+            }
+            let split = |value: &Value| -> Vec<String> {
+                value
+                    .as_str()
+                    .map(|names| names.split(',').map(str::to_owned).collect())
+                    .unwrap_or_default()
+            };
+            let answer = match line.as_str() {
+                NESTED_PROJECT => project(1, NESTED, "private", None),
+                "GET /api/v4/projects/group%2Fsub%2Fname/issues/5" => issue.clone(),
+                "GET /api/v4/projects/group%2Fsub%2Fname/merge_requests/5" => merge_request.clone(),
+                LABELS => json!([
+                    {"id": 1, "name": "triage"}, {"id": 2, "name": "bug"},
+                    {"id": 3, "name": "priority::1"}, {"id": 4, "name": "priority::2"},
+                ]),
+                "GET /api/v4/projects/1/labels?page=2&per_page=100" => json!([]),
+                NOTE_ISSUE | NOTE_MR => json!({"id": 30}),
+                CREATE => {
+                    let mut labels = split(&request.body["labels"]);
+                    labels.retain(|name| name != "triage");
+                    json!({"iid": 8, "web_url": CREATED_URL, "labels": labels})
+                }
+                PUT_ISSUE | PUT_MR => {
+                    let mut item = if line == PUT_ISSUE {
+                        issue.clone()
+                    } else {
+                        merge_request.clone()
+                    };
+                    let mut labels = label_names(&item["labels"]).unwrap();
+                    labels.extend(split(&request.body["add_labels"]));
+                    let removed = split(&request.body["remove_labels"]);
+                    labels.retain(|name| !removed.contains(name));
+                    item["labels"] = json!(labels);
+                    if request.body["state_event"] == "close" {
+                        item["state"] = json!("closed");
+                    }
+                    item
+                }
+                _ => return (404, "{}".to_owned()),
+            };
+            (200, answer.to_string())
+        })
+    }
+
+    /// Each op as GitLab sees it, and every write it makes, on an issue
+    /// and a merge request of the same iid: success, a re-run that finds
+    /// it done, refusals before any write, and failures after one.
+    #[test]
+    fn metadata() {
+        let labels = |kind, add: bool, names: &[&str]| {
             Op::Labels(LabelChange {
                 item: 5,
-                add: true,
-                labels: vec!["bug".into()],
-            }),
+                kind: Some(kind),
+                add,
+                labels: names.iter().map(|name| (*name).to_owned()).collect(),
+            })
+        };
+        let close = |kind| {
             Op::Close(Close {
                 number: 5,
-                kind: Kind::Issue,
-                body: "b".into(),
-            }),
+                kind,
+                body: "Done.".into(),
+            })
+        };
+        let issue = |names: &[&str]| {
+            Op::Issue(NewIssue {
+                title: "Flaky".into(),
+                body: "It fails.".into(),
+                labels: names.iter().map(|name| (*name).to_owned()).collect(),
+            })
+        };
+        let open = |kind, labels: &[&str]| nested(kind, "opened", labels);
+        let (i, m) = (Kind::Issue, Kind::PullRequest);
+        let note = |route| (route, json!({"body": "Done."}));
+        let closing = |route| (route, json!({"state_event": "close"}));
+        // The ops, issue 5, merge request 5, the writes that fail, the
+        // writes made, and the URL or a part of the error.
+        type Case = (
+            Vec<Op>,
+            Value,
+            Value,
+            &'static [&'static str],
+            Vec<(&'static str, Value)>,
+            Result<&'static str, &'static str>,
+        );
+        let cases: Vec<Case> = vec![
+            // Of the kind named, whatever the other of its iid has.
+            (
+                vec![labels(i, true, &["triage", "bug"])],
+                open(i, &["bug"]),
+                open(m, &[]),
+                &[],
+                vec![(PUT_ISSUE, json!({"add_labels": "triage"}))],
+                Ok(ISSUE_URL),
+            ),
+            (
+                vec![labels(m, true, &["triage"])],
+                open(i, &["triage"]),
+                open(m, &[]),
+                &[],
+                vec![(PUT_MR, json!({"add_labels": "triage"}))],
+                Ok(MR_URL),
+            ),
+            (
+                vec![labels(m, false, &["bug", "triage"])],
+                open(i, &["triage"]),
+                open(m, &["bug"]),
+                &[],
+                vec![(PUT_MR, json!({"remove_labels": "bug"}))],
+                Ok(MR_URL),
+            ),
+            // A re-run: nothing still to change.
+            (
+                vec![labels(i, true, &["triage"]), labels(i, false, &["bug"])],
+                open(i, &["triage"]),
+                open(m, &["bug"]),
+                &[],
+                vec![],
+                Ok(ISSUE_URL),
+            ),
+            // Refused before any write: a label the project lacks, by its
+            // exact name, which GitLab would create.
+            (
+                vec![close(i), labels(i, true, &["triage", "wontfix"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("group/sub/name has no label \"wontfix\"; apply creates none"),
+            ),
+            (
+                vec![labels(m, true, &["BUG"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("has no label \"BUG\""),
+            ),
+            (
+                vec![issue(&["bug", "release"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("group/sub/name has no label \"release\""),
+            ),
+            (
+                vec![issue(&["a,b"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("label \"a,b\" has a comma"),
+            ),
+            // GitLab would remove a label of the same scope, or keep one
+            // of two.
+            (
+                vec![labels(i, true, &["priority::2"])],
+                open(i, &["priority::1"]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("adding \"priority::2\" to #5 would remove \"priority::1\", of its scope"),
+            ),
+            (
+                vec![issue(&["priority::1", "priority::2"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("labels \"priority::1\" and \"priority::2\" share the scope \"priority\""),
+            ),
+            // Another project's item, or another iid.
+            (
+                vec![labels(m, true, &["bug"])],
+                open(i, &[]),
+                {
+                    let mut foreign = open(m, &[]);
+                    foreign["project_id"] = json!(2);
+                    foreign
+                },
+                &[],
+                vec![],
+                Err("!5 is not an item of group/sub/name"),
+            ),
+            (
+                vec![close(i)],
+                {
+                    let mut other = open(i, &[]);
+                    other["iid"] = json!(6);
+                    other
+                },
+                open(m, &[]),
+                &[],
+                vec![],
+                Err("#5 is not an item of group/sub/name"),
+            ),
+            // Closing the kind named, and not one done already.
+            (
+                vec![close(i)],
+                open(i, &[]),
+                nested(m, "merged", &[]),
+                &[],
+                vec![note(NOTE_ISSUE), closing(PUT_ISSUE)],
+                Ok(ISSUE_URL),
+            ),
+            (
+                vec![close(m)],
+                nested(i, "closed", &[]),
+                open(m, &[]),
+                &[],
+                vec![note(NOTE_MR), closing(PUT_MR)],
+                Ok(MR_URL),
+            ),
+            (
+                vec![close(m)],
+                open(i, &[]),
+                nested(m, "merged", &[]),
+                &[],
+                vec![],
+                Ok(MR_URL),
+            ),
+            (
+                vec![close(i)],
+                nested(i, "closed", &[]),
+                open(m, &[]),
+                &[],
+                vec![],
+                Ok(ISSUE_URL),
+            ),
+            (
+                vec![labels(i, true, &["bug"]), close(m)],
+                open(i, &[]),
+                nested(m, "locked", &[]),
+                &[],
+                vec![],
+                Err("!5 is locked, which apply does not close"),
+            ),
+            // Failures after a write name it, without the token.
+            (
+                vec![close(i)],
+                open(i, &[]),
+                open(m, &[]),
+                &[PUT_ISSUE],
+                vec![note(NOTE_ISSUE), closing(PUT_ISSUE)],
+                Err(
+                    "after commenting https://gitlab.example/group/sub/name/-/issues/5#note_30: PUT",
+                ),
+            ),
+            (
+                vec![labels(i, true, &["bug"]), close(m)],
+                open(i, &[]),
+                open(m, &[]),
+                &[NOTE_MR],
+                vec![(PUT_ISSUE, json!({"add_labels": "bug"})), note(NOTE_MR)],
+                Err("after publishing https://gitlab.example/group/sub/name/-/issues/5: POST"),
+            ),
+            (
+                vec![issue(&["bug"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![(
+                    CREATE,
+                    json!({"title": "Flaky", "description": "It fails.", "labels": "bug"}),
+                )],
+                Ok(CREATED_URL),
+            ),
+            (
+                vec![issue(&[])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![(
+                    CREATE,
+                    json!({"title": "Flaky", "description": "It fails."}),
+                )],
+                Ok(CREATED_URL),
+            ),
+            (
+                vec![issue(&["triage", "bug"])],
+                open(i, &[]),
+                open(m, &[]),
+                &[],
+                vec![(
+                    CREATE,
+                    json!({"title": "Flaky", "description": "It fails.", "labels": "triage,bug"}),
+                )],
+                Err(
+                    "created https://gitlab.example/group/sub/name/-/issues/8 without all of its labels triage, bug",
+                ),
+            ),
         ];
-        for op in ops {
-            let err = format!("{:#}", gitlab.preflight(&op).unwrap_err());
-            assert!(
-                err.ends_with("which apply does not publish to GitLab"),
-                "{err}"
-            );
+        for (ops, issue, merge_request, failing, writes, want) in cases {
+            let (server, requests) = gitlab_of(issue, merge_request, failing);
+            let gitlab = Gitlab::new(&format!("{server}/"), NESTED, TOKEN.to_owned(), &[]).unwrap();
+            let result = super::super::publish(&ops, &gitlab);
+            let made: Vec<(String, Value)> = requests
+                .try_iter()
+                .filter(|request| !request.line.starts_with("GET "))
+                .map(|request| {
+                    assert_eq!(request.authorization, format!("Bearer {TOKEN}"));
+                    (route(&request), request.body)
+                })
+                .collect();
+            let writes: Vec<(String, Value)> = writes
+                .into_iter()
+                .map(|(line, body)| (line.to_owned(), body))
+                .collect();
+            assert_eq!(made, writes, "{ops:?}");
+            match (result, want) {
+                (Ok(urls), Ok(want)) => assert_eq!(urls.last().map(String::as_str), Some(want)),
+                (Err(err), Err(want)) => {
+                    let err = format!("{:#}", err);
+                    assert!(err.contains(want), "{ops:?}: {err}");
+                    assert!(!err.contains(&TOKEN[..4]), "{err}");
+                }
+                (result, _) => panic!("{ops:?}: {result:?}"),
+            }
         }
+    }
+
+    /// Requests planned on GitLab reach the item of the kind they name,
+    /// with their quick actions and mentions broken.
+    #[test]
+    fn publishes_planned_metadata() {
+        let text = "Done @all\n/merge";
+        let dir = checked(&[
+            json!({"type": "add_labels", "repo": NESTED, "pull_request_number": 5,
+                "labels": ["triage"]}),
+            json!({"type": "close_issue", "repo": NESTED, "issue_number": 5, "body": text}),
+        ]);
+        let mut policy = policy();
+        policy.repo = NESTED.into();
+        policy.forge = crate::policy::Forge::Gitlab;
+        let target = Target {
+            forge: Forge::Gitlab,
+            repo: NESTED,
+            ..target(None)
+        };
+        let ops = plan(dir.path(), &policy, &target).unwrap();
+        let (server, requests) = gitlab_of(
+            nested(Kind::Issue, "opened", &[]),
+            nested(Kind::PullRequest, "opened", &[]),
+            &[],
+        );
+        let gitlab = Gitlab::new(&server, NESTED, TOKEN.to_owned(), &[]).unwrap();
+        assert_eq!(
+            super::super::publish(&ops, &gitlab).unwrap(),
+            [MR_URL, ISSUE_URL]
+        );
+        let writes: Vec<(String, Value)> = requests
+            .try_iter()
+            .filter(|request| !request.line.starts_with("GET "))
+            .map(|request| (route(&request), request.body))
+            .collect();
+        let body = format!(
+            "Done @\u{200b}all\n\u{200b}/merge\n\n> Generated by [agentic-job]({})",
+            target.run_url
+        );
+        assert_eq!(
+            writes,
+            [
+                (PUT_MR.to_owned(), json!({"add_labels": "triage"})),
+                (NOTE_ISSUE.to_owned(), json!({"body": body})),
+                (PUT_ISSUE.to_owned(), json!({"state_event": "close"})),
+            ]
+        );
     }
 
     #[test]

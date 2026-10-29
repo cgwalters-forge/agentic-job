@@ -31,6 +31,8 @@ pub(super) const TIMEOUT: Duration = Duration::from_secs(60);
 const GET: &str = "GET";
 const POST: &str = "POST";
 const PATCH: &str = "PATCH";
+/// GitLab's update.
+pub(super) const PUT: &str = "PUT";
 const DELETE: &str = "DELETE";
 
 /// Labels asked for a page, Forgejo's default most.
@@ -305,8 +307,8 @@ pub(super) struct Api<'a> {
 }
 
 impl Api<'_> {
-    /// Sends METHOD, with BODY for a POST or a PATCH, to PATH under the
-    /// API, and returns the JSON of a successful answer, null for none.
+    /// Sends METHOD, with BODY for a POST, a PATCH or a PUT, to PATH under
+    /// the API, and returns the JSON of a successful answer, null for none.
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         let url = format!("{}{path}", self.url);
         let authorization = self.authorization;
@@ -322,6 +324,13 @@ impl Api<'_> {
             PATCH => self
                 .http
                 .patch(url)
+                .header("authorization", authorization)
+                .header("accept", "application/json")
+                .header("content-type", "application/json")
+                .send(json.as_bytes()),
+            PUT => self
+                .http
+                .put(url)
                 .header("authorization", authorization)
                 .header("accept", "application/json")
                 .header("content-type", "application/json")
@@ -1568,6 +1577,7 @@ pub(super) mod tests {
         let labels = |add: bool, names: &[&str]| {
             Op::Labels(LabelChange {
                 item: 5,
+                kind: None,
                 add,
                 labels: names.iter().map(|name| (*name).to_owned()).collect(),
             })
