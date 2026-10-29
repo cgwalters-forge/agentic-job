@@ -7,7 +7,7 @@ issue, a comment, a pull request, a schedule, a dispatch. What makes
 that safe and useful is one command, `agentic-job event`, which is the
 only thing that reads the event's payload. It is gh-aw's
 `pre_activation` and `activation` jobs in one place
-([the validation against gh-aw](https://github.com/cgwalters-forge/agentic-job/blob/bot/initial-docs/docs/background-ghaw.md)): who may start a run, from
+([the validation against gh-aw](background-ghaw.md)): who may start a run, from
 which events, and how the event's text reaches the agent.
 
 **State.** The command, its wiring into the reusable workflow
@@ -195,7 +195,8 @@ covers issues too.
 
 Activation uses the caller's write permission on its own machine, like
 notification and apply. Policy, agent and check explicitly restrict their
-tokens to read permissions (and the agent's identity permission).
+repository tokens to read permissions. The agent job has no identity-token
+permission; a separate register job has `id-token: write` for inference.
 Discussions are refused at the workflow boundary before routing outputs
 or starting any write job: discussion notification, GraphQL label removal
 and kind-aware output routing remain unimplemented. The parser can still

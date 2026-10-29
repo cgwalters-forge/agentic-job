@@ -53,8 +53,8 @@ separate jobs on separate machines. The apply job's additional checks are
    by a command label pass through without writing.
 2. **agent**, on the caller's runner. [The step that secures a host for
    any job](secure-host.md), `cgwalters-forge/actions/secure-host` through
-   the `secure-host/` forwarder, removes general root access and the cloud
-   metadata service and probes that (`agentic-job sandbox setup` and
+   the `secure-host/` forwarder, removes general root access and probes
+   the configured restrictions (`agentic-job sandbox setup` and
    `sandbox check`, in its image); `run --runner-home` clones the target,
    drives the agent as the runner's user, with no second user, and leaves
    what may be uploaded. The job holds nothing the agent may not read:
@@ -67,6 +67,9 @@ separate jobs on separate machines. The apply job's additional checks are
    ([requirements.md](requirements.md#actors-and-trust)); the workflow
    still passes no inference key or MCP credential, and refuses a
    private caller or target and `fake-profile` there.
+   The pinned image still needs `sandbox.deny-runner-metadata = true`
+   to close metadata to the runner's user
+   ([main versus the pinned image](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)).
 3. **check**, on a machine the agent never touched. `agentic-job collect`
    validates and sanitizes the producer's requests, as gh-aw's collector
    would, then `agentic-job check` holds them and the patch to the policy.
@@ -277,7 +280,8 @@ agent. The pieces are:
 
 Every setting is an input of `policy.yml` (the same inputs as
 `agentic-job.yml`, without `agent-runner`, `github-reads` and
-`agent-user`, which are the agent job's), and check and apply take the policy call's
+`agent-user`, which are the agent job's, and
+`secure-host-image-artifact-id`, which selects its test image), and check and apply take the policy call's
 outputs as they are, with `toJSON(needs.policy.outputs)`: what is
 checked and applied is what that call decided. The agent job passes
 `prepare` only the policy call's two upload IDs, and check and apply
@@ -291,8 +295,12 @@ own workflow's. `prepare` and `run` refuse, before they use the policy
 upload, one whose commit is not their own: their ref when it is pinned
 by a full commit, otherwise the HEAD of the checkout they run from.
 
-A complete caller, with a privileged step before the agent and a step
-after it. `example-org/network-join` stands in for whichever action
+The jobs of a caller, with a privileged step before the agent and a step
+after it, inside a workflow declaring string inputs `item`, `task` and
+`repo`. Here `item` is an existing issue number in `repo`, which is also
+the calling repository. The bounds must allow `analysis` and
+`add_comment,noop`, as the shipped bounds do; the README's minimal
+pull-request-only bounds do not. `example-org/network-join` stands in for whichever action
 of yours needs root, pinned by commit. The agent is the runner's user,
 so this job holds no `id-token`, and it runs the scripted agent, which
 registers nothing. A real agent behind a broker gets its run token from a
@@ -308,10 +316,15 @@ jobs:
     uses: cgwalters-forge/agentic-job/.github/workflows/policy.yml@COMMIT
     permissions:
       contents: read
+      actions: read
     with:
       id: ${{ inputs.item }}
       task: ${{ inputs.task }}
       repo: ${{ inputs.repo }}
+      kind: analysis
+      outputs: add_comment,noop
+      max-outputs: "1"
+      comment-target: ${{ inputs.item }}
       allow: .github/agentic-job/allow.toml
       # The hardening for hosted ubuntu-26.04, from agentic-job at COMMIT.
       config: .agentic-job-source/.github/agentic-job/hosted.toml
@@ -366,7 +379,9 @@ jobs:
       # What the runner's user cannot hold for the agent, refused.
       - env:
           CALLER_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+          AGENT_USER: runner
         run: python3 .agentic-job-source/workflow/runner-setup.py admit
+      - run: agentic-job secure-host inference .agentic-job/config.toml
       # The host's configuration but for the setup script, run below.
       - run: agentic-job config --host --no-script --from .agentic-job/config.toml > "$RUNNER_TEMP/agentic-job-host.toml"
       - uses: ./.agentic-job-source/secure-host
@@ -992,12 +1007,14 @@ cannot reach a private proxy.
   `inference-audience`. These are addresses/identity names, not secrets.
   Keep `inference-register: github-oidc`: no repository secret or provider
   API key is needed for inference in this mode.
-- **A network route:** either a disposable self-hosted `agent-runner` on
-  the proxy's network, or an agent job of your own that joins the
-  network in a step before `secure-host`
+- **A network route:** either disposable self-hosted runners on
+  the proxy's network, or a composed caller that joins it in both the
+  register job and the agent job (before `secure-host`)
   ([above](#the-pieces-and-an-agent-job-of-your-own)), with whatever that
-  network's operator issues for it. Prefer a credential the job mints
-  from its identity token to a stored secret.
+  network's operator issues for it. The register job alone has an identity
+  token; the agent job must join without one. For example, `review.yml`'s
+  [network step](review.md#configuration) mints a single-use join key in
+  register and passes it as a secret to the agent job.
 - **Broker admission:** the broker operator must enable a `called_workflows`
   policy entry for `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml`,
   the exact commit pinned by the caller (`job_workflow_sha`), and the calling
@@ -2219,14 +2236,17 @@ or not newer than every `v` tag (`just release-check`), and a run whose
 `v` tags changed while it built. It then tags main's commit `vVERSION`
 and publishes the binaries with notes listing the pull requests merged
 since the previous version.
-Selecting the binary is unchanged: the tag's commit fetches its
-source-addressed release like any other commit.
+On main, a version-tagged workflow selects that version's attested
+release assets, as described at the [start of this page](#running-it-on-github),
+not its `build-DIGEST` release. Full-commit and branch pins retain the
+source-addressed path. `v0.6.4` already has the tagged selection path;
+older tags use the bootstrap code at their own commit.
 
 A caller pins the version's tag in place of a commit, for the reusable
 workflows and the actions alike:
 
 ```yaml
-    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@v0.1.0
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@v0.6.4
 ```
 
 and has Dependabot propose newer versions, daily:
