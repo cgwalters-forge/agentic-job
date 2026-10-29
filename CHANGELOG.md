@@ -21,6 +21,10 @@ says what a caller may rely on across versions.
   every user but root and the runner's, so the sandbox user cannot send
   data out in a name lookup around the egress proxy; both `hosted.toml`
   files set it. No release note had named it (docs/sandbox.md).
+- `agentic-job dispatch`'s `review` profile, like `review.yml`, asks whether a
+  change should exist as written before whether it works, blocking with
+  "should not exist as written: X instead", and flags tests that only restate
+  the implementation as important findings.
 - `review.yml`, with the repository variable `REVIEW_CARRY_APPROVAL=true`,
   carries the previous head's approval to a push that is only that head
   rebased onto the base branch or rustfmt's output of it, instead of
