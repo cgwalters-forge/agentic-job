@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `sandbox.close-resolved`, off by default, closes systemd-resolved to
+  every user but root and the runner's, so the sandbox user cannot send
+  data out in a name lookup around the egress proxy; both `hosted.toml`
+  files set it. No release note had named it (docs/sandbox.md).
 - `review.yml`, with the repository variable `REVIEW_CARRY_APPROVAL=true`,
   carries the previous head's approval to a push that is only that head
   rebased onto the base branch or rustfmt's output of it, instead of
@@ -68,9 +72,10 @@ says what a caller may rely on across versions.
   checks out the agentic-job source to get the binary: a copy names
   `cgwalters-forge/agentic-job` and the commit its `run` job pins there
   (docs/dispatch.md).
-- `policy.yml` and `agentic-job.yml` take the task as an artifact,
-  `task-artifact`, in place of `task`: the runner drops a job output its secret masker changes, so
-  a task quoting credential-shaped text no longer reaches policy empty.
+- `policy.yml` and `agentic-job.yml` can take the task as an artifact,
+  `task-artifact`, as an alternative to `task`, which still works: the
+  runner drops a job output its secret masker changes, so a task quoting
+  credential-shaped text passed this way no longer reaches policy empty.
 - `budget-usd` caps a run's spend in US dollars. `budget` (AIC) is
   deprecated and used only while `budget-usd` is empty; it will be
   removed after one release. Run summaries and opted-in status comments

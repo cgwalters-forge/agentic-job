@@ -101,6 +101,25 @@ unconditionally
 the image the action pins refuses it only with
 `sandbox.deny-runner-metadata`.
 
+Two options narrow the sandbox user's network further, both off by
+default. `sandbox.close-resolved` closes systemd-resolved's Varlink
+socket and system-bus interface to every user but root and, on the bus,
+the runner's. resolved answers any local user there and asks upstream as
+itself, so without it the sandbox user can send data out in a name
+lookup (`DATA.attacker.example`) around the egress proxy and the rules
+on its uids, which already close resolved's stub on loopback's port 53.
+It needs systemd 258 or newer, and `sandbox check` notes when it is off.
+Both `hosted.toml` files set it: the action's default
+(`secure-host/hosted.toml`) and the workflow's
+(`.github/agentic-job/hosted.toml`). The runner's user, and so every
+later step, still resolves names. The egress policy file, the shipped
+one or `egress.policy`'s in its place, may set `[egress] mode = "allowlist"`
+with `allow`, at most 256 domains or gh-aw ecosystem identifiers
+(`egress/policy.py`): every destination, reads included, must then be one
+of them or under one, and an address literal is refused. The default,
+`mode = "reads-anywhere"`, lets a read go to any host not on the threat
+feed. A [private run](private-repositories.md) requires the allowlist.
+
 Past DNS, the egress proxy never connects to the ranges in
 `PROXY_DENIED_V4` and `PROXY_DENIED_V6`
 (`crates/secure-host/src/network.rs`): loopback, the private ranges,
