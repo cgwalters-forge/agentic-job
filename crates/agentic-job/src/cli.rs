@@ -53,7 +53,7 @@ pub enum Command {
     Check(check::Args),
     /// Inspect checked proposals with a bounded model request before apply
     Detect(crate::detect::Args),
-    /// Publish checked comments and a pull request to a Forgejo repository
+    /// Publish checked outputs, and the caller's commit status, to a Forgejo repository
     Apply(crate::apply::Args),
     /// Link checked pull requests to the caller's issue before publication
     LinkIssue(crate::apply::issue_reference::Args),
@@ -213,6 +213,10 @@ mod tests {
             "5",
             "--push-repo",
             "bot/name",
+            "--status",
+            "success",
+            "--status-sha",
+            "1111111111111111111111111111111111111111",
         ],
         &[
             "secondary-pull-request",
@@ -436,6 +440,44 @@ mod tests {
                 "u",
                 "--token",
                 "t",
+            ],
+            // A status needs both its state and its commit, and a state
+            // both forges have.
+            &[
+                "apply",
+                "--forge",
+                "forgejo",
+                "--server",
+                "s",
+                "--repo",
+                "o/n",
+                "--policy",
+                "p",
+                "--checked",
+                "d",
+                "--run-url",
+                "u",
+                "--status",
+                "success",
+            ],
+            &[
+                "apply",
+                "--forge",
+                "forgejo",
+                "--server",
+                "s",
+                "--repo",
+                "o/n",
+                "--policy",
+                "p",
+                "--checked",
+                "d",
+                "--run-url",
+                "u",
+                "--status",
+                "warning",
+                "--status-sha",
+                "1111111111111111111111111111111111111111",
             ],
         ];
         for args in cases {

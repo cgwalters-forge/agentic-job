@@ -1,7 +1,8 @@
 //! [`Publisher`] for Forgejo (and Gitea, whose API it keeps): comments,
-//! issues, labels and closing through `/api/v1`, and a pull request from
-//! a branch pushed over git to a fork the bounds name. Never to the
-//! repository itself: there, its CI
+//! issues, labels, closing and the caller's commit status through
+//! `/api/v1`, and a pull request from a branch pushed over git to a fork
+//! the bounds name, or a commit pushed on the branch of the policy's pull
+//! request from that fork. Never to the repository itself: there, its CI
 //! would run the agent's code as the repository's own, with its secrets
 //! and a write token, where a fork's pull request gets neither by default
 //! (docs/safe-outputs.md#publishing-to-forgejo).
@@ -17,7 +18,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use super::git::{self, Git, Push};
-use super::{Close, Kind, LabelChange, NewIssue, Op, Publisher, PullRequest};
+use super::{
+    BranchPush, Close, CommitStatus, Kind, LabelChange, NewIssue, Op, Publisher, PullRequest,
+    STATUS_CONTEXT,
+};
 
 /// The most of a response read: what a comment or pull request returns.
 pub(super) const MAX_RESPONSE: u64 = 1 << 20;
@@ -561,9 +565,67 @@ impl Forgejo {
                 branch: &pr.branch,
                 patch: &pr.patch,
                 files: &pr.files,
+                head: None,
             },
             self.recover_pushed_commit.as_deref(),
         )
+    }
+
+    /// Refuses a push repository of the repository's owner: see
+    /// [`Publisher::open_pull_request`].
+    fn other_owner(&self, push_repo: &str) -> Result<()> {
+        ensure!(
+            !super::owner(push_repo).eq_ignore_ascii_case(super::owner(&self.repo)),
+            "a pull request's branch goes to another owner's fork, not to {push_repo}"
+        );
+        Ok(())
+    }
+
+    /// The URL of the pull request PUSH goes to, refused unless the forge
+    /// answers for it as the policy's: open, of this repository, from the
+    /// bounds' fork and the branch the policy read, at the head the run
+    /// was asked for; and the fork as [`Self::check_fork`] holds it.
+    fn push_target(&self, push: &BranchPush) -> Result<String> {
+        self.other_owner(&push.push_repo)?;
+        self.check_fork(&push.push_repo, push.private)?;
+        let number = push.number;
+        let path = format!("/repos/{}/pulls/{number}", self.repo);
+        let answer = self.send(&path, None)?;
+        let text = |value: &Value| value.as_str().map(str::to_owned);
+        let named =
+            |value: &Value, repo: &str| text(value).is_some_and(|it| it.eq_ignore_ascii_case(repo));
+        ensure!(
+            answer["number"].as_u64() == Some(number)
+                && named(&answer["base"]["repo"]["full_name"], &self.repo),
+            "#{number} is not a pull request of {}",
+            self.repo
+        );
+        ensure!(
+            answer["state"] == "open",
+            "pull request #{number} is not open"
+        );
+        let (from, branch) = (
+            text(&answer["head"]["repo"]["full_name"]),
+            text(&answer["head"]["ref"]),
+        );
+        ensure!(
+            named(&answer["head"]["repo"]["full_name"], &push.push_repo)
+                && branch.as_deref() == Some(push.branch.as_str()),
+            "pull request #{number} is from {}:{}, not {}:{}: a push goes only to the bounds' fork and the branch the policy read",
+            from.as_deref().unwrap_or("a deleted repository"),
+            branch.as_deref().unwrap_or("no branch"),
+            push.push_repo,
+            push.branch
+        );
+        let head = text(&answer["head"]["sha"]);
+        ensure!(
+            head.as_deref() == Some(push.head.as_str()),
+            "pull request #{number}'s branch is at {}, not {}, the head the run was asked for: it moved, and is not pushed over",
+            head.as_deref().unwrap_or("no commit"),
+            push.head
+        );
+        let missing = || format!("GET {path}: the response has no html_url");
+        text(&answer["html_url"]).with_context(missing)
     }
 }
 
@@ -581,6 +643,20 @@ impl Publisher for Forgejo {
             Op::Close(close) => {
                 self.item(close.number, Some(close.kind))?;
             }
+            Op::Push(push) => {
+                let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
+                self.push_target(push).with_context(pushing)?;
+            }
+            // A commit the forge does not have would fail the status after
+            // every other write.
+            Op::Status(status) => {
+                let path = format!("/repos/{}/git/commits/{}", self.repo, status.sha);
+                let answer = self.send(&path, None)?;
+                ensure!(
+                    answer["sha"] == status.sha.as_str(),
+                    "GET {path}: the response is not that commit"
+                );
+            }
         }
         Ok(())
     }
@@ -596,12 +672,8 @@ impl Publisher for Forgejo {
         // `plan` refuses this too; held here as well, as nothing else
         // stands between the agent's code and the repository's CI. Forgejo
         // reads a head of the repository's own owner as its own branch.
+        self.other_owner(&pr.push_repo)?;
         let owner = super::owner(&pr.push_repo);
-        ensure!(
-            !owner.eq_ignore_ascii_case(super::owner(&self.repo)),
-            "a pull request's branch goes to another owner's fork, not to {}",
-            pr.push_repo
-        );
         let pushing = || format!("pushing {} to {}", pr.branch, pr.push_repo);
         self.check_fork(&pr.push_repo, pr.private)
             .with_context(pushing)?;
@@ -615,6 +687,52 @@ impl Publisher for Forgejo {
             "published {commit} to {} branch {}; PR creation failed; retry the same checked input with --recover-pushed-commit {commit} (no branch overwrite)",
             pr.push_repo, pr.branch
         )))
+    }
+
+    /// The pull request and fork are read again, as a moment may have
+    /// passed since the preflight; git then holds the branch to the head
+    /// under a lease, which the forge's answer alone cannot.
+    fn push_to_branch(&self, push: &BranchPush) -> Result<String> {
+        let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
+        let url = self.push_target(push).with_context(pushing)?;
+        let git = Git {
+            authorization: format!("token {}", self.token),
+            token: &self.token,
+        };
+        let fork = self.remote(&push.push_repo);
+        git.push(
+            &Push {
+                from: &fork,
+                base: &push.branch,
+                base_commit: &push.head,
+                to: &fork,
+                branch: &push.branch,
+                patch: &push.patch,
+                files: &push.files,
+                head: Some(&push.head),
+            },
+            None,
+        )
+        .with_context(pushing)?;
+        Ok(url)
+    }
+
+    /// Forgejo answers for a status with its own `url`.
+    fn status(&self, status: &CommitStatus) -> Result<String> {
+        let path = format!("/repos/{}/statuses/{}", self.repo, status.sha);
+        let answer = self.send(
+            &path,
+            Some(&json!({
+                "state": status.state.name(),
+                "target_url": status.target_url,
+                "description": status.state.description(),
+                "context": STATUS_CONTEXT,
+            })),
+        )?;
+        answer["url"]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("POST {path}: the response names no url"))
     }
 
     /// Forgejo leaves out the labels of a token that may not set them and
@@ -1708,6 +1826,337 @@ pub(super) mod tests {
                 }
                 (result, _) => panic!("{ops:?}: {result:?}"),
             }
+        }
+    }
+
+    const PULL: &str = "GET /repos/owner/name/pulls/9";
+    const PULL_URL: &str = "https://forge.example/owner/name/pulls/9";
+    const STATUS_URL: &str = "https://forge.example/api/v1/repos/owner/name/statuses/1";
+    const RUN_URL: &str = "https://forge.example/owner/name/actions/runs/7";
+
+    /// Pull request 9 as the forge answers for it: open, from HEAD_REPO's
+    /// BRANCH at SHA, into the repository's main.
+    fn pull(head_repo: &str, branch: &str, sha: &str) -> Value {
+        json!({
+            "number": 9, "state": "open", "html_url": PULL_URL,
+            "base": {"ref": "main", "repo": {"full_name": "owner/name"}},
+            "head": {"ref": branch, "sha": sha, "repo": {"full_name": head_repo}},
+        })
+    }
+
+    /// The repository of [`repository`], whose fork holds pull request 9's
+    /// branch `agent-run-7` at the patch's base, and the push of the patch
+    /// on it.
+    fn pull_request_branch() -> (tempfile::TempDir, BranchPush) {
+        let (root, pr) = repository();
+        let fork = root.path().join("fork/name.git");
+        sh(
+            &root.path().join("owner/name.git"),
+            &[
+                "push",
+                "-q",
+                fork.to_str().unwrap(),
+                "main:refs/heads/agent-run-7",
+            ],
+        );
+        let push = BranchPush {
+            number: 9,
+            push_repo: pr.push_repo,
+            private: false,
+            branch: pr.branch,
+            head: pr.base_commit,
+            patch: pr.patch,
+            files: pr.files,
+        };
+        (root, push)
+    }
+
+    /// A public repository, its public fork and pull request 9, PULL. It
+    /// knows only the commit KNOWN, takes every write, and fails each of
+    /// FAILING with the token in its answer.
+    fn push_forge(
+        pull: Value,
+        known: String,
+        failing: &'static [&'static str],
+    ) -> (String, mpsc::Receiver<Request>) {
+        serve(64, move |request| {
+            let line = route(request);
+            if failing.iter().any(|failing| line.starts_with(failing)) {
+                let answer = json!({"message": format!("failure {TOKEN}")});
+                return (500, answer.to_string());
+            }
+            let answer = match line.as_str() {
+                "GET /repos/owner/name" => target(false, false, "public"),
+                "GET /repos/fork/name" => fork(false),
+                PULL => pull.clone(),
+                COMMENT => json!({"html_url": COMMENT_URL}),
+                line if line == format!("GET /repos/owner/name/git/commits/{known}") => {
+                    json!({"sha": known})
+                }
+                line if line.starts_with("POST /repos/owner/name/statuses/") => {
+                    json!({"id": 1, "status": request.body["state"], "url": STATUS_URL})
+                }
+                _ => return (404, "{}".to_owned()),
+            };
+            ok(&answer)
+        })
+    }
+
+    /// A push to the policy's pull request's branch, and the caller's
+    /// status after it: the push, a branch that moved by the forge's
+    /// answer or under git's lease, another fork, branch or repository,
+    /// paths check did not read, and failures after a write.
+    #[test]
+    fn pushes_to_a_pull_request_branch() {
+        type Edit = fn(&Path, &mut Value, &mut BranchPush, &mut String);
+        let none: Edit = |_, _, _, _| {};
+        let not_pushed: Option<&str> = None;
+        let moved = "it moved, and is not pushed over";
+        // What, the change to the fixture (the fork's root, pull request 9,
+        // the push and the status's commit), the routes that fail, the
+        // URLs or a part of the error, and whether the branch got the
+        // commit and the status was written.
+        type Case = (
+            &'static str,
+            Edit,
+            &'static [&'static str],
+            Result<(), &'static str>,
+            Option<&'static str>,
+            bool,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "the push and its status",
+                none,
+                &[],
+                Ok(()),
+                Some("pushed"),
+                true,
+            ),
+            (
+                "a head the forge says moved",
+                |_, pull, _, _| pull["head"]["sha"] = json!("3".repeat(40)),
+                &[],
+                Err(moved),
+                not_pushed,
+                false,
+            ),
+            (
+                "a branch that moved after the forge answered",
+                |root, _, _, _| {
+                    let work = root.join("work");
+                    sh(&work, &["commit", "-q", "--allow-empty", "-m", "Other"]);
+                    let fork = root.join("fork/name.git");
+                    sh(
+                        &work,
+                        &[
+                            "push",
+                            "-q",
+                            "-f",
+                            fork.to_str().unwrap(),
+                            "HEAD:refs/heads/agent-run-7",
+                        ],
+                    );
+                },
+                &[],
+                Err("refs/heads/agent-run-7 is no longer at"),
+                Some("moved"),
+                false,
+            ),
+            (
+                "another fork's pull request",
+                |_, pull, _, _| pull["head"]["repo"]["full_name"] = json!("other/name"),
+                &[],
+                Err("is from other/name:agent-run-7, not fork/name:agent-run-7"),
+                not_pushed,
+                false,
+            ),
+            (
+                "another branch",
+                |_, pull, _, _| pull["head"]["ref"] = json!("main"),
+                &[],
+                Err("is from fork/name:main, not fork/name:agent-run-7"),
+                not_pushed,
+                false,
+            ),
+            (
+                "a deleted fork",
+                |_, pull, _, _| pull["head"]["repo"] = Value::Null,
+                &[],
+                Err("is from a deleted repository:agent-run-7"),
+                not_pushed,
+                false,
+            ),
+            (
+                "a closed pull request",
+                |_, pull, _, _| pull["state"] = json!("closed"),
+                &[],
+                Err("pull request #9 is not open"),
+                not_pushed,
+                false,
+            ),
+            (
+                "another repository's pull request",
+                |_, pull, _, _| pull["base"]["repo"]["full_name"] = json!("other/name"),
+                &[],
+                Err("#9 is not a pull request of owner/name"),
+                not_pushed,
+                false,
+            ),
+            (
+                "a public fork of a private run",
+                |_, _, push, _| push.private = true,
+                &[],
+                Err("fork/name is not private"),
+                not_pushed,
+                false,
+            ),
+            (
+                "the repository's owner's",
+                |_, _, push, _| push.push_repo = "owner/other".into(),
+                &[],
+                Err("a pull request's branch goes to another owner's fork, not to owner/other"),
+                not_pushed,
+                false,
+            ),
+            (
+                "paths check did not read",
+                |_, _, push, _| push.files = vec!["src/y".into()],
+                &[],
+                Err("the applied patch changes other paths than check read"),
+                not_pushed,
+                false,
+            ),
+            (
+                "a commit the forge does not have",
+                |_, _, _, sha| *sha = "3".repeat(40),
+                &[],
+                Err("GET /repos/owner/name/git/commits/3333"),
+                not_pushed,
+                false,
+            ),
+            (
+                "an answer echoing the token",
+                none,
+                &[PULL],
+                Err("GET /repos/owner/name/pulls/9: HTTP 500"),
+                not_pushed,
+                false,
+            ),
+            (
+                "a status failing after the push",
+                none,
+                &["POST /repos/owner/name/statuses/"],
+                Err("after publishing https://forge.example/owner/name/pulls/9: POST"),
+                Some("pushed"),
+                true,
+            ),
+        ];
+        for (what, edit, failing, want, pushed, status_written) in cases {
+            let (root, mut push) = pull_request_branch();
+            let mut pull = pull("fork/name", "agent-run-7", &push.head);
+            let mut sha = push.head.clone();
+            edit(root.path(), &mut pull, &mut push, &mut sha);
+            let (server, requests) = push_forge(pull, push.head.clone(), failing);
+            let mut forgejo = forgejo(&server);
+            forgejo.git = root.path().display().to_string();
+            let ops = [
+                Op::Push(push.clone()),
+                Op::Status(CommitStatus {
+                    sha: sha.clone(),
+                    state: super::super::State::Success,
+                    target_url: RUN_URL.to_owned(),
+                }),
+            ];
+            let result = super::super::publish(&ops, &forgejo);
+            let requests: Vec<Request> = requests.try_iter().collect();
+            let writes: Vec<&Request> = requests
+                .iter()
+                .filter(|request| !request.line.starts_with("GET "))
+                .collect();
+            for request in &requests {
+                assert_eq!(request.authorization, format!("token {TOKEN}"), "{what}");
+            }
+            match (result, want) {
+                (Ok(urls), Ok(())) => assert_eq!(urls, [PULL_URL, STATUS_URL], "{what}"),
+                (Err(err), Err(want)) => {
+                    let err = format!("{err:#}");
+                    assert!(err.contains(want), "{what}: {err}");
+                    assert!(!err.contains(&TOKEN[..4]), "{what}: {err}");
+                }
+                (result, _) => panic!("{what}: {result:?}"),
+            }
+            let bare = root.path().join("fork/name.git");
+            let branch = sh(&bare, &["rev-parse", "agent-run-7"]);
+            match pushed {
+                Some("pushed") => {
+                    assert_eq!(
+                        sh(&bare, &["rev-parse", "agent-run-7~"]),
+                        push.head,
+                        "{what}"
+                    );
+                    assert_eq!(sh(&bare, &["show", "agent-run-7:src/x"]), "x", "{what}");
+                    assert_eq!(
+                        sh(&bare, &["log", "-1", "--format=%an %cn", "agent-run-7"]),
+                        "t agentic-job",
+                        "{what}"
+                    );
+                }
+                // Left where another put it.
+                Some(_) => assert_ne!(branch, push.head, "{what}"),
+                None => assert_eq!(branch, push.head, "{what}"),
+            }
+            // The fork's branch alone: nothing in the repository itself.
+            assert_eq!(
+                sh(
+                    &root.path().join("owner/name.git"),
+                    &["for-each-ref", "--format=%(refname)"]
+                ),
+                "refs/heads/main",
+                "{what}"
+            );
+            assert_eq!(writes.len(), usize::from(status_written), "{what}");
+            if let Some(write) = writes.first() {
+                assert_eq!(
+                    route(write),
+                    format!("POST /repos/owner/name/statuses/{}", push.head),
+                    "{what}"
+                );
+            }
+        }
+    }
+
+    /// Each state the caller may set is the forge's of that name, with a
+    /// fixed description, the pinned context and the run's link.
+    #[test]
+    fn status_mapping() {
+        use super::super::State;
+        let sha = "4".repeat(40);
+        for (state, name, description) in [
+            (State::Pending, "pending", "The run is in progress"),
+            (State::Success, "success", "The run succeeded"),
+            (State::Failure, "failure", "The run failed"),
+            (State::Error, "error", "The run could not finish"),
+        ] {
+            let (server, requests) = push_forge(Value::Null, sha.clone(), &[]);
+            let url = forgejo(&server)
+                .status(&CommitStatus {
+                    sha: sha.clone(),
+                    state,
+                    target_url: RUN_URL.to_owned(),
+                })
+                .unwrap();
+            assert_eq!(url, STATUS_URL);
+            let request = requests.recv().unwrap();
+            assert_eq!(
+                route(&request),
+                format!("POST /repos/owner/name/statuses/{sha}")
+            );
+            assert_eq!(
+                request.body,
+                json!({"state": name, "target_url": RUN_URL, "description": description,
+                    "context": "agentic-job"})
+            );
         }
     }
 

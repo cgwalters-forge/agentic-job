@@ -105,10 +105,13 @@ bounds can allow:
 `missing_data`.
 
 Off GitHub, `agentic-job apply --forge forgejo` publishes
-`add_comment`, `create_pull_request`, `create_issue`, `add_labels`,
-`remove_labels`, `close_issue` and `close_pull_request`, writes nothing
-for `noop`, `missing_tool` and `missing_data`, and refuses the rest
-([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)).
+`add_comment`, `create_pull_request`, `push_to_pull_request_branch`,
+`create_issue`, `add_labels`, `remove_labels`, `close_issue` and
+`close_pull_request`, writes nothing for `noop`, `missing_tool` and
+`missing_data`, and refuses the rest
+([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)). With
+`--status` and `--status-sha` it also sets the caller's commit status,
+context `agentic-job`; no request type sets one.
 
 ## Hand-back files
 

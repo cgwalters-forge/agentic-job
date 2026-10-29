@@ -1216,7 +1216,8 @@ On GitHub, gh-aw's handlers remain the applier.
 ```text
 FORGEJO_TOKEN=... agentic-job apply --forge forgejo --server URL --repo OWNER/NAME \
   --policy policy.json --checked DIR --run-url URL [--comment-target NUMBER] \
-  [--push-repo OWNER/NAME] [--recover-pushed-commit SHA]
+  [--push-repo OWNER/NAME] [--recover-pushed-commit SHA] \
+  [--status pending|success|failure|error --status-sha SHA]
 ```
 
 publishes what `check` accepted to a Forgejo (or Gitea) repository,
@@ -1237,7 +1238,8 @@ CI's `forgejo` job runs apply with only those against a Forgejo LTS container,
 in [crates/agentic-job/tests/forgejo.rs](../crates/agentic-job/tests/forgejo.rs).
 
 It publishes `add_comment`, to `--comment-target` in the repository,
-`create_pull_request`, and the issue and label types
+`create_pull_request`, `push_to_pull_request_branch`
+([below](#pushing-to-a-pull-requests-branch-on-forgejo)), and the issue and label types
 [below](#labels-issues-and-closing-on-forgejo); `noop`, `missing_tool` and
 `missing_data` write nothing. Any other type is refused by
 name, as is a report check refused. Before anything is written, apply
@@ -1254,9 +1256,10 @@ references outside code spans and fences. Closing and reopening references
 share the collector's cap of ten; later ones are neutralized too.
 Then apply asks the forge what only it can say about each request, still
 before any write, and the pull request is
-opened, its push making the last checks, then issues created, comments
-posted, labels changed and items closed; a failure after a write names
-what was made.
+opened or pushed to, its push making the last checks, then issues created,
+comments posted, labels changed, items closed and the caller's
+[commit status](#commit-statuses-on-forgejo) set; a failure after a write
+names what was made.
 
 A pull request's branch goes to a fork, never to the target repository.
 `--push-repo` is required for one and must be the `push_repo` the bounds
@@ -1336,6 +1339,53 @@ no credential of their own. The fork's own push workflows run the code too,
 so the fork should have Actions disabled or no secrets. Comments involve no
 push.
 
+#### Pushing to a pull request's branch on Forgejo
+
+`push_to_pull_request_branch` adds one commit to the branch of an open
+pull request from the bounds' fork, as on GitHub
+([pushing to a pull request's branch](#pushing-to-a-pull-requests-branch)): the pull
+request, its branch and its head are the policy's, which the policy job
+read and held to the bounds' push `branches`; the request may only repeat
+them. `--push-repo` is required and must be the bounds' `push_repo`, of
+another owner, as for a new pull request. `policy` refuses a push for a
+private run, as on GitHub. Before any write, apply reads
+the two repositories as above (a fork of the target, private unless the
+target is public) and `GET /api/v1/repos/OWNER/NAME/pulls/N`,
+and refuses unless the pull request is open, into the target, from the
+bounds' fork and the policy's branch exactly, and at the head the run was
+asked for. A branch that moved is refused, never pushed over, and no other
+branch or repository is tried.
+
+It reads the patch again as for a new pull request: its size, the push's
+protected files and paths, `commit_author`, and its base commit, which
+must be the pinned head. It fetches the branch from the fork, applies the
+patch on that head as above, refuses it if it changed any path the patch
+did not name, and pushes the commit, made on the head and so a fast
+forward of it, under a lease on the head: a branch that moved after the
+forge answered is refused too. The
+commit's message is the patch's. apply does not mark the pull request
+ready, so `ready_when_complete` is refused, as is a replacement series.
+A re-run after the push is refused at the head, which has moved; the
+error after a later failure names the pull request.
+
+#### Commit statuses on Forgejo
+
+With `--status STATE --status-sha SHA`, apply sets a commit status on
+`SHA` in the target, after every other write:
+`POST /api/v1/repos/OWNER/NAME/statuses/SHA` with that state, the context
+`agentic-job`, a fixed description for the state and `--run-url` as its
+link. All four are the caller's. `STATE` is `pending`, `success`,
+`failure` or `error`, which GitHub and Forgejo both have; before any
+write, apply refuses a `SHA` that is not a full commit ID or one the
+forge does not have. Without the two options it sets none. A refused
+hand-back, or one whose publishing fails, gets no status from apply.
+
+No request can ask for a status. The agent's requests stay gh-aw's types
+([neutral profile](#neutral-profile)); a GitHub `create_check_run` is
+refused off GitHub, and an agent-visible status type would be a new
+verb, which needs its own approved and versioned contract rather than an
+unversioned JSONL line.
+
 #### Labels, issues and closing on Forgejo
 
 `add_labels`, `remove_labels`, `close_issue`, `close_pull_request` and
@@ -1384,9 +1434,8 @@ fails, naming the issue, if Forgejo created it without them, as it does
 for a token that may not set labels.
 
 Not done: re-run detection (a
-re-run with a pull request is refused at its branch; one with comments
-or a new issue posts them again),
-reviews and pushes to an open pull request.
+re-run with a pull request or a push is refused at its branch; one with
+comments or a new issue posts them again) and reviews.
 
 ## Neutral profile
 
@@ -1418,8 +1467,9 @@ any other there, and `check` refuses a policy that holds one. The list
 is of what is held, not of what is refused, so a type nobody has mapped
 stays GitHub-only. GitHub-only because no other forge has the object:
 `create_discussion`, `update_project`, `hide_comment`, `link_sub_issue`
-and `create_check_run` (check runs are for GitHub Apps; a neutral status
-with a pinned context would be the common subset). GitHub-only until
+and `create_check_run` (check runs are for GitHub Apps; the common
+subset is a commit status with a pinned context, which only the caller
+sets: [commit statuses on Forgejo](#commit-statuses-on-forgejo)). GitHub-only until
 someone maps them: `update_issue`, `update_pull_request`,
 `mark_pull_request_as_ready_for_review`, `add_reviewer`,
 `assign_to_user`, `reply_to_pull_request_review_comment` and
