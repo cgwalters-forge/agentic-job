@@ -16,6 +16,12 @@
 # Names are matched after the provider prefix (`praxis/`) and a date
 # suffix (`-20251101`) are dropped and dots read as dashes, so
 # `claude-sonnet-4.5` is `claude-sonnet-4-5`.
+#
+# An unpublished rate may opt in with estimate = true and a required,
+# nonempty one-line basis, alongside all three numeric rates. For example:
+# "unlisted-model" = { input = 2.0, cached-input = 0.10, output = 10.0, estimate = true, basis = "nearest published tier: gpt-6.1-sol" }
+# Such rates contribute to cost but are labeled estimates in summaries.
+# Omitting estimate (or setting it false) means a published price.
 
 date = "2026-10-29"
 
