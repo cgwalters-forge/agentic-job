@@ -940,6 +940,25 @@ hand-back is `outputs.jsonl`, `base.json` and at most one
 its own patch and `secondary-base.json`. gh-aw's agents call an MCP server that validates each
 request as it is made; here it is a plain file.
 
+With `[commit] format = true` in the runner configuration (off by
+default), a branch run whose change has Rust in it (a new or changed
+`.rs` file, or a commit of the agent's that touches one) is formatted
+before the patch is made, so that a hand-back does not spend a CI cycle
+and a fix round on `cargo fmt --check`. In a checkout with a
+`Cargo.toml`, `run` runs `just fmt` where the Justfile has that recipe,
+else `cargo fmt --all`. Like git there, it runs as the sandbox user with
+the agent's confinement, and so can do nothing the agent could not:
+Cargo is kept offline and rustup (1.28.1 or later) may not install a
+toolchain the checkout names, within a five-minute timeout. Formatting changes
+only how the code is laid out, though `cargo fmt --all` also formats
+files the agent did not change. A missing rustfmt or a formatter that
+fails is a warning in the job's log, which gives only the exit status,
+since rustfmt's errors quote the agent's source; the change is then
+taken as it was left. The result is the agent's change like any other,
+and `check` holds it to every bound.
+Only the run's own checkout is formatted, not a
+[secondary pull request](#a-secondary-pull-request)'s.
+
 Where the policy has `[memory]`, `run` also packs the flat directory
 `~/memory/` into `memory.json`, `{"files": {"NAME": "text", ...}}`,
 for an analysis run as for a branch run. Like `replacement.json`, it is

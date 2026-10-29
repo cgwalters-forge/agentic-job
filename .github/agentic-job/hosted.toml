@@ -50,14 +50,15 @@ packages = ["nftables", "podman", "uidmap"]
 # nothing is read from the target's own, untrusted, contents
 # (docs/dispatch.md#giving-runs-a-toolchain).
 [setup.repo-packages]
-# Ubuntu 26.04's Rust 1.93 (this repository needs 1.88) and gcc.
+# Ubuntu 26.04's Rust 1.93 (this repository needs 1.88), gcc, and
+# rustfmt with cargo-fmt for `[commit] format` below.
 # No egress rule is added: the proxy lets any GET through, and a
 # `cargo build --locked` only reads, from
 #   index.crates.io   the sparse index
 #   static.crates.io  the crates, checked against Cargo.lock
 #   github.com        git dependencies (git fetch is already allowed)
 # Their build scripts and proc macros run as the sandbox user.
-"cgwalters-forge/agentic-job" = ["cargo"]
+"cgwalters-forge/agentic-job" = ["cargo", "rustfmt"]
 
 [commit]
 # GitHub's own Actions bot, whose noreply address it attributes for any
@@ -65,3 +66,7 @@ packages = ["nftables", "podman", "uidmap"]
 # pins it in a bounds file (docs/safe-outputs.md#the-bounds-and-the-policy).
 author = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
 trailers = ["Generated-by: AI"]
+# Format the agent's Rust before the patch is taken, so that a hand-back
+# does not fail `cargo fmt --check` (docs/safe-outputs.md#what-the-agent-does).
+# A target without rustfmt in its packages above gets a warning.
+format = true
