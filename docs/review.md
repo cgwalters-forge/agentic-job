@@ -131,9 +131,9 @@ review run per finding, ten rounds on one pull request. Check does not read
 severities: refusing a mislabelled verdict would only lose its comment, and
 the status would fail as it does for CHANGES.
 
-Before correctness, `review.yml`'s standing task and the implement skill's
-[diff reviewer](../skills/agents/diff-reviewer.md), but not yet dispatch's
-inline `review` profile, ask whether the change should exist as
+Before correctness, `review.yml`'s standing task, dispatch's `review`
+profile and the implement skill's [diff reviewer](../skills/agents/diff-reviewer.md)
+ask whether the change should exist as
 written: whether it adds a mechanism where an existing one could be
 extended, configured or deleted, whether it sits in the repository and
 language the base's AGENTS.md or conventions call for, and whether it is
