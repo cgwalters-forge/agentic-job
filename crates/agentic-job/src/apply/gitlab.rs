@@ -4,7 +4,9 @@
 //! the repository as its `target_project_id`. Never a branch of the
 //! repository itself, for the reason Forgejo's publisher gives. Also an
 //! issue, labels added to or removed from an issue or a merge request,
-//! and one closed with a note saying why.
+//! and one closed with a note saying why; a commit pushed on the branch of
+//! the policy's merge request, in that fork, under a lease on the head the
+//! run was asked for; and the caller's commit status.
 //!
 //! GitLab numbers issues and merge requests apart within a project (`#5`
 //! and `!5`, each an `iid`), so a note's target kind is the caller's
@@ -39,6 +41,7 @@ use super::forgejo::{self, Api, PUT};
 use super::git::{Git, Push};
 use super::{
     BranchPush, Close, CommitStatus, Kind, LabelChange, Made, NewIssue, Op, Publisher, PullRequest,
+    STATUS_CONTEXT, State,
 };
 
 const GET: &str = "GET";
@@ -63,6 +66,21 @@ const SCOPE: &str = "::";
 const DONE: &[&str] = &["closed", "merged"];
 
 const OPENED: &str = "opened";
+
+/// A commit's latest statuses named [`STATUS_CONTEXT`] asked for, one a
+/// ref: GitLab's most a page.
+const STATUSES_PER_PAGE: usize = 100;
+
+/// GitLab's commit status state for STATE. It has no `error`, and a run
+/// that could not finish did not pass, so that is `failed` too, never
+/// `canceled` or `skipped`, which a merge check may let through.
+fn status_state(state: State) -> &'static str {
+    match state {
+        State::Pending => "pending",
+        State::Success => "success",
+        State::Failure | State::Error => "failed",
+    }
+}
 
 pub struct Gitlab {
     /// `SERVER/api/v4`.
@@ -443,14 +461,18 @@ impl Gitlab {
         Ok(())
     }
 
-    /// Pushes the merge request's branch to its fork: see [`Git::push`].
-    fn push(&self, pr: &PullRequest) -> Result<String> {
+    /// Git with the token, as GitLab takes it over HTTP.
+    fn git(&self) -> Git<'_> {
         let credential = BASE64.encode(format!("{GIT_USER}:{}", self.token));
-        let git = Git {
+        Git {
             authorization: format!("Basic {credential}"),
             token: &self.token,
-        };
-        git.push(
+        }
+    }
+
+    /// Pushes the merge request's branch to its fork: see [`Git::push`].
+    fn push(&self, pr: &PullRequest) -> Result<String> {
+        self.git().push(
             &Push {
                 from: &self.remote(&self.repo),
                 base: &pr.base,
@@ -465,11 +487,74 @@ impl Gitlab {
             self.recover_pushed_commit.as_deref(),
         )
     }
-}
 
-/// A write `plan` refuses on GitLab, refused here as well.
-fn unsupported(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("{what}, which apply does not publish to GitLab")
+    /// The URL of the merge request PUSH goes to, refused unless GitLab
+    /// answers for it as the policy's: that iid among the merge requests
+    /// of the repository's project, by the ID read, into that project,
+    /// open, from the bounds' fork, by its ID, and the branch the policy
+    /// read, at the head the run was asked for; and the fork as
+    /// [`Self::check_fork`] holds it.
+    fn push_target(&self, push: &BranchPush) -> Result<String> {
+        self.other_owner(&push.push_repo)?;
+        let (target, fork) = self.check_fork(&push.push_repo, push.private)?;
+        let number = push.number;
+        let mr = reference(Kind::PullRequest, number);
+        let path = format!("/projects/{}/merge_requests/{number}", target.id);
+        let answer = self.request(GET, &path, None)?;
+        ensure!(
+            answer["iid"].as_u64() == Some(number)
+                && answer["project_id"].as_u64() == Some(target.id)
+                && answer["target_project_id"].as_u64() == Some(target.id),
+            "{mr} is not a merge request of {}",
+            target.path
+        );
+        ensure!(answer["state"] == OPENED, "merge request {mr} is not open");
+        let (source, branch) = (
+            answer["source_project_id"].as_u64(),
+            answer["source_branch"].as_str(),
+        );
+        ensure!(
+            source == Some(fork.id) && branch == Some(push.branch.as_str()),
+            "merge request {mr} is from {}:{}, not {} (project {}):{}: a push goes only to the bounds' fork and the branch the policy read",
+            source.map_or_else(
+                || "a deleted project".to_owned(),
+                |id| format!("project {id}")
+            ),
+            branch.unwrap_or("no branch"),
+            fork.path,
+            fork.id,
+            push.branch
+        );
+        let head = answer["sha"].as_str();
+        ensure!(
+            head == Some(push.head.as_str()),
+            "merge request {mr}'s branch is at {}, not {}, the head the run was asked for: it moved, and is not pushed over",
+            head.unwrap_or("no commit"),
+            push.head
+        );
+        answer["web_url"]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("GET {path}: the response has no web_url"))
+    }
+
+    /// Commit SHA of the repository's project, as GitLab answers for it,
+    /// and its page: a commit it does not have would fail the status
+    /// after every other write.
+    fn commit(&self, sha: &str) -> Result<(Project, String)> {
+        let project = self.project(&self.repo)?;
+        let path = format!("/projects/{}/repository/commits/{sha}", project.id);
+        let answer = self.request(GET, &path, None)?;
+        ensure!(
+            answer["id"] == sha,
+            "GET {path}: the response is not that commit"
+        );
+        let url = answer["web_url"]
+            .as_str()
+            .map(str::to_owned)
+            .with_context(|| format!("GET {path}: the response has no web_url"))?;
+        Ok((project, url))
+    }
 }
 
 impl Publisher for Gitlab {
@@ -490,8 +575,13 @@ impl Publisher for Gitlab {
             Op::Close(close) => {
                 self.to_close(close.number, close.kind)?;
             }
-            Op::Push(_) => return Err(unsupported("a push to a merge request's branch")),
-            Op::Status(_) => return Err(unsupported("a commit status")),
+            Op::Push(push) => {
+                let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
+                self.push_target(push).with_context(pushing)?;
+            }
+            Op::Status(status) => {
+                self.commit(&status.sha)?;
+            }
         }
         Ok(())
     }
@@ -550,8 +640,29 @@ impl Publisher for Gitlab {
         })
     }
 
-    fn push_to_branch(&self, _: &BranchPush) -> Result<String> {
-        Err(unsupported("a push to a merge request's branch"))
+    /// As Forgejo's: the merge request and fork are read again, then git
+    /// holds the branch to the head under a lease.
+    fn push_to_branch(&self, push: &BranchPush) -> Result<String> {
+        let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
+        let url = self.push_target(push).with_context(pushing)?;
+        let fork = self.remote(&push.push_repo);
+        self.git()
+            .push(
+                &Push {
+                    from: &fork,
+                    base: &push.branch,
+                    base_commit: &push.head,
+                    to: &fork,
+                    branch: &push.branch,
+                    patch: &push.patch,
+                    files: &push.files,
+                    head: Some(&push.head),
+                    committer: None,
+                },
+                None,
+            )
+            .with_context(pushing)?;
+        Ok(url)
     }
 
     /// GitLab leaves out the labels of a token that may not set them and
@@ -632,14 +743,50 @@ impl Publisher for Gitlab {
         Ok(item.url)
     }
 
-    fn status(&self, _: &CommitStatus) -> Result<String> {
-        Err(unsupported("a commit status"))
+    /// GitLab refuses `pending` over a status of that name still pending,
+    /// and adds another for a finished one, so one with this state and
+    /// run link, a re-run's own, is left as it is. Returns the commit's page: GitLab gives a
+    /// status none of its own.
+    fn status(&self, status: &CommitStatus) -> Result<String> {
+        let (project, url) = self.commit(&status.sha)?;
+        let state = status_state(status.state);
+        let path = format!(
+            "/projects/{}/repository/commits/{}/statuses?name={STATUS_CONTEXT}&per_page={STATUSES_PER_PAGE}",
+            project.id, status.sha
+        );
+        let answer = self.request(GET, &path, None)?;
+        let latest = answer
+            .as_array()
+            .with_context(|| format!("GET {path}: the response is not statuses"))?;
+        if latest.iter().any(|set| {
+            set["name"] == STATUS_CONTEXT
+                && set["status"] == state
+                && set["target_url"] == status.target_url.as_str()
+        }) {
+            return Ok(url);
+        }
+        let path = format!("/projects/{}/statuses/{}", project.id, status.sha);
+        let answer = self.request(
+            POST,
+            &path,
+            Some(&json!({
+                "state": state,
+                "name": STATUS_CONTEXT,
+                "target_url": status.target_url,
+                "description": status.state.description(),
+            })),
+        )?;
+        ensure!(
+            answer["status"] == state && answer["name"] == STATUS_CONTEXT,
+            "POST {path}: the response is not a {state} status {STATUS_CONTEXT}"
+        );
+        Ok(url)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::forgejo::tests::{mock, repository, serve, sh};
+    use super::super::forgejo::tests::{mock, pull_request_branch, repository, serve, sh};
     use super::super::tests::{checked, policy, target};
     use super::super::{Forge, Target, plan};
     use super::*;
@@ -819,47 +966,401 @@ mod tests {
         }
     }
 
-    /// A push to a merge request's branch, a commit status, and a label
-    /// change of no kind are refused before any request.
+    /// A label change of no kind is refused before any request.
     #[test]
-    fn other_ops_are_refused() {
-        let gitlab = gitlab("http://127.0.0.1:1");
-        let (_root, pr) = repository();
-        let ops = [
-            (
-                Op::Push(BranchPush {
-                    number: 5,
-                    push_repo: pr.push_repo,
-                    private: false,
-                    branch: pr.branch,
-                    head: pr.base_commit.clone(),
-                    patch: pr.patch,
-                    files: pr.files,
+    fn a_label_change_of_no_kind_is_refused() {
+        let op = Op::Labels(LabelChange {
+            item: 5,
+            kind: None,
+            add: true,
+            labels: vec!["bug".into()],
+        });
+        let err = format!(
+            "{:#}",
+            gitlab("http://127.0.0.1:1").preflight(&op).unwrap_err()
+        );
+        assert_eq!(
+            err,
+            "a label change on GitLab that does not name its item's kind"
+        );
+    }
+
+    const MR: &str = "GET /api/v4/projects/1/merge_requests/9";
+    const MR_9_URL: &str = "https://gitlab.example/owner/name/-/merge_requests/9";
+    const COMMIT_URL: &str = "https://gitlab.example/owner/name/-/commit/";
+    const RUN_URL: &str = "https://gitlab.example/owner/name/-/pipelines/7";
+    const STATUSES: &str = "POST /api/v4/projects/1/statuses/";
+
+    /// Merge request 9 as GitLab answers for it: open, from project
+    /// SOURCE's BRANCH at SHA, into the repository's project, 1.
+    fn merge_request(source: u64, branch: &str, sha: &str) -> Value {
+        json!({
+            "iid": 9, "project_id": 1, "target_project_id": 1, "state": "opened",
+            "source_project_id": source, "source_branch": branch, "target_branch": "main",
+            "sha": sha, "web_url": MR_9_URL,
+        })
+    }
+
+    /// The public repository, project 1, its public fork, project 2, and
+    /// merge request 9, MR. It knows only the commit KNOWN, whose latest
+    /// statuses are SET, takes every write, and fails each route starting
+    /// with one of FAILING with the token in its answer.
+    fn push_gitlab(
+        mr: Value,
+        known: String,
+        set: Value,
+        failing: &'static [&'static str],
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
+    ) {
+        serve(64, move |request| {
+            let line = route(request);
+            if failing.iter().any(|failing| line.starts_with(failing)) {
+                let answer = json!({"message": format!("failure {TOKEN}")});
+                return (500, answer.to_string());
+            }
+            let commit = format!("GET /api/v4/projects/1/repository/commits/{known}");
+            let answer = match line.as_str() {
+                "GET /api/v4/projects/owner%2Fname" => repo(),
+                "GET /api/v4/projects/fork%2Fname" => project(2, "fork/name", "public", Some(1)),
+                MR => mr.clone(),
+                line if line == commit => {
+                    json!({"id": known, "web_url": format!("{COMMIT_URL}{known}")})
+                }
+                line if line == format!("{commit}/statuses?name=agentic-job&per_page=100") => {
+                    set.clone()
+                }
+                line if line.starts_with(STATUSES) => json!({
+                    "id": 1, "status": request.body["state"], "name": request.body["name"],
                 }),
-                "a push to a merge request's branch, which apply does not publish to GitLab",
+                _ => return (404, "{}".to_owned()),
+            };
+            ok(&answer)
+        })
+    }
+
+    /// A push to the policy's merge request's branch, from another
+    /// project, and the caller's status after it: the push, a head that
+    /// moved by GitLab's answer or under git's lease, another source
+    /// project, branch or target, another iid, paths check did not read,
+    /// and failures after a write.
+    #[test]
+    fn pushes_to_a_merge_request_branch() {
+        type Edit = fn(&std::path::Path, &mut Value, &mut BranchPush, &mut String);
+        let none: Edit = |_, _, _, _| {};
+        let moved = "it moved, and is not pushed over";
+        let not_from = "a push goes only to the bounds' fork and the branch the policy read";
+        // What, the change to the fixture (the fork's root, merge request
+        // 9, the push and the status's commit), the routes that fail, a
+        // part of the error, whether the branch got the commit (None: left
+        // at the head; Some(false): moved by another), and whether the
+        // status was written.
+        type Case = (
+            &'static str,
+            Edit,
+            &'static [&'static str],
+            Result<(), &'static str>,
+            Option<bool>,
+            bool,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "the push and its status",
+                none,
+                &[],
+                Ok(()),
+                Some(true),
+                true,
             ),
             (
-                Op::Status(CommitStatus {
-                    sha: pr.base_commit,
-                    state: super::super::State::Success,
-                    target_url: "https://x".into(),
-                }),
-                "a commit status, which apply does not publish to GitLab",
+                "a head GitLab says moved",
+                |_, mr, _, _| mr["sha"] = json!("3".repeat(40)),
+                &[],
+                Err(moved),
+                None,
+                false,
             ),
             (
-                Op::Labels(LabelChange {
-                    item: 5,
-                    kind: None,
-                    add: true,
-                    labels: vec!["bug".into()],
-                }),
-                "a label change on GitLab that does not name its item's kind",
+                "a branch that moved after GitLab answered",
+                |root, _, _, _| {
+                    let work = root.join("work");
+                    sh(&work, &["commit", "-q", "--allow-empty", "-m", "Other"]);
+                    let fork = root.join("fork/name.git");
+                    let fork = fork.to_str().unwrap();
+                    sh(
+                        &work,
+                        &["push", "-q", "-f", fork, "HEAD:refs/heads/agent-run-7"],
+                    );
+                },
+                &[],
+                Err("refs/heads/agent-run-7 is no longer at"),
+                Some(false),
+                false,
+            ),
+            (
+                "another project's merge request into the repository",
+                |_, mr, _, _| mr["source_project_id"] = json!(3),
+                &[],
+                Err("!9 is from project 3:agent-run-7, not fork/name (project 2):agent-run-7"),
+                None,
+                false,
+            ),
+            (
+                "the repository's own branch",
+                |_, mr, _, _| mr["source_project_id"] = json!(1),
+                &[],
+                Err(not_from),
+                None,
+                false,
+            ),
+            (
+                "another branch",
+                |_, mr, _, _| mr["source_branch"] = json!("main"),
+                &[],
+                Err("is from project 2:main"),
+                None,
+                false,
+            ),
+            (
+                "a deleted fork",
+                |_, mr, _, _| mr["source_project_id"] = Value::Null,
+                &[],
+                Err("is from a deleted project:agent-run-7"),
+                None,
+                false,
+            ),
+            (
+                "a merged merge request",
+                |_, mr, _, _| mr["state"] = json!("merged"),
+                &[],
+                Err("merge request !9 is not open"),
+                None,
+                false,
+            ),
+            (
+                "another iid",
+                |_, mr, _, _| mr["iid"] = json!(10),
+                &[],
+                Err("!9 is not a merge request of owner/name"),
+                None,
+                false,
+            ),
+            (
+                "another project's merge request",
+                |_, mr, _, _| mr["project_id"] = json!(4),
+                &[],
+                Err("!9 is not a merge request of owner/name"),
+                None,
+                false,
+            ),
+            (
+                "a merge request into another project",
+                |_, mr, _, _| mr["target_project_id"] = json!(4),
+                &[],
+                Err("!9 is not a merge request of owner/name"),
+                None,
+                false,
+            ),
+            (
+                "a public fork of a private run",
+                |_, _, push, _| push.private = true,
+                &[],
+                Err("fork/name is not private"),
+                None,
+                false,
+            ),
+            (
+                "the repository's owner's",
+                |_, _, push, _| push.push_repo = "owner/other".into(),
+                &[],
+                Err("a merge request's branch goes to another owner's fork, not to owner/other"),
+                None,
+                false,
+            ),
+            (
+                "paths check did not read",
+                |_, _, push, _| push.files = vec!["src/y".into()],
+                &[],
+                Err("the applied patch changes other paths than check read"),
+                None,
+                false,
+            ),
+            (
+                "a commit GitLab does not have",
+                |_, _, _, sha| *sha = "3".repeat(40),
+                &[],
+                Err("GET /projects/1/repository/commits/3333"),
+                None,
+                false,
+            ),
+            (
+                "an answer echoing the token",
+                none,
+                &[MR],
+                Err("GET /projects/1/merge_requests/9: HTTP 500"),
+                None,
+                false,
+            ),
+            (
+                "a status failing after the push",
+                none,
+                &[STATUSES],
+                Err("after publishing https://gitlab.example/owner/name/-/merge_requests/9: POST"),
+                Some(true),
+                true,
             ),
         ];
-        for (op, want) in ops {
-            let err = format!("{:#}", gitlab.preflight(&op).unwrap_err());
-            assert_eq!(err, want);
+        for (what, edit, failing, want, pushed, status_written) in cases {
+            let (root, mut push) = pull_request_branch();
+            let mut mr = merge_request(2, "agent-run-7", &push.head);
+            let mut sha = push.head.clone();
+            edit(root.path(), &mut mr, &mut push, &mut sha);
+            let (server, requests) = push_gitlab(mr, push.head.clone(), json!([]), failing);
+            let mut gitlab = gitlab(&server);
+            gitlab.git = root.path().display().to_string();
+            let ops = [
+                Op::Push(push.clone()),
+                Op::Status(CommitStatus {
+                    sha,
+                    state: State::Success,
+                    target_url: RUN_URL.to_owned(),
+                }),
+            ];
+            let result = super::super::publish(&ops, &gitlab);
+            let requests: Vec<_> = requests.try_iter().collect();
+            for request in &requests {
+                assert_eq!(request.authorization, format!("Bearer {TOKEN}"), "{what}");
+            }
+            match (result, want) {
+                (Ok(urls), Ok(())) => assert_eq!(
+                    urls,
+                    [MR_9_URL.to_owned(), format!("{COMMIT_URL}{}", push.head)],
+                    "{what}"
+                ),
+                (Err(err), Err(want)) => {
+                    let err = format!("{err:#}");
+                    assert!(err.contains(want), "{what}: {err}");
+                    assert!(!err.contains(&TOKEN[..4]), "{what}: {err}");
+                }
+                (result, _) => panic!("{what}: {result:?}"),
+            }
+            let fork = root.path().join("fork/name.git");
+            let branch = sh(&fork, &["rev-parse", "agent-run-7"]);
+            match pushed {
+                Some(true) => {
+                    assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), push.head);
+                    assert_eq!(sh(&fork, &["show", "agent-run-7:src/x"]), "x", "{what}");
+                }
+                Some(false) => assert_ne!(branch, push.head, "{what}"),
+                None => assert_eq!(branch, push.head, "{what}"),
+            }
+            // The fork's branch alone: nothing in the repository itself.
+            assert_eq!(
+                sh(
+                    &root.path().join("owner/name.git"),
+                    &["for-each-ref", "--format=%(refname)"]
+                ),
+                "refs/heads/main",
+                "{what}"
+            );
+            let writes: Vec<String> = requests
+                .iter()
+                .filter(|request| !request.line.starts_with("GET "))
+                .map(route)
+                .collect();
+            let want_writes = if status_written {
+                vec![format!("{STATUSES}{}", push.head)]
+            } else {
+                vec![]
+            };
+            assert_eq!(writes, want_writes, "{what}");
         }
+    }
+
+    /// Each state the caller may set is GitLab's nearest that fails no
+    /// less, with a fixed description, the pinned name and the run's
+    /// link; one the commit's latest of that name has, with that link,
+    /// is not written again, and GitLab's answer must be that status.
+    #[test]
+    fn statuses() {
+        let sha = "4".repeat(40);
+        let latest = |state: &str, link: &str| json!([{"name": "agentic-job", "status": state, "target_url": link}]);
+        let cases = [
+            (
+                State::Pending,
+                "pending",
+                "The run is in progress",
+                json!([]),
+            ),
+            (State::Success, "success", "The run succeeded", json!([])),
+            (State::Failure, "failed", "The run failed", json!([])),
+            (
+                State::Error,
+                "failed",
+                "The run could not finish",
+                json!([]),
+            ),
+            // Another run's, or another state, is written over.
+            (
+                State::Success,
+                "success",
+                "The run succeeded",
+                latest("success", "https://gitlab.example/other"),
+            ),
+            (
+                State::Success,
+                "success",
+                "The run succeeded",
+                latest("pending", RUN_URL),
+            ),
+        ];
+        for (state, name, description, set) in cases {
+            let (server, requests) = push_gitlab(Value::Null, sha.clone(), set, &[]);
+            let url = gitlab(&server)
+                .status(&CommitStatus {
+                    sha: sha.clone(),
+                    state,
+                    target_url: RUN_URL.to_owned(),
+                })
+                .unwrap();
+            assert_eq!(url, format!("{COMMIT_URL}{sha}"));
+            let write = requests
+                .try_iter()
+                .find(|request| !request.line.starts_with("GET "))
+                .unwrap();
+            assert_eq!(route(&write), format!("{STATUSES}{sha}"));
+            assert_eq!(
+                write.body,
+                json!({"state": name, "name": "agentic-job", "target_url": RUN_URL,
+                    "description": description})
+            );
+        }
+        // A re-run finds its own status set, and writes nothing.
+        let (server, requests) =
+            push_gitlab(Value::Null, sha.clone(), latest("failed", RUN_URL), &[]);
+        let status = CommitStatus {
+            sha: sha.clone(),
+            state: State::Error,
+            target_url: RUN_URL.to_owned(),
+        };
+        assert_eq!(
+            gitlab(&server).status(&status).unwrap(),
+            format!("{COMMIT_URL}{sha}")
+        );
+        assert!(requests.try_iter().all(|r| r.line.starts_with("GET ")));
+        // An answer that is not the status written is refused.
+        let (server, _requests) = mock(vec![
+            ok(&repo()),
+            ok(&json!({"id": sha, "web_url": "https://gitlab.example/c"})),
+            ok(&json!([])),
+            ok(&json!({"id": 1, "status": "canceled", "name": "agentic-job"})),
+        ]);
+        let err = format!("{:#}", gitlab(&server).status(&status).unwrap_err());
+        assert!(
+            err.contains("the response is not a failed status agentic-job"),
+            "{err}"
+        );
     }
 
     /// A project in a subgroup, whose path is one encoded segment.

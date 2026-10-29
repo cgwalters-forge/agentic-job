@@ -9,6 +9,15 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `agentic-job apply --forge gitlab` also publishes
+  `push_to_pull_request_branch`, one commit on the policy's open merge
+  request's branch in the bounds' fork, under the same patch, head and
+  lease rules as Forgejo's; a merge request from another project or
+  branch, or whose head moved, is refused before any write. `--status`
+  and `--status-sha` now set the caller's commit status on GitLab too,
+  name `agentic-job`, with `failure` and `error` both GitLab's `failed`;
+  a re-run finding its own status set writes none
+  (docs/safe-outputs.md#publishing-to-gitlab).
 - The pinned model price table accepts opt-in `estimate = true` rates with
   a required one-line `basis`. Run costs include these rates and label the
   figure estimated in `summary.json` and `summary.md`, naming the estimated

@@ -91,11 +91,12 @@ const SUPPORTED: &[&str] = &[
     MISSING_DATA,
 ];
 
-/// What this publishes to GitLab, of [`SUPPORTED`]: all but a push to a
-/// merge request's branch. The others are refused, as there.
+/// What this publishes to GitLab: all of [`SUPPORTED`]. The others are
+/// refused, as there.
 const GITLAB_SUPPORTED: &[&str] = &[
     ADD_COMMENT,
     CREATE_PULL_REQUEST,
+    PUSH_TO_PULL_REQUEST_BRANCH,
     CREATE_ISSUE,
     ADD_LABELS,
     REMOVE_LABELS,
@@ -601,9 +602,7 @@ pub fn plan(checked: &Path, policy: &Policy, target: &Target<'_>) -> Result<Vec<
     }
     // The caller's alone: no request of the run names a commit status.
     if let Some((state, sha)) = target.status {
-        if target.forge == Forge::Gitlab {
-            errors.push("--status, which apply does not set on GitLab".to_owned());
-        } else if COMMIT_RE.is_match(sha) {
+        if COMMIT_RE.is_match(sha) {
             ops.push(Op::Status(CommitStatus {
                 sha: sha.to_owned(),
                 state,
@@ -728,10 +727,11 @@ fn branch_push(
         .as_ref()
         .with_context(|| format!("a {output}, which the policy does not allow"))?;
     // GitHub's apply marks the pull request ready; Forgejo has no draft
-    // to take back, and a `WIP:` title is not apply's to edit.
+    // to take back, and a `WIP:` or `Draft:` title is not apply's to edit.
     anyhow::ensure!(
         !push.ready_when_complete,
-        "a {output} under ready_when_complete, which apply does not mark ready on Forgejo"
+        "a {output} under ready_when_complete, which apply does not mark ready on {}",
+        target.forge.name()
     );
     let pull = &push.target;
     let number = pull
@@ -813,7 +813,7 @@ fn checked_patch(
         .with_context(|| format!("a {output}, and check accepted no patch"))?;
     anyhow::ensure!(
         patch.commit_files.is_none(),
-        "a replacement series, which apply does not push to Forgejo"
+        "a replacement series, which apply does not push off GitHub"
     );
     let name = check::patch_file_name(branch);
     anyhow::ensure!(
@@ -1733,8 +1733,7 @@ mod tests {
                 |_, _, target| target.run_url = "javascript:alert(1)",
                 "not a plain http(s) link",
             ),
-            // GitLab: a GitLab policy, labels on an item of a named kind,
-            // no push and no status.
+            // GitLab: a GitLab policy, labels on an item of a named kind.
             (
                 &[comment_item()],
                 |_, _, target| target.forge = Forge::Gitlab,
@@ -1792,19 +1791,6 @@ mod tests {
                 ],
                 on_gitlab,
                 "state_reason \"not_planned\", which GitLab does not record",
-            ),
-            (
-                &[push_item()],
-                on_gitlab,
-                "\"push_to_pull_request_branch\", which apply does not publish to GitLab",
-            ),
-            (
-                &[comment_item()],
-                |dir, policy, target| {
-                    on_gitlab(dir, policy, target);
-                    target.status = Some((State::Success, HEAD));
-                },
-                "--status, which apply does not set on GitLab",
             ),
             (
                 &[comment_item()],
@@ -2030,15 +2016,30 @@ mod tests {
     }
 
     /// The push to the policy's pull request, then the caller's status
-    /// after every other write; and every refusal before any.
+    /// after every other write; and every refusal before any. GitLab's
+    /// alike, as the patch rules and the policy's merge request, branch
+    /// and head are the same.
     #[test]
     fn pushes() {
+        for forge in [Forge::Forgejo, Forge::Gitlab] {
+            pushes_on(forge);
+        }
+    }
+
+    fn pushes_on(forge: Forge) {
+        let on = |dir: &Path, policy: &mut Policy, target: &mut Target<'static>| {
+            if forge == Forge::Gitlab {
+                on_gitlab(dir, policy, target);
+            }
+        };
         let dir = checked_push(&[comment_item(), push_item()]);
-        let status = Target {
+        let mut status = Target {
             status: Some((State::Success, HEAD)),
             ..target(Some(64))
         };
-        let ops = plan(dir.path(), &push_policy(), &status).unwrap();
+        let mut policy = push_policy();
+        on(dir.path(), &mut policy, &mut status);
+        let ops = plan(dir.path(), &policy, &status).unwrap();
         assert_eq!(ops.len(), 3, "{ops:?}");
         assert_eq!(
             ops[0],
@@ -2152,7 +2153,7 @@ mod tests {
                     report["patch"]["commit_files"] = json!([["src/x"]]);
                     std::fs::write(path, report.to_string()).unwrap();
                 },
-                "a replacement series, which apply does not push to Forgejo",
+                "a replacement series, which apply does not push off GitHub",
             ),
             (
                 push_item(),
@@ -2183,11 +2184,13 @@ mod tests {
             let dir = checked_push(std::slice::from_ref(item));
             let mut policy = push_policy();
             let mut target = target(Some(64));
+            on(dir.path(), &mut policy, &mut target);
             change(dir.path(), &mut policy, &mut target);
             let errors = plan(dir.path(), &policy, &target).unwrap_err();
+            let want = want.replace("Forgejo", forge.name());
             assert!(
-                errors.iter().any(|error| error.contains(want)),
-                "{item}: {errors:?}"
+                errors.iter().any(|error| error.contains(&want)),
+                "{forge:?} {item}: {errors:?}"
             );
         }
     }

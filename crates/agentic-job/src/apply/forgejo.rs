@@ -1894,7 +1894,7 @@ pub(super) mod tests {
     /// The repository of [`repository`], whose fork holds pull request 9's
     /// branch `agent-run-7` at the patch's base, and the push of the patch
     /// on it.
-    fn pull_request_branch() -> (tempfile::TempDir, BranchPush) {
+    pub(in crate::apply) fn pull_request_branch() -> (tempfile::TempDir, BranchPush) {
         let (root, pr) = repository();
         let fork = root.path().join("fork/name.git");
         sh(

@@ -1534,7 +1534,8 @@ comments or a new issue posts them again) and reviews.
 GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJECT \
   --policy policy.json --checked DIR --run-url URL \
   [--comment-target IID --comment-target-kind issue|pull-request] \
-  [--push-repo GROUP/PROJECT] [--recover-pushed-commit SHA]
+  [--push-repo GROUP/PROJECT] [--recover-pushed-commit SHA] \
+  [--status STATE --status-sha SHA]
 ```
 
 publishes to a GitLab project through its REST API v4, as
@@ -1543,8 +1544,7 @@ and pre-write checks. The token comes only from `GITLAB_TOKEN` and goes
 only in an `Authorization: Bearer` header (to git as `oauth2` over
 Basic, through its environment). The policy must be for GitLab
 (`forge = "gitlab"`). It publishes the types below, and writes nothing
-for `noop`, `missing_tool` and `missing_data`;
-`push_to_pull_request_branch` is refused, as is `--status`:
+for `noop`, `missing_tool` and `missing_data`:
 
 - `add_comment` is a note on the caller's issue or merge request.
   GitLab numbers the two apart (`#5` and `!5`), so the caller names the
@@ -1559,6 +1559,28 @@ for `noop`, `missing_tool` and `missing_data`;
   project as its `target_project_id`. The fork must be GitLab's fork of
   that project (`forked_from_project`), and private unless the project
   is public and the run is not private. A draft is a `Draft:` title.
+- `push_to_pull_request_branch` adds one commit to the branch of the
+  policy's merge request, as on Forgejo
+  ([pushing to a pull request's branch](#pushing-to-a-pull-requests-branch-on-forgejo)):
+  the same patch, protected path, `commit_author`, head and lease rules,
+  and the same git push. Before any write, apply reads the project and
+  the fork as for a new merge request, then the merge request by its iid
+  under the project's ID, and refuses it unless GitLab answers for that
+  iid of that project and into it (`project_id` and
+  `target_project_id`), open, from the fork by its ID
+  (`source_project_id`) and the policy's branch (`source_branch`), at
+  the head the run was asked for (`sha`). A merge request from the
+  project itself or another fork, merged, closed or moved on is refused.
+- `--status` sets the caller's commit status after every other write,
+  as on Forgejo ([commit statuses on Forgejo](#commit-statuses-on-forgejo)):
+  `POST /projects/ID/statuses/SHA` with the name `agentic-job`, a fixed
+  description and `--run-url` as its link. GitLab has no `error`, so
+  `failure` and `error` are both `failed`; `pending` and `success` keep
+  their names. Before any write apply refuses a commit the project does
+  not have. GitLab refuses `pending` over a status of that name still
+  pending, and adds another for a finished one, so apply first reads the
+  commit's statuses of that name and writes nothing when one already has
+  this state and this run's link, as after a re-run.
 - `add_labels` and `remove_labels` change the labels of the issue or the
   merge request their `issue_number` or `pull_request_number` names:
   exactly one of the two, never `item_number`
@@ -1606,8 +1628,7 @@ The length and link limits are the same as Forgejo's.
 
 Not done, each a later slice of
 [tracker#786](https://github.com/cgwalters-forge/tracker/issues/786):
-pushes to an open merge request, commit statuses, review discussions,
-re-run detection for notes and new issues, and an end-to-end test
+review discussions, marking a merge request ready, re-run detection for notes and new issues, and an end-to-end test
 against a GitLab instance.
 
 ## Neutral profile
@@ -1687,5 +1708,5 @@ pull requests. On Forgejo and GitLab those can be two tokens.
 
 The Forgejo publisher above implements only its listed subset of this
 contract, and the [GitLab one](#publishing-to-gitlab) all of it but
-`push_to_pull_request_branch` and `create_pull_request_review_comment`,
+`create_pull_request_review_comment`,
 with GitLab's mentions and quick actions broken.

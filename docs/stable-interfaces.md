@@ -120,11 +120,13 @@ Off GitHub, `agentic-job apply --forge forgejo` publishes
 context `agentic-job`; no request type sets one.
 `agentic-job apply --forge gitlab` publishes `add_comment`, to the
 caller's `--comment-target` of the `--comment-target-kind` it names,
-`create_pull_request`, `create_issue`, `close_issue`,
-`close_pull_request`, and `add_labels` and `remove_labels`, which there
-name their item by exactly one of `issue_number` and
-`pull_request_number`, never `item_number`; it writes nothing for the
-three no-write types, and refuses the rest and `--status`
+`create_pull_request`, `push_to_pull_request_branch`, `create_issue`,
+`close_issue`, `close_pull_request`, and `add_labels` and
+`remove_labels`, which there name their item by exactly one of
+`issue_number` and `pull_request_number`, never `item_number`; it writes
+nothing for the three no-write types, and refuses the rest. With
+`--status` and `--status-sha` it sets the caller's commit status, name
+`agentic-job`, `failure` and `error` both as GitLab's `failed`
 ([publishing to GitLab](safe-outputs.md#publishing-to-gitlab)). On
 GitLab, `agentic-job collect` takes those two fields for the label types
 and refuses an `issue_number` or `pull_request_number` a type does not
