@@ -31,7 +31,9 @@ polkit denials, the privileged-binary allowlist (`setup/`), the
 systemd-resolved closure, the egress proxy and rules in their order,
 with the escaping of the setup script's output (`workflow_commands.rs`),
 and the probes that prove it (`check/`): the host, runner-lock and
-network probes with their embedded scripts, and the record of a passing
+network probes with their embedded scripts, the runner confinement probe
+(`check/confine.rs`, re-exported as `sandbox::probe`) that CI's `confined`
+job runs before and after the lock, and the record of a passing
 check, bound to the binary, configuration and job, that entering the
 sandbox user removes; and the timed stages and `sandbox timed`
 (`timed.rs`). agentic-job re-exports each at its old path (`files`,

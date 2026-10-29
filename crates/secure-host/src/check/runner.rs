@@ -69,7 +69,7 @@ fn groups_in(status: &str) -> Vec<u32> {
 
 /// The lines of `sudo -l` that are rules: those in parentheses, after
 /// the heading, with their spacing normalized.
-pub fn sudo_rules(listing: &str) -> Vec<String> {
+pub(crate) fn sudo_rules(listing: &str) -> Vec<String> {
     listing
         .lines()
         .map(str::trim)

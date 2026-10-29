@@ -442,14 +442,14 @@ test('confined proves the checkout from run steps and a local action main and po
   assert.doesNotMatch(job, /binary\.sh|secure-host world-write|sandbox setup|podman run|continue-on-error|\|\| true/);
   // The orphan is an earlier step than every probe, the control included.
   const orphan = job.indexOf('      - name: Leave a process running\n        id: orphan\n');
-  assert.ok(orphan >= 0 && orphan < job.indexOf('probe.mjs control before'));
-  assert.ok(job.indexOf('probe.mjs control before') < run);
+  assert.ok(orphan >= 0 && orphan < job.indexOf('"$RUNNER_TEMP/agentic-job" sandbox probe control before'));
+  assert.ok(job.indexOf('"$RUNNER_TEMP/agentic-job" sandbox probe control before') < run);
   assert.match(job, /\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n/);
   assert.match(job, /echo "\$!" > "\$RUNNER_TEMP\/confine-orphan\.pid"/);
   assert.match(job, /agentic-job sandbox check --record/);
-  assert.match(job, /probe\.mjs confined run-step/);
+  assert.match(job, /\n        run: agentic-job sandbox probe confined run-step\n/);
   // After setup, so its main and post steps run under the lock.
-  assert.ok(run < job.indexOf('probe.mjs confined run-step'));
+  assert.ok(run < job.indexOf('sandbox probe confined run-step'));
   assert.ok(run < job.indexOf(local));
   assert.ok(job.indexOf(local) < job.indexOf('uses: actions/upload-artifact@'));
   assert.doesNotMatch(job, /actions\/github-script@/);

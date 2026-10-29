@@ -89,9 +89,9 @@ pub fn skipped(pids: &[u32]) -> Option<String> {
     })
 }
 
-/// The diagnostic sockets of the Workers `pids` that a step could still
-/// connect to: those whose path is still a socket.
-pub fn linked_sockets(pids: &[u32]) -> Result<Vec<PathBuf>> {
+/// The paths the Workers `pids` bound their diagnostic sockets to, as the
+/// kernel lists them, whether or not they are still linked.
+pub fn listed_sockets(pids: &[u32]) -> Result<Vec<PathBuf>> {
     if pids.is_empty() {
         return Ok(Vec::new());
     }
@@ -105,8 +105,14 @@ pub fn linked_sockets(pids: &[u32]) -> Result<Vec<PathBuf>> {
         text.len() as u64 <= MAX_NET_UNIX_BYTES,
         "{PROC_NET_UNIX} is over {MAX_NET_UNIX_BYTES} bytes"
     );
+    Ok(socket_paths(&text, pids))
+}
+
+/// The diagnostic sockets of the Workers `pids` that a step could still
+/// connect to: those whose path is still a socket.
+pub fn linked_sockets(pids: &[u32]) -> Result<Vec<PathBuf>> {
     let mut linked = Vec::new();
-    for path in socket_paths(&text, pids) {
+    for path in listed_sockets(pids)? {
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_socket() => linked.push(path),
             Ok(_) => {}
