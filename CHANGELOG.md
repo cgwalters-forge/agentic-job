@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `summary.json` gives `cache_ratio`, the share of the run's input read
+  from the prompt cache, and `cache_warning`, true for an opencode run
+  that read under half from it after more than three requests;
+  `summary.md` says both (docs/inference.md#prompt-caching).
 - Runs with agent `claude` whose `run` is newer than the pinned
   secure-host image, such as `review.yml` at a commit of main, start
   again. Since the attribution change below they stopped on

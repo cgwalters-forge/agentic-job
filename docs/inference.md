@@ -264,6 +264,34 @@ to push a workflow to an admitted repository could start a job of its
 own that registers a run. What an operator turns on for this workflow
 is linked from [workflow.md](workflow.md#what-a-caller-provides).
 
+## Prompt caching
+
+Every model request resends the whole conversation, and the provider
+bills the part it reads from its prompt cache at a fraction of the rest.
+`summary.json`'s `cache_ratio` is the share of the run's input tokens
+read from the cache (`tokens.cache_read` over it plus `tokens.input`),
+and `summary.md` gives it as a percentage. `cache_warning` is true, and
+`summary.md` says so, for an opencode run that read less than half of
+its input from the cache over more than three requests the proxy
+counted: by then the system prompt, tools and earlier turns should be
+cache reads. On 28 October 2026 Claude Code's runs read 97% of their
+input from it and opencode's through the broker 18%, by their
+`summary.json`
+([#2209](https://github.com/cgwalters-forge/agentic-job/issues/2209)).
+The share shown is the agent's own word, and marked so, where the proxy
+gave no record.
+
+What opencode sends depends on its provider's package and the model's
+name, not on agentic-job (opencode 1.18.35). With `@ai-sdk/openai` it
+sends `store: false` and `prompt_cache_key` set to the session's id. It
+asks for `reasoning.encrypted_content` only for a model id containing
+`gpt-5` (but not `gpt-5-chat` or `gpt-5-pro`). Without that, it drops the model's reasoning from the turns it
+resends; OpenAI's guidance for `store: false` is to send it back, which
+it reports raises cache hits as well as quality. A
+configuration repository whose models are named otherwise sets it in
+each model's `options`:
+`"options": {"include": ["reasoning.encrypted_content"]}`.
+
 ## How the default was chosen
 
 The workflow defaults to `github-oidc` because network reachability alone
