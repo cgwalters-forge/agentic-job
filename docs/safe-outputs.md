@@ -1238,8 +1238,8 @@ skip refuses the run before either writes anything.
 ## Off GitHub
 
 `policy`, `collect` and `check` need no forge; gh-aw's handlers run
-under `actions/github-script`. A caller that is not on GitHub (Forgejo,
-later GitLab) runs
+under `actions/github-script`. A caller that is not on GitHub (Forgejo or
+GitLab) runs
 
 ```text
 agentic-job collect --policy FILE --outputs DIR --collected FILE
@@ -1275,7 +1275,7 @@ As gh-aw's collector does, it leaves @-mentions in what opens or
 comments on an issue, a pull request or a discussion to the applier,
 which knows who may be mentioned where it posts; in the other types,
 such as `noop`, `missing_tool` and `missing_data`, it wraps them in code.
-For Forgejo, the applier is `apply`, described below.
+For Forgejo and GitLab, the applier is `apply`, described below.
 On GitHub, gh-aw's handlers remain the applier.
 
 ### Publishing to Forgejo
@@ -1504,6 +1504,57 @@ Not done: re-run detection (a
 re-run with a pull request or a push is refused at its branch; one with
 comments or a new issue posts them again) and reviews.
 
+### Publishing to GitLab
+
+```text
+GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJECT \
+  --policy policy.json --checked DIR --run-url URL \
+  [--comment-target IID --comment-target-kind issue|pull-request] \
+  [--push-repo GROUP/PROJECT] [--recover-pushed-commit SHA]
+```
+
+publishes to a GitLab project through its REST API v4, as
+[Forgejo's](#publishing-to-forgejo) does, with the same server, token
+and pre-write checks. The token comes only from `GITLAB_TOKEN` and goes
+only in an `Authorization: Bearer` header (to git as `oauth2` over
+Basic, through its environment). The policy must be for GitLab
+(`forge = "gitlab"`). It publishes two types, and writes nothing for
+`noop`, `missing_tool` and `missing_data`; any other type is refused, as
+is `--status`:
+
+- `add_comment` is a note on the caller's issue or merge request.
+  GitLab numbers the two apart (`#5` and `!5`), so the caller names the
+  kind with `--comment-target-kind`; without it a comment is refused.
+  Before posting, apply reads the item by its iid under the project's
+  URL-encoded path, and refuses it unless GitLab answers for that iid
+  of that project, and the project under that path, not one it was
+  renamed or moved to. The note then goes to the project's ID as read,
+  as does the merge request below to the fork's.
+- `create_pull_request` pushes the branch to the bounds' `push_repo`, a
+  fork of the project, and opens the merge request on the fork with the
+  project as its `target_project_id`. The fork must be GitLab's fork of
+  that project (`forked_from_project`), and private unless the project
+  is public and the run is not private. A draft is a `Draft:` title.
+
+Every body and merge request title has GitLab's mentions broken:
+`@user`, `@group/subgroup`, `@all` and `@here`, after anything but an
+ASCII letter, digit or `_` as GitLab reads them, so `x.@all` too (and a
+link such as `https://social.example/@user` gets the break as well). A
+pull request's title has its mentions broken on Forgejo too now. Every
+body also has its
+[quick actions](https://docs.gitlab.com/user/project/quick_actions/)
+broken: a line starting with `/` (`/merge`, `/approve`, `/close`) after
+any indentation gets a zero-width break before it, so GitLab does not run
+it with the token's rights. This applies inside code too, though GitLab
+skips code there, as a fence it reads otherwise would run the command.
+The length and link limits are the same as Forgejo's.
+
+Not done, each a later slice of
+[tracker#786](https://github.com/cgwalters-forge/tracker/issues/786):
+labels, issues and closing, pushes to an open merge request, commit
+statuses, review discussions, and an end-to-end test against a GitLab
+instance.
+
 ## Neutral profile
 
 The requests stay gh-aw's JSONL on every forge, with its type and field
@@ -1520,8 +1571,8 @@ current contract.
 
 | gh-aw type | GitHub | Forgejo | GitLab |
 | --- | --- | --- | --- |
-| `add_comment` | issue comment | issue comment | note on an issue or a merge request |
-| `create_pull_request` | pull request from a fork; `draft` | pull request; draft is a `WIP:` title | merge request from the fork's project; draft is a `Draft:` title |
+| `add_comment` | issue comment | issue comment | note on the caller's issue or merge request, of the kind the caller names |
+| `create_pull_request` | pull request from a fork; `draft` | pull request; draft is a `WIP:` title | merge request opened on the fork with `target_project_id`; draft is a `Draft:` title |
 | `push_to_pull_request_branch` | git push | git push | git push |
 | `create_pull_request_review_comment` | review comment | review comment, by line number | discussion with a base, start and head commit position |
 | `add_labels`, `remove_labels` | by name | by name or ID | by name; apply must refuse a label that does not exist, which GitLab would create |
@@ -1573,7 +1624,6 @@ a fork identity that may push, and an upstream one that may only open
 pull requests. On Forgejo and GitLab those can be two tokens.
 
 The Forgejo publisher above implements only its listed subset of this
-contract. A GitLab publisher is still to be written; before it writes,
-it needs the mention filter above and must neutralize
-[quick actions](https://docs.gitlab.com/user/project/quick_actions/),
-a `/close` or `/merge` line that GitLab runs with the poster's rights.
+contract, and the [GitLab one](#publishing-to-gitlab) only `add_comment`
+and `create_pull_request`, with GitLab's mentions and quick actions
+broken.

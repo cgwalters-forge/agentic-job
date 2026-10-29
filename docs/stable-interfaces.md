@@ -117,6 +117,11 @@ Off GitHub, `agentic-job apply --forge forgejo` publishes
 ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)). With
 `--status` and `--status-sha` it also sets the caller's commit status,
 context `agentic-job`; no request type sets one.
+`agentic-job apply --forge gitlab` publishes `add_comment`, to the
+caller's `--comment-target` of the `--comment-target-kind` it names, and
+`create_pull_request`, writes nothing for the three no-write types, and
+refuses the rest and `--status`
+([publishing to GitLab](safe-outputs.md#publishing-to-gitlab)).
 
 ## Hand-back files
 

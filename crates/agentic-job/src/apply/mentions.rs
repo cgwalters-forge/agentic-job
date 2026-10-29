@@ -1,5 +1,6 @@
 //! Last-mile notification filtering, after collection and before publication.
 //! Code is kept verbatim; no agent-selected identity is allowed to notify.
+//! On GitLab, quick actions are broken too, code included.
 
 use std::sync::LazyLock;
 
@@ -11,6 +12,12 @@ struct Syntax {
     forge: &'static str,
     bang_references: bool,
     reopen: bool,
+    /// A mention is an `@` after anything but an ASCII letter, digit or
+    /// `_`, as GitLab's `(?<!\w)@` reads it: `x.@all` and `é@all` notify
+    /// there.
+    ascii_boundary: bool,
+    /// A line starting with `/` is a command run with the poster's rights.
+    quick_actions: bool,
 }
 
 // Group and broadcast mentions use the same @ prefix as user mentions.
@@ -19,24 +26,31 @@ const SYNTAX: &[Syntax] = &[
         forge: "github",
         bang_references: false,
         reopen: false,
+        ascii_boundary: false,
+        quick_actions: false,
     },
     Syntax {
         forge: "forgejo",
         bang_references: true,
         reopen: true,
+        ascii_boundary: false,
+        quick_actions: false,
     },
     Syntax {
         forge: "gitlab",
         bang_references: true,
         reopen: false,
+        ascii_boundary: true,
+        quick_actions: true,
     },
 ];
 
 const MAX_REFERENCES: usize = 10;
 const BREAK: char = '\u{200b}';
 
+// A GitLab namespace path may start with `.`.
 static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)@[\p{L}\p{N}_][\p{L}\p{N}_./-]*|![0-9]+|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+(?:[\w.-]+/[\w.-]+)?[#!][0-9]+")
+    Regex::new(r"(?i)@[\p{L}\p{N}_.][\p{L}\p{N}_./-]*|![0-9]+|\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|reopen(?:ed|s)?|implement(?:ed|s)?)\s+(?:[\w.-]+/[\w.-]+)?[#!][0-9]+")
         .expect("valid notification pattern")
 });
 
@@ -46,14 +60,20 @@ pub(super) fn filter(body: &str, forge: &str) -> String {
         .find(|syntax| syntax.forge == forge)
         .expect("publisher has a syntax entry");
     let mut references = 0;
-    outside_code(body, &mut |text, before, _| {
+    let filtered = outside_code(body, &mut |text, before, _| {
         let mut result = String::new();
         let mut end = 0;
         for token in TOKENS.find_iter(text) {
             result.push_str(&text[end..token.start()]);
             let value = token.as_str();
             let previous = text[..token.start()].chars().next_back().or(before);
-            let boundary = !previous.is_some_and(|c| c.is_alphanumeric() || "_./-".contains(c));
+            let boundary = !previous.is_some_and(|c| {
+                if syntax.ascii_boundary {
+                    c.is_ascii_alphanumeric() || c == '_'
+                } else {
+                    c.is_alphanumeric() || "_./-".contains(c)
+                }
+            });
             let neutralize = if value.starts_with('@') {
                 boundary
             } else if value.starts_with('!') {
@@ -85,7 +105,30 @@ pub(super) fn filter(body: &str, forge: &str) -> String {
         }
         result.push_str(&text[end..]);
         result
-    })
+    });
+    if syntax.quick_actions {
+        quick_actions(&filtered)
+    } else {
+        filtered
+    }
+}
+
+/// TEXT with a break before the `/` that starts a line, after any
+/// indentation, so that GitLab runs no quick action (`/merge`, `/approve`,
+/// `/close`) in a note or description with the token's rights. In code
+/// too, though GitLab skips code there: a fence it reads otherwise than
+/// [`outside_code`] does would run the command.
+fn quick_actions(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut line_start = true;
+    for c in text.chars() {
+        if line_start && c == '/' {
+            result.push(BREAK);
+        }
+        result.push(c);
+        line_start = matches!(c, '\n' | '\r') || (line_start && c.is_whitespace());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -107,12 +150,54 @@ mod tests {
                 "`@user !1`\n~~~\n@org/team\n~~~",
                 "`@user !1`\n~~~\n@org/team\n~~~",
             ),
+            ("gitlab", "hi @user", "hi @\u{200b}user"),
+            ("gitlab", "@group/subgroup", "@\u{200b}group/subgroup"),
+            (
+                "gitlab",
+                "@all, then @here.",
+                "@\u{200b}all, then @\u{200b}here.",
+            ),
+            ("gitlab", "@.dotted", "@\u{200b}.dotted"),
+            // GitLab reads a mention after anything but an ASCII word
+            // character; Forgejo not after a path's.
+            ("gitlab", "x.@all", "x.@\u{200b}all"),
+            ("gitlab", "path/@here", "path/@\u{200b}here"),
+            ("gitlab", "é@all", "é@\u{200b}all"),
+            ("forgejo", "path/@user", "path/@user"),
+            ("gitlab", "user@example.com", "user@example.com"),
+            ("gitlab", "`@all`", "`@all`"),
             ("forgejo", "user@example.com", "user@example.com"),
             ("forgejo", "see !12", "see !\u{200b}12"),
             ("forgejo", "Closes !12", "C\u{200b}loses !\u{200b}12"),
             ("github", "see !12", "see !12"),
         ] {
             assert_eq!(filter(input, forge), expected, "{forge}: {input}");
+        }
+    }
+
+    /// No line of a GitLab note or description starts a quick action,
+    /// indented, after a CR or in code; elsewhere nothing changes.
+    #[test]
+    fn quick_actions() {
+        for (forge, input, expected) in [
+            ("gitlab", "/merge", "\u{200b}/merge"),
+            (
+                "gitlab",
+                "Done.\n/approve\n/assign @me",
+                "Done.\n\u{200b}/approve\n\u{200b}/assign @\u{200b}me",
+            ),
+            (
+                "gitlab",
+                "a\r/close\r\n  /close",
+                "a\r\u{200b}/close\r\n  \u{200b}/close",
+            ),
+            ("gitlab", "```\n/close\n```", "```\n\u{200b}/close\n```"),
+            ("gitlab", "see a/b and /c", "see a/b and /c"),
+            ("gitlab", "> /close", "> /close"),
+            ("forgejo", "/close", "/close"),
+            ("github", "/close", "/close"),
+        ] {
+            assert_eq!(filter(input, forge), expected, "{forge}: {input:?}");
         }
     }
 
