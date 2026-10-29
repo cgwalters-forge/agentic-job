@@ -415,6 +415,10 @@ pub struct Commit {
     /// Lines put at the end of the commit's message, each `Key: value`:
     /// `Generated-by: AI`, for one.
     pub trailers: Vec<String>,
+    /// Format the agent's Rust before the change is taken: `just fmt`
+    /// where the checkout's Justfile has it, else `cargo fmt --all`, run
+    /// as the sandbox user ([`crate::run::handback`]). Off by default.
+    pub format: bool,
 }
 
 /// A remote MCP server, `[mcp.NAME]`: `run` serves it to the agent on

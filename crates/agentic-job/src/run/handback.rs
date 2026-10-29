@@ -166,6 +166,25 @@ const ABSENT_STATUS: i32 = 3;
 /// reads, so that they cannot push the status past what the runner keeps.
 const LIMIT_SCRIPT: &str =
     r#"limit=$1; shift; { "$@" 2>/dev/null; echo "$?" >&2; } | head -c "$limit""#;
+/// Formats the Rust of the checkout `$1` ([`config::Commit::format`]):
+/// nothing without a Cargo.toml, `just fmt` where the checkout's own
+/// Justfile (not one `just` finds above it) has that recipe, else `cargo fmt --all`, which exits [`NO_RUSTFMT_STATUS`]
+/// without rustfmt. All it writes goes to standard error, which is not
+/// logged: rustfmt's errors quote the agent's source.
+const FORMAT_SCRIPT: &str = concat!(
+    r#"cd -- "$1" || exit; test -f Cargo.toml || exit 0; "#,
+    r#"if test -f Justfile && command -v just >/dev/null 2>&1 && just --show fmt >/dev/null 2>&1; "#,
+    r#"then exec just fmt >&2; fi; "#,
+    r#"cargo fmt --version >/dev/null 2>&1 || exit 3; exec cargo fmt --all >&2"#
+);
+/// The `exit 3` of [`FORMAT_SCRIPT`].
+const NO_RUSTFMT_STATUS: i32 = 3;
+/// How long formatting may take.
+const FORMAT_TIMEOUT_S: &str = "300";
+/// Formatting needs no network. Cargo is kept offline, and rustup must not
+/// install a toolchain that a `rust-toolchain.toml` in the agent's
+/// checkout names, which would download it after the session has ended.
+const FORMAT_ENV: [&str; 2] = ["CARGO_NET_OFFLINE=true", "RUSTUP_AUTO_INSTALL=0"];
 
 /// The branch a run's pull request is on, which also names its patch.
 pub fn run_branch(run_id: &str) -> String {
@@ -1011,6 +1030,45 @@ fn stage_patch(git: &Git<'_>, base: &str, status: &[u8]) -> Result<Vec<String>, 
     Ok(omitted)
 }
 
+/// Whether the change has Rust in it: a new or changed `.rs` file in
+/// STATUS, or one the agent's own commits changed since BASE.
+fn touches_rust(git: &Git<'_>, base: &str, status: &[u8]) -> bool {
+    let diff = git.run(&["diff", "--quiet", base, "--", "*.rs"], b"");
+    let committed = matches!(diff, Some((1, _)));
+    committed
+        || changed_files(status)
+            .iter()
+            .any(|file| file.ends_with(".rs"))
+}
+
+/// Formats the Rust of the checkout DIR with [`FORMAT_SCRIPT`], as RUNNER,
+/// the sandbox user with the agent's confinement. A formatter that is
+/// absent or fails is a warning: the change is then taken as it is.
+fn format_rust(runner: &dyn Runner, dir: &str) {
+    let mut argv = vec!["env"];
+    argv.extend(FORMAT_ENV);
+    argv.extend([
+        "timeout",
+        FORMAT_TIMEOUT_S,
+        "sh",
+        "-c",
+        FORMAT_SCRIPT,
+        "sh",
+        dir,
+    ]);
+    match runner.run(&argv, b"", MAX_GIT_OUTPUT) {
+        Ok(out) if out.success() => {}
+        Ok(out) if out.status.code() == Some(NO_RUSTFMT_STATUS) => {
+            eprintln!("warning: the change is taken unformatted: rustfmt is not installed");
+        }
+        Ok(out) => eprintln!(
+            "warning: the change is taken as the formatter left it: it failed ({})",
+            out.status
+        ),
+        Err(err) => eprintln!("warning: the change is taken unformatted: {err:#}"),
+    }
+}
+
 /// The paths `git status --porcelain=v1 -z` lists.
 fn changed_files(status: &[u8]) -> Vec<String> {
     let mut files: Vec<String> = status
@@ -1367,17 +1425,30 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         Some(pinned) => parse_author(pinned)?,
         None => author(request.commit)?,
     };
-    let git = Git::new(runner, clone::utf8(&checkout.dir)?, &author);
-    let status = git.limited(
-        &[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--no-renames",
-            "--untracked-files=all",
-        ],
-        MAX_STATUS_BYTES,
-    );
+    let dir = clone::utf8(&checkout.dir)?;
+    let git = Git::new(runner, dir, &author);
+    let read_status = || {
+        git.limited(
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--no-renames",
+                "--untracked-files=all",
+            ],
+            MAX_STATUS_BYTES,
+        )
+    };
+    let mut status = read_status();
+    // Formatted before anything else reads the tree.
+    if request.commit.format
+        && policy.kind == Kind::Branch
+        && let Some(listed) = &status
+        && touches_rust(&git, base, listed)
+    {
+        format_rust(runner, dir);
+        status = read_status();
+    }
     let files = changed_files(status.as_deref().unwrap_or_default());
     // Commits of its own count as a change too, though it was asked to
     // make none.
@@ -2387,7 +2458,7 @@ mod tests {
     fn authors_and_trailers() {
         let commit = |author: Option<&str>| config::Commit {
             author: author.map(str::to_owned),
-            trailers: Vec::new(),
+            ..config::Commit::default()
         };
         assert_eq!(
             author(&commit(None)).unwrap(),
@@ -2753,6 +2824,7 @@ mod tests {
         let commit = config::Commit {
             author: Some("A Bot <bot@example.com>".into()),
             trailers: vec!["Generated-by: AI".into()],
+            format: false,
         };
         sh(
             &home.checkout.dir,
@@ -2848,6 +2920,116 @@ mod tests {
             sh(&applied, "git diff --name-only HEAD~1"),
             "a.txt\nsub/new-file.txt\n"
         );
+    }
+
+    /// With `[commit] format`, misformatted Rust the agent leaves is
+    /// handed back formatted: by `cargo fmt`, or by the Justfile's `fmt`
+    /// recipe where it has one. Without rustfmt, the change is handed back
+    /// as it is.
+    #[test]
+    fn the_agents_rust_is_handed_back_formatted() {
+        const MISFORMATTED: &str = "+pub fn  f( ){}";
+        const FORMATTED: &str = "+pub fn f() {}";
+        let rustfmt = Command::new("cargo")
+            .args(["fmt", "--version"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let just = Command::new("just")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success());
+        const FORMATTED_BASE: &str = "pub fn g() {}\\n";
+        let misformat = "printf 'pub fn g() {}\\npub fn  f( ){}\\n' > src/lib.rs";
+        let by_just = format!(
+            "printf 'fmt:\\n\\tprintf \"pub fn f() {{}}\\\\n\" > src/lib.rs\\n' > Justfile && {misformat}"
+        );
+        // (the case, whether it formats, the base's src/lib.rs, what the
+        // agent does, what the patch has and has not)
+        let mut cases = vec![
+            (
+                "off",
+                false,
+                FORMATTED_BASE,
+                misformat.to_owned(),
+                MISFORMATTED,
+                FORMATTED,
+            ),
+            (
+                "on",
+                true,
+                FORMATTED_BASE,
+                misformat.to_owned(),
+                if rustfmt { FORMATTED } else { MISFORMATTED },
+                if rustfmt { MISFORMATTED } else { FORMATTED },
+            ),
+            (
+                "on, committed",
+                true,
+                FORMATTED_BASE,
+                format!(
+                    "{misformat} && git -c user.name=t -c user.email=t@example.invalid \
+                     commit -qam F"
+                ),
+                if rustfmt { FORMATTED } else { MISFORMATTED },
+                if rustfmt { MISFORMATTED } else { FORMATTED },
+            ),
+            // Only a change with Rust in it is formatted: the base's
+            // misformatted file is left as it is.
+            (
+                "no Rust changed",
+                true,
+                "pub fn  g( ){}\\n",
+                "echo two >> a.txt".to_owned(),
+                "+two",
+                "src/lib.rs",
+            ),
+        ];
+        if just {
+            cases.push((
+                "just fmt",
+                true,
+                FORMATTED_BASE,
+                by_just,
+                FORMATTED,
+                MISFORMATTED,
+            ));
+        } else {
+            eprintln!("skipped the just fmt case: just is not installed");
+        }
+        let policy = policy(Kind::Branch, pull_requests());
+        for (case, format, base_lib, script, has, has_not) in cases {
+            let mut home = Home::new();
+            let repo = home.checkout.dir.clone();
+            let head = sh(
+                &repo,
+                &format!(
+                    "mkdir src && printf '[package]\\nname = \"fixture\"\\nversion = \"0.1.0\"\\n\
+                     edition = \"2021\"\\n\\n[workspace]\\n' > Cargo.toml && \
+                     printf '{base_lib}' > src/lib.rs && git add . && \
+                     git -c user.name=t -c user.email=t@example.invalid commit -q -m Crate && \
+                     git rev-parse HEAD"
+                ),
+            );
+            home.checkout.base_commit = head.trim().to_owned();
+            sh(&repo, &script);
+            std::fs::write(
+                home.path(AGENT_OUTPUTS),
+                "{\"type\":\"create_pull_request\",\"title\":\"Add f\",\"body\":\"Adds f.\"}\n",
+            )
+            .unwrap();
+            let commit = config::Commit {
+                format,
+                ..config::Commit::default()
+            };
+            let change = home.collect(&policy, &commit);
+            assert_eq!(change.dropped, None, "{case}");
+            let patch =
+                std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-42.patch")).unwrap();
+            assert!(patch.contains(has), "{case}: {patch}");
+            assert!(!patch.contains(has_not), "{case}: {patch}");
+            let verdict = home.verdict(&policy);
+            assert!(verdict.ok, "{case}: {:?}", verdict.errors);
+        }
     }
 
     /// A run of [`policy`] that may also open a pull request in `o/tool`.
@@ -3380,7 +3562,7 @@ mod tests {
         let policy = policy(Kind::Branch, pull_requests());
         let commit = config::Commit {
             author: Some("A Bot <bot@example.com>".into()),
-            trailers: Vec::new(),
+            ..config::Commit::default()
         };
         let identity = "git config author.name Evil && git config author.email evil@example.org && \
             git config committer.name Evil && git config committer.email evil@example.org && \
@@ -3465,7 +3647,7 @@ mod tests {
         policy.commit_author = Some(bot.into());
         let commit = config::Commit {
             author: Some("A Bot <bot@example.com>".into()),
-            trailers: Vec::new(),
+            ..config::Commit::default()
         };
         let home = Home::new();
         sh(&home.checkout.dir, "echo two >> a.txt");

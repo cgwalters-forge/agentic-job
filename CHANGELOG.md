@@ -70,6 +70,11 @@ says what a caller may rely on across versions.
   has not connected is a note, as before), and the tailnet's refusals
   from a container are made at once in one container. Every probe and
   refusal timeout stays.
+- `[commit] format`, off by default and set by `hosted.toml`, has `run`
+  format a branch run's Rust before taking its patch: `just fmt` where
+  the Justfile has it, else `cargo fmt --all`, as the sandbox user. A
+  missing rustfmt is a warning (docs/safe-outputs.md#what-the-agent-does).
+  `hosted.toml` adds `rustfmt` to this repository's packages.
 - `review.yml`, with the repository variable `REVIEW_HISTORY=true`, gives
   the review agent the pull request's earlier verdicts by the review job,
   their findings and the replies to them, the commits since each and the

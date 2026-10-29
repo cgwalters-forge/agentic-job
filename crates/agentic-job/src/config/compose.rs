@@ -381,6 +381,13 @@ fn compose(args: &Args) -> Result<String> {
     let config = Config::parse(&text)?;
     if args.host {
         config.check_host()?;
+        // Formatting belongs to `run`, not host setup. The released
+        // secure-host image still parses the older commit table strictly.
+        // Validate first so an invalid setting is not silently discarded.
+        if let Some(commit) = table.get_mut("commit").and_then(Value::as_table_mut) {
+            commit.remove("format");
+        }
+        return toml::to_string(&table).context("writing the host configuration");
     } else {
         config.check()?;
     }
@@ -899,6 +906,23 @@ mod tests {
                 "41898282+github-actions[bot]@users.noreply.github.com"
             )
         );
+    }
+
+    #[test]
+    fn host_config_omits_run_only_formatting_for_the_released_image() {
+        for enabled in [false, true] {
+            let run = Args {
+                boolean: settings(&[&format!("commit.format={enabled}")]),
+                ..args(None, RUN, LIMITS, &[])
+            };
+            assert_eq!(composed(&run).commit.format, enabled);
+            let host = Args { host: true, ..run };
+            let text = compose(&host).unwrap();
+            let table: Table = toml::from_str(&text).unwrap();
+            assert!(table["commit"].get("format").is_none(), "{text}");
+        }
+        // Do not hide invalid run settings while making a host file.
+        assert!(compose(&host_args(&["commit.format=not-a-boolean"], &[])).is_err());
     }
 
     /// A host's file needs no agent and no limits, which a run's does;
