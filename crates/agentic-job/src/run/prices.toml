@@ -17,7 +17,7 @@
 # suffix (`-20251101`) are dropped and dots read as dashes, so
 # `claude-sonnet-4.5` is `claude-sonnet-4-5`.
 
-date = "2026-10-24"
+date = "2026-10-29"
 
 [models]
 "claude-fable-5-1" = { input = 10.0, cached-input = 0.25, output = 50.0 }
@@ -35,6 +35,9 @@ date = "2026-10-24"
 "claude-sonnet-4-5" = { input = 3.0, cached-input = 0.30, output = 15.0 }
 "claude-haiku-5-5" = { input = 0.10, cached-input = 0.01, output = 0.50 }
 "claude-haiku-4-5" = { input = 1.0, cached-input = 0.10, output = 5.0 }
+"gpt-6-astra" = { input = 10.0, cached-input = 1.0, output = 50.0 }
+"gpt-6.1-sol" = { input = 2.0, cached-input = 0.10, output = 10.0 }
+"gpt-6-luna" = { input = 0.10, cached-input = 0.01, output = 0.50 }
 "gpt-5.6-sol" = { input = 4.0, cached-input = 0.40, output = 20.0 }
 "gpt-5.6-terra" = { input = 2.0, cached-input = 0.20, output = 12.0 }
 "gpt-5.6-luna" = { input = 0.20, cached-input = 0.02, output = 1.20 }
