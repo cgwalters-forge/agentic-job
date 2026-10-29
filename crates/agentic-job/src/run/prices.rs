@@ -25,12 +25,15 @@ struct Table {
 }
 
 /// USD per million tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Rates {
     pub input: f64,
     pub cached_input: f64,
     pub output: f64,
+    #[serde(default)]
+    pub estimate: bool,
+    pub basis: Option<String>,
 }
 
 /// Token counts as the proxy's record has them: `input` without the
@@ -63,10 +66,17 @@ impl Prices {
         Self::parse(TABLE)
     }
 
-    fn parse(text: &str) -> Result<Self> {
+    pub(super) fn parse(text: &str) -> Result<Self> {
         let table: Table = toml::from_str(text).context("parsing the price table")?;
         let mut rates = BTreeMap::new();
         for (name, rate) in table.models {
+            ensure!(
+                !rate.estimate
+                    || rate.basis.as_deref().is_some_and(|basis| {
+                        !basis.trim().is_empty() && !basis.contains(['\n', '\r'])
+                    }),
+                "the price table's {name:?} estimate requires a nonempty one-line basis"
+            );
             ensure!(
                 [rate.input, rate.cached_input, rate.output]
                     .iter()
@@ -85,8 +95,8 @@ impl Prices {
     }
 
     /// The rates of MODEL, if the table has it.
-    pub fn rates(&self, model: &str) -> Option<Rates> {
-        self.rates.get(&key(model)).copied()
+    pub fn rates(&self, model: &str) -> Option<&Rates> {
+        self.rates.get(&key(model))
     }
 }
 
@@ -155,6 +165,8 @@ mod tests {
                 input,
                 cached_input,
                 output,
+                estimate: false,
+                basis: None,
             })
         };
         for (model, want) in [
@@ -165,13 +177,14 @@ mod tests {
             ("gpt-6.1-sol-mini", None),
             ("gpt-6", None),
         ] {
-            assert_eq!(prices.rates(model), want, "{model}");
+            assert_eq!(prices.rates(model), want.as_ref(), "{model}");
         }
     }
 
     #[test]
     fn cost() {
-        let rates = Prices::builtin().unwrap().rates("gpt-5.5").unwrap();
+        let prices = Prices::builtin().unwrap();
+        let rates = prices.rates("gpt-5.5").unwrap();
         let tokens = Tokens {
             input: 1_000_000,
             cached: 2_000_000,
@@ -179,6 +192,33 @@ mod tests {
         };
         // $5 + 2 × $0.50 + 0.1 × $30.
         assert!((rates.cost(tokens) - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimates_require_basis() {
+        for (fields, accepted) in [
+            ("", true),
+            (", estimate = false", true),
+            (", estimate = true", false),
+            (", estimate = true, basis = ''", false),
+            (", estimate = true, basis = '   '", false),
+            (", estimate = true, basis = \"line\\nline\"", false),
+            (", estimate = true, basis = \"line\\rline\"", false),
+            (
+                ", estimate = true, basis = 'nearest published tier: gpt-6.1-sol'",
+                true,
+            ),
+        ] {
+            let text = format!(
+                "date = 'x'\n[models]\na = {{ input = 2.0, cached-input = 0.1, output = 10.0{fields} }}"
+            );
+            let parsed = Prices::parse(&text);
+            assert_eq!(parsed.is_ok(), accepted, "{fields}: {parsed:?}");
+            if let Ok(prices) = parsed {
+                let rate = prices.rates("a").unwrap();
+                assert_eq!(rate.estimate, fields.contains("true"));
+            }
+        }
     }
 
     #[test]

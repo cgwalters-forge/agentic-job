@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The pinned model price table accepts opt-in `estimate = true` rates with
+  a required one-line `basis`. Run costs include these rates and label the
+  figure estimated in `summary.json` and `summary.md`, naming the estimated
+  models; models without rates remain unpriced.
 - Run costs price `gpt-6.1-sol`, `gpt-6-astra` and `gpt-6-luna` at
   OpenAI's standard-tier list prices instead of reporting them unpriced.
 - `native_handlers` also takes `add_labels`, `remove_labels`,

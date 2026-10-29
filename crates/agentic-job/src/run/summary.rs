@@ -190,9 +190,19 @@ fn praxis_summary(record: &Value) -> Value {
 /// is unpriced or a response's usage never arrived (`unmetered`).
 fn list_cost(record: Option<&Value>, agent_usd: Option<f64>, pricing: &str) -> Value {
     let prices = Prices::builtin().ok();
+    list_cost_with_prices(record, agent_usd, pricing, prices.as_ref())
+}
+
+fn list_cost_with_prices(
+    record: Option<&Value>,
+    agent_usd: Option<f64>,
+    pricing: &str,
+    prices: Option<&Prices>,
+) -> Value {
     let round = |usd: f64| (usd * USD_ROUNDING).round() / USD_ROUNDING;
     let by_model = record.and_then(|r| r["models"].as_object());
     let mut models = Map::new();
+    let mut estimated_models = Map::new();
     let mut total = 0.0;
     // Fails closed: an `unmetered` that is not a count may hide usage.
     let mut partial = record.is_some_and(|r| r["unmetered"].as_u64() != Some(0))
@@ -205,7 +215,11 @@ fn list_cost(record: Option<&Value>, agent_usd: Option<f64>, pricing: &str) -> V
                 cached: count("cache_read")?,
                 output: count("output")?,
             };
-            Some(prices.as_ref()?.rates(name)?.cost(tokens))
+            let rates = prices?.rates(name)?;
+            if rates.estimate {
+                estimated_models.insert(cut(name), json!(rates.basis));
+            }
+            Some(rates.cost(tokens))
         })();
         partial |= cost.is_none();
         total += cost.unwrap_or(0.0);
@@ -219,8 +233,10 @@ fn list_cost(record: Option<&Value>, agent_usd: Option<f64>, pricing: &str) -> V
     };
     json!({
         "usd": usd.map(round), "basis": "list", "source": source,
-        "prices": prices.map(|p| p.date),
+        "prices": prices.map(|p| &p.date),
         "partial": priced && partial,
+        "estimated": !estimated_models.is_empty(),
+        "estimated_models": estimated_models,
         "models": if priced { Value::Object(models) } else { Value::Null },
     })
 }
@@ -632,8 +648,13 @@ pub fn cost_line(s: &Value) -> String {
         ""
     };
     let budget = s["aic_budget"].as_f64().map(|aic| json!(aic / AIC_PER_USD));
+    let estimate = if cost["estimated"] == true {
+        "est. "
+    } else {
+        ""
+    };
     format!(
-        "Cost: {at_least}{} at API list prices ({source}); budget: {}, capping the agent's own figure.",
+        "Cost: {at_least}{estimate}{} at API list prices ({source}); budget: {}, capping the agent's own figure.",
         usd(&cost["usd"]),
         usd(budget.as_ref().unwrap_or(&Value::Null))
     )
@@ -691,9 +712,29 @@ pub fn markdown(s: &Value) -> String {
                     ""
                 }
             ),
-            usd(&s["cost"]["usd"]),
+            format!(
+                "{}{}",
+                if s["cost"]["estimated"] == true {
+                    "est. "
+                } else {
+                    ""
+                },
+                usd(&s["cost"]["usd"])
+            ),
         ]),
     ];
+    if let Some(models) = s["cost"]["estimated_models"]
+        .as_object()
+        .filter(|m| !m.is_empty())
+    {
+        let names = models
+            .keys()
+            .take(MAX_COST_MODELS)
+            .map(|name| code(&json!(cut(name))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.extend([String::new(), format!("Estimated models: {names}.")]);
+    }
     if s["stopped_early"] == true {
         let handed_back = if s["handed_back"] == true {
             "the agent handed back, so its change is a partial one to continue"
@@ -1160,12 +1201,70 @@ mod tests {
             let mut want = want;
             want["basis"] = json!("list");
             want["prices"] = json!(date);
+            want["estimated"] = json!(false);
+            want["estimated_models"] = json!({});
             assert_eq!(
                 list_cost(record.as_ref(), agent, pricing),
                 want,
                 "{record:?}"
             );
         }
+    }
+
+    #[test]
+    fn estimated_cost_and_rendering() {
+        let prices = Prices::parse(
+            "date = '2026-10-29'\n[models]\n\
+             published = { input = 2.0, cached-input = 0.1, output = 10.0 }\n\
+             assumed = { input = 2.0, cached-input = 0.1, output = 10.0, estimate = true, basis = 'nearest published tier: published' }"
+        ).unwrap();
+        let tokens = json!({"input": 1_000_000, "cache_read": 2_000_000, "output": 100_000});
+        for (models, total, partial, estimated) in [
+            (json!({"published": tokens}), 3.2, false, false),
+            (json!({"provider/assumed": tokens}), 3.2, false, true),
+            (
+                json!({"published": tokens, "provider/assumed": tokens}),
+                6.4,
+                false,
+                true,
+            ),
+            (
+                json!({"published": tokens, "provider/assumed": tokens, "unknown": tokens}),
+                6.4,
+                true,
+                true,
+            ),
+        ] {
+            let record = json!({"unmetered": 0, "models": models});
+            let cost =
+                list_cost_with_prices(Some(&record), Some(0.0), "subscription", Some(&prices));
+            assert_eq!(cost["usd"], total);
+            assert_eq!(cost["source"], COST_METERED);
+            assert_eq!(cost["partial"], partial);
+            assert_eq!(cost["estimated"], estimated);
+            assert_eq!(
+                cost["estimated_models"],
+                if estimated {
+                    json!({"provider/assumed": "nearest published tier: published"})
+                } else {
+                    json!({})
+                }
+            );
+            let summary = json!({"cost": cost});
+            let rendered = markdown(&summary);
+            assert_eq!(rendered.contains("est. $"), estimated, "{rendered}");
+            assert_eq!(
+                rendered.contains("Estimated models: `provider/assumed`."),
+                estimated
+            );
+            assert_eq!(cost_line(&summary).contains("est. $"), estimated);
+        }
+        // An estimated rate with missing token counts contributes nothing.
+        let record = json!({"unmetered": 0, "models": {"assumed": {"input": 1}}});
+        let cost = list_cost_with_prices(Some(&record), None, "subscription", Some(&prices));
+        assert!(cost["usd"].is_null());
+        assert_eq!(cost["estimated"], false);
+        assert_eq!(cost["estimated_models"], json!({}));
     }
 
     #[test]

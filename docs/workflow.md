@@ -1990,6 +1990,13 @@ transcript. Cost is in dollars at API list prices, whether the pool is
 metered or a subscription: the inference proxy's token counts by the
 model upstream named, each at its rates in a pinned, dated table
 (`crates/agentic-job/src/run/prices.toml`), never fetched at run time.
+An entry may mark unpublished rates with `estimate = true` and a required,
+nonempty one-line `basis`, alongside `input`, `cached-input` and `output`.
+This is off by default. Such rates count toward `cost.usd`, but set
+`cost.estimated` to true; `cost.estimated_models` maps the contributing
+estimated model names to their bases. `summary.md` marks the figure `est.`
+and names these models. Published-only runs have `cost.estimated: false`
+and an empty `cost.estimated_models`; no rates are inferred for absent models.
 A model the table lacks or a response without usage makes it "at least"
 that figure. With no model priced it is Claude Code's own
 list-price figure, marked agent-reported and unverified, or unknown;
