@@ -135,7 +135,7 @@ const RUNNER_WRITES: &[(&str, RunnerHosts, &[&str])] = &[
     // results service returns. gh-aw's firewall pins only
     // productionresultssa0 to productionresultssa19, but on 28 Oct 2026
     // hosted runners were handed productionresultssa31, which it refuses
-    // (cgwalters-forge/tracker#974).
+    // (cgwalters-forge/tracker#974), and on 29 Oct productionresultssa30.
     (
         "GitHub Actions results storage (runner)",
         RunnerHosts::Ecosystem("github-actions"),
@@ -143,11 +143,17 @@ const RUNNER_WRITES: &[(&str, RunnerHosts, &[&str])] = &[
     ),
     // GitHub's artifact service redirected downloads to this account in
     // https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113
-    // (secure-host-write-policy and e2e-write-policy). DNS existence alone
-    // is not evidence of GitHub ownership: admit no neighboring accounts.
+    // (secure-host-write-policy and e2e-write-policy), and to
+    // productionresultssa30 in
+    // https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049
+    // (secure-host-write-policy). DNS existence alone is not evidence of
+    // GitHub ownership: admit no neighboring accounts.
     (
         "GitHub Actions results storage (runner)",
-        RunnerHosts::Hosts(&["productionresultssa31.blob.core.windows.net"]),
+        RunnerHosts::Hosts(&[
+            "productionresultssa30.blob.core.windows.net",
+            "productionresultssa31.blob.core.windows.net",
+        ]),
         &["PUT"],
     ),
 ];
@@ -984,7 +990,11 @@ mod tests {
                 has_body: true,
                 ..Request::default()
             };
-            assert_eq!(runner.request(&request).allowed, n == 31, "{host}");
+            assert_eq!(
+                runner.request(&request).allowed,
+                n == 30 || n == 31,
+                "{host}"
+            );
         }
         let write = |method, host| Request {
             method,
@@ -1010,6 +1020,7 @@ mod tests {
             ("PUT", "productionresultssa0.blob.core.windows.net", true),
             ("PUT", "ProductionResultsSA19.blob.core.windows.net.", true),
             ("PUT", "productionresultssa20.blob.core.windows.net", false),
+            ("PUT", "productionresultssa30.blob.core.windows.net", true),
             ("PUT", "productionresultssa31.blob.core.windows.net", true),
             ("POST", "productionresultssa31.blob.core.windows.net", false),
             (

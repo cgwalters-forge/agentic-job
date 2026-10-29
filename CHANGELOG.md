@@ -52,9 +52,9 @@ says what a caller may rely on across versions.
   checkpoint too, so that it opens as a draft. Broker token loss is reported
   as `inference_unreachable`, including for a partial change.
 - Under `egress.write-policy`, the runner may also upload to the verified
-  results storage account `productionresultssa31`, alongside gh-aw's first
-  twenty. Hosted runners now get this account, so `upload-artifact` failed
-  (tracker#974).
+  results storage accounts `productionresultssa31` and
+  `productionresultssa30`, alongside gh-aw's first twenty. Hosted runners
+  now get these accounts, so `upload-artifact` failed (tracker#974).
 - With `[session] listen`, `sandbox check` probes that the sandbox user cannot
   reach the session bridge on loopback or at the node's own tailnet addresses,
   against a listener of the runner's user as the control
