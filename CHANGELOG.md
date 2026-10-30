@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Tailnet container refusals share one container start per endpoint, with
+  the existing target IDs, order and ten-second deadlines. The batch uses
+  the serial container lane within the bounded probe pool; missing or
+  malformed target results fail closed and name the affected targets.
 - Secure-host checks refill a bounded probe pool as each attempt finishes,
   rather than waiting for the slowest attempt in each batch. Report order,
   probe IDs and refusal deadlines are unchanged; note-only runner controls
