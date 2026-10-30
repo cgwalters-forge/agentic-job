@@ -1,0 +1,24 @@
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf install -y podman shadow-utils shadow-utils-subid fuse-overlayfs crun \
+        git nodejs libstdc++ tar gzip curl procps-ng python3 libcap \
+    && dnf remove -y sudo \
+    && dnf clean all
+
+RUN groupadd --gid 1001 runner \
+    && useradd --uid 1001 --gid 1001 --create-home runner \
+    && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 runner \
+    && mkdir -p /tmp/run-user-1001 /home/runner/.config/containers \
+    && chown -R 1001:1001 /tmp/run-user-1001 /home/runner \
+    && chmod 0700 /tmp/run-user-1001
+
+COPY containers.conf storage.conf /etc/job-container/
+COPY harden.py /usr/local/lib/job-container-harden.py
+# Do this last: package installation must not restore privileged binaries.
+RUN python3 /usr/local/lib/job-container-harden.py
+
+ENV HOME=/home/runner XDG_RUNTIME_DIR=/tmp/run-user-1001
+ENV CONTAINERS_CONF=/etc/job-container/containers.conf CONTAINERS_STORAGE_CONF=/etc/job-container/storage.conf
+WORKDIR /home/runner
+USER 1001:1001
+CMD ["sleep", "infinity"]
