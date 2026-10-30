@@ -1285,6 +1285,22 @@ mod tests {
         let bounded = bounded_control(&probe);
         assert_eq!(bounded[..CONTROL_LIMIT.len()], *CONTROL_LIMIT);
         assert_eq!(bounded[CONTROL_LIMIT.len()..], probe);
+        assert_eq!(TCP_PROBE_SECONDS, "10");
+        assert_eq!(WIRESERVER_CONNECT_SECONDS, "5");
+        // Exercise the outer deadline, not just its command construction:
+        // a control can connect, fail, or stall, without a sandbox session.
+        for (argv, code) in [
+            (&["true"][..], 0),
+            (&["false"][..], 1),
+            (&["sleep", "30"][..], 124),
+        ] {
+            let bounded = bounded_control(argv);
+            let status = std::process::Command::new(bounded[0])
+                .args(&bounded[1..])
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(code), "{argv:?}");
+        }
     }
 
     #[test]
