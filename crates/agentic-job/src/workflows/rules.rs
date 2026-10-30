@@ -596,8 +596,8 @@ fn execution_problems(value: &Value, scope: &str, literal_matrix: bool) -> Vec<S
     for (v, known, at) in maps {
         if let Some(map) = v.as_object() {
             for key in map.keys().filter(|k| {
-                !known.contains(&k.as_str())
-                    && !(scope == "step" && known.contains(&k.to_ascii_lowercase().as_str()))
+                !(known.contains(&k.as_str())
+                    || (scope == "step" && known.contains(&k.to_ascii_lowercase().as_str())))
             }) {
                 problems.push(format!("has unknown or miscased `{at}` key `{key}`"));
             }
