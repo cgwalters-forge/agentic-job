@@ -659,7 +659,9 @@ impl Forgejo {
     /// The repository's labels, every page.
     fn repository_labels(&self) -> Result<Vec<Label>> {
         let mut labels = Vec::new();
-        for page in 1..=MAX_LABEL_PAGES {
+        // One bounded sentinel page distinguishes an exactly full listing
+        // from overflow without raising the label ceiling.
+        for page in 1..=MAX_LABEL_PAGES + 1 {
             let path = format!(
                 "/repos/{}/labels?page={page}&limit={LABELS_PER_PAGE}",
                 self.repo
@@ -667,14 +669,25 @@ impl Forgejo {
             let answer = self.send(&path, None)?;
             let found = labels_of(&answer)
                 .with_context(|| format!("GET {path}: the response is not labels"))?;
-            if found.is_empty() {
+            ensure!(found.len() <= LABELS_PER_PAGE, "too many labels on a page");
+            // Forgejo may clamp `limit` to API.MaxResponseItems, so a
+            // short nonempty page does not establish completeness.
+            let empty = found.is_empty();
+            labels.extend(found);
+            ensure!(
+                labels.len() <= MAX_LABEL_PAGES * LABELS_PER_PAGE,
+                "{} has more labels than apply reads ({})",
+                self.repo,
+                MAX_LABEL_PAGES * LABELS_PER_PAGE
+            );
+            if empty {
                 return Ok(labels);
             }
-            labels.extend(found);
         }
         bail!(
-            "{} has more labels than apply reads ({})",
+            "{} label listing did not end within {} pages ({}-label ceiling)",
             self.repo,
+            MAX_LABEL_PAGES + 1,
             MAX_LABEL_PAGES * LABELS_PER_PAGE
         )
     }
@@ -694,17 +707,22 @@ impl Forgejo {
     /// removes from it.
     fn label_change(&self, change: &LabelChange) -> Result<(Item, Vec<Label>)> {
         let item = self.item(change.item, None)?;
+        let labels = self.label_change_on(&item, change)?;
+        Ok((item, labels))
+    }
+
+    fn label_change_on(&self, item: &Item, change: &LabelChange) -> Result<Vec<Label>> {
         let repository = self.repository_labels()?;
         let labels = if change.add {
             let wanted = resolve(&self.repo, &repository, &change.labels)?;
-            additions(&item, change.item, wanted)?
+            additions(item, change.item, wanted)?
         } else {
-            removals(&item, &repository, change)?
+            removals(item, &repository, change)?
                 .into_iter()
                 .cloned()
                 .collect()
         };
-        Ok((item, labels))
+        Ok(labels)
     }
 
     /// Pushes the pull request's branch to its fork: see [`Git::push`].
@@ -844,6 +862,29 @@ impl Publisher for Forgejo {
                     answer["sha"] == status.sha.as_str(),
                     "GET {path}: the response is not that commit"
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn preflight_batch(&self, ops: &[Op]) -> Result<()> {
+        let mut items = std::collections::BTreeMap::new();
+        for op in ops {
+            if let Op::Labels(change) = op {
+                let item = match items.entry(change.item) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(self.item(change.item, None)?)
+                    }
+                };
+                let labels = self.label_change_on(item, change)?;
+                if change.add {
+                    item.labels.extend(labels);
+                } else {
+                    item.labels.retain(|label| !labels.contains(label));
+                }
+            } else {
+                self.preflight(op)?;
             }
         }
         Ok(())
@@ -1727,6 +1768,166 @@ pub(super) mod tests {
             "repository": {"full_name": "owner/name"},
             "labels": labels.iter().map(|(id, name)| label(*id, name)).collect::<Vec<_>>(),
         })
+    }
+
+    /// Exercise the public checked planner and publisher together: only
+    /// an earlier, explicitly authorized removal permits the transition.
+    #[test]
+    fn exclusive_label_batch() {
+        for (case, reverse, blocked, other_item, raced) in [
+            ("authorized", false, false, false, false),
+            ("blocked removal", false, true, false, false),
+            ("add first", true, false, false, false),
+            ("different item", false, false, true, false),
+            ("live state changed", false, false, false, true),
+        ] {
+            let mut current = item(false, true, &[(6, "status/protected")]);
+            let (server, requests) = serve(32, move |request| {
+                let line = route(request);
+                match line.as_str() {
+                    ITEM => ok(&current),
+                    "GET /repos/owner/name/issues/9" => {
+                        let mut other = current.clone();
+                        other["number"] = json!(9);
+                        ok(&other)
+                    }
+                    "GET /repos/owner/name/labels?page=1&limit=50" => ok(&json!([
+                        label(5, "status/triaged"),
+                        label(6, "status/protected")
+                    ])),
+                    line if line.starts_with("DELETE ") => {
+                        if !raced {
+                            current["labels"] = json!([]);
+                        }
+                        (204, String::new())
+                    }
+                    ADD => {
+                        current["labels"] = json!([label(5, "status/triaged")]);
+                        ok(&current["labels"])
+                    }
+                    "GET /repos/owner/name/labels?page=2&limit=50" => ok(&json!([])),
+                    _ => (404, "{}".into()),
+                }
+            });
+            let mut items = vec![
+                json!({"type": "remove_labels", "repo": "owner/name", "item_number": if other_item {9} else {5}, "labels": ["status/protected"]}),
+                json!({"type": "add_labels", "repo": "owner/name", "item_number": 5, "labels": ["status/triaged"]}),
+            ];
+            if reverse {
+                items.reverse();
+            }
+            let checked = super::super::tests::checked(&items);
+            let mut policy = super::super::tests::policy();
+            policy.repo = "owner/name".into();
+            for (kind, name) in [
+                ("remove_labels", "status/protected"),
+                ("add_labels", "status/triaged"),
+            ] {
+                let limit = policy.safe_outputs.others.get_mut(kind).unwrap();
+                limit.allowed = Some(vec![name.into()]);
+                if blocked && kind == "remove_labels" {
+                    limit.blocked.push(name.into());
+                }
+            }
+            let target = super::super::Target {
+                repo: "owner/name",
+                ..super::super::tests::target(None)
+            };
+            let result = super::super::plan(checked.path(), &policy, &target)
+                .map_err(|errors| anyhow::anyhow!("{errors:?}"))
+                .and_then(|ops| super::super::publish(&ops, &forgejo(&server)));
+            assert_eq!(result.is_ok(), case == "authorized", "{case}: {result:?}");
+            let writes: Vec<_> = requests
+                .try_iter()
+                .filter(|request| !request.line.starts_with("GET "))
+                .map(|request| route(&request))
+                .collect();
+            assert_eq!(
+                writes.len(),
+                if case == "authorized" {
+                    2
+                } else if raced {
+                    1
+                } else {
+                    0
+                },
+                "{case}: {writes:?}"
+            );
+            if case == "authorized" {
+                assert!(writes[0].starts_with("DELETE "));
+                assert_eq!(writes[1], ADD);
+            }
+        }
+    }
+
+    #[test]
+    fn repository_label_page_boundaries() {
+        for (count, page_size) in [
+            (950, 50),
+            (951, 50),
+            (999, 50),
+            (1000, 50),
+            (1001, 50),
+            (40, 25),
+            (1001, 25),
+        ] {
+            // Overflow must refuse even when the requested label is on
+            // the first short page, not just when it cannot be found.
+            let bug_id = if count > 1000 && page_size < 50 {
+                1
+            } else {
+                count
+            };
+            let (server, requests) = serve(64, move |request| {
+                let line = route(request);
+                if let Some(page) = line.strip_prefix("GET /repos/owner/name/labels?page=") {
+                    let page: usize = page.strip_suffix("&limit=50").unwrap().parse().unwrap();
+                    let labels: Vec<_> = ((page - 1) * page_size..count.min(page * page_size))
+                        .map(|i| label(i as u64 + 1, if i == bug_id - 1 { "bug" } else { "other" }))
+                        .collect();
+                    return ok(&json!(labels));
+                }
+                assert_eq!(line, CREATE);
+                assert_eq!(request.body["labels"], json!([bug_id]));
+                ok(&json!({"html_url": CREATED_URL, "labels": [label(bug_id as u64, "bug")]}))
+            });
+            let checked = super::super::tests::checked(&[
+                json!({"type": "create_issue", "repo": "owner/name", "title": "Flaky", "body": "It fails.", "labels": ["bug"]}),
+            ]);
+            let mut policy = super::super::tests::policy();
+            policy.repo = "owner/name".into();
+            policy
+                .safe_outputs
+                .others
+                .get_mut("create_issue")
+                .unwrap()
+                .allowed = Some(vec!["bug".into()]);
+            let target = super::super::Target {
+                repo: "owner/name",
+                ..super::super::tests::target(None)
+            };
+            let ops = super::super::plan(checked.path(), &policy, &target).unwrap();
+            let result = super::super::publish(&ops, &forgejo(&server));
+            let allowed = count <= 1000 && count / page_size < MAX_LABEL_PAGES + 1;
+            assert_eq!(result.is_ok(), allowed, "{count}/{page_size}: {result:?}");
+            let requests: Vec<_> = requests.try_iter().collect();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| route(request) == CREATE)
+                    .count(),
+                usize::from(allowed)
+            );
+            if let Err(err) = result {
+                let expected = if page_size == 50 {
+                    "more labels than apply reads (1000)"
+                } else {
+                    "label listing did not end within 21 pages (1000-label ceiling)"
+                };
+                assert!(err.to_string().contains(expected), "{err}");
+                assert_eq!(requests.len(), 21);
+            }
+        }
     }
 
     /// Each op as the forge sees it, and every write it makes: success,

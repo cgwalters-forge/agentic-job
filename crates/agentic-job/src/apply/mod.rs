@@ -441,6 +441,17 @@ pub trait Publisher {
     /// repository lacks), reading only. [`publish`] asks this of every op
     /// before the first write.
     fn preflight(&self, op: &Op) -> Result<()>;
+
+    /// Checks the whole ordered batch before writing. Publishers whose
+    /// operations depend on earlier changes may project that state here;
+    /// the write methods must still check the live state themselves.
+    fn preflight_batch(&self, ops: &[Op]) -> Result<()> {
+        for op in ops {
+            self.preflight(op)?;
+        }
+        Ok(())
+    }
+
     fn comment(&self, issue: u64, body: &str) -> Result<Made>;
     /// Pushes the patch to a new branch of the fork and opens a pull
     /// request from it.
@@ -1105,9 +1116,7 @@ fn trailer_start(body: &str) -> Option<usize> {
 /// failure after the first write names what was already made, so that
 /// whoever runs it again knows.
 pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
-    for op in ops {
-        publisher.preflight(op)?;
-    }
+    publisher.preflight_batch(ops)?;
     let mut made = Vec::new();
     for op in ops {
         let url = match op {

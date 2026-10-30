@@ -1594,9 +1594,21 @@ Names differing only in case are each their own label. Forgejo keeps one
 label of an [exclusive scope](https://forgejo.org/docs/latest/user/labels/#scoped-labels)
 on an item and removes the item's other when adding one, so apply refuses
 two requested labels of one scope, and an addition that would remove a
-label of the item: no request names that removal.
+label of the item implicitly. Preflight projects each item's labels in
+batch order: an explicitly allowed `remove_labels ["status/old"]` followed
+by `add_labels ["status/new"]` can transition an exclusive scope in one
+batch. Both operations need their own label authorization; removing a
+different item's label or adding before removing does not authorize the
+transition. Every operation is preflighted before any write, and each write
+still checks the live item and labels. A concurrent change can therefore
+stop a partly applied batch; projection is not a transaction.
 `remove_labels` looks at the item's labels: one it lacks is no change,
 and a name matching two of them in another case is refused.
+The repository listing accepts up to 1000 labels, using pages of 50 and
+at most one extra sentinel page to distinguish exactly 1000 from overflow.
+Only an empty page ends the listing: Forgejo may cap a page below the
+requested size. A listing that has not ended within 21 pages is refused,
+even below 1000 labels on a server configured with smaller pages.
 
 A label is added by its ID, only if the item lacks it, and removed only if
 the item has it, so a re-run changes nothing more. Forgejo's removal takes

@@ -9,6 +9,13 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Forgejo `apply` preflight now projects labels per item in batch order,
+  allowing an explicitly authorized remove-then-add exclusive-label
+  transition without weakening live pre-write checks. Label paging accepts
+  all repositories up to the advertised 1000-label ceiling and still
+  refuses overflow. Real-Forgejo coverage now includes labelled issue
+  creation, issue/PR closing, wrong-kind refusals and close reruns with
+  the scoped apply token.
 - Forgejo and GitLab `apply` now publish the neutral
   `create_pull_request_review_comment` output, off unless bounded in policy.
   `check --review-head SHA` binds it to the caller's fixed PR/MR and admitted
