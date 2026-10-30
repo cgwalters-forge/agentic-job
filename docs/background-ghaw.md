@@ -8,9 +8,9 @@ source of the safe-output format, of the collector `collect` ports and
 [gh-cao](https://github.com/githubnext/gh-cao) (GitHub Central Agentic Ops)
 is a GitHub Next research prototype layered on gh-aw. It adds campaigns
 across repositories, a catalog and a dashboard. This page compares
-features. It is not deployment advice. The
-[README](../README.md#why-not-github-agentic-workflows) explains why this
-project uses a host-user sandbox rather than gh-aw's container runtime.
+features. It is not deployment advice. [Below](#why-a-host-user-and-not-a-container)
+is why this project uses a host-user sandbox rather than gh-aw's container
+runtime.
 
 The gh-aw descriptions come from its documentation and the release notes up
 to [v0.92.6](https://github.com/github/gh-aw/releases), a pre-release of
@@ -21,6 +21,40 @@ setup action at v0.91.12 plus seven commits
 this repository were checked against its code when this page was written;
 the code wins where they differ. Issue numbers are the ones that tracked
 each gap. All of them are closed, even where part of the gap remains.
+
+## Why a host user and not a container
+
+For most people, gh-aw is the right choice today. The difference is where
+the agent runs. gh-aw puts it in a container behind a firewall, with
+[VM isolation in preview](https://github.github.com/gh-aw/reference/agent-runtimes/).
+That is a good boundary until the work itself needs containers: gh-aw's
+[mode for that](https://github.com/github/gh-aw-firewall/blob/main/docs/usage.md)
+hands the agent the host's Docker socket, and its own docs warn that
+this lets the agent around the firewall. agentic-job hardens the runner
+VM instead and runs the agent as an ordinary unprivileged user on it,
+with `/dev/kvm`, user namespaces and a login session of its own. That is
+the work this was built for: operating system and container tooling.
+
+Rootless Podman must be installed before hardening. Container build steps
+that need the network also need `--network=host` and a read-only mount of
+the egress proxy's CA bundle at the image's trust-bundle path; these are
+not Podman defaults. See the [container recipe](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#containers).
+
+Three smaller differences:
+
+- The hardening is not tied to the agent. A build-and-test job with no
+  agent can use `secure-host` by itself.
+- The model key is never on the runner. gh-aw keeps it out of the
+  agent's process, in an
+  [API proxy](https://github.com/github/gh-aw-firewall) beside it on the
+  same runner, and has
+  [keyless modes](https://github.github.com/gh-aw/reference/auth/) too.
+  Here the runner gets a token good for one run, and the key stays on
+  another machine.
+- There is no compiler and no new workflow language. You write ordinary
+  workflow YAML that calls a reusable workflow.
+  The opt-in [workflow checker](workflows-check.md) enforces job shape;
+  this repository runs it in the required base-trusted ingress `vet` job.
 
 ## Shape of a workflow
 

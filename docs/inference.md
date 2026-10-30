@@ -16,11 +16,35 @@ which its operator runs and which the agent's runner has to reach (how to
 run one is in its README), or, for a caller with only a provider's API
 key, one that `run` serves itself ([below](#a-provider-api-key)). The
 agent sees the same thing either way: an address and a token for the run.
-The [README](../README.md#inference) sums up what each needs.
+The reusable workflow on main uses a broker alone: it refuses a key
+([below](#a-provider-api-key)).
 
 [`tests/inference.rs`](../crates/agentic-job/tests/inference.rs) exercises registration with a mock proxy. Real-agent
 deployment evidence is reported in the [README](../README.md#what-is-real-today).
 This page describes the client protocol, not the broker's current deployment.
+
+## What a broker provides
+
+- its root URL, given as `inference-url`, serving the Anthropic API at
+  `/anthropic` (Claude Code), the OpenAI Responses API at `/v1`
+  (opencode) and Mistral at `/mistral/v1` (Vibe);
+- the run API: `POST /v1/runs` with the job's GitHub identity token for
+  the audience `inference-audience` (the broker's default is
+  `praxis-credential-broker`) answering 201 with a run token, then
+  `GET` and `DELETE /v1/runs/self`;
+- an admission entry in its
+  [run-token policy](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/run-token-policy.yaml):
+  `called_workflows` naming `agentic-job.yml` at the commit the caller
+  pins and the calling repository's numeric id, or, for an agent job of
+  the caller's own, `any_workflow` for that repository
+  ([which workflows a broker admits](#which-workflows-a-broker-admits)).
+
+The sandbox user reaches the broker directly only at an IPv4 address in
+100.64.0.0/10, that is on a tailnet. A host name, or a public `https://`
+broker, goes through the egress proxy, whose write rules refuse the
+agent's requests to it with a 403. The runner joins that network in a
+privileged step before `secure-host`; GitHub's hosted runners cannot
+reach a private broker without one.
 
 ## What `run` does
 

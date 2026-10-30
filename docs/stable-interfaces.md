@@ -55,7 +55,7 @@ Not stable: `budget`, deprecated in favour of `budget-usd`;
 tests; and `inference-provider`, `inference-register: api-key`,
 `INFERENCE_API_KEY` and `MCP_TOKEN`, which the workflow accepts and
 refuses or does not pass on for now
-([refused for now](../README.md#refused-for-now-a-key-in-the-reusable-workflow)).
+([refused for now](inference.md#a-provider-api-key)).
 
 ## Configuration files
 
