@@ -279,6 +279,10 @@ fn labels(forge: &Forge, auth: &Auth, repo: &str) -> Vec<String> {
 /// Runs apply as a caller's job does, without a proxy git would send the
 /// loopback server's traffic to.
 fn apply(forge: &Forge, policy: &Path, checked: &Path, token: &str) -> Output {
+    apply_to(forge, policy, checked, token, 1)
+}
+
+fn apply_to(forge: &Forge, policy: &Path, checked: &Path, token: &str, number: u64) -> Output {
     let mut command = Command::new(BIN);
     for name in PROXY_VARS {
         command.env_remove(name);
@@ -290,11 +294,197 @@ fn apply(forge: &Forge, policy: &Path, checked: &Path, token: &str) -> Output {
         .arg(policy)
         .arg("--checked")
         .arg(checked)
-        .args(["--comment-target", "1", "--run-url", RUN_URL])
+        .args([
+            "--comment-target",
+            &number.to_string(),
+            "--run-url",
+            RUN_URL,
+        ])
         .args(["--push-repo", &format!("{BOT}/{NAME}")])
         .env("FORGEJO_TOKEN", token)
         .output()
         .unwrap()
+}
+
+/// Push fixture commits with the same scoped token apply uses.
+fn git(dir: &Path, token: &str, args: &[&str]) {
+    let mut command = Command::new("git");
+    for name in PROXY_VARS {
+        command.env_remove(name);
+    }
+    let authorization = STANDARD.encode(format!("{BOT}:{token}"));
+    let output = command
+        .current_dir(dir)
+        .args([
+            "-c",
+            &format!("http.extraHeader=Authorization: Basic {authorization}"),
+        ])
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.org",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert_success(&format!("git {}", args.join(" ")), &output);
+}
+
+/// Exercise diff positions and the pending-review guard on the real API.
+fn inline_reviews(forge: &Forge, dir: &Path, token: &str, footer: &str, neutralized: &str) {
+    let bot = Auth::Token(token);
+    let target = format!("{ADMIN}/{NAME}");
+    let checkout = dir.join("inline-checkout");
+    git(
+        dir,
+        token,
+        &[
+            "clone",
+            &format!("{}/{target}.git", forge.server),
+            "inline-checkout",
+        ],
+    );
+    std::fs::write(checkout.join("inline.txt"), "before\ncontext\n").unwrap();
+    git(&checkout, token, &["add", "inline.txt"]);
+    git(&checkout, token, &["commit", "-m", "Seed inline fixture"]);
+    git(&checkout, token, &["push", "origin", "main"]);
+    git(&checkout, token, &["checkout", "-b", "inline-review"]);
+    std::fs::write(checkout.join("inline.txt"), "after\ncontext\n").unwrap();
+    git(
+        &checkout,
+        token,
+        &["commit", "-am", "Change inline fixture"],
+    );
+    git(&checkout, token, &["push", "origin", "inline-review"]);
+    // The admin opens it so the apply identity is a reviewer, not the author.
+    let pull = forge.post(
+        &Auth::Basic(ADMIN),
+        &format!("/repos/{target}/pulls"),
+        &json!({"title": "Inline fixture", "head": "inline-review", "base": "main"}),
+    );
+    let number = pull["number"].as_u64().unwrap();
+    let head = pull["head"]["sha"].as_str().unwrap();
+    let reviews_path = format!("/repos/{target}/pulls/{number}/reviews");
+    let publishing = policy(
+        forge,
+        dir,
+        "inline",
+        "add_comment = { max = 1 }\ncreate_pull_request_review_comment = { max = 1 }\n",
+    );
+    let publish = |name: &str, head: &str, side: &str, line: u64, earlier_comment: bool| {
+        let checked = dir.join(name);
+        let mut items = Vec::new();
+        if earlier_comment {
+            items.push(json!({"type": "add_comment", "body": "Must not appear."}));
+        }
+        items.push(json!({
+            "type": "create_pull_request_review_comment", "repo": target,
+            "pull_request_number": number, "path": "inline.txt", "side": side,
+            "line": line, "body": format!("{side} finding, @{ADMIN}.")
+        }));
+        checked_items(&checked, &items);
+        let report_path = checked.join("report.json");
+        let mut report: Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        report["inline_target"] = json!({"repo": target, "number": number, "head": head});
+        std::fs::write(report_path, report.to_string()).unwrap();
+        apply_to(forge, &publishing, &checked, token, number)
+    };
+    for (index, side) in ["RIGHT", "LEFT"].into_iter().enumerate() {
+        let before = forge.get(&bot, &reviews_path);
+        let output = publish(side, head, side, 1, false);
+        assert_success("agentic-job apply inline", &output);
+        let reviews = forge.get(&bot, &reviews_path);
+        let reviews = reviews.as_array().unwrap();
+        assert_eq!(reviews.len(), index + 1);
+        let review = reviews
+            .iter()
+            .find(|review| {
+                !before
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|old| old["id"] == review["id"])
+            })
+            .unwrap();
+        assert_eq!(review["state"], "COMMENT");
+        assert_eq!(review["user"]["login"], BOT);
+        assert_eq!(review["commit_id"], head);
+        let comments = forge.get(&bot, &format!("{reviews_path}/{}/comments", review["id"]));
+        let [comment] = comments.as_array().unwrap().as_slice() else {
+            panic!("{comments}")
+        };
+        assert_eq!(comment["path"], "inline.txt");
+        assert_eq!(comment["commit_id"], head);
+        assert_eq!(comment["position"], if side == "RIGHT" { 1 } else { 0 });
+        assert_eq!(
+            comment["original_position"],
+            if side == "LEFT" { 1 } else { 0 }
+        );
+        assert_eq!(
+            comment["body"],
+            format!("{side} finding, {neutralized}.{footer}")
+        );
+    }
+
+    // An earlier valid operation must not write when inline preflight refuses.
+    // Snapshot review comments too: a pending review must remain unpublished.
+    let snapshot = || {
+        let reviews = forge.get(&bot, &reviews_path);
+        let comments: Vec<_> = reviews
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|review| forge.get(&bot, &format!("{reviews_path}/{}/comments", review["id"])))
+            .collect();
+        let issue_comments = forge.get(&bot, &format!("/repos/{target}/issues/{number}/comments"));
+        (reviews, comments, issue_comments)
+    };
+    let refuse = |name: &str, head: &str, line: u64, message: &str| {
+        let before = snapshot();
+        let output = publish(name, head, "RIGHT", line, true);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{output:?}"
+        );
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(snapshot(), before);
+    };
+    refuse("outside-diff", head, 100, "line is outside the diff");
+
+    std::fs::write(checkout.join("inline.txt"), "new head\ncontext\n").unwrap();
+    git(&checkout, token, &["commit", "-am", "Move inline head"]);
+    git(&checkout, token, &["push", "origin", "inline-review"]);
+    // PR synchronization after a push can be asynchronous.
+    let start = Instant::now();
+    let current = loop {
+        let current = forge.get(&bot, &format!("/repos/{target}/pulls/{number}"));
+        if current["head"]["sha"] != head {
+            break current;
+        }
+        assert!(start.elapsed() < STARTUP, "PR head did not move after push");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    refuse("stale-inline", head, 1, "head is stale");
+    let head = current["head"]["sha"].as_str().unwrap();
+    let pending = forge.post(
+        &bot,
+        &reviews_path,
+        &json!({"event": "PENDING", "body": "Unchecked draft review.", "commit_id": head, "comments": [{
+            "path": "inline.txt", "new_position": 1, "old_position": 0,
+            "body": "Unchecked draft must stay pending."
+        }]}),
+    );
+    assert_eq!(pending["state"], "PENDING");
+    assert_eq!(pending["user"]["login"], BOT);
+    refuse(
+        "pending-inline",
+        head,
+        1,
+        "pending review by the apply identity",
+    );
 }
 
 /// The names of REPO's branches.
@@ -442,6 +632,7 @@ fn apply_publishes_to_forgejo() {
     let path = format!("/repos/{target}/collaborators/{BOT}");
     let (status, answer) = forge.call(&admin, "PUT", &path, Some(&json!({"permission": "write"})));
     assert_eq!(status, 204, "PUT {path}: {answer}");
+    inline_reviews(&forge, dir.path(), token, &footer, &neutralized);
     let before = labels(&forge, &admin, &target);
     let labelling = policy(&forge, dir.path(), "labelling", LABELLING);
     let label = |name: &str, output: &str, names: &[&str]| -> Output {
