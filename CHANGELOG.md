@@ -16,6 +16,17 @@ says what a caller may rely on across versions.
 - Move ordinary Ubuntu VM jobs, examples and the reusable workflow's
   `runner` default to Ubuntu 26.04, matching `agent-runner`. Explicit caller
   runner selections remain unchanged.
+- `native_handlers` also takes `push_to_pull_request_branch`,
+  `create_issue` and `create_pull_request_review_comment`, which
+  agentic-job's own handlers publish as gh-aw's pinned handlers do. A
+  push is check's patch on the run's head, with a lease on it, to the
+  pull request's branch in `head-repo`, with gh-aw's commit comment; its
+  commit is dated the patch's author date. An issue for an issue event is
+  linked as that issue's sub-issue. Review comments go in one review of
+  event `COMMENT` after every other routed request, and are refused in a
+  run that leaves gh-aw any type. The publication corpus gains cases for
+  sub-issues, a comment outside the diff and re-runs mixing both
+  handlers (docs/safe-outputs.md#agentic-jobs-own-handlers).
 - Repair live Forgejo inline-review assertions: deleted-line comments identify
   the fixture's base commit, while the review and checked target bind current
   head. Keep the subsequent stale-head, out-of-diff and pending-review

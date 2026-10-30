@@ -495,14 +495,26 @@ fn inline_reviews(forge: &Forge, dir: &Path, token: &str, footer: &str, neutrali
     std::fs::write(checkout.join("inline.txt"), "new head\ncontext\n").unwrap();
     git(&checkout, token, &["commit", "-am", "Move inline head"]);
     git(&checkout, token, &["push", "origin", "inline-review"]);
-    // PR synchronization after a push can be asynchronous.
+    // PR synchronization after a push is asynchronous, and Forgejo marks the
+    // earlier reviews stale only after moving the head (services/pull/pull.go,
+    // ValidatePullRequest): wait for both, or a later snapshot sees the flip.
     let start = Instant::now();
     let current = loop {
         let current = forge.get(&bot, &format!("/repos/{target}/pulls/{number}"));
-        if current["head"]["sha"] != head {
+        let reviews = forge.get(&bot, &reviews_path);
+        if current["head"]["sha"] != head
+            && reviews
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|review| review["stale"] == true)
+        {
             break current;
         }
-        assert!(start.elapsed() < STARTUP, "PR head did not move after push");
+        assert!(
+            start.elapsed() < STARTUP,
+            "PR head did not move, or its reviews did not go stale, after push"
+        );
         std::thread::sleep(Duration::from_millis(100));
     };
     refuse("stale-inline", head, 1, "head is stale");

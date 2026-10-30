@@ -44,6 +44,9 @@ const MAX_PAGES: u32 = 100;
 
 const PER_PAGE: usize = 100;
 
+/// The GraphQL API's path, under the REST API's address.
+const GRAPHQL: &str = "/graphql";
+
 /// The statuses gh-aw's `isTransientError` retries.
 const TRANSIENT_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];
 
@@ -151,7 +154,25 @@ pub struct Github {
 pub(super) struct Refused {
     pub status: u16,
     pub message: String,
+    /// The answer's `errors`, which name the field each is about.
+    pub errors: Vec<Value>,
 }
+
+/// A request [`Github::request_retrying`] gave up on, worded as gh-aw's
+/// `withRetry` words it, with the forge's last refusal.
+#[derive(Debug)]
+pub(super) struct Retried {
+    message: String,
+    pub refused: Option<Refused>,
+}
+
+impl std::fmt::Display for Retried {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Retried {}
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -176,7 +197,7 @@ impl std::error::Error for Unanswered {}
 
 /// Whether gh-aw's `isTransientError` retries ERR: no answer, or a
 /// refusal of a transient status or message.
-fn is_transient(err: &anyhow::Error) -> bool {
+pub(super) fn is_transient(err: &anyhow::Error) -> bool {
     if err.is::<Unanswered>() {
         return true;
     }
@@ -194,16 +215,18 @@ fn is_transient(err: &anyhow::Error) -> bool {
 /// failed with ERR after RETRIES retries: what its handler reports, and
 /// what its manager quotes in the comments after a pull request that
 /// failed. A 403 its `x-ratelimit-remaining` header alone calls a rate
-/// limit is not told apart here.
-fn retry_failure(err: &anyhow::Error, operation: &str, retries: u32) -> String {
+/// limit is not told apart here, nor one of fewer than three retries at
+/// most (MAX).
+fn retry_failure(err: &anyhow::Error, operation: &str, retries: u32, max: u32) -> String {
     let original = format!("{err:#}");
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let rate_limit = err
-        .downcast_ref::<Refused>()
-        .is_some_and(|refused| refused.status == 429)
-        || RATE_LIMIT_MESSAGES
-            .iter()
-            .any(|pattern| original.to_lowercase().contains(pattern));
+    let rate_limit = max >= 3
+        && (err
+            .downcast_ref::<Refused>()
+            .is_some_and(|refused| refused.status == 429)
+            || RATE_LIMIT_MESSAGES
+                .iter()
+                .any(|pattern| original.to_lowercase().contains(pattern)));
     let (code, failed, retryable, suggestion) = if !is_transient(err) {
         (
             "ERR_API",
@@ -238,6 +261,10 @@ impl Refused {
     /// The refusal TEXT says, which a forge's JSON error words with
     /// `message`, any `errors` and a `documentation_url`.
     fn of(status: u16, text: &str) -> Self {
+        let errors = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|data| data.get("errors").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
         let message = match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(data)) => match data.get("message") {
                 Some(message) => {
@@ -261,7 +288,11 @@ impl Refused {
             },
             _ => text.to_owned(),
         };
-        Self { status, message }
+        Self {
+            status,
+            message,
+            errors,
+        }
     }
 }
 
@@ -332,7 +363,12 @@ impl Github {
         path: &str,
         body: Option<&Value>,
     ) -> Result<(u16, String, Option<String>)> {
-        let url = format!("{}{path}", self.api);
+        // A server's GraphQL API is beside its REST API at `/api/v3`, as
+        // octokit's `graphql` finds it.
+        let url = match (path, self.api.strip_suffix("/api/v3")) {
+            (GRAPHQL, Some(server)) => format!("{server}/api{GRAPHQL}"),
+            _ => format!("{}{path}", self.api),
+        };
         let authorization = format!("Bearer {}", self.token);
         let version = self.api_version.unwrap_or_default();
         let request = |builder: ureq::RequestBuilder<ureq::typestate::WithBody>| {
@@ -442,24 +478,69 @@ impl Github {
         body: Option<&Value>,
         operation: &str,
     ) -> Result<Value> {
+        self.request_retrying_up_to(method, path, body, operation, PULL_REQUEST_RETRIES)
+    }
+
+    /// [`Self::request_retrying`], at most MAX times again; a failure is
+    /// [`Retried`].
+    pub(super) fn request_retrying_up_to(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        operation: &str,
+        max: u32,
+    ) -> Result<Value> {
         let mut wait = self.retry_wait;
         let mut retries = 0;
         loop {
             match self.request(method, path, body) {
-                Err(err) if retries < PULL_REQUEST_RETRIES && is_transient(&err) => {
+                Err(err) if retries < max && is_transient(&err) => {
                     retries += 1;
                     println!(
-                        "::warning::{method} {path} failed ({}); retry {retries}/{PULL_REQUEST_RETRIES} in {}s",
+                        "::warning::{method} {path} failed ({}); retry {retries}/{max} in {}s",
                         crate::run::enter::one_line(&format!("{err:#}")),
                         wait.as_secs()
                     );
                     std::thread::sleep(wait);
                     wait = (wait * 2).min(MAX_RETRY_WAIT);
                 }
-                Err(err) => bail!(retry_failure(&err, operation, retries)),
+                Err(err) => {
+                    let message = retry_failure(&err, operation, retries, max);
+                    return Err(Retried {
+                        message,
+                        refused: err.downcast::<Refused>().ok(),
+                    }
+                    .into());
+                }
                 answer => return answer,
             }
         }
+    }
+
+    /// Sends QUERY with VARIABLES to the GraphQL API, as octokit's
+    /// `graphql` does, and returns the answer's `data`; one with `errors`
+    /// is an error.
+    pub(super) fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let answer = self.request(
+            "POST",
+            GRAPHQL,
+            Some(&json!({"query": query, "variables": variables})),
+        )?;
+        if let Some(errors) = answer["errors"]
+            .as_array()
+            .filter(|errors| !errors.is_empty())
+        {
+            let messages: Vec<&str> = errors
+                .iter()
+                .filter_map(|error| error["message"].as_str())
+                .collect();
+            bail!(
+                "Request failed due to following response errors:\n - {}",
+                messages.join("\n - ")
+            );
+        }
+        Ok(answer["data"].clone())
     }
 
     /// GETs PATH, and returns the JSON of a successful answer.
@@ -694,6 +775,8 @@ impl Publisher for GithubPublisher {
                     files: &pr.files,
                     head: None,
                     committer: Some(ACTIONS_COMMITTER),
+                    at_author_date: false,
+                    max_changed_kb: None,
                 },
                 None,
             )
