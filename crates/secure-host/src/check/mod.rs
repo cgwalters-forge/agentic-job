@@ -538,15 +538,17 @@ impl Checker<'_> {
     /// Whether each of `attempts` succeeded, unreported: see
     /// [`Self::attempts`].
     fn made(&self, attempts: &[Attempt]) -> Result<Vec<bool>> {
-        in_order(attempts, |attempt| {
-            let argv: Vec<&str> = attempt.argv.iter().map(String::as_str).collect();
-            match attempt.kind {
-                AttemptKind::Control => Ok(runner_reaches(&bounded_control(&argv))),
-                AttemptKind::Refused | AttemptKind::RefusedInContainer => {
-                    Ok(self.refusal_output(attempt, &argv)?.success())
-                }
+        in_order(attempts, |attempt| self.make(attempt))
+    }
+
+    fn make(&self, attempt: &Attempt) -> Result<bool> {
+        let argv: Vec<&str> = attempt.argv.iter().map(String::as_str).collect();
+        match attempt.kind {
+            AttemptKind::Control => Ok(runner_reaches(&bounded_control(&argv))),
+            AttemptKind::Refused | AttemptKind::RefusedInContainer => {
+                Ok(self.refusal_output(attempt, &argv)?.success())
             }
-        })
+        }
     }
 
     /// What the sandbox user's `attempt` at `argv`, which must not
