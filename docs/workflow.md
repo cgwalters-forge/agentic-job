@@ -2280,8 +2280,8 @@ since the previous version.
 On main, a version-tagged workflow selects that version's attested
 release assets, as described at the [start of this page](#running-it-on-github),
 not its `build-DIGEST` release. Full-commit and branch pins retain the
-source-addressed path. `v0.6.4` already has the tagged selection path;
-older tags use the bootstrap code at their own commit.
+source-addressed path. Every tag from `v0.4.0` has the tagged selection
+path; older tags use the bootstrap code at their own commit.
 
 A caller pins the version's tag in place of a commit, for the reusable
 workflows and the actions alike:
