@@ -365,6 +365,22 @@ fn inline_reviews(forge: &Forge, dir: &Path, token: &str, footer: &str, neutrali
     );
     let number = pull["number"].as_u64().unwrap();
     let head = pull["head"]["sha"].as_str().unwrap();
+    let base = pull["base"]["sha"].as_str().unwrap();
+    assert_ne!(base, head);
+    assert_eq!(pull["merge_base"], base);
+    let commits = Command::new("git")
+        .current_dir(&checkout)
+        .args(["rev-parse", "main", "inline-review"])
+        .output()
+        .unwrap();
+    assert_success("git rev-parse fixture commits", &commits);
+    assert_eq!(
+        String::from_utf8(commits.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [base, head]
+    );
     let reviews_path = format!("/repos/{target}/pulls/{number}/reviews");
     let publishing = policy(
         forge,
@@ -395,6 +411,15 @@ fn inline_reviews(forge: &Forge, dir: &Path, token: &str, footer: &str, neutrali
         let before = forge.get(&bot, &reviews_path);
         let output = publish(side, head, side, 1, false);
         assert_success("agentic-job apply inline", &output);
+        let checked: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(side).join("report.json")).unwrap())
+                .unwrap();
+        let current = forge.get(&bot, &format!("/repos/{target}/pulls/{number}"));
+        assert_eq!(current["head"]["sha"], head);
+        assert_eq!(
+            checked["inline_target"],
+            json!({"repo": target, "number": number, "head": current["head"]["sha"]})
+        );
         let reviews = forge.get(&bot, &reviews_path);
         let reviews = reviews.as_array().unwrap();
         assert_eq!(reviews.len(), index + 1);
@@ -410,13 +435,26 @@ fn inline_reviews(forge: &Forge, dir: &Path, token: &str, footer: &str, neutrali
             .unwrap();
         assert_eq!(review["state"], "COMMENT");
         assert_eq!(review["user"]["login"], BOT);
+        // The submitted review binds the checked current head on BOTH sides,
+        // independently of the blame-based commit returned for its comment.
         assert_eq!(review["commit_id"], head);
         let comments = forge.get(&bot, &format!("{reviews_path}/{}/comments", review["id"]));
         let [comment] = comments.as_array().unwrap().as_slice() else {
             panic!("{comments}")
         };
         assert_eq!(comment["path"], "inline.txt");
-        assert_eq!(comment["commit_id"], head);
+        assert_eq!(comment["pull_request_review_id"], review["id"]);
+        // Observed on CI's pinned Forgejo v15.0.11: RIGHT added line ->
+        // head, position=1/original_position=0; LEFT deleted line -> base,
+        // position=0/original_position=1. services/pull/review.go's
+        // CreateCodeCommentKnownReviewID uses LineBlame/ReverseLineBlame;
+        // services/convert/pull_review.go exports CommitSHA and signed Line.
+        // These equal head/base for THIS one-change fixture, not all PRs.
+        // https://codeberg.org/forgejo/forgejo/src/tag/v15.0.11/services/pull/review.go
+        assert_eq!(
+            comment["commit_id"],
+            if side == "RIGHT" { head } else { base }
+        );
         assert_eq!(comment["position"], if side == "RIGHT" { 1 } else { 0 });
         assert_eq!(
             comment["original_position"],

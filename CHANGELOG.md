@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Repair live Forgejo inline-review assertions: deleted-line comments identify
+  the fixture's base commit, while the review and checked target bind current
+  head. Keep the subsequent stale-head, out-of-diff and pending-review
+  zero-write checks and metadata cases in the same scenario.
 - Secure-host checks refill a bounded probe pool as each attempt finishes,
   rather than waiting for the slowest attempt in each batch. Report order,
   probe IDs and refusal deadlines are unchanged; note-only runner controls

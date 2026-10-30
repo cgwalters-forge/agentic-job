@@ -1381,7 +1381,10 @@ most 20 pages of 50 reviews and refuses when any is `PENDING`. The scan must
 account for the unfiltered `X-Total-Count`; hidden reviews, missing or changing
 counts and incomplete scans fail closed, even when a filtered page is empty.
 It posts one `COMMENT` review per operation with `commit_id` and an
-`old_position` or `new_position` line number. GitLab resolves the repository
+`old_position` or `new_position` line number. The returned review identifies
+that head, but its comments identify blame-based commits: on the pinned
+Forgejo, a deleted line in the live one-change fixture identifies the base,
+not the head. GitLab resolves the repository
 path to its project ID and reads only `merge_requests`, never `issues` with
 a colliding iid. It requires current `diff_refs.base_sha`, `start_sha` and
 `head_sha`, reads at most 20 pages of 100 diff files (each response at most
@@ -1403,9 +1406,11 @@ reply or thread resolution is added.
 Loopback tests replay stored API-shaped JSON and diff fixtures for both
 mappings, both sides and context lines, colliding iids, moved heads,
 refusals before writes and partial failures. These fixtures are not live
-forge captures. CI's `forgejo` job also covers live inline comments against
+forge captures. CI's `forgejo` job runs the live inline scenario against
 its pinned container: RIGHT added and LEFT deleted lines are read back with
-their path, line and commit, and stale heads after a push, out-of-diff lines
+their path, line and side-aware commit (head/base in this fixture), separately
+from the checked target and submitted review's current-head binding.
+Stale heads after a push, out-of-diff lines
 and the apply identity's pending review are refused before writes. This
 exercises the real diff endpoint, position semantics and review listing's
 `X-Total-Count` contract, but not multi-page review scans. GitLab inline
