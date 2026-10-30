@@ -48,6 +48,10 @@ jobs:
       - run: make check                           # runner's user, no sudo
 ```
 
+Losing root does not hide the job's tokens from later steps. The reusable
+workflow keeps write credentials in separate jobs
+([token boundaries](docs/workflow.md#which-tokens-reach-what)).
+
 **Agent security is just CI security.** An agent is code you did not
 write, steered by text you did not write, like a build script from a pull
 request: take root away from it, give its job no token it could misuse,
@@ -164,30 +168,19 @@ agentic-job provisions no runners. The
 The binary is Rust; the workflow, the sandbox and the checks run on
 same-repository pull requests here, end to end, with the scripted agent, on
 GitHub's hosted Ubuntu 26.04 runners. Claude Code and opencode have each
-run real tasks on it on RHEL 10 runners. Called from
-`cgwalters-bot/agentic-job-trial`, runs
-[37587896350](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37587896350)
-and [37588497422](https://github.com/cgwalters-bot/agentic-job-trial/actions/runs/37588497422)
-opened pull requests [#1](https://github.com/cgwalters-bot/agentic-job-trial/pull/1)
-and [#2](https://github.com/cgwalters-bot/agentic-job-trial/pull/2)
-([#59](https://github.com/cgwalters-forge/agentic-job/issues/59)), before
-pull requests came from a fork. The fork path has run live once, from
-`cgwalters-forge/tracker`; the caller in [Try it](#try-it), from a fresh
-repository, has not ([what has run](docs/workflow.md#what-has-run-and-what-has-not)).
-`bootc-dev/cgwalters-devspace-sandbox` calls the workflow through
-`cgwalters-forge/actions`' wrapper on bootc-dev's RHEL 10 runners: a
-research run ([39465607338](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39465607338))
-posted its result as a comment; an implement run
-([39456746786](https://github.com/bootc-dev/cgwalters-devspace-sandbox/actions/runs/39456746786))
-opened nothing, as that caller names no fork.
+run real tasks on it on RHEL 10 runners. Cross-repository trials opened
+pull requests before apply switched to forks
+([#59](https://github.com/cgwalters-forge/agentic-job/issues/59)). The fork
+path has run live once, from `cgwalters-forge/tracker`; the caller in
+[Try it](#try-it), from a fresh repository, has not
+([deployment evidence](docs/workflow.md#what-has-run-and-what-has-not)).
 
-Claude Code and opencode have also run on hosted runners through the
-since-removed `tailscale-*` inputs ([retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294);
-[migrating](docs/workflow.md#migrating-from-the-tailscale-inputs)).
-Today a caller joins a private network in its own step in the
-[composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own),
-as only this repository's review gate does, with opencode on hosted
-`ubuntu-26.04` ([run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)).
+For hosted runners reaching a private broker, the current deployment is
+this repository's review gate with opencode on `ubuntu-26.04`
+([run 38666714558](https://github.com/cgwalters-forge/agentic-job/actions/runs/38666714558)).
+It joins the network in a caller-owned step in the
+[composed form](docs/workflow.md#the-pieces-and-an-agent-job-of-your-own).
+Older callers must [migrate from the removed Tailscale inputs](docs/workflow.md#migrating-from-the-tailscale-inputs).
 
 Not supported: most of gh-aw's catalogue. Private targets are refused unless the caller
 opts its own repository in under the conditions of
