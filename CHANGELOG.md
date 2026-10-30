@@ -16,6 +16,14 @@ says what a caller may rely on across versions.
   refuses overflow. Real-Forgejo coverage now includes labelled issue
   creation, issue/PR closing, wrong-kind refusals and close reruns with
   the scoped apply token.
+- GitLab commit statuses now require trusted `--status-ref` and
+  `--status-pipeline-id`, validated against the project and pinned SHA
+  before any writes. Reruns compare only the current job's full state,
+  description and run URL across bounded pages; an older match no longer
+  suppresses an update, and `error` updates a previous `failure` description.
+  Another run's pending/running job refuses instead of taking over its
+  identity. Status remains opt-in, with no agent-visible request or new
+  token permissions; ambiguous legacy status calls fail explicitly.
 - Forgejo and GitLab `apply` now publish the neutral
   `create_pull_request_review_comment` output, off unless bounded in policy.
   `check --review-head SHA` binds it to the caller's fixed PR/MR and admitted

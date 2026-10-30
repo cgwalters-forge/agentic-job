@@ -242,6 +242,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gitlab_status_context_flags() {
+        let base = [
+            "agentic-job",
+            "apply",
+            "--forge",
+            "gitlab",
+            "--server",
+            "https://gitlab.example",
+            "--repo",
+            "owner/name",
+            "--policy",
+            "p.json",
+            "--checked",
+            "dir",
+            "--run-url",
+            "https://gitlab.example/run/7",
+            "--status",
+            "success",
+            "--status-sha",
+            "1111111111111111111111111111111111111111",
+        ];
+        for (extra, accepted) in [
+            (vec![], true), // Legacy syntax parses, but preflight explains the missing context.
+            (vec!["--status-ref", "main"], false),
+            (vec!["--status-pipeline-id", "7"], false),
+            (
+                vec!["--status-ref", "main", "--status-pipeline-id", "0"],
+                false,
+            ),
+            (
+                vec!["--status-ref", "main", "--status-pipeline-id", "7"],
+                true,
+            ),
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(base.into_iter().chain(extra.clone())).is_ok(),
+                accepted,
+                "{extra:?}"
+            );
+        }
+    }
+
     /// Not in the plan's table: what a workflow writes the configuration
     /// with, from inputs that may hold anything.
     #[test]

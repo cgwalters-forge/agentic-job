@@ -1640,7 +1640,7 @@ GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJ
   --policy policy.json --checked DIR --run-url URL \
   [--comment-target IID --comment-target-kind issue|pull-request] \
   [--push-repo GROUP/PROJECT] [--recover-pushed-commit SHA] \
-  [--status STATE --status-sha SHA]
+  [--status STATE --status-sha SHA --status-ref REF --status-pipeline-id ID]
 ```
 
 publishes to a GitLab project through its REST API v4, as
@@ -1677,15 +1677,56 @@ for `noop`, `missing_tool` and `missing_data`:
   the head the run was asked for (`sha`). A merge request from the
   project itself or another fork, merged, closed or moved on is refused.
 - `--status` sets the caller's commit status after every other write,
-  as on Forgejo ([commit statuses on Forgejo](#commit-statuses-on-forgejo)):
-  `POST /projects/ID/statuses/SHA` with the name `agentic-job`, a fixed
+  off by default, never from agent JSONL. To prevent attaching a result
+  to the wrong pipeline or taking over another run's job, GitLab requires
+  the trusted caller's `--status-ref REF` and `--status-pipeline-id ID`.
+  The existing project-local pipeline must match the project's ID, the
+  full `--status-sha` and the exact ref. Missing context is an explicit
+  refusal, not automatic pipeline discovery; legacy calls without status
+  and Forgejo's status flags are unchanged. `POST /projects/ID/statuses/SHA`
+  carries both ref and pipeline ID, the fixed name `agentic-job`, a fixed
   description and `--run-url` as its link. GitLab has no `error`, so
-  `failure` and `error` are both `failed`; `pending` and `success` keep
-  their names. Before any write apply refuses a commit the project does
-  not have. GitLab refuses `pending` over a status of that name still
-  pending, and adds another for a finished one, so apply first reads the
-  commit's statuses of that name and writes nothing when one already has
-  this state and this run's link, as after a re-run.
+  `failure` and `error` are both `failed`, with distinct descriptions;
+  `pending` and `success` keep their names.
+
+Status targeting follows GitLab's documented
+[commit status API](https://docs.gitlab.com/api/commits/#set-commit-pipeline-status)
+and [pipeline API](https://docs.gitlab.com/api/pipelines/#get-a-single-pipeline).
+It requires GitLab 17.9 or later for the status listing's `pipeline_id`
+filter. GitLab may otherwise choose among duplicate pipelines or create an
+external pipeline; apply deliberately does neither. A commit readable in
+the target project's object store is not sufficient: a fork-only head
+without the matching pipeline in that project is refused before any
+write, including a push. For an MR, GitLab documents targeting the source
+branch's commit. The caller must provide an existing pipeline in the
+publication project for that SHA/ref, or omit status; apply never moves
+publication to the fork or reads these settings from checked agent output.
+No token scope, secret, workflow permission or JSONL capability is added.
+
+Preflight and the final status operation both read all statuses for this
+name, SHA, ref and pipeline, with `all=true`, at most 20 pages of 100
+entries (a full final page refuses incomplete selection). The greatest
+numeric job ID is current, regardless of list order; duplicate IDs or
+responses outside the requested context refuse. Only that current job's
+full state, description and run URL can suppress the POST. An older match
+cannot hide a newer different result, and `failure` followed by `error`
+updates the description. Any pending or running job for this context
+whose URL is not this run's refuses, even if an even newer job matches:
+GitLab could otherwise update that unfinished job, stealing its identity.
+
+These reads are not a transaction. A pipeline can disappear, a competing
+run can publish between the read and POST, and GitLab can reject the
+request (including pending conflicts, 409 update conflicts or 422 job
+limits). Apply sends at most one POST, never blindly retries an error or
+lost response, and never changes the name or run URL to bypass a conflict.
+A later explicit rerun reads the current value again. If status fails
+after a push or other write, the error includes the URLs already published
+(for example the MR URL); those writes remain published. Inspect that MR,
+the commit page and the trusted run URL before retrying: status rerun
+safety does not make an already-applied branch push replayable.
+
+Other GitLab outputs:
+
 - `add_labels` and `remove_labels` change the labels of the issue or the
   merge request their `issue_number` or `pull_request_number` names:
   exactly one of the two, never `item_number`

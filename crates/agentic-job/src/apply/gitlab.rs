@@ -74,6 +74,9 @@ const OPENED: &str = "opened";
 /// ref: GitLab's most a page.
 const STATUSES_PER_PAGE: usize = 100;
 
+/// Refuse rather than make unbounded reads in the credentialed publisher.
+const MAX_STATUS_PAGES: usize = 20;
+
 /// GitLab's commit status state for STATE. It has no `error`, and a run
 /// that could not finish did not pass, so that is `failed` too, never
 /// `canceled` or `skipped`, which a merge check may let through.
@@ -97,6 +100,8 @@ pub struct Gitlab {
     recover_pushed_commit: Option<String>,
     /// What the caller's comment target is.
     comment_kind: Option<Kind>,
+    /// Trusted deployment context, never taken from the checked JSONL.
+    status_context: Option<(String, u64)>,
 }
 
 /// What GitLab says of a project, as far as a push to it needs.
@@ -310,6 +315,7 @@ impl Gitlab {
             http: forgejo::agent(),
             recover_pushed_commit: None,
             comment_kind: None,
+            status_context: None,
         })
     }
 
@@ -326,6 +332,105 @@ impl Gitlab {
         self
     }
 
+    pub fn status_context(mut self, context: Option<(String, u64)>) -> Self {
+        self.status_context = context;
+        self
+    }
+
+    /// Bind the status to an existing pipeline of this project, SHA and
+    /// ref. Commit existence alone also accepts fork-only objects for
+    /// which GitLab cannot create a pipeline in the target project.
+    fn status_target(&self, status: &CommitStatus) -> Result<(Project, String, &str, u64)> {
+        let (reference, pipeline) = self.status_context.as_ref().context(
+            "GitLab --status requires trusted --status-ref and --status-pipeline-id; automatic pipeline targeting is ambiguous",
+        )?;
+        ensure!(
+            !reference.is_empty()
+                && reference.chars().count() <= 255
+                && !reference.chars().any(char::is_control),
+            "GitLab status ref must have 1..255 characters and no control characters"
+        );
+        ensure!(*pipeline > 0, "GitLab status pipeline ID must be positive");
+        ensure!(
+            super::COMMIT_RE.is_match(&status.sha),
+            "GitLab status requires a full commit SHA"
+        );
+        ensure!(
+            status.target_url.chars().count() <= 255,
+            "GitLab status run URL exceeds 255 characters"
+        );
+        let (project, url) = self.commit(&status.sha)?;
+        let path = format!("/projects/{}/pipelines/{pipeline}", project.id);
+        let answer = self.request(GET, &path, None)?;
+        ensure!(
+            answer["id"].as_u64() == Some(*pipeline)
+                && answer["project_id"].as_u64() == Some(project.id)
+                && answer["sha"] == status.sha
+                && answer["ref"] == reference.as_str(),
+            "GET {path}: status pipeline does not match the trusted project, SHA and ref"
+        );
+        Ok((project, url, reference, *pipeline))
+    }
+
+    /// Read every bounded page, not an arbitrary matching historic job.
+    /// IDs define current deterministically; timestamps can tie. Read all
+    /// jobs so an older active job belonging to another run is not stolen.
+    fn current_status(
+        &self,
+        project: u64,
+        reference: &str,
+        pipeline: u64,
+        status: &CommitStatus,
+    ) -> Result<Option<Value>> {
+        let mut latest: Option<Value> = None;
+        let mut ids = std::collections::BTreeSet::new();
+        for page in 1..=MAX_STATUS_PAGES {
+            let path = format!(
+                "/projects/{project}/repository/commits/{}/statuses?name={STATUS_CONTEXT}&ref={}&pipeline_id={pipeline}&all=true&per_page={STATUSES_PER_PAGE}&page={page}",
+                status.sha,
+                encoded(reference)
+            );
+            let answer = self.request(GET, &path, None)?;
+            let entries = answer
+                .as_array()
+                .context("GitLab response is not statuses")?;
+            ensure!(
+                entries.len() <= STATUSES_PER_PAGE,
+                "status page exceeds its limit"
+            );
+            for entry in entries {
+                ensure!(
+                    entry["name"] == STATUS_CONTEXT
+                        && entry["sha"] == status.sha
+                        && entry["ref"] == reference,
+                    "GitLab status does not match the requested context, SHA and ref"
+                );
+                let id = entry["id"].as_u64().context("status has no numeric id")?;
+                ensure!(
+                    ids.insert(id),
+                    "duplicate status id across pages; status listing changed or is ambiguous"
+                );
+                ensure!(
+                    !matches!(entry["status"].as_str(), Some("pending" | "running"))
+                        || entry["target_url"] == status.target_url,
+                    "another run has an active {STATUS_CONTEXT} status in pipeline {pipeline}; refusing to take over its identity"
+                );
+                if latest
+                    .as_ref()
+                    .is_none_or(|previous| previous["id"].as_u64() < Some(id))
+                {
+                    latest = Some(entry.clone());
+                }
+            }
+            if entries.len() < STATUSES_PER_PAGE {
+                return Ok(latest);
+            }
+        }
+        bail!(
+            "status listing exceeds {MAX_STATUS_PAGES} pages; refusing incomplete current-status selection"
+        )
+    }
+
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         Api {
             http: &self.http,
@@ -334,6 +439,16 @@ impl Gitlab {
             token: &self.token,
         }
         .request(method, path, body)
+        .map_err(|err| {
+            anyhow::anyhow!(super::git::shown(
+                &[
+                    &self.token,
+                    &encoded(&self.token),
+                    &BASE64.encode(format!("{GIT_USER}:{}", self.token))
+                ],
+                &format!("{err:#}")
+            ))
+        })
     }
 
     /// What git fetches PROJECT from, or pushes to it at.
@@ -707,7 +822,8 @@ impl Publisher for Gitlab {
                 self.push_target(push).with_context(pushing)?;
             }
             Op::Status(status) => {
-                self.commit(&status.sha)?;
+                let (project, _, reference, pipeline) = self.status_target(status)?;
+                self.current_status(project.id, reference, pipeline, status)?;
             }
         }
         Ok(())
@@ -870,25 +986,17 @@ impl Publisher for Gitlab {
         Ok(item.url)
     }
 
-    /// GitLab refuses `pending` over a status of that name still pending,
-    /// and adds another for a finished one, so one with this state and
-    /// run link, a re-run's own, is left as it is. Returns the commit's page: GitLab gives a
-    /// status none of its own.
+    /// At most one POST, never retried on transport/API failure: it may
+    /// already have created a job. A subsequent explicit rerun reads back
+    /// the current full desired value. GitLab gives a status no own page.
     fn status(&self, status: &CommitStatus) -> Result<String> {
-        let (project, url) = self.commit(&status.sha)?;
+        let (project, url, reference, pipeline) = self.status_target(status)?;
         let state = status_state(status.state);
-        let path = format!(
-            "/projects/{}/repository/commits/{}/statuses?name={STATUS_CONTEXT}&per_page={STATUSES_PER_PAGE}",
-            project.id, status.sha
-        );
-        let answer = self.request(GET, &path, None)?;
-        let latest = answer
-            .as_array()
-            .with_context(|| format!("GET {path}: the response is not statuses"))?;
-        if latest.iter().any(|set| {
-            set["name"] == STATUS_CONTEXT
-                && set["status"] == state
+        let latest = self.current_status(project.id, reference, pipeline, status)?;
+        if latest.as_ref().is_some_and(|set| {
+            set["status"] == state
                 && set["target_url"] == status.target_url.as_str()
+                && set["description"] == status.state.description()
         }) {
             return Ok(url);
         }
@@ -901,10 +1009,17 @@ impl Publisher for Gitlab {
                 "name": STATUS_CONTEXT,
                 "target_url": status.target_url,
                 "description": status.state.description(),
+                "ref": reference,
+                "pipeline_id": pipeline,
             })),
         )?;
         ensure!(
-            answer["status"] == state && answer["name"] == STATUS_CONTEXT,
+            answer["status"] == state
+                && answer["name"] == STATUS_CONTEXT
+                && answer["sha"] == status.sha
+                && answer["ref"] == reference
+                && answer["target_url"] == status.target_url
+                && answer["description"] == status.state.description(),
             "POST {path}: the response is not a {state} status {STATUS_CONTEXT}"
         );
         Ok(url)
@@ -921,7 +1036,9 @@ mod tests {
     const TOKEN: &str = "test-token-not-secret";
 
     fn gitlab(server: &str) -> Gitlab {
-        Gitlab::new(&format!("{server}/"), "owner/name", TOKEN.to_owned(), &[]).unwrap()
+        Gitlab::new(&format!("{server}/"), "owner/name", TOKEN.to_owned(), &[])
+            .unwrap()
+            .status_context(Some(("main".into(), 7)))
     }
 
     fn ok(answer: &Value) -> (u16, String) {
@@ -1118,6 +1235,269 @@ mod tests {
     const RUN_URL: &str = "https://gitlab.example/owner/name/-/pipelines/7";
     const STATUSES: &str = "POST /api/v4/projects/1/statuses/";
 
+    /// A loopback forge that remembers every POST, including multiple jobs
+    /// for the same context. Unlike a response queue this exercises reruns.
+    fn status_server(
+        mut statuses: Vec<Value>,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
+    ) {
+        let sha = "4".repeat(40);
+        serve(128, move |request| {
+            let line = route(request);
+            if line == "GET /api/v4/projects/owner%2Fname" {
+                return ok(&repo());
+            }
+            if line == format!("GET /api/v4/projects/1/repository/commits/{sha}") {
+                return ok(&json!({"id": sha, "web_url": format!("{COMMIT_URL}{sha}")}));
+            }
+            if line == "GET /api/v4/projects/1/pipelines/7" {
+                return ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"}));
+            }
+            if line.contains("/statuses?") {
+                let page: usize = line
+                    .split("&page=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let start = (page - 1) * STATUSES_PER_PAGE;
+                return ok(&json!(
+                    statuses
+                        .iter()
+                        .skip(start)
+                        .take(STATUSES_PER_PAGE)
+                        .collect::<Vec<_>>()
+                ));
+            }
+            if line.starts_with(STATUSES) {
+                let mut set = request.body.clone();
+                set["status"] = set["state"].clone();
+                set["id"] = json!(
+                    statuses
+                        .iter()
+                        .filter_map(|s| s["id"].as_u64())
+                        .max()
+                        .unwrap_or(0)
+                        + 1
+                );
+                set["sha"] = json!(sha);
+                set["ref"] = json!("main");
+                statuses.push(set.clone());
+                return ok(&set);
+            }
+            (404, "{}".into())
+        })
+    }
+
+    fn status_entry(id: u64, state: State, link: &str) -> Value {
+        json!({"id": id, "name": STATUS_CONTEXT, "sha": "4".repeat(40),
+            "ref": "main", "status": status_state(state), "target_url": link,
+            "description": state.description()})
+    }
+
+    #[test]
+    fn stateful_status_reruns() {
+        for (initial, states, writes) in [
+            // An older match must not hide a newer different result.
+            (
+                vec![
+                    status_entry(1, State::Failure, RUN_URL),
+                    status_entry(2, State::Success, RUN_URL),
+                ],
+                vec![State::Failure],
+                1,
+            ),
+            (vec![], vec![State::Failure, State::Error, State::Error], 2),
+            (
+                vec![],
+                vec![
+                    State::Pending,
+                    State::Pending,
+                    State::Success,
+                    State::Success,
+                ],
+                2,
+            ),
+        ] {
+            let (server, requests) = status_server(initial);
+            let publisher = gitlab(&server);
+            for state in states {
+                publisher
+                    .status(&CommitStatus {
+                        sha: "4".repeat(40),
+                        state,
+                        target_url: RUN_URL.into(),
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                requests
+                    .try_iter()
+                    .filter(|r| r.line.starts_with("POST "))
+                    .count(),
+                writes
+            );
+        }
+    }
+
+    #[test]
+    fn status_pagination_and_active_run_conflicts() {
+        for (count, other_pending, refusal) in [
+            (101, false, None),
+            (101, true, Some("another run has an active")),
+            (
+                MAX_STATUS_PAGES * STATUSES_PER_PAGE,
+                false,
+                Some("status listing exceeds"),
+            ),
+        ] {
+            // The newest entry is deliberately on the final page and
+            // differs from every older (otherwise matching) entry.
+            let mut entries: Vec<_> = (1..count)
+                .map(|id| status_entry(id as u64, State::Success, RUN_URL))
+                .collect();
+            entries.push(status_entry(
+                count as u64,
+                if other_pending {
+                    State::Pending
+                } else {
+                    State::Failure
+                },
+                "https://gitlab.example/other-run",
+            ));
+            let (server, requests) = status_server(entries);
+            let status = CommitStatus {
+                sha: "4".repeat(40),
+                state: State::Success,
+                target_url: RUN_URL.into(),
+            };
+            let result = gitlab(&server).status(&status);
+            match refusal {
+                Some(refusal) => assert!(format!("{:#}", result.unwrap_err()).contains(refusal)),
+                None => {
+                    result.unwrap();
+                }
+            }
+            let requests: Vec<_> = requests.try_iter().collect();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| r.line.starts_with("POST "))
+                    .count(),
+                usize::from(refusal.is_none())
+            );
+            assert!(requests.iter().any(|r| r.line.contains("&page=2")));
+        }
+        // Even a newer same-run result must not hide someone else's
+        // unfinished job: GitLab might select that job for the update.
+        let (server, requests) = status_server(vec![
+            status_entry(1, State::Pending, "https://gitlab.example/other-run"),
+            status_entry(2, State::Success, RUN_URL),
+        ]);
+        let status = CommitStatus {
+            sha: "4".repeat(40),
+            state: State::Success,
+            target_url: RUN_URL.into(),
+        };
+        assert!(gitlab(&server).preflight(&Op::Status(status)).is_err());
+        assert!(requests.try_iter().all(|r| r.line.starts_with("GET ")));
+    }
+
+    #[test]
+    fn unsupported_status_context_is_refused_before_other_writes() {
+        let sha = "4".repeat(40);
+        let pipeline = json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"});
+        let mut cases = vec![(None, pipeline.clone(), "requires trusted")];
+        for (key, value) in [
+            ("id", json!(8)),
+            ("project_id", json!(2)),
+            ("sha", json!("5".repeat(40))),
+            ("ref", json!("other")),
+        ] {
+            let mut answer = pipeline.clone();
+            answer[key] = value;
+            cases.push((
+                Some(("main".into(), 7)),
+                answer,
+                "does not match the trusted",
+            ));
+        }
+        for (context, pipeline, refusal) in cases {
+            let (server, requests) = mock(if context.is_some() {
+                vec![
+                    ok(&repo()),
+                    ok(&repo()),
+                    ok(&json!({"id": sha, "web_url": COMMIT_URL})),
+                    ok(&pipeline),
+                ]
+            } else {
+                vec![ok(&repo())]
+            });
+            let publisher = gitlab(&server).status_context(context);
+            // The issue operation would write first, but all preflights
+            // finish before any operation can publish.
+            let ops = [
+                Op::Issue(NewIssue {
+                    title: "Issue".into(),
+                    body: "Body".into(),
+                    labels: vec![],
+                }),
+                Op::Status(CommitStatus {
+                    sha: sha.clone(),
+                    state: State::Success,
+                    target_url: RUN_URL.into(),
+                }),
+            ];
+            let err = super::super::publish(&ops, &publisher).unwrap_err();
+            assert!(format!("{err:#}").contains(refusal), "{err:#}");
+            assert!(requests.try_iter().all(|r| r.line.starts_with("GET ")));
+        }
+    }
+
+    #[test]
+    fn status_errors_scrub_tokens_and_do_not_retry_posts() {
+        for code in [400, 409, 422, 500] {
+            let token = "test+status/token";
+            let encoded_token = encoded(token);
+            let credential = BASE64.encode(format!("{GIT_USER}:{token}"));
+            let sha = "4".repeat(40);
+            let (server, requests) = mock(vec![
+                ok(&repo()),
+                ok(&json!({"id": sha, "web_url": COMMIT_URL})),
+                ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": token})),
+                ok(&json!([])),
+                (
+                    code,
+                    json!({"message": format!("{token} {encoded_token} {credential}")}).to_string(),
+                ),
+            ]);
+            let publisher = Gitlab::new(&server, "owner/name", token.into(), &[])
+                .unwrap()
+                .status_context(Some((token.into(), 7)));
+            let err = publisher
+                .status(&CommitStatus {
+                    sha,
+                    state: State::Pending,
+                    target_url: RUN_URL.into(),
+                })
+                .unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(&format!("HTTP {code}")), "{err}");
+            for secret in [token, &encoded_token, &credential] {
+                assert!(!err.contains(secret), "{err}");
+            }
+            assert_eq!(
+                requests
+                    .try_iter()
+                    .filter(|r| r.line.starts_with("POST "))
+                    .count(),
+                1
+            );
+        }
+    }
+
     /// Merge request 9 as GitLab answers for it: open, from project
     /// SOURCE's BRANCH at SHA, into the repository's project, 1.
     fn merge_request(source: u64, branch: &str, sha: &str) -> Value {
@@ -1152,15 +1532,20 @@ mod tests {
                 "GET /api/v4/projects/owner%2Fname" => repo(),
                 "GET /api/v4/projects/fork%2Fname" => project(2, "fork/name", "public", Some(1)),
                 MR => mr.clone(),
+                "GET /api/v4/projects/1/pipelines/7" => {
+                    json!({"id": 7, "project_id": 1, "sha": known, "ref": "main"})
+                }
                 line if line == commit => {
                     json!({"id": known, "web_url": format!("{COMMIT_URL}{known}")})
                 }
-                line if line == format!("{commit}/statuses?name=agentic-job&per_page=100") => {
-                    set.clone()
+                line if line.starts_with(&format!("{commit}/statuses?")) => set.clone(),
+                line if line.starts_with(STATUSES) => {
+                    let mut answer = request.body.clone();
+                    answer["id"] = json!(1);
+                    answer["sha"] = json!(known);
+                    answer["status"] = request.body["state"].clone();
+                    answer
                 }
-                line if line.starts_with(STATUSES) => json!({
-                    "id": 1, "status": request.body["state"], "name": request.body["name"],
-                }),
                 _ => return (404, "{}".to_owned()),
             };
             ok(&answer)
@@ -1330,6 +1715,14 @@ mod tests {
                 false,
             ),
             (
+                "a pipeline unavailable in the target project",
+                none,
+                &["GET /api/v4/projects/1/pipelines/7"],
+                Err("GET /projects/1/pipelines/7: HTTP 500"),
+                None,
+                false,
+            ),
+            (
                 "a status failing after the push",
                 none,
                 &[STATUSES],
@@ -1412,7 +1805,7 @@ mod tests {
     #[test]
     fn statuses() {
         let sha = "4".repeat(40);
-        let latest = |state: &str, link: &str| json!([{"name": "agentic-job", "status": state, "target_url": link}]);
+        let latest = |state: State, link: &str| json!([status_entry(1, state, link)]);
         let cases = [
             (
                 State::Pending,
@@ -1433,13 +1826,13 @@ mod tests {
                 State::Success,
                 "success",
                 "The run succeeded",
-                latest("success", "https://gitlab.example/other"),
+                latest(State::Success, "https://gitlab.example/other"),
             ),
             (
                 State::Success,
                 "success",
                 "The run succeeded",
-                latest("pending", RUN_URL),
+                latest(State::Pending, RUN_URL),
             ),
         ];
         for (state, name, description, set) in cases {
@@ -1460,12 +1853,12 @@ mod tests {
             assert_eq!(
                 write.body,
                 json!({"state": name, "name": "agentic-job", "target_url": RUN_URL,
-                    "description": description})
+                    "description": description, "ref": "main", "pipeline_id": 7})
             );
         }
         // A re-run finds its own status set, and writes nothing.
         let (server, requests) =
-            push_gitlab(Value::Null, sha.clone(), latest("failed", RUN_URL), &[]);
+            push_gitlab(Value::Null, sha.clone(), latest(State::Error, RUN_URL), &[]);
         let status = CommitStatus {
             sha: sha.clone(),
             state: State::Error,
@@ -1480,6 +1873,7 @@ mod tests {
         let (server, _requests) = mock(vec![
             ok(&repo()),
             ok(&json!({"id": sha, "web_url": "https://gitlab.example/c"})),
+            ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"})),
             ok(&json!([])),
             ok(&json!({"id": 1, "status": "canceled", "name": "agentic-job"})),
         ]);
