@@ -479,7 +479,7 @@ It needs these repository or organization variables, and with a broker no secret
 
 | Variable | |
 | --- | --- |
-| `AGENT` | `claude` or `opencode`; unset fails the run rather than fall back to the scripted agent |
+| `AGENT` | `claude`, `opencode` or `vibe`; unset fails the run rather than fall back to the scripted agent |
 | `AGENT_MODEL` | the model, as the proxy serves it |
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
 | `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional; `api-key`, a provider's API key in place of a broker ([inference](inference.md#a-provider-api-key)), is refused for now, as in `agentic-job.yml`: the agent is the runner's user, which would hold the key |

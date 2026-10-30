@@ -170,7 +170,7 @@ See [output validation](safe-outputs.md).
 
 Set operator-controlled repository variables (not dispatch inputs):
 
-- `AGENT`: `opencode` or `claude` (`fake` is the default).
+- `AGENT`: `opencode`, `claude` or `vibe` (`fake` is the default).
 - `AGENT_MODEL`: the model name the selected agent and broker support.
 - `AGENT_RUNNER`: JSON runner labels, for example
   `["self-hosted","agentic-job"]`, for a disposable proxy-reachable image.
