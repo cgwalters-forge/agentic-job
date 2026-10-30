@@ -263,6 +263,12 @@ pub struct Args {
     /// The commit the caller's --status is for
     #[arg(long, value_name = "SHA", requires = "status")]
     pub status_sha: Option<String>,
+    /// GitLab status's trusted pipeline ref (never read from agent output)
+    #[arg(long, value_name = "REF", requires_all = ["status", "status_pipeline_id"])]
+    pub status_ref: Option<String>,
+    /// GitLab status's trusted project-local pipeline ID
+    #[arg(long, value_name = "ID", requires_all = ["status", "status_ref"], value_parser = clap::value_parser!(u64).range(1..))]
+    pub status_pipeline_id: Option<u64>,
 }
 
 /// A commit status's state: those GitHub and Forgejo both have.
@@ -1141,6 +1147,11 @@ pub fn publish(ops: &[Op], publisher: &dyn Publisher) -> Result<Vec<String>> {
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
+    anyhow::ensure!(
+        args.forge == Forge::Gitlab
+            || (args.status_ref.is_none() && args.status_pipeline_id.is_none()),
+        "--status-ref and --status-pipeline-id are GitLab-only"
+    );
     if let Some(commit) = &args.recover_pushed_commit {
         anyhow::ensure!(
             COMMIT_RE.is_match(commit),
@@ -1165,7 +1176,8 @@ pub fn run(args: &Args) -> Result<Exit> {
         Forge::Gitlab => Box::new(
             gitlab::Gitlab::new(&args.server, &policy.repo, token, &policy.allow_http)?
                 .recovering(args.recover_pushed_commit.clone())
-                .commenting_on(args.comment_target_kind),
+                .commenting_on(args.comment_target_kind)
+                .status_context(args.status_ref.clone().zip(args.status_pipeline_id)),
         ),
     };
     let target = Target {

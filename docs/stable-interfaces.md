@@ -130,7 +130,13 @@ caller's `--comment-target` of the `--comment-target-kind` it names,
 `issue_number` and `pull_request_number`, never `item_number`; it writes
 nothing for the three no-write types, and refuses the rest. With
 `--status` and `--status-sha` it sets the caller's commit status, name
-`agentic-job`, `failure` and `error` both as GitLab's `failed`
+`agentic-job`, `failure` and `error` both as GitLab's `failed`, with
+distinct descriptions. GitLab statuses require trusted `--status-ref` and
+`--status-pipeline-id` for an existing pipeline matching the project, SHA
+and ref; legacy status calls lacking these refuse before writes. Only the
+greatest job ID in that context can suppress an identical full status;
+another run's pending/running job refuses. Listing is bounded and POSTs
+are not retried automatically
 ([publishing to GitLab](safe-outputs.md#publishing-to-gitlab)). On
 GitLab, `agentic-job collect` takes those two fields for the label types
 and refuses an `issue_number` or `pull_request_number` a type does not
