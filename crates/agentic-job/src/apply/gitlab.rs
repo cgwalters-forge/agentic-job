@@ -712,6 +712,8 @@ impl Gitlab {
                 files: &pr.files,
                 head: None,
                 committer: None,
+                at_author_date: false,
+                max_changed_kb: None,
             },
             self.recover_pushed_commit.as_deref(),
         )
@@ -914,6 +916,8 @@ impl Publisher for Gitlab {
                     files: &push.files,
                     head: Some(&push.head),
                     committer: None,
+                    at_author_date: false,
+                    max_changed_kb: None,
                 },
                 None,
             )
