@@ -425,7 +425,7 @@ says why on the issue.
 ## Verification
 
 `cargo test -p agentic-job dispatch` covers every preflight refusal and each
-profile's task text; `node --test workflow/dispatch.test.cjs workflow/review.test.cjs`
+profile's task text; `node --test workflow/dispatch.test.cjs`
 checks the caller's shape and runs all shipped sessions; `cargo test -p agentic-job review`
 covers hostile review routing and output cases.
 CI calls the **same dispatch.yml**, running research wherever it runs its

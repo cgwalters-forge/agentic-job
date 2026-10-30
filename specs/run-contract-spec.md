@@ -120,8 +120,8 @@ calling repository; where the outputs go is the caller's to bound
 and for `implement`).
 Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), test
 `what_the_job_token_cannot_apply_is_refused`;
-[proposals.test.cjs](../workflow/proposals.test.cjs), the `the policy command
-is told when apply holds only the job token` cases.
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`the_request_step_tells_the_policy_command_its_token_and_targets`.
 
 ### 3.2 Proposals and refusals
 
@@ -135,10 +135,9 @@ directly. See [hand-back construction](../docs/safe-outputs.md#what-the-agent-do
 require explicit trusted binary and policy artifact IDs and exactly one
 proposal selector (artifact ID or legacy name). Producer outputs MUST NOT
 select the checker binary, policy or fixed comment destination.
-Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
-`proposals route retains check and token separation`,
-`checker requires explicit trusted IDs and one proposal selector` and
-`wrapper passes trusted checker inputs directly and exports all checker outputs`.
+Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`workflow_shapes`, `the_checker_requires_explicit_artifact_contracts` and
+`the_checker_refuses_another_upload_digest`.
 
 **RC-005 — Hand-back files.** Check MUST accept only `outputs.jsonl`, optional
 `base.json` and at most one `aw-BRANCH.patch`, or the replacement form of RC-023.
@@ -181,8 +180,10 @@ Enforcement: [check/patch.rs](../crates/agentic-job/src/check/patch.rs), tests
 **RC-008 — Failure gate.** A refused hand-back MUST NOT upload applicable
 outputs or start apply. A missing or malformed collector result MUST be an
 error, not an acceptance verdict.
-Enforcement: [refusal.test.cjs](../workflow/refusal.test.cjs),
-`expected refusal never uploads applicable outputs or starts apply`;
+Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`workflow_shapes`, `refusals_reach_the_conclusion_comment`,
+`collector_refusals_fail_the_step_after_it` and
+`an_expected_refusal_needs_a_report_and_a_summary`;
 [tests/check.rs](../crates/agentic-job/tests/check.rs),
 `a_check_that_cannot_be_made_is_an_error_and_writes_no_verdict`.
 
@@ -194,8 +195,8 @@ apply MAY consume `SAFE_OUTPUTS_PAT`; its checkout and handler
 API steps MUST select that explicitly passed secret when nonempty, otherwise
 `github.token`, independently of the optional apply environment. Event status
 jobs can also write, but are not proposal appliers.
-Enforcement: [proposals.test.cjs](../workflow/proposals.test.cjs),
-`proposals route retains check and token separation`;
+Enforcement: [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`workflow_shapes` and `the_review_caller_keeps_token_separation`;
 [apply.test.cjs](../workflow/apply.test.cjs),
 `apply alone consumes the optional safe outputs PAT with job-token fallback`
 and the `credential expression wiring: PAT ...` cases.
@@ -280,8 +281,8 @@ Enforcement: [check/mod.rs](../crates/agentic-job/src/check/mod.rs) test
 `per_type_destinations_and_protection_are_not_offered`,
 [apply.test.cjs](../workflow/apply.test.cjs)
 `a comment is hidden only on the triggering item, for the pinned reasons`,
-[proposals.test.cjs](../workflow/proposals.test.cjs)
-`hide_comment is refused before the agent for an event's item elsewhere`, and
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)
+`review_thread_types_are_refused_for_an_events_item_elsewhere`, and
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
 `a checked comment is hidden only on the triggering item, for a pinned reason`.
 
@@ -301,8 +302,8 @@ Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs) test
 [apply.test.cjs](../workflow/apply.test.cjs)
 `review threads are held to the triggering pull request` and
 `a reply to a review comment off the run's pull request refuses the run before anything is applied`,
-[proposals.test.cjs](../workflow/proposals.test.cjs)
-`… is refused before the agent for an event's item elsewhere`,
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)
+`review_thread_types_are_refused_for_an_events_item_elsewhere`,
 [handlers.test.mjs](../crates/agentic-job/tests/corpus/handlers.test.mjs)
 `checked review comments, replies and resolved threads stay on the triggering pull request`,
 and CI's `e2e-threads`.
@@ -393,9 +394,9 @@ quotes its reason through the pinned gh-aw sanitizer`, `the reason of a run
 with no result is sanitized as the handlers sanitize a comment` and the
 `conclude says ...` cases; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary` and `the URL of what apply made is an output
-of dispatch, by way of the wrapper`; [proposals.test.cjs](../workflow/proposals.test.cjs),
-the issue and `item-repo` cases of `the policy command is told when apply holds only the job
-token`; [status.rs](../crates/agentic-job/src/apply/status.rs), test
+of dispatch, by way of the wrapper`; [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+the issue and `item-repo` cases of
+`the_request_step_tells_the_policy_command_its_token_and_targets`; [status.rs](../crates/agentic-job/src/apply/status.rs), test
 `writes`; [policy.rs](../crates/agentic-job/src/policy.rs), the `an item in ...`
 cases of `requests_against_the_bounds`; [handback.rs](../crates/agentic-job/src/run/handback.rs), tests
 `titles_are_cut_between_words` and `made_up_pull_requests`.
@@ -460,8 +461,8 @@ identity's fork as a new pull request's`, `a push is verified on the branch it w
 head, with the checked tree`, `a partial run's push is not applied, whatever
 else it posts` and `target base fetching never advances the
 output repository and a stale base is refused`;
-[proposals.test.cjs](../workflow/proposals.test.cjs), the push cases of `the
-policy command is told when apply holds only the job token`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs), the push cases of
+`the_request_step_tells_the_policy_command_its_token_and_targets`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
 capabilities and token boundary`.
 
 **RC-023 — Bounded history replacement.** A push MAY replace its full series

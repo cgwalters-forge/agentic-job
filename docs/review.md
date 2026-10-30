@@ -574,12 +574,13 @@ added spaces, a non-Rust or new file, a conflicting rebase, a failing
 formatter), with a stand-in for rustfmt, and which statuses approve.
 They use a fake API; actual forge writes are left to real workflow runs.
 
-`node --test workflow/review.test.cjs` checks, by reading `review.yml`, which job
-holds which token, which authors start automatic reviews and what the status
-job runs. It also checks that both review prompts require code analysis without
+The crate's `tests/workflows.rs` checks, by reading `review.yml`, which job
+holds which token and what the status job runs, and pins the policy job's `if:`
+that decides which authors start automatic reviews, and that the review agent
+job has no project toolchain installation or build-cache restore.
+`dispatch::tests` checks that both review prompts require code analysis without
 running checks or consulting CI, findings tagged blocker, important or nit and
-CHANGES only for a blocker, and that the review agent job has no project
-toolchain installation or build-cache restore. `node --test
+CHANGES only for a blocker. `node --test
 workflow/agent-actions.test.cjs` checks that the caller's network step is
 one optional step of the register job, from its base checkout, and of
 `agent.yml`'s job when review.yml asks for it, between `prepare` and
@@ -594,19 +595,6 @@ policy, agent, check and apply path with the scripted agent and no inference,
 through `agentic-job.yml`; `review.yml` itself, its network step and its
 submit and status jobs' API calls run only on real pull requests. Real-model review quality is not
 asserted.
-
-The opt-in captured-request regression uses a real opencode runtime and a
-loopback deterministic model endpoint, not credentials or real inference:
-
-```sh
-cargo build --locked
-AGENTIC_JOB_TEST_REAL_OPENCODE=1 node --test workflow/review-runtime.test.cjs
-```
-
-Install the workflow's npm version on PATH first. The test checks a trusted
-instruction positive control and data-file reads, and that hostile head
-AGENTS.md, CLAUDE.md and project configuration are not loaded as instructions
-at startup. Without the opt-in it is skipped. It makes no immutability claim.
 
 The npm registry available during this change reports `opencode-ai` latest as
 1.18.35, not a stable 2.x release. The workflow default uses that available
