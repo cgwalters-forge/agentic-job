@@ -16,9 +16,10 @@ says what a caller may rely on across versions.
   refuses overflow. Real-Forgejo coverage now includes labelled issue
   creation, issue/PR closing, wrong-kind refusals and close reruns with
   the scoped apply token.
-- GitLab commit statuses now require trusted `--status-ref` and
+- GitLab commit statuses now require GitLab 18.5+ and trusted `--status-ref` and
   `--status-pipeline-id`, validated against the project and pinned SHA
-  before any writes. Reruns compare only the current job's full state,
+  before any writes; archived pipelines or CI configuration errors refuse.
+  Reruns compare only the current job's full state,
   description and run URL across bounded pages; an older match no longer
   suppresses an update, and `error` updates a previous `failure` description.
   Another run's pending/running job refuses instead of taking over its

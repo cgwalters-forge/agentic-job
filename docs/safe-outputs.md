@@ -1681,7 +1681,8 @@ for `noop`, `missing_tool` and `missing_data`:
   to the wrong pipeline or taking over another run's job, GitLab requires
   the trusted caller's `--status-ref REF` and `--status-pipeline-id ID`.
   The existing project-local pipeline must match the project's ID, the
-  full `--status-sha` and the exact ref. Missing context is an explicit
+  full `--status-sha` and the exact ref, be explicitly unarchived and have
+  no CI configuration errors (`yaml_errors`). Missing context is an explicit
   refusal, not automatic pipeline discovery; legacy calls without status
   and Forgejo's status flags are unchanged. `POST /projects/ID/statuses/SHA`
   carries both ref and pipeline ID, the fixed name `agentic-job`, a fixed
@@ -1692,8 +1693,10 @@ for `noop`, `missing_tool` and `missing_data`:
 Status targeting follows GitLab's documented
 [commit status API](https://docs.gitlab.com/api/commits/#set-commit-pipeline-status)
 and [pipeline API](https://docs.gitlab.com/api/pipelines/#get-a-single-pipeline).
-It requires GitLab 17.9 or later for the status listing's `pipeline_id`
-filter. GitLab may otherwise choose among duplicate pipelines or create an
+It requires GitLab 18.5 or later: status listing needs the `pipeline_id`
+filter (17.9+), and the pipeline API must expose a boolean `archived`
+field (18.5+). Older responses refuse before any write, rather than guess
+archive eligibility. GitLab may otherwise choose among duplicate pipelines or create an
 external pipeline; apply deliberately does neither. A commit readable in
 the target project's object store is not sufficient: a fork-only head
 without the matching pipeline in that project is refused before any
