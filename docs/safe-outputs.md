@@ -1403,10 +1403,13 @@ reply or thread resolution is added.
 Loopback tests replay stored API-shaped JSON and diff fixtures for both
 mappings, both sides and context lines, colliding iids, moved heads,
 refusals before writes and partial failures. These fixtures are not live
-forge captures. CI's `forgejo` job does not yet post inline comments, and
-there is no GitLab one; live-forge inline-review coverage (diff endpoint,
-position semantics, review listing and paging) remains follow-up work, not
-proof supplied by the loopback tests. A failed later
+forge captures. CI's `forgejo` job also covers live inline comments against
+its pinned container: RIGHT added and LEFT deleted lines are read back with
+their path, line and commit, and stale heads after a push, out-of-diff lines
+and the apply identity's pending review are refused before writes. This
+exercises the real diff endpoint, position semantics and review listing's
+`X-Total-Count` contract, but not multi-page review scans. GitLab inline
+coverage remains loopback-only; there is no live GitLab job. A failed later
 write names already published URLs; retrying may duplicate comments because
 these publishers do not add deduplication markers.
 
