@@ -14,9 +14,14 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// A file of .github/workflows, read at test time.
+/// A workflow basename or a repository-relative action, read at test time.
 fn workflow(file: &str) -> String {
-    std::fs::read_to_string(root().join(".github/workflows").join(file)).unwrap()
+    let file = if file.contains('/') {
+        root().join(file)
+    } else {
+        root().join(".github/workflows").join(file)
+    };
+    std::fs::read_to_string(file).unwrap()
 }
 
 /// The text of `name`, a job of `text`, up to the next job.
@@ -33,33 +38,46 @@ fn job<'a>(text: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// Runs the `run:` text of the one step named `name` in `file`, of any job,
-/// with bash as Actions does, in `dir`: with `env`, and of this process's
-/// environment only PATH and HOME.
-fn run_step(file: &str, name: &str, dir: &Path, env: &[(&str, &str)]) -> Output {
+/// Workflows by basename, composite actions by repository-relative path.
+fn definition(file: &str) -> yaml_rust2::Yaml {
     let text = workflow(file);
-    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
-    let mut runs = doc["jobs"]
-        .as_hash()
+    yaml_rust2::YamlLoader::load_from_str(&text)
         .unwrap()
-        .values()
-        .flat_map(|job| job["steps"].as_vec().into_iter().flatten())
-        .filter(|step| step["name"].as_str() == Some(name))
-        .map(|step| step["run"].as_str().unwrap());
-    let script = runs
-        .next()
-        .unwrap_or_else(|| panic!("no step {name:?} in {file}"));
-    assert!(runs.next().is_none(), "two steps {name:?} in {file}");
+        .remove(0)
+}
+
+fn steps(doc: &yaml_rust2::Yaml) -> Vec<&yaml_rust2::Yaml> {
+    if let Some(jobs) = doc["jobs"].as_hash() {
+        jobs.values()
+            .flat_map(|job| job["steps"].as_vec().into_iter().flatten())
+            .collect()
+    } else {
+        doc["runs"]["steps"].as_vec().unwrap().iter().collect()
+    }
+}
+
+fn named_step<'a>(doc: &'a yaml_rust2::Yaml, name: &str) -> &'a yaml_rust2::Yaml {
+    let mut found = steps(doc)
+        .into_iter()
+        .filter(|step| step["name"].as_str() == Some(name));
+    let step = found.next().unwrap_or_else(|| panic!("no step {name:?}"));
+    assert!(found.next().is_none(), "two steps {name:?}");
+    step
+}
+
+/// Runs the actual workflow or composite step, without job credentials or
+/// user configuration from this process. Every invocation has a temporary HOME.
+fn run_step(file: &str, name: &str, dir: &Path, env: &[(&str, &str)]) -> Output {
+    let doc = definition(file);
+    let script = named_step(&doc, name)["run"].as_str().unwrap();
     let mut command = Command::new("bash");
     command
         .args(["-eo", "pipefail", "-c", script])
         .current_dir(dir)
         .env_clear();
-    for key in ["PATH", "HOME"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
+    command
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", dir);
     command.envs(env.iter().copied()).output().unwrap()
 }
 
@@ -549,6 +567,1865 @@ fn workflow_budgets_convert_dollars_and_keep_explicit_legacy_aic() {
 
 const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
 
+#[test]
+fn prepare_requires_trusted_ids_before_download() {
+    let dir = tempfile::tempdir().unwrap();
+    for (binary, policy, ok) in [
+        ("1", "2", true),
+        ("", "2", false),
+        ("1", "", false),
+        ("0", "2", false),
+        ("1,2", "3", false),
+        ("1", "policy-name", false),
+        ("$(exit 99)", "2", false),
+    ] {
+        let result = run_step(
+            "prepare/action.yml",
+            "Require trusted upload IDs",
+            dir.path(),
+            &[("BINARY", binary), ("POLICY", policy)],
+        );
+        assert_eq!(
+            result.status.success(),
+            ok,
+            "{binary:?} {policy:?}: {result:?}"
+        );
+    }
+    let doc = definition("prepare/action.yml");
+    let steps = steps(&doc);
+    let download = steps
+        .iter()
+        .position(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/download-artifact@"))
+        })
+        .unwrap();
+    assert!(
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some("Require trusted upload IDs"))
+            .unwrap()
+            < download
+    );
+    assert_eq!(
+        steps[download]["with"]["artifact-ids"].as_str(),
+        Some("${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}")
+    );
+    assert!(steps[download]["with"]["name"].is_badvalue());
+}
+
+#[test]
+fn prepare_address_is_a_config_value_and_refusal_is_atomic() {
+    use serde_json::json;
+    for (address, ok) in [("100.64.0.1", true), ("--help", true), ("refused", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(
+            &dir.path().join("agentic-job"),
+            "#!/bin/bash\n[ \"$4\" != --inference-address=refused ] || exit 1\nprintf '%s\\n' \"$@\"\n",
+        );
+        std::fs::write(dir.path().join("config.toml"), "policy\n").unwrap();
+        std::fs::write(dir.path().join("meta.json"), r#"{"item":"x"}"#).unwrap();
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "prepare/action.yml",
+            "The inference broker's address",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("ADDRESS", address),
+                ("PATH", &search),
+            ],
+        );
+        assert_eq!(result.status.success(), ok, "{result:?}");
+        let expected = if ok {
+            format!(
+                "config\n--from\n{}/config.toml\n--inference-address={address}\n",
+                dir.path().display()
+            )
+        } else {
+            "policy\n".into()
+        };
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            expected
+        );
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("meta.json")).unwrap()).unwrap();
+        assert_eq!(
+            meta,
+            if ok {
+                json!({"item":"x", "inference_address":address})
+            } else {
+                json!({"item":"x"})
+            }
+        );
+    }
+    let doc = definition("prepare/action.yml");
+    let step = named_step(&doc, "The inference broker's address");
+    assert_eq!(
+        step["if"].as_str(),
+        Some("${{ inputs.inference-address != '' }}")
+    );
+    assert_eq!(
+        step["env"]["ADDRESS"].as_str(),
+        Some("${{ inputs.inference-address }}")
+    );
+}
+
+#[test]
+fn actions_refuse_source_skew_before_using_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "source"
+        ])
+        .status
+        .success()
+    );
+    let head = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    let head = head.trim();
+    let other = "b".repeat(40);
+    let upper = head.to_uppercase();
+    let newline = format!("{head}\n");
+    let plain = tempfile::tempdir().unwrap();
+    for (sha, action_ref, action_path, ok) in [
+        (Some(head), "", dir.path(), true),
+        (Some(other.as_str()), "", dir.path(), false),
+        (Some(head), head, plain.path(), true),
+        (Some(other.as_str()), head, plain.path(), false),
+        (Some(head), other.as_str(), dir.path(), false),
+        (Some(head), "", plain.path(), false),
+        (Some(head), "main", plain.path(), false),
+        (None, "", dir.path(), false),
+        (Some(""), "", plain.path(), false),
+        (Some(upper.as_str()), "", dir.path(), false),
+        (Some(newline.as_str()), "", dir.path(), false),
+    ] {
+        let value = sha.map_or_else(
+            || serde_json::json!({}),
+            |sha| serde_json::json!({"source_sha":sha}),
+        );
+        std::fs::write(dir.path().join("run.json"), value.to_string()).unwrap();
+        for file in ["prepare/action.yml", "run/action.yml"] {
+            let result = run_step(
+                file,
+                "The policy call is this action's commit",
+                dir.path(),
+                &[
+                    ("JOB_DIR", path(dir.path())),
+                    ("ACTION_REF", action_ref),
+                    ("GITHUB_ACTION_PATH", path(action_path)),
+                    ("GIT_CEILING_DIRECTORIES", path(dir.path())),
+                ],
+            );
+            assert_eq!(
+                result.status.success(),
+                ok,
+                "{file} {sha:?} {action_ref}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn run_requires_locked_host_and_consistent_user_before_probing() {
+    let doc = definition("run/action.yml");
+    let guard = named_step(&doc, "Prove the host is secured")["run"]
+        .as_str()
+        .unwrap();
+    let python = Regex::new("python3 -c '([^']+)'")
+        .unwrap()
+        .captures(guard)
+        .unwrap()[1]
+        .to_owned();
+    for (sandbox, ok) in [
+        ("{}", true),
+        (r#"{"lock-runner":true}"#, true),
+        (r#"{"lock-runner":false}"#, false),
+        (r#"{"lock-runner":"true"}"#, false),
+    ] {
+        let replacement = format!(
+            "__import__('json').loads('{}')",
+            serde_json::json!({"sandbox":serde_json::from_str::<serde_json::Value>(sandbox).unwrap()})
+        );
+        let code = python.replace(
+            "tomllib.load(open(\"/etc/agentic-job/config.toml\", \"rb\"))",
+            &replacement,
+        );
+        let result = Command::new("python3")
+            .args(["-c", &code])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), ok, "{sandbox}: {result:?}");
+    }
+    for (user, home, message) in [
+        ("runner", "", "agent-user runner requires runner-home"),
+        (
+            "sandbox",
+            "/tmp/home",
+            "agent-user sandbox takes no runner-home",
+        ),
+        ("", "/tmp/home", "agent-user must be runner or sandbox"),
+        ("root", "", "agent-user must be runner or sandbox"),
+        ("runner/home", "", "agent-user must be runner or sandbox"),
+        ("runner", "/tmp/home", ""),
+        ("sandbox", "", ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(
+            &dir.path().join("python3"),
+            "#!/bin/sh\necho lock >&2\nexit 1\n",
+        );
+        executable(
+            &dir.path().join("agentic-job"),
+            "#!/bin/sh\necho unexpected\nexit 99\n",
+        );
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "run/action.yml",
+            "Prove the host is secured",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("AGENT_USER", user),
+                ("RUNNER_HOME", home),
+            ],
+        );
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!("::error::{message}\n")
+            }
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).contains("lock"),
+            message.is_empty()
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let result = run_step(
+        "run/action.yml",
+        "Install the built-in scripted session",
+        dir.path(),
+        &[
+            ("AGENT_USER", "sandbox"),
+            ("PROFILE", "comment"),
+            ("RUNNER_HOME", ""),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "::error::fake-profile requires agent-user runner\n"
+    );
+    assert_eq!(
+        doc["inputs"]["agent-user"]["default"].as_str(),
+        Some("runner")
+    );
+}
+
+/// curl's mock refuses a token on argv and requires the authorization header
+/// on stdin; it is shared by the scope and publication probes.
+const MOCK_CURL: &str = r#"#!/bin/bash
+read -r header
+[ "$header" = "Authorization: Bearer $GH_TOKEN" ] || exit 8
+case "$*" in *"$GH_TOKEN"*) exit 9 ;; esac
+if [ -n "$HEADERS" ]; then printf '%s' "$HEADERS"; exit "$API_EXIT"; fi
+if [ "${*: -1}" = "https://api.github.com/repos/$REPO" ]; then answer=$TARGET; else answer=$OTHER; fi
+case "$answer" in
+  public) echo '{"private":false,"visibility":"public"}' ;;
+  private) echo '{"private":true,"visibility":"private"}' ;;
+  unknown) echo '{"private":false,"visibility":"internal"}' ;;
+esac
+exit "$API_EXIT"
+"#;
+
+#[test]
+fn run_refuses_classic_write_tokens_without_exposing_them() {
+    for (token, headers, api_exit, ok) in [
+        ("", "", "0", true),
+        (
+            "job-fixture",
+            "HTTP/2 200\r\nx-ratelimit-limit: 5000\r\n",
+            "0",
+            true,
+        ),
+        (
+            "classic-fixture",
+            "HTTP/2 200\r\nx-oauth-scopes: \r\n",
+            "0",
+            true,
+        ),
+        (
+            "classic-fixture",
+            "HTTP/2 200\r\nX-OAuth-Scopes: read:org, read:user, user:email\r\n",
+            "0",
+            true,
+        ),
+        (
+            "classic-fixture",
+            "x-oauth-scopes: public_repo\r\n",
+            "0",
+            false,
+        ),
+        (
+            "classic-fixture",
+            "x-oauth-scopes: read:org, repo\r\n",
+            "0",
+            false,
+        ),
+        (
+            "classic-fixture",
+            "x-oauth-scopes: read:packages,write:packages\r\n",
+            "0",
+            false,
+        ),
+        ("classic-fixture", "x-oauth-scopes: gist\r\n", "0", false),
+        ("classic-fixture", "x-oauth-scopes: *\r\n", "0", false),
+        (
+            "classic-fixture",
+            "x-oauth-scopes: $(exit 0)\r\n",
+            "0",
+            false,
+        ),
+        ("classic-fixture", "", "22", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(&dir.path().join("curl"), MOCK_CURL);
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "run/action.yml",
+            "Refuse a GitHub token that can write",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("GH_TOKEN", token),
+                ("HEADERS", headers),
+                ("API_EXIT", api_exit),
+            ],
+        );
+        assert_eq!(result.status.success(), ok, "{headers:?}: {result:?}");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !log.contains("classic-fixture") && !log.contains("job-fixture"),
+            "{log}"
+        );
+    }
+}
+
+#[test]
+fn visibility_admission_and_publication_fail_closed() {
+    // Target, other repositories, target/other API answers, policy private,
+    // policy repo, caller, API status, upload acceptance, admission acceptance.
+    for (repo, repos, target, other, private, policy_repo, caller, api_exit, upload, admission) in [
+        (
+            "owner/repo",
+            "",
+            "public",
+            "public",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            true,
+            true,
+        ),
+        (
+            "owner/repo",
+            "owner/config",
+            "public",
+            "public",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            true,
+            true,
+        ),
+        (
+            "owner/repo",
+            "",
+            "private",
+            "public",
+            false,
+            "owner/repo",
+            "owner/repo",
+            "0",
+            false,
+            true,
+        ),
+        (
+            "owner/repo",
+            "",
+            "private",
+            "public",
+            true,
+            "owner/repo",
+            "owner/repo",
+            "0",
+            true,
+            true,
+        ),
+        (
+            "owner/repo",
+            "",
+            "private",
+            "public",
+            true,
+            "owner/other",
+            "owner/repo",
+            "0",
+            false,
+            true,
+        ),
+        (
+            "owner/repo",
+            "",
+            "private",
+            "public",
+            true,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "",
+            "unknown",
+            "public",
+            true,
+            "owner/repo",
+            "owner/repo",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config",
+            "private",
+            "private",
+            true,
+            "owner/repo",
+            "owner/repo",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/repo",
+            "private",
+            "private",
+            true,
+            "owner/repo",
+            "owner/repo",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "$(exit 99)",
+            "",
+            "public",
+            "public",
+            false,
+            "$(exit 99)",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "",
+            "",
+            "public",
+            "public",
+            false,
+            "",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            " ",
+            "",
+            "public",
+            "public",
+            false,
+            " ",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "invalid",
+            "public",
+            "public",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config owner/item",
+            "unknown",
+            "unknown",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config owner/item",
+            "",
+            "",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config owner/item",
+            "public",
+            "public",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "1",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config owner/item",
+            "private",
+            "private",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+        (
+            "owner/repo",
+            "owner/config",
+            "public",
+            "private",
+            false,
+            "owner/repo",
+            "owner/caller",
+            "0",
+            false,
+            false,
+        ),
+    ] {
+        for (file, name, ok) in [
+            (
+                "run/action.yml",
+                "Check again that the repositories are public",
+                upload,
+            ),
+            (
+                "policy.yml",
+                "Check that the repositories are public",
+                admission,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            executable(&dir.path().join("curl"), MOCK_CURL);
+            executable(
+                &dir.path().join("gh"),
+                "#!/bin/bash\nif [ \"$2\" = \"repos/$REPO\" ]; then printf '%s\\n' \"$TARGET\"; else printf '%s\\n' \"$OTHER\"; fi\nexit \"$API_EXIT\"\n",
+            );
+            std::fs::write(
+                dir.path().join("policy.json"),
+                serde_json::json!({"repo":policy_repo,"private":private}).to_string(),
+            )
+            .unwrap();
+            let output = dir.path().join("output");
+            std::fs::write(&output, "").unwrap();
+            let search = format!("{}:/usr/bin:/bin", dir.path().display());
+            let result = run_step(
+                file,
+                name,
+                dir.path(),
+                &[
+                    ("PATH", &search),
+                    ("GH_TOKEN", "fixture-token"),
+                    ("REPO", repo),
+                    ("REPOS", repos),
+                    ("TARGET", target),
+                    ("OTHER", other),
+                    ("API_EXIT", api_exit),
+                    ("JOB_DIR", path(dir.path())),
+                    ("GITHUB_REPOSITORY", caller),
+                    ("GITHUB_OUTPUT", path(&output)),
+                ],
+            );
+            assert_eq!(
+                result.status.success(),
+                ok,
+                "{file} {repo:?} {target} {other} {caller}: {result:?}"
+            );
+            if file == "policy.yml" {
+                let marked = target == "private" && repo == caller && api_exit == "0";
+                assert_eq!(
+                    std::fs::read_to_string(&output).unwrap(),
+                    if marked { "private=true\n" } else { "" }
+                );
+            }
+            if !ok && repo == "owner/repo" && repos != "invalid" {
+                assert!(
+                    String::from_utf8_lossy(&result.stdout).contains("private runs are refused"),
+                    "{result:?}"
+                );
+                assert!(
+                    String::from_utf8_lossy(&result.stdout)
+                        .contains("docs/private-repositories.md")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn runner_admission_precedes_setup_and_setup_is_isolated() {
+    // Copy the script at test time into the source-checkout layout used by
+    // the real steps, so neither the helper nor Python needs a source rewrite.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".agentic-job-source/workflow")).unwrap();
+    std::fs::copy(
+        root().join("workflow/runner-setup.py"),
+        dir.path()
+            .join(".agentic-job-source/workflow/runner-setup.py"),
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join(".agentic-job")).unwrap();
+    let home = dir.path().join("agent-home");
+    let config = dir.path().join(".agentic-job/config.toml");
+    for (caller, policy, text, runner, sandbox) in [
+        ("false", "{}", "", true, true),
+        ("false", r#"{"private":false}"#, "", true, true),
+        ("false", "{}", "[egress]\nwrite-policy = true\n", true, true),
+        ("true", "{}", "", false, false),
+        ("null", "{}", "", false, false),
+        ("false", r#"{"private":true}"#, "", false, false),
+        (
+            "true",
+            "{}",
+            "[egress]\nwrite-policy = true\n",
+            false,
+            false,
+        ),
+        (
+            "null",
+            "{}",
+            "[egress]\nwrite-policy = true\n",
+            false,
+            false,
+        ),
+        (
+            "true",
+            r#"{"private":true}"#,
+            "[egress]\nwrite-policy = true\n",
+            false,
+            false,
+        ),
+        (
+            "false",
+            r#"{"private":true}"#,
+            "[egress]\nwrite-policy = true\n",
+            false,
+            false,
+        ),
+        (
+            "false",
+            "{}",
+            "[inference]\nregister = 'api-key'",
+            false,
+            false,
+        ),
+        (
+            "false",
+            "{}",
+            "[mcp.server]\nurl = 'https://example.com'",
+            false,
+            false,
+        ),
+        ("false", "{}", "[session]\nlisten = true", false, true),
+        (
+            "false",
+            "{}",
+            "[sandbox.check]\nbefore-agent = true",
+            false,
+            true,
+        ),
+        ("false", "{}", "[setup.tools]\nrust = 'stable'", false, true),
+        ("false", "{}", "[setup]\npackages = []", true, true),
+    ] {
+        std::fs::write(&config, text).unwrap();
+        std::fs::write(dir.path().join(".agentic-job/policy.json"), policy).unwrap();
+        for (user, ok) in [
+            ("runner", runner),
+            ("sandbox", sandbox),
+            ("", false),
+            ("root", false),
+        ] {
+            let result = run_step(
+                "agent.yml",
+                "Admit the runner-user configuration",
+                dir.path(),
+                &[
+                    ("CALLER_PRIVATE", caller),
+                    ("AGENT_USER", user),
+                    ("AGENT_HOME", path(&home)),
+                ],
+            );
+            assert_eq!(
+                result.status.success(),
+                ok,
+                "{caller} {policy} {text} {user}: {result:?}"
+            );
+            assert!(!home.exists());
+        }
+    }
+    for (text, script, code) in [
+        ("[setup]\npackages = []", "", 0),
+        (
+            "[setup]\nscript = 'setup.sh'\n[sandbox.env]\nTOOLCHAIN_OPTION = 'configured'",
+            "#!/bin/sh\npwd > \"$HOME/pwd\"\nenv > \"$HOME/env\"\n",
+            0,
+        ),
+        ("[setup]\nscript = 'setup.sh'", "#!/bin/sh\nexit 3\n", 3),
+    ] {
+        std::fs::write(&config, text).unwrap();
+        std::fs::write(dir.path().join("setup.sh"), script).unwrap();
+        let result = run_step(
+            "agent.yml",
+            "The setup script",
+            dir.path(),
+            &[
+                ("RUNNER_TEMP", path(dir.path())),
+                ("AGENT_HOME", path(&home)),
+                ("JOB_CREDENTIAL", "must-not-reach-setup"),
+            ],
+        );
+        assert_eq!(result.status.code(), Some(code), "{result:?}");
+        if script.is_empty() {
+            assert!(!home.exists());
+        }
+        if script.contains("pwd") {
+            assert_eq!(
+                std::fs::read_to_string(home.join("pwd")).unwrap().trim(),
+                path(&home)
+            );
+            let env = std::fs::read_to_string(home.join("env")).unwrap();
+            assert!(
+                env.lines()
+                    .any(|line| line == format!("HOME={}", home.display()))
+            );
+            assert!(
+                env.lines()
+                    .any(|line| line == "TOOLCHAIN_OPTION=configured")
+            );
+            assert!(!env.contains("JOB_CREDENTIAL") && !env.contains("RUNNER_TEMP"));
+        }
+    }
+}
+
+#[test]
+fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
+    for user in ["runner", "sandbox"] {
+        for exit in [0, 1, 3, 4, 124] {
+            let dir = tempfile::tempdir().unwrap();
+            executable(
+                &dir.path().join("agentic-job"),
+                "#!/bin/bash\nprintf '%s\\n' \"$0\" \"$@\" > \"$RECORD\"\nexit \"$STATE\"\n",
+            );
+            // Artifact downloads do not preserve executable permissions.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("agentic-job"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            let record = dir.path().join("record");
+            let output = dir.path().join("output");
+            let home = dir.path().join("agent-home");
+            let result = run_step(
+                "run/action.yml",
+                "Run the agent",
+                dir.path(),
+                &[
+                    ("JOB_DIR", path(dir.path())),
+                    ("AGENT_USER", user),
+                    (
+                        "RUNNER_HOME",
+                        if user == "runner" { path(&home) } else { "" },
+                    ),
+                    ("REVIEW_HEAD", "review-head"),
+                    ("STATE", &exit.to_string()),
+                    ("RECORD", path(&record)),
+                    ("GITHUB_OUTPUT", path(&output)),
+                    ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+                ],
+            );
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(
+                std::fs::read_to_string(output).unwrap(),
+                format!("exit={exit}\n")
+            );
+            let args = std::fs::read_to_string(record).unwrap();
+            assert!(args.starts_with(&format!("{}/agentic-job\nrun\n", dir.path().display())));
+            assert!(args.contains("--review-head\nreview-head\n"));
+            assert_eq!(args.contains("--runner-home\n"), user == "runner");
+            if user == "runner" {
+                assert!(args.ends_with(&format!("--runner-home\n{}\n", home.display())));
+            }
+            for partial in ["false", "true"] {
+                let gate = run_step(
+                    "run/action.yml",
+                    "The run's result",
+                    dir.path(),
+                    &[
+                        ("JOB_DIR", path(dir.path())),
+                        ("EXIT", &exit.to_string()),
+                        ("PARTIAL", partial),
+                        ("HANDED_BACK", "false"),
+                        ("CLASS", ""),
+                    ],
+                );
+                assert_eq!(
+                    gate.status.success(),
+                    exit == 0 || partial == "true" && [3, 124].contains(&exit),
+                    "{exit} {partial}: {gate:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
+    use serde_json::json;
+    for (summary, over) in [
+        (
+            json!({"result":"success","aic":565.9,"aic_budget":500}),
+            "565.9 of 500 AIC",
+        ),
+        (json!({"result":"success","aic":499.9,"aic_budget":500}), ""),
+        (
+            json!({"result":"success","aic":565.9,"aic_budget":null}),
+            "",
+        ),
+        (
+            json!({"result":"success","aic":"565.9 $(exit 9)","aic_budget":500}),
+            "",
+        ),
+        (json!({"result":"budget","aic":565.9,"aic_budget":500}), ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("out/run")).unwrap();
+        std::fs::write(dir.path().join("out/run/summary.json"), summary.to_string()).unwrap();
+        executable(&dir.path().join("agentic-job"), "#!/bin/sh\nexit 0\n");
+        let output = dir.path().join("output");
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        let extra = if over.is_empty() {
+            String::new()
+        } else {
+            format!("over-budget={over}\n")
+        };
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("exit=0\n{extra}")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).contains(&format!(
+                "::warning::the agent ended its turn over budget: spent {over}\n"
+            )),
+            !over.is_empty()
+        );
+    }
+    for (at, wanted) in [
+        (
+            "safe-outputs/aw-agent-run-1.patch, line 3\n",
+            "safe-outputs/aw-agent-run-1.patch, line 3",
+        ),
+        (
+            "transcript/acp.jsonl, line 12\nmore\n",
+            "transcript/acp.jsonl, line 12",
+        ),
+        ("safe-outputs/a`@b`.patch, line 3\n", ""),
+        ("../x, line 3\n", ""),
+        ("safe-outputs/x.patch, line 3 $(exit 9)\n", ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("out")).unwrap();
+        std::fs::write(dir.path().join("out/secret-at"), at).unwrap();
+        executable(&dir.path().join("agentic-job"), "#!/bin/sh\nexit 1\n");
+        let output = dir.path().join("output");
+        let summary = dir.path().join("summary");
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("GITHUB_STEP_SUMMARY", path(&summary)),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        let extra = if wanted.is_empty() {
+            String::new()
+        } else {
+            format!("secret-at={wanted}\n")
+        };
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("exit=1\n{extra}")
+        );
+        assert_eq!(
+            std::fs::read_to_string(summary).unwrap_or_default(),
+            if wanted.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "Nothing of this run was uploaded: a secret or a private key is in {wanted}.\n"
+                )
+            }
+        );
+    }
+}
+
+#[test]
+fn network_refuses_debug_logging_before_minting() {
+    let file = ".github/agentic-job/network/action.yml";
+    let doc = definition(file);
+    let steps = steps(&doc);
+    assert_eq!(steps[0]["name"].as_str(), Some("Refuse step debug logging"));
+    assert_eq!(steps[0]["if"].as_str(), Some("${{ inputs.secret == '' }}"));
+    assert!(
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some("Mint the agent job's key"))
+            .unwrap()
+            > 0
+    );
+    for value in [None, Some(""), Some("0"), Some("1")] {
+        let dir = tempfile::tempdir().unwrap();
+        let env: Vec<_> = value.map(|v| ("RUNNER_DEBUG", v)).into_iter().collect();
+        let result = run_step(file, "Refuse step debug logging", dir.path(), &env);
+        let ok = value.is_none_or(str::is_empty);
+        assert_eq!(result.status.success(), ok, "{value:?}: {result:?}");
+        if !ok {
+            assert!(
+                String::from_utf8_lossy(&result.stdout).starts_with("::error::Refusing to mint")
+            );
+        }
+    }
+    let pinned = Regex::new(r"^[\w-]+/[\w./-]+@[0-9a-f]{40}$").unwrap();
+    for step in steps {
+        if let Some(action) = step["uses"].as_str() {
+            assert!(pinned.is_match(action), "{action}");
+        }
+    }
+}
+
+#[test]
+fn composed_agents_keep_policy_source_and_trusted_edges() {
+    let pinned = Regex::new(r"^actions/(checkout|download-artifact)@[0-9a-f]{40}$").unwrap();
+    for (file, prefix) in [
+        ("agent.yml", "fromJSON(inputs.policy)."),
+        ("example-compose.yml", "needs.policy.outputs."),
+    ] {
+        let doc = definition(file);
+        let agent = &doc["jobs"]["agent"];
+        let steps = agent["steps"].as_vec().unwrap();
+        let uses: Vec<_> = steps.iter().filter_map(|s| s["uses"].as_str()).collect();
+        let local: Vec<_> = uses
+            .iter()
+            .copied()
+            .filter(|s| !s.starts_with("actions/"))
+            .collect();
+        let expected = if file == "agent.yml" {
+            vec![
+                "./.agentic-job-source/prepare",
+                "./.github/agentic-job/network",
+                "./.agentic-job-source/secure-host",
+                "./.agentic-job-source/run",
+            ]
+        } else {
+            vec![
+                "./.agentic-job-source/prepare",
+                "./.agentic-job-source/secure-host",
+                "./.agentic-job-source/run",
+            ]
+        };
+        assert_eq!(local, expected, "{file}");
+        for action in uses.iter().filter(|s| s.starts_with("actions/")) {
+            assert!(pinned.is_match(action));
+        }
+        let checkouts: Vec<_> = steps
+            .iter()
+            .filter(|s| {
+                s["uses"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("actions/checkout@"))
+            })
+            .collect();
+        assert_eq!(checkouts.len(), 2);
+        for step in &checkouts {
+            assert_eq!(step["with"]["persist-credentials"].as_bool(), Some(false));
+        }
+        for (key, value) in [("repository", "source-repository"), ("ref", "source-sha")] {
+            assert_eq!(
+                checkouts[1]["with"][key].as_str(),
+                Some(format!("${{{{ {prefix}{value} }}}}").as_str())
+            );
+        }
+        assert_eq!(
+            checkouts[1]["with"]["path"].as_str(),
+            Some(".agentic-job-source")
+        );
+        assert_eq!(
+            checkouts[0]["with"]["ref"].as_str(),
+            Some(format!("${{{{ {prefix}ref }}}}").as_str())
+        );
+        let prepare = steps
+            .iter()
+            .find(|s| s["uses"].as_str() == Some("./.agentic-job-source/prepare"))
+            .unwrap();
+        for key in ["binary-artifact-id", "policy-artifact-id"] {
+            assert_eq!(
+                prepare["with"][key].as_str(),
+                Some(format!("${{{{ {prefix}{key} }}}}").as_str())
+            );
+        }
+        for key in ["safe-outputs-artifact-id", "safe-outputs-artifact-digest"] {
+            assert_eq!(
+                agent["outputs"][key].as_str(),
+                Some(format!("${{{{ steps.run.outputs.{key} }}}}").as_str())
+            );
+        }
+        let source_name = "The policy call's source repository and commit";
+        let at = |name| {
+            steps
+                .iter()
+                .position(|s| s["name"].as_str() == Some(name))
+                .unwrap()
+        };
+        assert!(
+            at(source_name)
+                < steps
+                    .iter()
+                    .position(|s| s["with"]["path"].as_str() == Some(".agentic-job-source"))
+                    .unwrap()
+        );
+        for (repo, sha, ok) in [
+            ("o/r", PIN, true),
+            ("", PIN, false),
+            ("o/r", "", false),
+            ("o/r", "main", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = run_step(
+                file,
+                source_name,
+                dir.path(),
+                &[("SOURCE_REPOSITORY", repo), ("SOURCE_SHA", sha)],
+            );
+            assert_eq!(
+                result.status.success(),
+                ok,
+                "{file} {repo} {sha}: {result:?}"
+            );
+        }
+        let expanded = workflow(file)
+            .replace(
+                "uses: ./.agentic-job-source/prepare",
+                &std::fs::read_to_string(root().join("prepare/action.yml")).unwrap(),
+            )
+            .replace(
+                "uses: ./.agentic-job-source/secure-host",
+                &std::fs::read_to_string(root().join("secure-host/action.yml")).unwrap(),
+            )
+            .replace(
+                "uses: ./.agentic-job-source/run",
+                &std::fs::read_to_string(root().join("run/action.yml")).unwrap(),
+            );
+        let mut start = 0;
+        for name in [
+            "Install the binary",
+            "Write what the run is called",
+            "Admit the runner-user configuration",
+            "Check inference proxy reachability",
+            "The host's configuration",
+            "Refuse the old action's inputs",
+            "The setup script",
+            "The session's endpoint",
+            "Prove the host is secured",
+            "Run the agent",
+        ] {
+            let needle = format!("- name: {name}\n");
+            start += expanded[start..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{file}: no {name} after {start}"))
+                + needle.len();
+        }
+        assert_eq!(
+            named_step(&doc, "Check inference proxy reachability")["run"].as_str(),
+            Some("agentic-job secure-host inference .agentic-job/config.toml")
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| s["run"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("agentic-job secure-host inference")))
+                .count(),
+            1
+        );
+    }
+    for file in ["agentic-job.yml", "example-compose.yml"] {
+        let doc = definition(file);
+        for (name, values) in [
+            (
+                "check",
+                vec![
+                    ("policy", "${{ toJSON(needs.policy.outputs) }}"),
+                    (
+                        "safe-outputs-artifact-id",
+                        "${{ needs.agent.outputs.safe-outputs-artifact-id }}",
+                    ),
+                    (
+                        "safe-outputs-artifact-digest",
+                        "${{ needs.agent.outputs.safe-outputs-artifact-digest }}",
+                    ),
+                ],
+            ),
+            (
+                "apply",
+                vec![
+                    ("policy", "${{ toJSON(needs.policy.outputs) }}"),
+                    ("agent", "${{ toJSON(needs.agent) }}"),
+                    ("check", "${{ toJSON(needs.check) }}"),
+                ],
+            ),
+        ] {
+            let with = doc["jobs"][name]["with"].as_hash().unwrap();
+            assert_eq!(with.len(), values.len());
+            for (key, value) in values {
+                assert_eq!(doc["jobs"][name]["with"][key].as_str(), Some(value));
+            }
+        }
+    }
+}
+
+#[test]
+fn agent_credentials_stay_in_their_deterministic_jobs_and_steps() {
+    use yaml_rust2::Yaml;
+    let pinned = Regex::new(r"^actions/[\w-]+@[0-9a-f]{40}$").unwrap();
+    for file in ["prepare/action.yml", "run/action.yml"] {
+        let doc = definition(file);
+        for step in steps(&doc) {
+            if let Some(action) = step["uses"].as_str() {
+                assert!(pinned.is_match(action), "{file}: {action}");
+            }
+        }
+    }
+    let reads = Yaml::Hash(
+        ["contents", "issues", "pull-requests", "actions"]
+            .map(|key| (Yaml::String(key.into()), Yaml::String("read".into())))
+            .into_iter()
+            .collect(),
+    );
+    for (file, name) in [
+        ("agent.yml", "agent"),
+        ("agentic-job.yml", "agent"),
+        ("example-compose.yml", "agent"),
+    ] {
+        assert_eq!(
+            definition(file)["jobs"][name]["permissions"],
+            reads,
+            "{file}"
+        );
+    }
+    let agent = workflow("agent.yml");
+    let wrapper = workflow("agentic-job.yml");
+    let run = std::fs::read_to_string(root().join("run/action.yml")).unwrap();
+    let doc = definition("run/action.yml");
+    for (input, key) in [
+        ("github-token", "GH_TOKEN"),
+        ("inference-api-key", "AGENTIC_JOB_INFERENCE_KEY"),
+        ("mcp-token", "AGENTIC_JOB_MCP_TOKEN"),
+        ("inference-run-token", "AGENTIC_JOB_INFERENCE_RUN_TOKEN"),
+    ] {
+        assert_eq!(
+            named_step(&doc, "Run the agent")["env"][key].as_str(),
+            Some(format!("${{{{ inputs.{input} }}}}").as_str())
+        );
+        if input != "github-token" {
+            assert_eq!(run.matches(&format!("inputs.{input}")).count(), 1);
+        }
+    }
+    assert_eq!(doc["inputs"]["github-token"]["default"].as_str(), Some(""));
+    for file in [
+        "agentic-job.yml",
+        "agent.yml",
+        "example-compose.yml",
+        "policy.yml",
+        "check.yml",
+        "apply.yml",
+    ] {
+        let text = workflow(file);
+        let doc = definition(file);
+        for (name, value) in doc["jobs"].as_hash().unwrap() {
+            let name = name.as_str().unwrap();
+            let writes = name == "apply"
+                || file == "agentic-job.yml" && name == "policy"
+                || file == "policy.yml" && ["notify", "apply-token"].contains(&name)
+                || file == "apply.yml" && name == "conclude";
+            assert_eq!(
+                job(&text, name).contains("secrets.SAFE_OUTPUTS_PAT"),
+                writes,
+                "{file} {name}"
+            );
+            if file == "agent.yml" {
+                assert!(value["permissions"]["id-token"].is_badvalue());
+            }
+        }
+    }
+    for (file, text) in [
+        ("agentic-job.yml", wrapper.as_str()),
+        ("agent.yml", agent.as_str()),
+        ("review.yml", workflow("review.yml").as_str()),
+    ] {
+        for key in ["MCP_TOKEN", "INFERENCE_API_KEY"] {
+            assert!(!text.contains(&format!("secrets.{key}")), "{file}");
+        }
+    }
+    assert!(
+        !Regex::new("check-key|mcp-token|inference-api-key")
+            .unwrap()
+            .is_match(&agent)
+    );
+    let secrets = Regex::new(r"secrets\.([\w]+)").unwrap();
+    assert_eq!(
+        secrets
+            .captures_iter(&agent)
+            .map(|c| c[1].to_owned())
+            .collect::<Vec<_>>(),
+        ["NETWORK_SECRET", "INFERENCE_RUN_TOKEN"]
+    );
+    assert_eq!(
+        wrapper
+            .lines()
+            .filter(|l| l.contains("needs.register.outputs"))
+            .collect::<Vec<_>>(),
+        ["      INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}"]
+    );
+    assert_eq!(
+        agent
+            .lines()
+            .filter(|l| l.contains("secrets.INFERENCE_RUN_TOKEN"))
+            .collect::<Vec<_>>(),
+        ["          inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}"]
+    );
+    let doc = definition("agentic-job.yml");
+    let register = &doc["jobs"]["register"];
+    assert_eq!(register["permissions"].as_hash().unwrap().len(), 1);
+    assert_eq!(register["permissions"]["id-token"].as_str(), Some("write"));
+    let register_text = job(&wrapper, "register");
+    assert!(
+        !Regex::new(r"secrets\.|checkout|github\.token")
+            .unwrap()
+            .is_match(register_text)
+    );
+    assert_eq!(
+        register["outputs"]["run-token"].as_str(),
+        Some("${{ steps.register.outputs.run-token }}")
+    );
+    assert_eq!(
+        register["runs-on"].as_str(),
+        Some("${{ fromJSON(inputs.agent-runner) }}")
+    );
+    let uses: Vec<_> = register["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["uses"].as_str())
+        .collect();
+    assert_eq!(
+        uses,
+        ["actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"]
+    );
+    assert!(named_step(&doc, "Register the run at the inference proxy")["run"].as_str().unwrap().trim_end().ends_with(r#""$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT""#));
+    assert_eq!(
+        doc["on"]["workflow_call"]["inputs"]["github-reads"]["default"].as_bool(),
+        Some(true)
+    );
+    assert!(agent.contains("github-token: ${{ inputs.github-reads && github.token || '' }}"));
+    // Called workflows cannot elevate their caller's grants, even in skipped jobs.
+    for entry in std::fs::read_dir(root().join(".github/workflows")).unwrap() {
+        let file = entry.unwrap().path();
+        if file.extension().is_none_or(|s| s != "yml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("GH_READ_TOKEN"), "{file:?}");
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+        for (name, job) in doc["jobs"].as_hash().unwrap() {
+            if !job["uses"].as_str().is_some_and(|s| {
+                [
+                    "./.github/workflows/agentic-job.yml",
+                    "./.github/workflows/dispatch.yml",
+                    "./.github/workflows/example-compose.yml",
+                ]
+                .contains(&s)
+            }) {
+                continue;
+            }
+            for key in ["contents", "issues", "pull-requests", "actions"] {
+                assert!(
+                    matches!(job["permissions"][key].as_str(), Some("read" | "write")),
+                    "{file:?} {name:?} {key}"
+                );
+            }
+            assert_eq!(
+                job["permissions"]["id-token"].as_str(),
+                Some("write"),
+                "{file:?} {name:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wrapper_forwards_policy_settings_without_reinterpretation() {
+    let wrapper = definition("agentic-job.yml");
+    let policy = definition("policy.yml");
+    let own = [
+        "agent-runner",
+        "github-reads",
+        "secure-host-image-artifact-id",
+        "agent-user",
+    ];
+    let inputs = |doc: &yaml_rust2::Yaml| {
+        doc["on"]["workflow_call"]["inputs"]
+            .as_hash()
+            .unwrap()
+            .keys()
+            .map(|key| key.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        inputs(&wrapper)
+            .into_iter()
+            .filter(|s| !own.contains(&s.as_str()))
+            .collect::<Vec<_>>(),
+        inputs(&policy)
+    );
+    assert_eq!(
+        wrapper["jobs"]["policy"]["with"].as_hash().unwrap().len(),
+        inputs(&policy).len()
+    );
+    for name in inputs(&policy) {
+        assert_eq!(
+            wrapper["jobs"]["policy"]["with"][name.as_str()].as_str(),
+            Some(format!("${{{{ inputs.{name} }}}}").as_str())
+        );
+    }
+}
+
+#[test]
+fn policy_config_uses_its_own_binary_and_host_config_keeps_user_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("bin")).unwrap();
+    executable(
+        &dir.path().join("bin/agentic-job"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+    );
+    let mut env = vec![
+        ("JOB_DIR", path(dir.path())),
+        ("AGENT", "fake"),
+        ("REPO", "example/repo"),
+    ];
+    for key in [
+        "CONFIG",
+        "MODEL",
+        "CONFIG_REPO",
+        "CONFIG_REF",
+        "CONFIG_PATH",
+        "SKILLS",
+        "URL",
+        "REGISTER",
+        "AUDIENCE",
+        "TOKEN_FILE",
+        "PROVIDER",
+        "TIMEOUT",
+        "MAX_REQUESTS",
+        "MAX_TASKS",
+        "BUDGET",
+        "BUDGET_USD",
+        "PACKAGES",
+        "NPM",
+        "AGENTS",
+        "SETUP",
+        "SESSION",
+        "IDLE_MINUTES",
+        "WRITE_POLICY",
+    ] {
+        env.push((key, ""));
+    }
+    let result = run_step("policy.yml", "Write the configuration", dir.path(), &env);
+    assert!(result.status.success(), "{result:?}");
+    assert!(
+        std::fs::read_to_string(dir.path().join("config.toml"))
+            .unwrap()
+            .starts_with("config\n--repo\nexample/repo\n--string\nagent.name=fake\n")
+    );
+    let search = format!("{}:/usr/bin:/bin", dir.path().join("bin").display());
+    executable(
+        &dir.path().join("bin/agentic-job"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RECORD\"\n",
+    );
+    for (user, flags) in [("runner", "--host\n--no-script\n"), ("sandbox", "--host\n")] {
+        let record = dir.path().join("record");
+        let result = run_step(
+            "agent.yml",
+            "The host's configuration",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("AGENT_USER", user),
+                ("RUNNER_TEMP", path(dir.path())),
+                ("RECORD", path(&record)),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(record).unwrap(),
+            format!("config\n{flags}--from\n.agentic-job/config.toml\n")
+        );
+    }
+}
+
+#[test]
+fn caller_network_credentials_are_spent_before_the_agent() {
+    let network = "./.github/agentic-job/network";
+    let review = definition("review.yml");
+    let register = &review["jobs"]["register"];
+    let steps = register["steps"].as_vec().unwrap();
+    for (name, value) in review["jobs"].as_hash().unwrap() {
+        if name.as_str() != Some("register") {
+            assert!(!value["steps"].as_vec().is_some_and(|steps| {
+                steps
+                    .iter()
+                    .any(|step| step["uses"].as_str() == Some(network))
+            }));
+        }
+    }
+    assert_eq!(
+        steps
+            .iter()
+            .filter_map(|s| s["uses"].as_str())
+            .map(|s| s.split('@').next().unwrap())
+            .collect::<Vec<_>>(),
+        ["actions/checkout", network, "actions/download-artifact"]
+    );
+    let checkout = steps
+        .iter()
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("actions/checkout@"))
+        })
+        .unwrap();
+    assert_eq!(
+        checkout["with"]["ref"].as_str(),
+        Some("${{ needs.policy.outputs.ref }}")
+    );
+    assert_eq!(
+        checkout["with"]["persist-credentials"].as_bool(),
+        Some(false)
+    );
+    let join = named_step(&review, "The caller's network step");
+    assert_eq!(join["id"].as_str(), Some("network"));
+    assert_eq!(
+        join["if"].as_str(),
+        Some("${{ hashFiles('.github/agentic-job/network/action.yml') != '' }}")
+    );
+    assert_eq!(
+        register["outputs"]["network-secret"].as_str(),
+        Some("${{ steps.network.outputs.secret }}")
+    );
+    assert_eq!(
+        review["jobs"]["agent"]["secrets"]["NETWORK_SECRET"].as_str(),
+        Some("${{ needs.register.outputs.network-secret }}")
+    );
+    assert_eq!(
+        review["jobs"]["agent"]["with"]["network"].as_bool(),
+        Some(true)
+    );
+    let text = workflow("review.yml");
+    assert_eq!(
+        text.lines()
+            .filter(|s| s.contains("network-secret")
+                || s.contains("NETWORK_SECRET")
+                || s.contains("steps.network."))
+            .map(str::trim)
+            .collect::<Vec<_>>(),
+        [
+            "network-secret: ${{ steps.network.outputs.secret }}",
+            "NETWORK_SECRET: ${{ needs.register.outputs.network-secret }}"
+        ]
+    );
+    assert!(named_step(&review, "Register the run at the inference proxy")["run"].as_str().unwrap().trim_end().ends_with(r#""$JOB_DIR/agentic-job" register --config "$JOB_DIR/config.toml" --output "$GITHUB_OUTPUT""#));
+    assert!(
+        !Regex::new(r"secrets\.|github\.token|agentic-job-source")
+            .unwrap()
+            .is_match(job(&text, "register"))
+    );
+    let doc = definition("agent.yml");
+    let join = named_step(&doc, "The caller's network step");
+    assert_eq!(join["uses"].as_str(), Some(network));
+    assert_eq!(
+        join["if"].as_str(),
+        Some("${{ inputs.network && hashFiles('.github/agentic-job/network/action.yml') != '' }}")
+    );
+    assert_eq!(
+        join["with"]["secret"].as_str(),
+        Some("${{ secrets.NETWORK_SECRET }}")
+    );
+    assert_eq!(
+        doc["on"]["workflow_call"]["inputs"]["network"]["default"].as_bool(),
+        Some(false)
+    );
+    let agent = workflow("agent.yml");
+    assert_eq!(
+        agent
+            .lines()
+            .filter(|s| s.contains("secrets.NETWORK_SECRET"))
+            .collect::<Vec<_>>(),
+        ["          secret: ${{ secrets.NETWORK_SECRET }}"]
+    );
+    assert!(
+        agent
+            .find("- name: Admit the runner-user configuration")
+            .unwrap()
+            < agent.find(&format!("uses: {network}")).unwrap()
+    );
+    let forbidden = Regex::new(r"(?i)tailscale|join(?:s|ing)? (?:a|the) tailnet").unwrap();
+    let foreign = Regex::new(r"cgwalters-forge/actions(?:/([\w/-]+))?").unwrap();
+    let files = std::fs::read_dir(root().join(".github/workflows"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .chain(
+            [
+                "prepare/action.yml",
+                "run/action.yml",
+                "secure-host/action.yml",
+            ]
+            .map(|s| root().join(s)),
+        );
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!forbidden.is_match(&text), "{file:?}");
+        for found in foreign.captures_iter(&text) {
+            assert_eq!(
+                found.get(1).map(|m| m.as_str()),
+                Some("secure-host"),
+                "{file:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_apply_token_admission_holds_the_pat_in_one_step() {
+    let apply = definition("apply.yml");
+    assert!(
+        !apply["jobs"]["apply"]["if"]
+            .as_str()
+            .unwrap()
+            .contains("always()")
+    );
+    for file in ["policy.yml", "agentic-job.yml"] {
+        let doc = definition(file);
+        assert_eq!(
+            doc["on"]["workflow_call"]["inputs"]["require-safe-outputs-pat"]["default"].as_bool(),
+            Some(false)
+        );
+    }
+    let doc = definition("policy.yml");
+    let steps = doc["jobs"]["apply-token"]["steps"].as_vec().unwrap();
+    let text = workflow("policy.yml");
+    let check = job(&text, "apply-token");
+    assert_eq!(check.matches("secrets.SAFE_OUTPUTS_PAT").count(), 1);
+    assert!(
+        !check
+            .split("- name: Check SAFE_OUTPUTS_PAT\n")
+            .next()
+            .unwrap()
+            .contains("secrets.")
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|s| s["env"]["SAFE_OUTPUTS_PAT"].as_str()
+                == Some("${{ secrets.SAFE_OUTPUTS_PAT }}"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ci_agents_take_the_build_image_by_id_only() {
+    let ci = definition("ci.yml");
+    for name in [
+        "e2e-full",
+        "e2e-limit",
+        "e2e-write-policy",
+        "e2e-event",
+        "e2e-analysis",
+        "e2e-analysis-refused",
+        "e2e-review",
+    ] {
+        assert_eq!(ci["jobs"][name]["with"]["agent"].as_str(), Some("fake"));
+        assert!(ci["jobs"][name]["with"]["inference-url"].is_badvalue());
+    }
+    for (name, job) in ci["jobs"].as_hash().unwrap() {
+        if job["uses"].as_str() != Some("./.github/workflows/agentic-job.yml")
+            || !job["with"]["proposals-artifact"].is_badvalue()
+        {
+            continue;
+        }
+        let needs = job["needs"].as_vec().unwrap();
+        assert!(
+            needs.iter().any(|n| n.as_str() == Some("static")),
+            "{name:?}"
+        );
+        assert_eq!(
+            job["with"]["secure-host-image-artifact-id"].as_str(),
+            Some("${{ needs.static.outputs.secure-host-image-artifact-id }}")
+        );
+    }
+    let doc = definition("build.yml");
+    assert_eq!(
+        doc["on"]["workflow_call"]["outputs"]["secure-host-image-artifact-id"]["value"].as_str(),
+        Some("${{ jobs.build.outputs.secure-host-image-artifact-id }}")
+    );
+    assert_eq!(
+        doc["jobs"]["build"]["outputs"]["secure-host-image-artifact-id"].as_str(),
+        Some("${{ steps.image.outputs.artifact-id }}")
+    );
+    let image = doc["jobs"]["build"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"].as_str() == Some("image"))
+        .unwrap();
+    assert_eq!(image["with"]["name"].as_str(), Some("secure-host-image"));
+    assert!(
+        Regex::new(r"^actions/upload-artifact@[0-9a-f]{40}$")
+            .unwrap()
+            .is_match(image["uses"].as_str().unwrap())
+    );
+    let doc = definition("agent.yml");
+    let download = steps(&doc)
+        .into_iter()
+        .find(|s| {
+            s["with"]["artifact-ids"].as_str()
+                == Some("${{ inputs.secure-host-image-artifact-id }}")
+        })
+        .unwrap();
+    assert_eq!(
+        download["if"].as_str(),
+        Some("${{ inputs.secure-host-image-artifact-id != '' }}")
+    );
+    assert!(download["with"]["name"].is_badvalue());
+}
+
+#[test]
+fn composed_example_keeps_the_callers_privilege_boundary() {
+    // Shape only: the fresh-host e2e-compose job executes these sudo probes.
+    let doc = definition("example-compose.yml");
+    let before = named_step(&doc, "A caller's privileged step (example)")["run"]
+        .as_str()
+        .unwrap();
+    let file = Regex::new(r"sudo install -m 0600 -o root -g root /dev/null (/var/lib/[\w-]+)")
+        .unwrap()
+        .captures(before)
+        .unwrap()[1]
+        .to_owned();
+    let after = named_step(&doc, "A caller's later step (example)")["run"]
+        .as_str()
+        .unwrap();
+    assert!(after.contains(&format!("stat -c '%U %a' {file})\" = 'root 600'")));
+    assert!(
+        Regex::new(r"if sudo -n true .*exit 1; fi")
+            .unwrap()
+            .is_match(after)
+    );
+}
+
+#[test]
+fn agent_configuration_provenance_and_step_gates_are_preserved() {
+    let policy = definition("policy.yml");
+    assert_eq!(
+        named_step(&policy, "Write the configuration")["if"].as_str(),
+        Some("${{ inputs.proposals-artifact == '' && steps.event.outputs.admitted != 'false' }}")
+    );
+    assert!(
+        workflow("policy.yml")
+            .split("agentic-job-policy\n")
+            .nth(1)
+            .unwrap()
+            .split("\n  activate:")
+            .next()
+            .unwrap()
+            .contains(".agentic-job/config.toml")
+    );
+    assert!(workflow("policy.yml").contains("@agentclientprotocol/claude-agent-acp@0.88.0"));
+    for (file, expected) in [
+        (
+            "agent.yml",
+            "[ \"$AGENT_USER\" = sandbox ] || set -- --no-script\nagentic-job config --host \"$@\" --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
+        ),
+        (
+            "example-compose.yml",
+            "agentic-job config --host --no-script --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"",
+        ),
+    ] {
+        let doc = definition(file);
+        let host = named_step(&doc, "The host's configuration");
+        assert_eq!(host["run"].as_str(), Some(expected), "{file}");
+        let agent = &doc["jobs"]["agent"];
+        let steps = agent["steps"].as_vec().unwrap();
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| s["run"].as_str().is_some_and(|s| s.contains(" config ")))
+                .count(),
+            1,
+            "{file}"
+        );
+        let secured = steps
+            .iter()
+            .find(|s| s["uses"].as_str() == Some("./.agentic-job-source/secure-host"))
+            .unwrap();
+        assert_eq!(
+            secured["with"]["config"].as_str(),
+            Some("${{ runner.temp }}/agentic-job-host.toml")
+        );
+    }
+    for (file, name) in [
+        ("policy.yml", "Check that the repositories are public"),
+        (
+            "run/action.yml",
+            "Check again that the repositories are public",
+        ),
+    ] {
+        let doc = definition(file);
+        assert!(
+            named_step(&doc, name)["run"]
+                .as_str()
+                .unwrap()
+                .contains(".private == false and .visibility == \"public\"")
+        );
+    }
+}
+
+#[test]
+fn agent_secret_contract_accepts_only_the_intended_credentials() {
+    let agent = definition("agent.yml");
+    let wrapper = definition("agentic-job.yml");
+    let names = |value: &yaml_rust2::Yaml| {
+        value
+            .as_hash()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&agent["on"]["workflow_call"]["secrets"]),
+        ["INFERENCE_RUN_TOKEN", "NETWORK_SECRET"]
+    );
+    assert_eq!(
+        names(&wrapper["jobs"]["agent"]["secrets"]),
+        ["INFERENCE_RUN_TOKEN"]
+    );
+    for (file, keys) in [
+        ("agentic-job.yml", &["MCP_TOKEN", "INFERENCE_API_KEY"][..]),
+        ("review.yml", &["INFERENCE_API_KEY"][..]),
+    ] {
+        let doc = definition(file);
+        for key in keys {
+            assert_eq!(
+                doc["on"]["workflow_call"]["secrets"][*key]["required"].as_bool(),
+                Some(false),
+                "{file} {key}"
+            );
+        }
+    }
+}
+
 fn passing() -> String {
     format!(
         "on: push
@@ -1035,6 +2912,115 @@ fn an_expected_refusal_shows_the_reason_ci_expects() {
 /// Workflow text that keeps check, token and refusal separation, as (file,
 /// job or "" for the whole file, patterns that match, patterns that do not).
 const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
+    (
+        "prepare/action.yml",
+        "",
+        &[r#"sudo install -m 0755 "\$JOB_DIR/agentic-job" /usr/local/bin/agentic-job"#],
+        &[r"secrets\.|SAFE_OUTPUTS_PAT"],
+    ),
+    (
+        "run/action.yml",
+        "",
+        &[
+            r"PARTIAL: \$\{\{ steps.settings.outputs.apply_partial == 'true' && steps.safe-outputs.outputs.artifact-id != '' \}\}",
+            r"value: \$\{\{ steps.session.outputs.endpoint \}\}",
+        ],
+        &[
+            r"secrets\.|SAFE_OUTPUTS_PAT",
+            r"(?m)^\s*(?:[^#\n]*[|;&(]\s*)?gh\s",
+        ],
+    ),
+    (
+        "secure-host/action.yml",
+        "",
+        &[],
+        &[r"(?i)inference|session"],
+    ),
+    (
+        "policy.yml",
+        "policy",
+        &[
+            r"source-repository: \$\{\{ job.workflow_repository \}\}",
+            r"source-sha: \$\{\{ job.workflow_sha \}\}",
+            r#"--arg source_sha "\$SOURCE_SHA" '\$ARGS.named'"#,
+            r#"SOURCE_SHA: \$\{\{ job.workflow_sha \}\}\n {8}run: \|\n {10}if \[ -n "\$PROFILE" \]"#,
+            r"PRIVATE: \$\{\{ steps.visibility.outputs.private \}\}",
+            r#"(?s)set -- "\$@" --private\n.*--output-repo "\$\{OUTPUT_REPO:-\$GITHUB_REPOSITORY\}""#,
+        ],
+        &["CONFIG_BINARY"],
+    ),
+    (
+        "apply.yml",
+        "apply",
+        &[r"if: >-\n\s+\$\{\{ !cancelled\(\) && fromJSON\(inputs.check\).result == 'success' &&"],
+        &[],
+    ),
+    (
+        "agent.yml",
+        "agent",
+        &[
+            r"agent-user: \$\{\{ inputs.agent-user \}\}",
+            r"runner-home: \$\{\{ inputs.agent-user != 'sandbox' && format\('\{0\}/agent-home', runner.temp\) \|\| '' \}\}",
+            r"- name: The setup script\n        if: \$\{\{ inputs.agent-user != 'sandbox' \}\}",
+            r"session-endpoint: \$\{\{ steps.run.outputs.session-endpoint \}\}",
+            r"config: \$\{\{ runner.temp \}\}/agentic-job-host.toml",
+            r"artifact-ids: \$\{\{ inputs.secure-host-image-artifact-id \}\}",
+            r"image-archive: \$\{\{ inputs.secure-host-image-artifact-id != '' && format\('\{0\}/secure-host-image/secure-host.tar', runner.temp\) \|\| '' \}\}",
+        ],
+        &[],
+    ),
+    (
+        "agentic-job.yml",
+        "",
+        &[r"value: \$\{\{ jobs.agent.outputs.session-endpoint \}\}"],
+        &[r"\n {6}network:"],
+    ),
+    (
+        "review.yml",
+        "",
+        &[
+            r"inference-register: \$\{\{ vars.INFERENCE_REGISTER \|\| 'github-oidc' \}\}",
+            r"inference-provider: \$\{\{ vars.INFERENCE_PROVIDER \}\}",
+        ],
+        &[r"secrets\.INFERENCE_API_KEY|check-key|inference-api-key"],
+    ),
+    (
+        "policy.yml",
+        "apply-token",
+        &[
+            r"needs: policy\n    if: \$\{\{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' \}\}",
+            r"environment: \$\{\{ inputs.apply-environment \}\}\n    permissions:\n      contents: read",
+            r#"agentic-job check-apply-token --output-repo "\$OUTPUT_REPO""#,
+        ],
+        &[r"continue-on-error|always\(\)|cancelled\(\)"],
+    ),
+    (
+        "policy.yml",
+        "notify",
+        &[
+            r"needs: \[policy, activate, apply-token\]",
+            r"needs.apply-token.result != 'failure'",
+        ],
+        &[],
+    ),
+    (
+        "agentic-job.yml",
+        "register",
+        &[r"needs: policy\n"],
+        &[r"always\(\)|cancelled\(\)|failure\(\)"],
+    ),
+    (
+        "agentic-job.yml",
+        "agent",
+        &[r"needs: \[policy, register\]\n"],
+        &[r"always\(\)|cancelled\(\)|failure\(\)"],
+    ),
+    (
+        "example-compose.yml",
+        "agent",
+        &[r"needs: policy\n"],
+        &[r"always\(\)|cancelled\(\)|failure\(\)"],
+    ),
     // A refusal is reported only by the opted-in status helper, with the
     // optional PAT.
     (
@@ -1266,6 +3252,10 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
 
 /// Text each file or job holds, in this order, as (file, job or "", texts).
 const TEXTS: &[(&str, &str, &[&str])] = &[
+    ("example-compose.yml", "agent", &["uses: ./.agentic-job-source/prepare", "Your privileged steps go here", "name: A caller's privileged step", "End of your privileged steps", "uses: ./.agentic-job-source/secure-host", "uses: ./.agentic-job-source/run", "Your later steps go here", "name: A caller's later step"]),
+    ("prepare/action.yml", "", &["artifact-ids:", "The policy call is this action's commit", "- name: Install the binary", "- name: Write what the run is called", "- name: The inference broker's address"]),
+    ("run/action.yml", "", &["- name: Prove the host is secured", "The policy call is this action's commit", "- name: Read the run's settings", "- name: Refuse a GitHub token that can write", "- name: Run the agent", "- name: Check again that the repositories are public", "uses: actions/upload-artifact", "id: safe-outputs", "- name: The run's result"]),
+    ("policy.yml", "policy", &["Check that the repositories are public", "- name: This workflow"]),
     // Apply posts the comment check folded, before anything that names or
     // marks what it posts.
     (

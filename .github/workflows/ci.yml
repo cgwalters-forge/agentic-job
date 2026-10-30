@@ -293,7 +293,6 @@ jobs:
           ZIZMOR: ${{ runner.temp }}/zizmor
           ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/workflow-commands.test.cjs
-      - run: node --test workflow/agent-actions.test.cjs
       # Read-only contract tests; no forge token or agent-produced code.
       - run: node --test workflow/dispatch.test.cjs
       - run: node --test workflow/ci.test.cjs
