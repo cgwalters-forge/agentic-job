@@ -679,10 +679,10 @@ pub(crate) fn redirections_to(
         }
     }
     if output == "remove_labels"
-        && !item
+        && item
             .get("labels")
             .and_then(Value::as_array)
-            .is_some_and(|labels| !labels.is_empty())
+            .is_none_or(|labels| labels.is_empty())
     {
         problems.push("a remove_labels requires a nonempty labels array".to_owned());
     }
@@ -831,10 +831,10 @@ pub(crate) fn redirections_to(
     // The handler posts the body on the issue, then closes it, so whoever
     // watches the issue learns why; without one it fails in apply instead.
     if output == "close_issue"
-        && !item
+        && item
             .get("body")
             .and_then(Value::as_str)
-            .is_some_and(|body| !body.trim().is_empty())
+            .is_none_or(|body| body.trim().is_empty())
     {
         problems.push("a close_issue requires a body saying why it is closed".to_owned());
     }
