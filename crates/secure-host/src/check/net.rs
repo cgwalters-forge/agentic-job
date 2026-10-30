@@ -989,19 +989,27 @@ impl Checker<'_> {
                 self.attempts(&attempts)?;
                 continue;
             }
-            // The container's refusals in one container, beside the host's.
-            let this = &*self;
-            let (made, contained) = std::thread::scope(|scope| {
-                let lane = scope.spawn(|| this.tcp_refusals_in_one_container(&targets));
-                let made = this.made(&attempts);
-                let contained = lane
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                (made, contained)
-            });
+            // One container-lane slot for the whole group. Use the same
+            // scheduler so it reserves one of the bounded pool's workers
+            // and never overlaps another podman start.
+            attempts.push(Attempt::refused_in_container(
+                "tailnet-container",
+                "the tailnet targets",
+                &[],
+            ));
+            let mut results = super::in_order(&attempts, |attempt| {
+                if attempt.kind == super::AttemptKind::RefusedInContainer {
+                    self.tcp_refusals_in_one_container(&targets)
+                } else {
+                    Ok(vec![self.make(attempt)?])
+                }
+            })?;
+            let contained = results.pop().expect("one container group");
+            attempts.pop();
+            let made: Vec<bool> = results.into_iter().flatten().collect();
             let runner = self.runner.name.clone();
-            self.report.attempts(&runner, &attempts, &made?)?;
-            self.report.attempts(&runner, &in_container, &contained?)?;
+            self.report.attempts(&runner, &attempts, &made)?;
+            self.report.attempts(&runner, &in_container, &contained)?;
         }
         Ok(())
     }
@@ -1033,7 +1041,12 @@ impl Checker<'_> {
         let attempt = Attempt::refused_in_container(id, id, &[]);
         crate::timed::stage("check", id, || {
             let output = self.refusal_output(&attempt, &self.container(&argv))?;
-            tcp_probe_results(id, &String::from_utf8_lossy(&output.stdout), &named)
+            tcp_probe_results(
+                id,
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stdout),
+                &named,
+            )
         })
     }
 }
@@ -1103,18 +1116,40 @@ wait"#;
 /// in order, connected, from its output. A probe with no line, or two, or
 /// one whose command did not start, is an error: its refusal would prove
 /// nothing.
-fn tcp_probe_results(id: &str, stdout: &str, targets: &[String]) -> Result<Vec<bool>> {
+fn tcp_probe_results(
+    id: &str,
+    status: Option<i32>,
+    stdout: &str,
+    targets: &[String],
+) -> Result<Vec<bool>> {
+    ensure!(
+        super::started(status),
+        "{id}: podman did not start the container (exit {status:?})"
+    );
     let mut codes: Vec<Option<i32>> = vec![None; targets.len()];
     for line in stdout.lines() {
-        let parsed = line
-            .split_once(' ')
-            .and_then(|(index, code)| Some((index.parse::<usize>().ok()?, code.parse().ok()?)));
-        let (index, code) = parsed.with_context(|| format!("{id}: unexpected output {line:?}"))?;
-        let slot = codes
-            .get_mut(index)
-            .with_context(|| format!("{id}: a result for probe {index} of {}", targets.len()))?;
+        let (index, code) = line.split_once(' ').with_context(|| {
+            format!(
+                "{id}: targets {}: unexpected output {line:?}",
+                targets.join(", ")
+            )
+        })?;
+        let index = index
+            .parse::<usize>()
+            .ok()
+            .filter(|&i| i < targets.len())
+            .with_context(|| {
+                format!(
+                    "{id}: targets {}: unexpected probe index in {line:?}",
+                    targets.join(", ")
+                )
+            })?;
+        let code = code
+            .parse::<u8>()
+            .with_context(|| format!("{id}:{}: malformed result {line:?}", targets[index]))?;
+        let slot = &mut codes[index];
         ensure!(slot.is_none(), "{id}:{}: two results", targets[index]);
-        *slot = Some(code);
+        *slot = Some(i32::from(code));
     }
     codes
         .into_iter()
@@ -1265,7 +1300,13 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!(
-            tcp_probe_results("t", &stdout, &["a".into(), "b".into(), "c".into()]).unwrap(),
+            tcp_probe_results(
+                "t",
+                output.status.code(),
+                &stdout,
+                &["a".into(), "b".into(), "c".into()]
+            )
+            .unwrap(),
             [false, true, false]
         );
     }
@@ -1307,22 +1348,36 @@ mod tests {
     fn tcp_probe_results_fail_closed() {
         type Expected<'a> = Result<&'a [bool], &'a str>;
 
-        let cases: &[(&str, usize, Expected<'_>)] = &[
-            ("", 0, Ok(&[])),
-            ("1 1\n0 0\n", 2, Ok(&[true, false])),
-            ("0 124\n", 1, Ok(&[false])),
-            ("", 1, Err("t:a: no result")),
-            ("0 1\n", 2, Err("t:b: no result")),
-            ("0 1\n0 1\n", 1, Err("t:a: two results")),
-            ("2 1\n", 2, Err("a result for probe 2 of 2")),
-            ("0 127\n", 1, Err("t:a: the probe did not run (exited 127)")),
-            ("0 125\n", 1, Err("did not run")),
-            ("0 1 extra\n", 1, Err("unexpected output")),
-            ("refused\n", 1, Err("unexpected output")),
+        let cases: &[(&str, i32, usize, Expected<'_>)] = &[
+            ("", 0, 0, Ok(&[])),
+            ("1 1\n0 0\n", 0, 2, Ok(&[true, false])),
+            ("1 124\n0 1\n", 0, 2, Ok(&[false, false])),
+            ("0 124\n", 0, 1, Ok(&[false])),
+            ("", 0, 1, Err("t:a: no result")),
+            ("0 1\n", 0, 2, Err("t:b: no result")),
+            ("0 1\n0 1\n", 0, 1, Err("t:a: two results")),
+            ("2 1\n", 0, 2, Err("targets a, b: unexpected probe index")),
+            (
+                "0 127\n",
+                0,
+                1,
+                Err("t:a: the probe did not run (exited 127)"),
+            ),
+            ("0 125\n", 0, 1, Err("t:a: the probe did not run")),
+            ("0 1 extra\n", 0, 1, Err("t:a: malformed result")),
+            ("0 -1\n", 0, 1, Err("t:a: malformed result")),
+            ("0 256\n", 0, 1, Err("t:a: malformed result")),
+            ("refused\n", 0, 1, Err("targets a: unexpected output")),
+            ("0 1\n", 125, 1, Err("podman did not start")),
+            ("0 1\n", 126, 1, Err("podman did not start")),
+            ("0 1\n", 127, 1, Err("podman did not start")),
         ];
         let names = ["a".to_owned(), "b".to_owned()];
-        for (stdout, count, want) in cases {
-            match (tcp_probe_results("t", stdout, &names[..*count]), want) {
+        for (stdout, status, count, want) in cases {
+            match (
+                tcp_probe_results("t", Some(*status), stdout, &names[..*count]),
+                want,
+            ) {
                 (Ok(got), Ok(want)) => assert_eq!(&got, want, "{stdout:?}"),
                 (Err(err), Err(want)) => assert!(err.to_string().contains(want), "{err:#}"),
                 (got, _) => panic!("{stdout:?}: {got:?}"),
