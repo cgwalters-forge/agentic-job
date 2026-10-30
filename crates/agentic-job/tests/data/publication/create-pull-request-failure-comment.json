@@ -188,7 +188,43 @@
             "body"
           ]
         }
-      ]
+      ],
+      "edits": [
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [
+            "::warning::the pull request names no issue: the caller passed policy.yml no `issue`"
+          ],
+          "summary": "",
+          "items": [
+            {
+              "type": "create_pull_request",
+              "title": "Fix the overflow",
+              "body": "Checks the length first.",
+              "branch": "agent-run-4242"
+            },
+            {
+              "type": "add_comment",
+              "item_number": 7,
+              "body": "The requested changes have been applied."
+            }
+          ]
+        }
+      ],
+      "pushed": {
+        "agentic-bot/repo:refs/heads/agent-run-4242": [
+          {
+            "author": "Agent <agent@example.invalid>",
+            "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+            "message": "lib: Check for overflow",
+            "files": [
+              "src/lib.rs"
+            ]
+          }
+        ]
+      }
     }
   ],
   "pushed": {
