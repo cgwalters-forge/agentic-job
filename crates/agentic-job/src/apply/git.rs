@@ -78,7 +78,52 @@ pub(super) struct Push<'a> {
     /// Who commits it, now; by default [`COMMITTER`] at the patch's
     /// author date, so that a retry makes the very same commit.
     pub committer: Option<(&'a str, &'a str)>,
+    /// Commits as `committer` at the patch's author date too.
+    pub at_author_date: bool,
+    /// The most the changed files may hold once applied, in KB, as gh-aw's
+    /// push handler counts them: [`TooLarge`] past it.
+    pub max_changed_kb: Option<u64>,
 }
+
+/// The branch a push is for is no longer at its head: someone pushed to
+/// it since, and nothing is pushed over that.
+#[derive(Debug)]
+pub(super) struct Moved {
+    target: String,
+    head: String,
+}
+
+impl std::fmt::Display for Moved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is no longer at {}, the head the run was asked for: it moved, and is not pushed over",
+            self.target, self.head
+        )
+    }
+}
+
+impl std::error::Error for Moved {}
+
+/// The files a patch changes hold more than [`Push::max_changed_kb`] once
+/// applied, in gh-aw's words.
+#[derive(Debug)]
+pub(super) struct TooLarge {
+    kb: u64,
+    max_kb: u64,
+}
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Changed content size ({} KB) exceeds maximum allowed size ({} KB)",
+            self.kb, self.max_kb
+        )
+    }
+}
+
+impl std::error::Error for TooLarge {}
 
 impl Git<'_> {
     /// What git's errors are scrubbed of, longest first: the whole header
@@ -207,15 +252,13 @@ impl Git<'_> {
         // the GitHub apply job (`am.keepcr`): without it `git am` would
         // commit other bytes than check read, and a patch to a file with
         // CRLF line ends would not apply at all.
+        let am = ["am", "-q", "--keep-cr", "--committer-date-is-author-date"];
         match push.committer {
-            None => self.run(
-                dir,
-                &["am", "-q", "--keep-cr", "--committer-date-is-author-date"],
-                Some(push.patch),
-            )?,
-            Some(committer) => {
-                self.run_as(dir, &["am", "-q", "--keep-cr"], Some(push.patch), committer)?
+            None => self.run(dir, &am, Some(push.patch))?,
+            Some(committer) if push.at_author_date => {
+                self.run_as(dir, &am, Some(push.patch), committer)?
             }
+            Some(committer) => self.run_as(dir, &am[..3], Some(push.patch), committer)?,
         };
         // check read the paths the patch names; git applies by its own
         // reading, so what it changed is held to those.
@@ -238,6 +281,20 @@ impl Git<'_> {
             changed == named,
             "the applied patch changes other paths than check read in it"
         );
+        if let Some(max_kb) = push.max_changed_kb {
+            // A deleted file adds nothing, and no path leaves the checkout:
+            // check refused `..` and absolute paths.
+            let bytes: u64 = changed
+                .iter()
+                .filter_map(|path| std::fs::symlink_metadata(dir.join(path)).ok())
+                .filter(std::fs::Metadata::is_file)
+                .map(|metadata| metadata.len())
+                .sum();
+            let kb = bytes.div_ceil(1024);
+            if kb > max_kb {
+                bail!(TooLarge { kb, max_kb });
+            }
+        }
         let target = format!("refs/heads/{}", push.branch);
         let commit = self
             .run(dir, &["rev-parse", "HEAD"], None)?
@@ -255,10 +312,14 @@ impl Git<'_> {
             return Ok(commit);
         }
         match push.head {
-            Some(head) => ensure!(
-                existing.trim() == format!("{head}\t{target}"),
-                "{target} is no longer at {head}, the head the run was asked for: it moved, and is not pushed over"
-            ),
+            Some(head) => {
+                if existing.trim() != format!("{head}\t{target}") {
+                    bail!(Moved {
+                        target,
+                        head: head.to_owned()
+                    });
+                }
+            }
             None => ensure!(existing.trim().is_empty(), "{target} exists already"),
         }
         // The lease is the head, or no branch: what was read, still there

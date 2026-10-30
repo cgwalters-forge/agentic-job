@@ -697,8 +697,9 @@ organization bounds, both files must name the same one. A top-level `allowed_dom
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 A top-level `native_handlers`, empty by default, lists `add_comment`,
-`create_pull_request`, `add_labels`, `remove_labels`, `close_issue` or
-`close_pull_request` for apply to publish with
+`create_pull_request`, `add_labels`, `remove_labels`, `close_issue`,
+`close_pull_request`, `push_to_pull_request_branch`, `create_issue` or
+`create_pull_request_review_comment` for apply to publish with
 [agentic-job's own handlers](#agentic-jobs-own-handlers) on GitHub rather
 than gh-aw's; each must be a type the bounds allow, and with
 organization bounds a type is routed only where both files name it.
@@ -1180,7 +1181,8 @@ before the guard: moving check's folded review findings into place
 and linking the caller's issue to a pull request. Their edited items,
 outputs and annotations are recorded, so the corpus captures what the
 guard and handlers receive as well as what they send.
-The cases are the forge's starting state, its failures and
+The cases are the forge's starting state, its failures, the event the
+run is for (a dispatch with none by default) and
 the requests; the golden file of each holds the method, path, body and
 its keys' order of every request, the step outputs, annotations and
 summary, the guard's kept and skipped items, `safe-output-items.jsonl`,
@@ -1193,7 +1195,10 @@ sanitizing, a `max` and a link limit, a re-run finding its comment on a
 second page, a handler replacing an older workflow comment past its first
 page, re-runs of an issue and a pull request, half-closed,
 reopened and already closed issues and pull requests, labels left out
-by the allowed list, a blocked pattern, a repeat or a missing label, and
+by the allowed list, a blocked pattern, a repeat or a missing label, an
+issue made for an issue event (its sub-issue link and the comment in its
+place where the forge refuses the link), a review comment outside the
+pull request's diff, re-runs mixing both sets of handlers, and
 failures of the forge and of the guard. Push re-runs cover a completed
 push and a commit that landed before its activation comment failed;
 the guard skips both on re-run, including the lost activation comment.
@@ -1232,7 +1237,9 @@ and error report.
 ### agentic-job's own handlers
 
 Bounds that list `add_comment`, `create_pull_request`, `add_labels`,
-`remove_labels`, `close_issue` or `close_pull_request` in
+`remove_labels`, `close_issue`, `close_pull_request`,
+`push_to_pull_request_branch`, `create_issue` or
+`create_pull_request_review_comment` in
 `native_handlers` ([the bounds](#the-bounds-and-the-policy)) have apply
 publish those types with `agentic-job publish` instead of gh-aw's
 handlers, in a step of policy's binary before gh-aw's: a port of those
@@ -1241,10 +1248,8 @@ and its client, which hold apply's token. It is off by default; every
 other type stays gh-aw's, and everything before the handlers runs as
 before (the fork step, the patch's trial, the partial note, the issue
 link and the guard against re-runs, `agentic-job applied`, which also
-finishes a half-closed item).
-`push_to_pull_request_branch`, `create_issue` and
-`create_pull_request_review_comment` are not ported yet: their corpus
-cases pass through gh-aw's handlers alone.
+finishes a half-closed item and leaves out a push an earlier attempt
+made, even one whose comment failed).
 
 What it sends is what gh-aw's handlers send: the second sanitizing with
 the same mentions allowed (the item's author and the event's people;
@@ -1252,7 +1257,24 @@ none in a closing comment), the footer, the workflow and execution
 markers, the applied name hidden as apply.yml's hook hides it, the
 comment limits, the title prefix, the draft setting, and the branch
 pushed to the `head-repo` the fork step chose, committed by the job's
-git identity. Labels are filtered by the handler's `allowed` and
+git identity. A push applies check's patch on the head the run was
+asked for, with git's lease on that head
+([the same push](../crates/agentic-job/src/apply/git.rs) apply makes
+off GitHub), to the branch of the pull request the handler's `target`
+names, which has to be from `head-repo`, neither its default branch nor
+protected, and comments on it with the commit. Its commit keeps the
+patch's author and message, trailers included, and is dated the
+patch's author date, so that it is the same commit whenever it is made;
+gh-aw's is dated when it is made. An issue made in a run for an issue
+event in the run's repository says it is related to that issue and is
+linked as its sub-issue, or that issue gets gh-aw's comment saying so
+where the forge will not link them. Review comments are kept, as gh-aw's
+review buffer keeps them, and submitted as one review of event
+`COMMENT` on the pull request's head after every other routed request:
+one on a path the pull request does not change is left out, and those
+the forge cannot anchor are put in the review's body; a locked pull
+request's review is skipped, and any other refusal fails the comments.
+Labels are filtered by the handler's `allowed` and
 `blocked` patterns, at most 10 added in one request, or removed one at
 a time, at most the handler's `max`: a label the item lacks is skipped,
 and one the forge will not remove reported without failing the
@@ -1261,8 +1283,10 @@ comment is posted first, even on an item someone closed already, which
 is not closed again; a pull request is closed even where its comment
 fails, an issue is not. It writes the same
 `safe-output-items.jsonl` entries (with an item's state before and after
-its labels change), step outputs (`created_pr_number`,
-`created_pr_url`, `comment_id`, `items_failed` and the rest), summary and
+its labels change, a push's head before and after, and the review the
+comments went into), step outputs (`created_pr_number`,
+`created_issue_number`, `push_commit_sha`, `comment_id`,
+`code_push_failure_count`, `items_failed` and the rest), summary and
 `safe-output-errors.json`, as `publish-errors.json`; the [publication
 corpus](#the-publication-corpus) holds it to all of them.
 
@@ -1280,19 +1304,28 @@ temporary ID (`#aw_`), an item named other than by a positive integer
 number, a label other than a plain one of at most 64 letters, digits,
 spaces and `-_./:`, a label pattern that is not ASCII, a dispatch whose
 inputs gh-aw would read the event from, a mention gh-aw would look up,
-or a file gh-aw's footer would read in `/tmp/gh-aw`. `check` (and so
+a file gh-aw's footer would read in `/tmp/gh-aw`, a push without the
+policy's pull request, head and branch or with a replacement series
+(which the guard pushes), an issue linked to another one, an issue in a
+run leaving gh-aw's handlers a pull request or a push (apply.yml lets
+gh-aw's step open issues in their place up to the run's `create_issue`
+count, which would then not bound both), a review comment other than one
+line or range of a path, and review comments in a run with any of
+gh-aw's types, whose review gh-aw would submit after them. `check` (and so
 `handback check`) refuses the order, the fields, the numbers, the labels
 and the temporary IDs, which depend on the requests alone, while the
 agent can still change them. A run with no routed request is given to gh-aw's step
 whole, held to none of these. A failure is not answered as gh-aw would answer it:
 a pull request the forge refuses opens no fallback issue, a comment on
 something that is not an issue or pull request is not retried on a
-discussion, and the routed comments after a failed pull request are not
-posted (gh-aw's would carry a note of the failure). Each of these fails
-the job, and `diagnostics handler-errors` reports why. gh-aw's own
-comments after a pull request that failed here do carry that note: it
-is written into the requests gh-aw's step is given, as its handler
-manager would add it.
+discussion, a push onto a branch that was rewritten since the run was
+asked for is not applied on whatever it now holds, and the routed
+comments after a failed pull request or push are not posted (gh-aw's
+would carry a note of the failure). Each of these fails the job, and
+`diagnostics handler-errors` reports why. gh-aw's own comments after a
+pull request or push that failed here do carry that note: it is written
+into the requests gh-aw's step is given, as its handler manager would
+add it.
 
 Every `update_project` field is checked against the live project in a
 step before both, so that a field or option the pinned handler would
