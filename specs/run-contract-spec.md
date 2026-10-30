@@ -97,9 +97,9 @@ its value MUST be redacted wherever the run logs or publishes. The egress
 proxy MAY pass `POST api.github.com/graphql` for reads; other GitHub writes
 MUST stay refused at the proxy. That allowance admits mutations too, so on that
 path only GitHub's enforcement of the token's permissions stops a write.
-Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
-`the agent job token reads and only apply holds a write credential` and
-`the agent gets its GitHub token, and a classic token that can write is refused first`;
+Enforcement: [workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`agent_credentials_stay_in_their_deterministic_jobs_and_steps` and
+`run_refuses_classic_write_tokens_without_exposing_them`;
 [launch.rs](../crates/agentic-job/src/run/launch.rs), `agents_get_only_the_runs_github_token`;
 [agent.rs](../crates/agentic-job/src/run/agent.rs), `github_tokens`;
 [tests/run.rs](../crates/agentic-job/tests/run.rs),
@@ -612,14 +612,12 @@ or one the read API does not name as this run's upload of check's
 `checked-outputs` under the policy call's artifact prefix.
 `prepare` and `run` MUST refuse, before they install or run anything from
 the policy upload, a `run.json` whose `source_sha` is not their own commit.
-Enforcement: [agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
-`agentic-job.yml composes the pinned-source agent job and keeps trusted edges
-off agent outputs` and its `example-compose.yml` twin,
-`the source an agent job takes its actions from is the policy call's own`,
-`apply applies only what check accepted, whatever the caller's gate`,
-`the wrapper forwards every setting to the policy call as it is`,
-`no workflow or action of this repository joins a network itself` and
-`the agent job installs the trusted binary and checks the proxy before setup`;
+Enforcement: [workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`composed_agents_keep_policy_source_and_trusted_edges`,
+`actions_refuse_source_skew_before_using_policy`, `workflow_shapes`,
+`wrapper_forwards_policy_settings_without_reinterpretation`,
+`caller_network_credentials_are_spent_before_the_agent` and
+`agent_configuration_provenance_and_step_gates_are_preserved`;
 [apply.test.cjs](../workflow/apply.test.cjs), `check and apply refuse a
 policy call of another commit, and apply an empty checked ID` and `apply
 takes only this run's check output, whatever the caller wired`;
@@ -636,9 +634,9 @@ does not close to the sandbox user: setup removes the runner's sudo and the
 sandbox's routes to the host, not what a step chose to share.
 Enforcement: CI's `e2e-compose` runs [example-compose.yml](../.github/workflows/example-compose.yml)
 with an example privileged step that creates a root-owned file;
-[agent-actions.test.cjs](../workflow/agent-actions.test.cjs),
-`the composed example marks where a caller's own steps go, and its examples
-prove their privileges`, holds that it sits between `prepare` and `secure-host`. What a
+[workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`composed_example_keeps_the_callers_privilege_boundary`,
+holds that it sits between `prepare` and `secure-host`. What a
 caller's step itself does is not tested here (section 4).
 
 **RC-017 — Steps after `run`.** A caller's steps after `run` execute as the
@@ -653,7 +651,7 @@ token it is passed, the job's included, and cannot see what a job token was
 granted.
 Enforcement: CI's `e2e-compose` example later step finds the earlier step's
 root-owned file and fails if `sudo -n true` succeeds; the same
-`agent-actions.test.cjs` test holds that it follows `run`. Only
+`composed_example_keeps_the_callers_privilege_boundary` test holds that it follows `run`. Only
 example-compose.yml's `permissions` block is tested (section 4).
 
 ## 4. Not yet enforced

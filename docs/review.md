@@ -580,8 +580,8 @@ that decides which authors start automatic reviews, and that the review agent
 job has no project toolchain installation or build-cache restore.
 `dispatch::tests` checks that both review prompts require code analysis without
 running checks or consulting CI, findings tagged blocker, important or nit and
-CHANGES only for a blocker. `node --test
-workflow/agent-actions.test.cjs` checks that the caller's network step is
+CHANGES only for a blocker. `tests/workflows.rs`'s
+`caller_network_credentials_are_spent_before_the_agent` checks that the caller's network step is
 one optional step of the register job, from its base checkout, and of
 `agent.yml`'s job when review.yml asks for it, between `prepare` and
 `secure-host`, that no workflow joins a network itself, and
