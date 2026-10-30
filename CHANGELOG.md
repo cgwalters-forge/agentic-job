@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Secure-host checks refill a bounded probe pool as each attempt finishes,
+  rather than waiting for the slowest attempt in each batch. Report order,
+  probe IDs and refusal deadlines are unchanged; note-only runner controls
+  retain their separate three-second bound.
 - Forgejo `apply` preflight now projects labels per item in batch order,
   allowing an explicitly authorized remove-then-add exclusive-label
   transition without weakening live pre-write checks. Label paging accepts

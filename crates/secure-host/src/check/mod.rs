@@ -83,6 +83,8 @@ const CONCURRENT_PROBES: usize = 8;
 /// control that connected on hosted runners did so in under 0.05 s; one
 /// that cannot connect (a dropped packet, a port nothing serves) cost
 /// the refusal's whole timeout, tens of seconds of every check.
+/// Three seconds leaves over 60 times that observed latency for a slow
+/// runner; expiry only loses a note-only control, never shortens a refusal.
 const CONTROL_LIMIT: &[&str] = &["timeout", "--kill-after=1", "3"];
 
 const CANARY_BYTES: usize = 12;
@@ -728,26 +730,39 @@ fn concurrently_bounded<T: Sync, R: Send>(
     limit: usize,
     run: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    assert!(limit > 0, "a probe pool needs at least one worker");
+    let next = &AtomicUsize::new(0);
     let run = &run;
-    items
-        .chunks(limit)
-        .flat_map(|chunk| {
-            std::thread::scope(|scope| {
-                let started: Vec<_> = chunk
-                    .iter()
-                    .map(|item| scope.spawn(move || run(item)))
-                    .collect();
-                started
-                    .into_iter()
-                    .map(|thread| {
-                        thread
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                    })
-                    .collect::<Vec<R>>()
+    let mut results = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..limit.min(items.len()))
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut made = Vec::new();
+                    loop {
+                        // Only the index is shared; each worker owns its results.
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break;
+                        };
+                        made.push((index, run(item)));
+                    }
+                    made
+                })
             })
-        })
-        .collect()
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect::<Vec<_>>()
+    });
+    results.sort_unstable_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 const DIAGNOSTIC_BYTES: usize = 4096;
@@ -882,23 +897,63 @@ mod tests {
     #[test]
     fn batches_keep_their_order_and_their_bound() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let items: Vec<usize> = (0..3 * CONCURRENT_PROBES + 1).collect();
-        let results = concurrently(&items, |&item| {
-            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-            most.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            running.fetch_sub(1, Ordering::SeqCst);
-            item * 2
-        });
-        assert_eq!(
-            results,
-            items.iter().map(|item| item * 2).collect::<Vec<_>>()
-        );
-        // How many overlap depends on the machine; that no more than the
-        // bound do does not.
-        let most = most.into_inner();
-        assert!((1..=CONCURRENT_PROBES).contains(&most), "{most}");
+        for (count, limit) in [(0, 8), (1, 1), (9, 1), (25, 7), (25, 8), (3, 8)] {
+            let items: Vec<usize> = (0..count).collect();
+            // An error in every possible position, plus the all-success case.
+            for error in (0..count).map(Some).chain([None]) {
+                let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                let results = concurrently_bounded(&items, limit, |&item| {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::yield_now();
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    if error == Some(item) {
+                        Err(item)
+                    } else {
+                        Ok(item * 2)
+                    }
+                });
+                let expected: Vec<_> = items
+                    .iter()
+                    .map(|&item| {
+                        if error == Some(item) {
+                            Err(item)
+                        } else {
+                            Ok(item * 2)
+                        }
+                    })
+                    .collect();
+                assert_eq!(results, expected, "{count} {limit} {error:?}");
+                assert_eq!(running.into_inner(), 0);
+                assert!(most.into_inner() <= limit);
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_item_does_not_hold_the_next_batch() {
+        use std::sync::{Mutex, mpsc};
+        for limit in [2, CONCURRENT_PROBES - 1, CONCURRENT_PROBES] {
+            for slow in 0..limit {
+                let (tx, rx) = mpsc::channel();
+                let rx = Mutex::new(rx);
+                let items: Vec<_> = (0..limit * 3).collect();
+                let results = concurrently_bounded(&items, limit, |&item| {
+                    if item == slow {
+                        // A chunk barrier cannot start this later item until
+                        // we finish. Bound the wait so that regression fails.
+                        rx.lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                    } else if item == limit * 2 {
+                        tx.send(()).unwrap();
+                    }
+                    item
+                });
+                assert_eq!(results, items);
+            }
+        }
     }
 
     #[test]
@@ -983,18 +1038,64 @@ mod tests {
     }
 
     #[test]
+    fn competing_errors_keep_input_order_across_lanes() {
+        use std::sync::{Mutex, mpsc};
+
+        for (first, second) in [
+            (AttemptKind::Refused, AttemptKind::Refused),
+            (AttemptKind::Refused, AttemptKind::RefusedInContainer),
+            (AttemptKind::RefusedInContainer, AttemptKind::Refused),
+        ] {
+            let attempts = [
+                Attempt::new(first, "first", "first", &[]),
+                Attempt::new(second, "second", "second", &[]),
+                Attempt::control("last", "last", &[]),
+            ];
+            let (tx, rx) = mpsc::channel();
+            let rx = Mutex::new(rx);
+            let err = in_order(&attempts, |attempt| {
+                match attempt.id.as_str() {
+                    "first" => {
+                        rx.lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        Err(anyhow::anyhow!("first error"))
+                    }
+                    "second" => {
+                        // Publish the later error before releasing the first.
+                        let result = Err(anyhow::anyhow!("second error"));
+                        tx.send(()).unwrap();
+                        result
+                    }
+                    _ => Ok(true),
+                }
+            })
+            .unwrap_err();
+            assert_eq!(err.to_string(), "first error", "{first:?} {second:?}");
+        }
+    }
+
+    #[test]
     fn an_attempt_that_was_not_made_fails_the_batch() {
-        for kind in [AttemptKind::Refused, AttemptKind::RefusedInContainer] {
+        for kind in [
+            AttemptKind::Control,
+            AttemptKind::Refused,
+            AttemptKind::RefusedInContainer,
+        ] {
             let attempts = [
                 Attempt::control("a", "a", &[]),
                 Attempt::new(kind, "b", "b", &[]),
+                Attempt::refused("c", "c", &[]),
             ];
-            let err = in_order(&attempts, |attempt| {
-                ensure!(attempt.id != "b", "never entered");
-                Ok(true)
-            })
-            .unwrap_err();
-            assert_eq!(err.to_string(), "never entered");
+            for failed in ["a", "b", "c"] {
+                let err = in_order(&attempts, |attempt| {
+                    ensure!(attempt.id != failed, "never entered {failed}");
+                    Ok(true)
+                })
+                .unwrap_err();
+                assert_eq!(err.to_string(), format!("never entered {failed}"));
+            }
         }
     }
 
