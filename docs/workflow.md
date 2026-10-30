@@ -1102,7 +1102,7 @@ with it, `model` is optional in a direct call and still wins when supplied. See
 [the harness](harness.md#agents) for what is taken and why.
 
 `agent-skills: true` installs the built-in [skills](skills.md) for
-`claude` or `opencode`; dispatch turns it on for `implement`.
+`claude`, `opencode` or `vibe`; dispatch turns it on for `implement`.
 
 ### What a caller provides
 
@@ -1251,7 +1251,7 @@ The dedicated [review caller](review.md) sets `review: true` and
 review an admitted head SHA, from a fork too, with an analysis-only policy,
 post one validated verdict comment or noop, and report the verdict as the
 commit status `review`. It requires notifications and partial application
-off, and supports fake, opencode and Claude agents. Real reviewers start in
+off, and supports fake, opencode, Claude and Vibe agents. Real reviewers start in
 the trusted base checkout with the exact head beside it; see the
 [review guide](review.md). The
 [dispatch caller](dispatch.md) also supports operator-selected reviews of open

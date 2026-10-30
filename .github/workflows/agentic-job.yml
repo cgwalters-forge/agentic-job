@@ -134,7 +134,7 @@ on:
         type: string
         default: ""
       agent-skills:
-        description: Install the binary's skills and subagents for claude or opencode, for a task that names one (docs/skills.md)
+        description: Install the binary's skills and subagents for claude, opencode or vibe, for a task that names one (docs/skills.md)
         type: boolean
         default: false
       runner:
