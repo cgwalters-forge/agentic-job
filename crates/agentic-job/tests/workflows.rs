@@ -1,11 +1,83 @@
 //! `workflows check` as a repository's check runs it: over a tree, with
-//! its exemptions file.
+//! its exemptions file. And the workflows' own steps and shapes.
+#![allow(clippy::unwrap_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use regex::Regex;
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 const ERROR: i32 = 2;
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A file of .github/workflows, read at test time.
+fn workflow(file: &str) -> String {
+    std::fs::read_to_string(root().join(".github/workflows").join(file)).unwrap()
+}
+
+/// The text of `name`, a job of `text`, up to the next job.
+fn job<'a>(text: &'a str, name: &str) -> &'a str {
+    let start = text
+        .find(&format!("\n  {name}:\n"))
+        .unwrap_or_else(|| panic!("no job {name}"))
+        + 1;
+    let rest = &text[start..];
+    let end = Regex::new(r"\n  [a-z][\w-]*:\n")
+        .unwrap()
+        .find(rest)
+        .map_or(rest.len(), |next| next.start() + 1);
+    &rest[..end]
+}
+
+/// Runs the `run:` text of the one step named `name` in `file`, of any job,
+/// with bash as Actions does, in `dir`: with `env`, and of this process's
+/// environment only PATH and HOME.
+fn run_step(file: &str, name: &str, dir: &Path, env: &[(&str, &str)]) -> Output {
+    let text = workflow(file);
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let mut runs = doc["jobs"]
+        .as_hash()
+        .unwrap()
+        .values()
+        .flat_map(|job| job["steps"].as_vec().into_iter().flatten())
+        .filter(|step| step["name"].as_str() == Some(name))
+        .map(|step| step["run"].as_str().unwrap());
+    let script = runs
+        .next()
+        .unwrap_or_else(|| panic!("no step {name:?} in {file}"));
+    assert!(runs.next().is_none(), "two steps {name:?} in {file}");
+    let mut command = Command::new("bash");
+    command
+        .args(["-eo", "pipefail", "-c", script])
+        .current_dir(dir)
+        .env_clear();
+    for key in ["PATH", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command.envs(env.iter().copied()).output().unwrap()
+}
+
+/// A stand-in for a command a step runs.
+fn executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn path(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+
+/// The directory of the binary under test, as the steps' `JOB_DIR`.
+fn bin_dir() -> &'static str {
+    Path::new(BIN).parent().unwrap().to_str().unwrap()
+}
 
 /// The status comment keeps the agent's cost only in the run action's
 /// grammar, which cannot end the HTML comment it goes in.
@@ -706,4 +778,1168 @@ fn this_repository_passes() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+/// A refusal by the collector, the policy check or the review verdict
+/// reaches check's refusal step and the text of the conclusion comment.
+#[test]
+fn refusals_reach_the_conclusion_comment() {
+    use serde_json::json;
+    for phase in ["collector", "policy", "review"] {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = path(dir.path());
+        let errors = if phase == "collector" {
+            json!(["collector refused"])
+        } else {
+            json!([])
+        };
+        std::fs::write(
+            dir.path().join("agent_output.json"),
+            json!({"errors": errors, "items": []}).to_string(),
+        )
+        .unwrap();
+        if phase == "policy" {
+            let report = json!({"ok": false, "errors": ["protected files: CONTRIBUTING.md"]});
+            std::fs::write(dir.path().join("report.json"), report.to_string()).unwrap();
+        }
+        if phase == "review" {
+            // No comment is no verdict: the binary writes the report the
+            // refusal step reads, and fails the step before its output.
+            let output = dir.path().join("verdict-output");
+            let verdict = run_step(
+                "check.yml",
+                "Validate the review verdict",
+                dir.path(),
+                &[
+                    ("JOB_DIR", bin_dir()),
+                    ("GH_AW_TMP", tmp),
+                    ("TARGET", "12"),
+                    ("GITHUB_OUTPUT", path(&output)),
+                ],
+            );
+            assert_eq!(verdict.status.code(), Some(1), "{verdict:?}");
+            assert!(!output.exists());
+        }
+        let reasons = dir.path().join("reasons");
+        std::fs::write(&reasons, "").unwrap();
+        let shown = run_step(
+            "check.yml",
+            "Show why check refused the outputs",
+            dir.path(),
+            &[
+                ("JOB_DIR", bin_dir()),
+                ("GH_AW_TMP", tmp),
+                ("GITHUB_OUTPUT", path(&reasons)),
+            ],
+        );
+        assert!(shown.status.success(), "{phase}: {shown:?}");
+        assert!(
+            String::from_utf8_lossy(&shown.stdout).starts_with("::error::Refused by check: "),
+            "{phase}: {shown:?}"
+        );
+        let reasons = std::fs::read_to_string(&reasons).unwrap();
+        let reason = reasons
+            .strip_prefix("reason=")
+            .and_then(|reason| reason.strip_suffix('\n'))
+            .filter(|reason| !reason.is_empty() && !reason.contains('\n'))
+            .unwrap_or_else(|| panic!("{phase}: {reasons:?}"));
+        let output = dir.path().join("step-output");
+        let ended = run_step(
+            "apply.yml",
+            "How the run ended",
+            dir.path(),
+            &[
+                ("RESULTS", "success/failure/skipped"),
+                ("EXIT", "0"),
+                ("PR", ""),
+                ("REFUSAL", reason),
+                ("WORKFLOW", "test"),
+                ("RUN_URL", "https://example.invalid/run"),
+                ("GITHUB_OUTPUT", path(&output)),
+            ],
+        );
+        assert!(ended.status.success(), "{phase}: {ended:?}");
+        assert!(
+            std::fs::read_to_string(&output)
+                .unwrap()
+                .contains(&format!("refused by check: {reason}")),
+            "{phase}"
+        );
+    }
+}
+
+/// The collector is agentic-job's, and gh-aw's is not set up: a line it
+/// refused fails the step after it, with the reason in agent_output.json,
+/// and an error of its own fails its own.
+#[test]
+fn collector_refusals_fail_the_step_after_it() {
+    use serde_json::json;
+    let pattern = Regex::new("gh-aw/actions/setup@|collect_ndjson_output").unwrap();
+    assert!(!pattern.is_match(&workflow("check.yml")));
+    let dir = tempfile::tempdir().unwrap();
+    executable(
+        &dir.path().join("agentic-job"),
+        "#!/bin/bash\nif [ \"$STATUS\" != 2 ]; then echo \"$RESULT\" > \"$GH_AW_TMP/agent_output.json\"; fi\nexit \"$STATUS\"\n",
+    );
+    let accepted = json!({"items": [{"type": "noop", "message": "m"}], "errors": []}).to_string();
+    let refused =
+        json!({"items": [], "errors": ["Line 1: add_comment requires a 'body' field (string)"]})
+            .to_string();
+    // (the collector's status and result, whether its step succeeds, and
+    // whether the next one does)
+    for (status, result, ingested, checked) in [
+        ("0", accepted.as_str(), true, Some(true)),
+        ("1", refused.as_str(), true, Some(false)),
+        ("2", "", false, None),
+    ] {
+        let _ = std::fs::remove_file(dir.path().join("agent_output.json"));
+        let env = [
+            ("JOB_DIR", path(dir.path())),
+            ("GH_AW_TMP", path(dir.path())),
+            ("STATUS", status),
+            ("RESULT", result),
+        ];
+        let ingest = run_step(
+            "check.yml",
+            "Ingest the outputs with agentic-job collect",
+            dir.path(),
+            &env,
+        );
+        let code = Some(i32::from(!ingested));
+        assert_eq!(ingest.status.code(), code, "{status}: {ingest:?}");
+        if let Some(checked) = checked {
+            let check = run_step(
+                "check.yml",
+                "The collector refused nothing",
+                dir.path(),
+                &env,
+            );
+            let code = Some(i32::from(!checked));
+            assert_eq!(check.status.code(), code, "{status}: {check:?}");
+        }
+    }
+}
+
+/// With `expect-check-refusal`, the policy step succeeds only on a refusal
+/// whose report says why, shown in a summary that could be written; without
+/// it, only on an acceptance.
+#[test]
+fn an_expected_refusal_needs_a_report_and_a_summary() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    executable(
+        &dir.path().join("agentic-job"),
+        "#!/bin/bash\nif [ \"$REPORT\" != missing ]; then cp \"$REPORT\" \"$GH_AW_TMP/report.json\"; fi\nexit \"$STATUS\"\n",
+    );
+    let fixture = dir.path().join("fixture.json");
+    let refusal = json!({"ok": false, "errors": ["wrong item"]});
+    // (expect-check-refusal, check's status, its report, the summary file,
+    // the step's status)
+    for (expect, status, report, summary, code) in [
+        ("true", "1", Some(refusal.clone()), "summary", 0),
+        (
+            "true",
+            "0",
+            Some(json!({"ok": true, "errors": []})),
+            "summary",
+            1,
+        ),
+        ("true", "1", None, "summary", 2),
+        ("true", "2", Some(refusal.clone()), "summary", 1),
+        (
+            "true",
+            "1",
+            Some(json!({"ok": false, "errors": []})),
+            "summary",
+            1,
+        ),
+        ("true", "1", Some(refusal.clone()), "missing/summary", 1),
+        ("false", "1", Some(refusal.clone()), "summary", 1),
+        (
+            "false",
+            "0",
+            Some(json!({"ok": true, "errors": [], "patch": null})),
+            "summary",
+            0,
+        ),
+    ] {
+        let _ = std::fs::remove_file(dir.path().join("report.json"));
+        if let Some(report) = &report {
+            std::fs::write(&fixture, report.to_string()).unwrap();
+        }
+        let output = run_step(
+            "check.yml",
+            "Check the outputs against the policy",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("GH_AW_TMP", path(dir.path())),
+                ("COMMENT_TARGET", "64"),
+                ("COMMENT_REPO", "owner/repo"),
+                ("EXPECT_REFUSAL", expect),
+                ("STATUS", status),
+                (
+                    "REPORT",
+                    report.as_ref().map_or("missing", |_| path(&fixture)),
+                ),
+                ("GITHUB_OUTPUT", path(&dir.path().join("output"))),
+                ("GITHUB_STEP_SUMMARY", path(&dir.path().join(summary))),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{expect} {status} {report:?} {summary}: {output:?}"
+        );
+    }
+}
+
+/// CI's e2e-analysis-refused holds the reason check shows to the refusal
+/// it expects, and to nothing else.
+#[test]
+fn an_expected_refusal_shows_the_reason_ci_expects() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = serde_json::json!({"ok": false,
+        "errors": ["an add_comment with item_number outside the caller's fixed item"]});
+    std::fs::write(dir.path().join("report.json"), report.to_string()).unwrap();
+    let output = dir.path().join("output");
+    std::fs::write(&output, "").unwrap();
+    let shown = Command::new(BIN)
+        .args(["diagnostics", "refusals", path(dir.path()), "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{shown:?}");
+    let output = std::fs::read_to_string(&output).unwrap();
+    let reason = output
+        .strip_prefix("reason=")
+        .and_then(|reason| reason.strip_suffix('\n'))
+        .unwrap();
+    let ci = workflow("ci.yml");
+    let assertion = ci
+        .lines()
+        .find(|line| line.contains("grep -F") && line.contains("$REFUSAL"))
+        .unwrap()
+        .trim();
+    for (value, matches) in [(reason, true), ("unrelated refusal", false), ("", false)] {
+        let status = Command::new("bash")
+            .args(["-eo", "pipefail", "-c", assertion])
+            .env("REFUSAL", value)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), matches, "{value:?}");
+    }
+}
+
+/// Workflow text that keeps check, token and refusal separation, as (file,
+/// job or "" for the whole file, patterns that match, patterns that do not).
+const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
+    // A refusal is reported only by the opted-in status helper, with the
+    // optional PAT.
+    (
+        "apply.yml",
+        "conclude",
+        &[
+            r"fromJSON\(inputs.policy\).notify != 'none' && fromJSON\(inputs.policy\).notified == 'true'",
+            r"REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}",
+            r#"conclude-binary/agentic-job" status\n"#,
+            r"STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}",
+        ],
+        &["Post the refusal to the comment target"],
+    ),
+    // Apply starts on neither an expected refusal nor a failed agent
+    // unless it handed over proposals, and checks out only where its
+    // outputs go.
+    (
+        "apply.yml",
+        "apply",
+        &[
+            r"&& fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}",
+            r"fromJSON\(inputs.check\).result == 'success' && \(fromJSON\(inputs.policy\).proposals-artifact != ''",
+            r"fromJSON\(inputs.policy\).proposals-artifact == '' && format\('\{0\}', fromJSON\(inputs.agent\).outputs.exit\) != '0'",
+            r"(?s)- name: Write applied.json.*EXIT: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact != '' && '0' \|\| fromJSON\(inputs.agent\).outputs.exit \}\}",
+            r"if: \$\{\{ fromJSON\(inputs.check\).outputs.has-patch == 'true' && fromJSON\(inputs.policy\).apply-staged != 'true' \}\}\s+with:\s+repository: \$\{\{ env.OUTPUT_REPO \}\}",
+        ],
+        &[r"pull_request.head|refs/pull"],
+    ),
+    // Check shows a refusal, uploads inline findings folded into the
+    // verdict comment, takes the proposals by upload ID or legacy name,
+    // and runs its own commit's source without secrets.
+    (
+        "check.yml",
+        "",
+        &[
+            r"failure\(\) \|\| steps.checked.outputs.refused == 'true'",
+            r"\n {12}\$\{\{ env.GH_AW_TMP \}\}/folded.json\n",
+            r#"verdict=\$\("\$JOB_DIR/agentic-job" review verdict --collected "\$GH_AW_TMP/agent_output.json" --target "\$TARGET" --report "\$GH_AW_TMP/report.json"\)"#,
+            r"if: \$\{\{ fromJSON\(inputs.policy\).review == 'true' \}\}",
+            r"name: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact \}\}",
+            r"artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}",
+            r#"agentic-job" check --policy"#,
+            r"permissions:\n  contents: read",
+            r"repository: \$\{\{ job.workflow_repository \}\}",
+            r"ref: \$\{\{ job.workflow_sha \}\}",
+        ],
+        &[r"secrets\."],
+    ),
+    // An expected refusal uploads nothing applicable; the job reads the
+    // proposals' upload with `actions: read`.
+    (
+        "check.yml",
+        "check",
+        &[
+            r"- name: Put the patch beside the ingested outputs\n        if: \$\{\{ success\(\) && fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}",
+            r"- id: upload\n        if: \$\{\{ success\(\) && fromJSON\(inputs.policy\).expect-check-refusal != 'true' \}\}",
+            r"permissions:\n      contents: read\n      actions: read\n",
+        ],
+        &[],
+    ),
+    // CI expects a refusal, and that nothing was applied; its e2e-review
+    // runs when the base has the review files, and is required then.
+    (
+        "ci.yml",
+        "",
+        &[
+            "expect-check-refusal: true",
+            r#"test "\$REFUSED" = success"#,
+            r#"test -z "\$REFUSED_APPLIED""#,
+            r"e2e-review:\s+needs: \[changes, static\]\n\s+if: \$\{\{ needs\.changes\.outputs\.e2e == 'true' && needs\.changes\.outputs\.review == 'true' \}\}",
+            r#"git cat-file -t "\$BASE:\$file""#,
+            "Exactly one scripted verdict was posted",
+            r"HEAD_SHA: \$\{\{ github.event.pull_request.head.sha \}\}",
+            r#"contains\("Reviewed SHA: " \+ \$sha \+ "\\n"\)"#,
+            r#"\(\.key == "e2e-review" and \$review != "true"\)"#,
+        ],
+        &[],
+    ),
+    // The review caller: the base's policy and actions, the head as data.
+    (
+        "review.yml",
+        "",
+        &[
+            r"pull_request_target: *(?:#[^\n]*)?\n\s+types: \[opened, synchronize, reopened, ready_for_review\]",
+            "kind: analysis",
+            "notify: none",
+            "review-task: workflow/review.md",
+        ],
+        &[r"contents: write|secrets: inherit|pull_request.head|refs/pull"],
+    ),
+    // The review agent analyses: no project toolchain or build cache.
+    (
+        "review.yml",
+        "agent",
+        &[
+            r"(?s)if: \$\{\{ !cancelled\(\) && needs.register.result == 'success' .*policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}",
+        ],
+        &[
+            r"rust-toolchain|rust-cache|setup-(?:node|python|go|java)|cargo (?:build|test|fmt|clippy)|npm (?:test|ci)",
+        ],
+    ),
+    (
+        "review.yml",
+        "register",
+        &[r"ref: \$\{\{ needs.policy.outputs.ref \}\}"],
+        &[],
+    ),
+    // The status takes the verdict check set and the head policy admitted,
+    // nothing the agent wrote, and runs only the pinned source's binary.
+    (
+        "review.yml",
+        "status",
+        &[
+            r"VERDICT: \$\{\{ needs.check.outputs.verdict \}\}",
+            r#""\$RUNNER_TEMP/bin/agentic-job" review status"#,
+            r"REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}",
+            r"if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' \}\}",
+            "runs-on: ubuntu-26.04",
+            r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
+        ],
+        &[
+            r"needs\.agent\.outputs|needs\.check\.outputs\.artifact|pull_request\.head|needs\.policy\.outputs\.ref\b",
+        ],
+    ),
+    (
+        "review.yml",
+        "carry",
+        &[
+            r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
+            r#"(?s)if: >-\n\s+\$\{\{ vars.REVIEW_CARRY_APPROVAL == 'true' && .*agentic-job" review carry --output "\$GITHUB_OUTPUT""#,
+        ],
+        &[],
+    ),
+    // The verdict is posted once: as the review, or else as apply's
+    // comment. Only a checked verdict, from check's upload, is submitted;
+    // the footer's job link is the agent job's own ID, from Actions.
+    (
+        "review.yml",
+        "submit",
+        &[
+            r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
+            "vars.AGENT_REAL_REVIEWS == 'true'",
+            r"binary-artifact-id != '' && \(needs.carry.outputs.from != '' \|\|\s+\(needs.check.result == 'success' && needs.check.outputs.artifact-id != ''",
+            r#"accepted=\(--accepted "\$RUNNER_TEMP/checked/agent_output.json"\)\n.*\n\s+"\$RUNNER_TEMP/bin/agentic-job" review submit "\$\{accepted\[@\]\}""#,
+            r"VERDICT: \$\{\{ needs.check.outputs.verdict \}\}",
+            r"AGENT_EXIT: \$\{\{ needs.agent.outputs.exit \}\}",
+            r"AGENT_JOB: \$\{\{ needs.agent.outputs.job \}\}",
+        ],
+        &[r"secrets|safe-outputs-artifact-id|pull_request\.head|needs\.policy\.outputs\.ref\b"],
+    ),
+    (
+        "review.yml",
+        "apply",
+        &[
+            r"if: \$\{\{ !cancelled\(\) && needs.policy.result == 'success' && needs.carry.outputs.from == '' && needs.submit.outputs.review-url == '' \}\}",
+        ],
+        &[],
+    ),
+    // The refusal of an event review updates the one bounded status
+    // comment, with the policy job's binary.
+    (
+        "review.yml",
+        "refusal",
+        &[
+            "needs.policy.outputs.admitted == 'false' && needs.policy.outputs.binary-artifact-id != ''",
+            r"artifact-ids: \$\{\{ needs.policy.outputs.binary-artifact-id \}\}\n",
+            r"TEXT: \$\{\{ needs.policy.outputs.refusal \}\}",
+            r#""\$RUNNER_TEMP/bin/agentic-job" status\n"#,
+            "group: agentic-job-status-",
+        ],
+        &[],
+    ),
+    (
+        "policy.yml",
+        "",
+        &[r#"review admit --decision "\$JOB_DIR/event\.json" --output "\$GITHUB_OUTPUT""#],
+        &[],
+    ),
+    // The agent checks out the trusted base, and reports its job's ID.
+    (
+        "agent.yml",
+        "",
+        &[
+            r"\n {6}job: \$\{\{ job.check_run_id \}\}\n",
+            r"\n {6}job:\n {8}value: \$\{\{ jobs.agent.outputs.job \}\}\n",
+            r"ref: \$\{\{ fromJSON\(inputs.policy\).ref \}\}",
+        ],
+        &[],
+    ),
+    // agentic-job.yml's agent job is agent.yml's, which takes the policy
+    // call's outputs as check.yml does; dispatch.yml's configuration goes
+    // through unchanged.
+    (
+        "agentic-job.yml",
+        "",
+        &[
+            r"\n {4}uses: \./\.github/workflows/agent\.yml .*\n(?: {4}.*\n)*? {6}policy: \$\{\{ toJSON\(needs.policy.outputs\) \}\}\n",
+            r"(?m)^      config: \$\{\{ inputs\.config \}\}$",
+        ],
+        &[],
+    ),
+    // The proposals route keeps check read-only, without secrets, and
+    // starts no agent or activation.
+    (
+        "agentic-job.yml",
+        "check",
+        &[
+            "needs.policy.result == 'success'",
+            r"permissions:\n      contents: read",
+            r"uses: \./\.github/workflows/check\.yml",
+            r"safe-outputs-artifact-id: \$\{\{ needs.agent.outputs.safe-outputs-artifact-id \}\}",
+            r"safe-outputs-artifact-digest: \$\{\{ needs.agent.outputs.safe-outputs-artifact-digest \}\}",
+        ],
+        &[r"secrets[.:]|needs.agent.outputs.(binary|policy|comment)"],
+    ),
+    (
+        "agentic-job.yml",
+        "agent",
+        &[r"\n    if: .*inputs.proposals-artifact == ''"],
+        &[],
+    ),
+    (
+        "policy.yml",
+        "activate",
+        &[r"\n    if: .*inputs.proposals-artifact == ''"],
+        &[],
+    ),
+];
+
+/// Text each file or job holds, in this order, as (file, job or "", texts).
+const TEXTS: &[(&str, &str, &[&str])] = &[
+    // Apply posts the comment check folded, before anything that names or
+    // marks what it posts.
+    (
+        "apply.yml",
+        "",
+        &[
+            r#"mv "$GH_AW_TMP/folded.json" "$GH_AW_TMP/agent_output.json""#,
+            "- name: Mark what a partial run opens or posts",
+            "- name: Leave out what an earlier attempt applied",
+        ],
+    ),
+    (
+        "check.yml",
+        "",
+        &[
+            "- name: Put the patch beside the ingested outputs",
+            r#"review fold "$GH_AW_TMP/agent_output.json""#,
+            "- id: upload",
+        ],
+    ),
+    // The proposals are held to the agent job's digest before they are
+    // downloaded, and the download to that digest.
+    (
+        "check.yml",
+        "check",
+        &[
+            "- name: Require explicit artifact contracts\n",
+            "- name: The proposals are the agent job's upload\n",
+            "artifact-ids: ${{ inputs.safe-outputs-artifact-id }}",
+            "- name: Ingest the outputs",
+        ],
+    ),
+    (
+        "check.yml",
+        "check",
+        &["artifact-ids: ${{ inputs.safe-outputs-artifact-id }}\n          path: .agentic-job/safe-outputs\n          digest-mismatch: error\n"],
+    ),
+    // Check takes the trusted IDs and the comment target from the policy
+    // call, and exports what apply needs.
+    (
+        "check.yml",
+        "",
+        &[
+            "value: ${{ jobs.detect.outputs.artifact-id }}",
+            "value: ${{ jobs.check.outputs.refusal }}",
+            "value: ${{ jobs.check.outputs.has-patch }}",
+            "${{ fromJSON(inputs.policy).binary-artifact-id }}",
+            "${{ fromJSON(inputs.policy).policy-artifact-id }}",
+            "${{ fromJSON(inputs.policy).comment-target }}",
+        ],
+    ),
+    (
+        "agentic-job.yml",
+        "check",
+        &["policy: ${{ toJSON(needs.policy.outputs) }}"],
+    ),
+    // Who starts an automatic review: the owner, members and collaborators,
+    // and a Bot whose numeric id REVIEW_BOT_IDS lists as a JSON array; a
+    // `/review` comment from anyone, which its bounds hold to write access.
+    // Changing it changes who spends inference.
+    (
+        "review.yml",
+        "policy",
+        &["    if: >-
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+        (contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.pull_request.author_association) ||
+          (github.event.pull_request.user.type == 'Bot' && startsWith(vars.REVIEW_BOT_IDS, '[') &&
+            contains(fromJSON(vars.REVIEW_BOT_IDS || '[]'), github.event.pull_request.user.id)))) ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+"],
+    ),
+    // The policy job reads the bounds at the workflow's commit for
+    // pull_request_target, and the agent stays on the event's base.
+    (
+        "policy.yml",
+        "policy",
+        &[
+            "\n      ref: ${{ inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha }}\n",
+            "\n          ref: ${{ github.event_name == 'pull_request_target' && github.workflow_sha || (inputs.review && !inputs.review-item && (github.event.pull_request.base.sha || inputs.base) || github.sha) }}\n",
+        ],
+    ),
+    // Without AGENT_CONFIG, review and dispatch read this source's
+    // hosted.toml, which the policy job checks out before reading it.
+    (
+        "policy.yml",
+        "policy",
+        &[
+            "\n          repository: ${{ job.workflow_repository }}\n          ref: ${{ job.workflow_sha }}\n          path: .agentic-job-source\n",
+            "- name: Write the configuration",
+        ],
+    ),
+    (
+        "review.yml",
+        "",
+        &["config: ${{ vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
+    ),
+    (
+        "dispatch.yml",
+        "",
+        &["config: ${{ !inputs.scripted && vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
+    ),
+    // Policy hands on the issue it checked, not the input.
+    (
+        "policy.yml",
+        "",
+        &["\n      issue: ${{ steps.request.outputs.issue }}\n"],
+    ),
+];
+
+#[test]
+fn workflow_shapes() {
+    for (file, name, matching, other) in SHAPES {
+        let text = workflow(file);
+        let text = if name.is_empty() {
+            text.as_str()
+        } else {
+            job(&text, name)
+        };
+        for (patterns, wanted) in [(matching, true), (other, false)] {
+            for pattern in *patterns {
+                let found = Regex::new(pattern).unwrap().is_match(text);
+                assert_eq!(found, wanted, "{file} {name}: {pattern}");
+            }
+        }
+    }
+    for (file, name, texts) in TEXTS {
+        let text = workflow(file);
+        let text = if name.is_empty() {
+            text.as_str()
+        } else {
+            job(&text, name)
+        };
+        let at: Vec<usize> = texts
+            .iter()
+            .map(|want| {
+                text.find(want)
+                    .unwrap_or_else(|| panic!("{file} {name}: no {want:?}"))
+            })
+            .collect();
+        assert!(at.is_sorted(), "{file} {name}: {texts:?} at {at:?}");
+    }
+    assert!(root().join(".github/agentic-job/hosted.toml").is_file());
+    // Of check's inputs, only the proposals' upload ID and digest are not
+    // the policy call's: the producer chooses no binary, policy or target.
+    let text = workflow("check.yml");
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let inputs: Vec<&str> = doc["on"]["workflow_call"]["inputs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|input| input.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        inputs,
+        [
+            "policy",
+            "safe-outputs-artifact-id",
+            "safe-outputs-artifact-digest"
+        ]
+    );
+}
+
+/// review.yml's jobs and what each may write: comments in refusal, submit
+/// and apply, the status in status, identity tokens in register and
+/// check's detector, never in the agent's job, whose only secrets are the
+/// register job's run token and its network step's key.
+#[test]
+fn the_review_caller_keeps_token_separation() {
+    let text = workflow("review.yml");
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let names: Vec<&str> = doc["jobs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap())
+        .collect();
+    let writes: [(&str, &[&str]); 9] = [
+        ("policy", &[]),
+        ("refusal", &["pull-requests"]),
+        ("carry", &[]),
+        ("register", &["id-token"]),
+        ("agent", &[]),
+        ("check", &["id-token"]),
+        ("submit", &["pull-requests"]),
+        ("apply", &["pull-requests"]),
+        ("status", &["statuses"]),
+    ];
+    assert_eq!(names, writes.map(|(name, _)| name));
+    for (name, wanted) in writes {
+        let granted: Vec<&str> = doc["jobs"][name]["permissions"]
+            .as_hash()
+            .unwrap()
+            .iter()
+            .filter(|(_, access)| access.as_str() == Some("write"))
+            .map(|(permission, _)| permission.as_str().unwrap())
+            .collect();
+        assert_eq!(granted, wanted, "{name}");
+        let secrets = job(&text, name).replace(
+            "\n    secrets:\n      INFERENCE_RUN_TOKEN: ${{ needs.register.outputs.run-token }}\n      NETWORK_SECRET: ${{ needs.register.outputs.network-secret }}\n",
+            "\n",
+        );
+        assert!(
+            name == "apply" || !secrets.contains("secrets"),
+            "{name}: {secrets}"
+        );
+    }
+    let pinned = Regex::new("@[0-9a-f]{40}$").unwrap();
+    for action in Regex::new(r"(?m)^ +(?:- )?uses: ([^.\s]\S*)")
+        .unwrap()
+        .captures_iter(&text)
+    {
+        assert!(pinned.is_match(&action[1]), "{}", &action[1]);
+    }
+    // The only uploads read: the policy job's binary of the pinned source,
+    // and check's accepted outputs.
+    const BINARY: &str = "${{ needs.policy.outputs.binary-artifact-id }}";
+    let ids = Regex::new("artifact-ids: (.*)").unwrap();
+    for (name, wanted) in [
+        ("status", &[BINARY][..]),
+        ("carry", &[BINARY]),
+        (
+            "submit",
+            &[BINARY, "${{ needs.check.outputs.artifact-id }}"],
+        ),
+    ] {
+        let found: Vec<&str> = ids
+            .captures_iter(job(&text, name))
+            .map(|id| id.get(1).unwrap().as_str())
+            .collect();
+        assert_eq!(found, wanted, "{name}");
+    }
+}
+
+/// policy.yml's mode check, with `change` over a run that names nothing.
+fn mode_gate(dir: &Path, change: &[(&str, &str)]) -> Output {
+    let mut env = vec![
+        ("RUNNER_TEMP", path(dir)),
+        ("PROPOSALS", ""),
+        ("EVENT", "false"),
+        ("REVIEW", "false"),
+        ("PARTIAL", "false"),
+        ("TASK", ""),
+        ("TASK_ARTIFACT", ""),
+    ];
+    env.extend_from_slice(change);
+    run_step("policy.yml", "Check the proposals mode", dir, &env)
+}
+
+/// Proposals come without an event, a review or partial apply; an agent
+/// run has a task or derives one.
+#[test]
+fn the_proposals_mode_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    for (change, success) in [
+        (&[("PROPOSALS", "proposals")][..], true),
+        (&[("PROPOSALS", "proposals"), ("EVENT", "true")], false),
+        (&[("PROPOSALS", "proposals"), ("REVIEW", "true")], false),
+        (&[("PROPOSALS", "proposals"), ("PARTIAL", "true")], false),
+        (&[("TASK", "run")], true),
+        (&[], false),
+        (&[("TASK", "run"), ("PARTIAL", "true")], true),
+        (&[("PARTIAL", "true")], false),
+        (&[("EVENT", "true")], true),
+        (&[("REVIEW", "true")], true),
+        (&[("EVENT", "true"), ("REVIEW", "true")], true),
+        // The artifact's name is data.
+        (&[("PROPOSALS", "$(exit 99)")], true),
+    ] {
+        let output = mode_gate(dir.path(), change);
+        let code = Some(i32::from(!success));
+        assert_eq!(output.status.code(), code, "{change:?}: {output:?}");
+    }
+}
+
+/// Every call of agentic-job.yml here passes the mode check: a task
+/// given as prose or an expression is one, uninterpreted.
+#[test]
+fn every_caller_passes_the_mode_gate() {
+    use yaml_rust2::Yaml;
+    let dir = tempfile::tempdir().unwrap();
+    let mut callers = 0;
+    for entry in std::fs::read_dir(root().join(".github/workflows")).unwrap() {
+        let file = entry.unwrap().path();
+        if file.extension().is_none_or(|extension| extension != "yml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+        for (name, job) in doc["jobs"].as_hash().into_iter().flatten() {
+            if job["uses"].as_str() != Some("./.github/workflows/agentic-job.yml") {
+                continue;
+            }
+            let values: Vec<(&str, String)> = [
+                ("proposals-artifact", "PROPOSALS"),
+                ("event", "EVENT"),
+                ("review", "REVIEW"),
+                ("apply-partial", "PARTIAL"),
+                ("task", "TASK"),
+            ]
+            .into_iter()
+            .filter_map(|(input, variable)| {
+                let value = match &job["with"][input] {
+                    Yaml::String(value) => value.clone(),
+                    Yaml::Boolean(value) => value.to_string(),
+                    Yaml::Integer(value) => value.to_string(),
+                    _ => return None,
+                };
+                Some((variable, value))
+            })
+            .collect();
+            let change: Vec<(&str, &str)> = values
+                .iter()
+                .map(|(variable, value)| (*variable, value.as_str()))
+                .collect();
+            let output = mode_gate(dir.path(), &change);
+            assert!(output.status.success(), "{file:?} {name:?}: {output:?}");
+            callers += 1;
+        }
+    }
+    assert!(
+        callers >= 8,
+        "expected the example, review and CI callers, found {callers}"
+    );
+}
+
+/// Check takes explicit trusted upload IDs, and one proposal selector:
+/// the agent job's upload ID with its digest, or a legacy name.
+#[test]
+fn the_checker_requires_explicit_artifact_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest = "c".repeat(64);
+    let prefixed = format!("sha256:{digest}");
+    for (change, success) in [
+        (&[][..], true),
+        (
+            &[
+                ("PROPOSALS", ""),
+                ("DIGEST", ""),
+                ("NAME", "board-proposals"),
+            ],
+            true,
+        ),
+        (&[("BINARY", "")], false),
+        (&[("POLICY", "")], false),
+        (&[("PROPOSALS", "")], false),
+        (&[("DIGEST", "")], false),
+        (&[("DIGEST", prefixed.as_str())], false),
+        (&[("DIGEST", &digest[1..])], false),
+        (&[("DIGEST", "$(exit 0)")], false),
+        (&[("DIGEST", ""), ("NAME", "board-proposals")], false),
+        (&[("PROPOSALS", ""), ("NAME", "board-proposals")], false),
+        (&[("POLICY", "2,4")], false),
+        (&[("PROPOSALS", "$(exit 99)")], false),
+        // The legacy name is data.
+        (
+            &[("PROPOSALS", ""), ("DIGEST", ""), ("NAME", "$(exit 99)")],
+            true,
+        ),
+    ] {
+        let mut env = vec![
+            ("BINARY", "1"),
+            ("POLICY", "2"),
+            ("PROPOSALS", "3"),
+            ("DIGEST", digest.as_str()),
+            ("NAME", ""),
+        ];
+        env.extend_from_slice(change);
+        let output = run_step(
+            "check.yml",
+            "Require explicit artifact contracts",
+            dir.path(),
+            &env,
+        );
+        let code = Some(i32::from(!success));
+        assert_eq!(output.status.code(), code, "{change:?}: {output:?}");
+    }
+}
+
+/// The agent job hands back by upload ID and digest; check holds the upload
+/// to that digest, and to this run, before it downloads any of it.
+#[test]
+fn the_checker_refuses_another_upload_digest() {
+    use serde_json::{Value, json};
+    let text = workflow("check.yml");
+    let doc = &yaml_rust2::YamlLoader::load_from_str(&text).unwrap()[0];
+    let step = doc["jobs"]["check"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("The proposals are the agent job's upload"))
+        .unwrap();
+    assert_eq!(
+        step["if"].as_str(),
+        Some("${{ fromJSON(inputs.policy).proposals-artifact == '' }}")
+    );
+    assert_eq!(
+        step["env"]["DIGEST"].as_str(),
+        Some("${{ inputs.safe-outputs-artifact-digest }}")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // What the read API says of upload 3.
+    executable(
+        &bin.join("gh"),
+        "#!/bin/bash\n[ \"$*\" = 'api repos/o/r/actions/artifacts/3' ] || exit 9\n[ -n \"$ANSWER\" ] && printf %s \"$ANSWER\"\n",
+    );
+    let search = format!("{}:{}", path(&bin), std::env::var("PATH").unwrap());
+    let digest = "c".repeat(64);
+    let artifact = |hash: Value, run: u64| {
+        json!({"id": 3, "name": "safe-outputs", "digest": hash, "workflow_run": {"id": run}})
+            .to_string()
+    };
+    let sha = |c: &str| json!(format!("sha256:{}", c.repeat(64)));
+    // (the API's answer, the digest the agent job gave, whether check goes on)
+    for (answer, given, success) in [
+        (artifact(sha("c"), 7), digest.as_str(), true),
+        (artifact(sha("d"), 7), &digest, false),
+        (artifact(sha("c"), 7), "", false),
+        (artifact(Value::Null, 7), &digest, false),
+        (artifact(json!(digest), 7), &digest, false),
+        (artifact(sha("c"), 8), &digest, false),
+        // Not found, or not readable.
+        (String::new(), &digest, false),
+    ] {
+        let output = run_step(
+            "check.yml",
+            "The proposals are the agent job's upload",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("PROPOSALS", "3"),
+                ("DIGEST", given),
+                ("GITHUB_REPOSITORY", "o/r"),
+                ("GITHUB_RUN_ID", "7"),
+                ("ANSWER", &answer),
+            ],
+        );
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{answer} {given}: {output:?}"
+        );
+    }
+}
+
+/// policy.yml's request step, with a stand-in for the policy command that
+/// prints its arguments and `FAKE_SAFE_OUTPUTS` as the policy, and the
+/// directory it ran in.
+fn request(env: &[(&str, &str)]) -> (Output, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("bin")).unwrap();
+    executable(
+        &dir.path().join("bin/agentic-job"),
+        "#!/bin/bash\nprintf '%s\\0' \"$@\" |\n  jq -Rs --argjson safe \"$FAKE_SAFE_OUTPUTS\" '{args: split(\"\\u0000\")[:-1], safe_outputs: $safe}'\n",
+    );
+    let output = dir.path().join("output");
+    let mut all = vec![
+        ("SOURCE_DIR", path(dir.path())),
+        ("JOB_DIR", path(dir.path())),
+        ("GITHUB_OUTPUT", path(&output)),
+        ("GITHUB_REPOSITORY", "o/r"),
+        ("ALLOW", "allow"),
+        ("REPO", "o/r"),
+        ("BASE", "main"),
+        ("OUTPUTS", "all"),
+        ("TARGET", ""),
+        ("ISSUE", ""),
+    ];
+    all.extend_from_slice(env);
+    let output = run_step(
+        "policy.yml",
+        "Check the request against the caller's bounds",
+        dir.path(),
+        &all,
+    );
+    (output, dir)
+}
+
+/// The policy command is told when apply holds only the job token, where
+/// a push goes and which repository an item is in; an issue is a number,
+/// and an item's repository is not for an event, a review or a push.
+#[test]
+fn the_request_step_tells_the_policy_command_its_token_and_targets() {
+    let head = "a".repeat(40);
+    let replacement = "b".repeat(40);
+    let push = [
+        ("PUSH_ITEM", "42"),
+        ("PUSH_BRANCH", "agent-run-1"),
+        ("PUSH_HEAD", head.as_str()),
+        ("REPLACEMENT_BASE", replacement.as_str()),
+        ("OUTPUT_REPO", ""),
+    ];
+    let pushed = |repo: &'static str| {
+        let mut args = vec![
+            "--pull-request",
+            "42",
+            "--head",
+            head.as_str(),
+            "--output-repo",
+        ];
+        args.push(repo);
+        args
+    };
+    let with = |extra: &[(&'static str, &'static str)]| {
+        let mut env = push.to_vec();
+        env.extend_from_slice(extra);
+        env
+    };
+    let item = [("ITEM_REPO", "o/tracker")];
+    // (apply-environment, issue, other inputs, the policy command's
+    // arguments after --max-outputs, or the refusal)
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        Vec<(&'a str, &'a str)>,
+        Result<Vec<&'a str>, &'a str>,
+    );
+    let cases: Vec<Case> = vec![
+        ("", "", vec![], Ok(vec!["--job-token"])),
+        ("", "64", vec![], Ok(vec!["--job-token"])),
+        ("apply", "64", vec![], Ok(vec![])),
+        ("apply", "0", vec![], Err("issue is not a number")),
+        ("apply", "64 ", vec![], Err("issue is not a number")),
+        (
+            "apply",
+            "owner/repo#64",
+            vec![],
+            Err("issue is not a number"),
+        ),
+        ("apply", "$(exit 0)", vec![], Err("issue is not a number")),
+        // A push names where apply applies it, for the binary to refuse
+        // any repository but the run's: the calling one by default.
+        ("apply", "", with(&[]), Ok(pushed("o/r"))),
+        (
+            "",
+            "",
+            with(&[]),
+            Ok([pushed("o/r"), vec!["--job-token"]].concat()),
+        ),
+        (
+            "apply",
+            "",
+            with(&[("OUTPUT_REPO", "x/y")]),
+            Ok(pushed("x/y")),
+        ),
+        // The binary holds an item's repository to the bounds; an event's
+        // item is the caller's, and a review's or a push's pull request
+        // the target's.
+        (
+            "apply",
+            "64",
+            item.to_vec(),
+            Ok(vec!["--item-repo", "o/tracker"]),
+        ),
+        (
+            "apply",
+            "",
+            [&item[..], &[("EVENT", "true")]].concat(),
+            Err("item-repo is not for an event-triggered run"),
+        ),
+        (
+            "apply",
+            "",
+            [&item[..], &[("REVIEW_ITEM", "42")]].concat(),
+            Err("item-repo is not for a review or a push"),
+        ),
+        (
+            "apply",
+            "",
+            [&item[..], &[("REVIEW", "true")]].concat(),
+            Err("item-repo is not for a review or a push"),
+        ),
+        (
+            "apply",
+            "",
+            with(&item),
+            Err("item-repo is not for a review or a push"),
+        ),
+    ];
+    for (environment, issue, extra, wanted) in cases {
+        let mut env = vec![
+            ("KIND", "implement"),
+            ("MAX_OUTPUTS", "3"),
+            ("APPLY_ENVIRONMENT", environment),
+            ("ISSUE", issue),
+            (
+                "FAKE_SAFE_OUTPUTS",
+                r#"{"push_to_pull_request_branch": {}}"#,
+            ),
+        ];
+        env.extend_from_slice(&extra);
+        let (output, dir) = request(&env);
+        let case = format!("{environment:?} {issue:?} {extra:?}: {output:?}");
+        let args = match wanted {
+            Err(refusal) => {
+                assert_eq!(output.status.code(), Some(1), "{case}");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains(&format!("::error::{refusal}")), "{case}");
+                continue;
+            }
+            Ok(args) => args,
+        };
+        assert!(output.status.success(), "{case}");
+        let policy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("policy.json")).unwrap())
+                .unwrap();
+        let given: Vec<&str> = policy["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        let at = given
+            .iter()
+            .position(|arg| *arg == "--max-outputs")
+            .unwrap();
+        assert_eq!(given[at + 2..], args, "{case}");
+        if extra.iter().any(|(key, _)| *key == "PUSH_ITEM") {
+            assert_eq!(
+                policy["safe_outputs"]["push_to_pull_request_branch"]["replacement_base"],
+                replacement.as_str(),
+                "{case}"
+            );
+        }
+        let written = std::fs::read_to_string(dir.path().join("output")).unwrap();
+        assert!(
+            written.lines().any(|line| line == format!("issue={issue}")),
+            "{case}"
+        );
+    }
+}
+
+/// An event's item is in the calling repository; with outputs going to
+/// another one, check and apply would hide a comment, or act on a review
+/// thread, of that number there, an item the event was not about.
+#[test]
+fn review_thread_types_are_refused_for_an_events_item_elsewhere() {
+    for kind in [
+        "hide_comment",
+        "create_pull_request_review_comment",
+        "reply_to_pull_request_review_comment",
+        "resolve_pull_request_review_thread",
+    ] {
+        let safe = format!(r#"{{"noop": {{"max": 1}}, "{kind}": {{"max": 1}}}}"#);
+        for (extra, success) in [
+            (&[][..], true),
+            (&[("EVENT", "true")], true),
+            (&[("EVENT", "true"), ("OUTPUT_REPO", "O/R")], true),
+            (&[("OUTPUT_REPO", "x/y")], true),
+            (&[("EVENT", "true"), ("OUTPUT_REPO", "x/y")], false),
+        ] {
+            let mut env = vec![
+                ("KIND", "analysis"),
+                ("MAX_OUTPUTS", "1"),
+                ("APPLY_ENVIRONMENT", "apply"),
+                ("FAKE_SAFE_OUTPUTS", safe.as_str()),
+            ];
+            env.extend_from_slice(extra);
+            let (output, _dir) = request(&env);
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{kind} {extra:?}: {output:?}"
+            );
+            if !success {
+                let refusal = format!(
+                    "::error::{kind} is for an event-triggered run only when output-repo is the calling repository"
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains(&refusal),
+                    "{kind} {extra:?}: {output:?}"
+                );
+            }
+        }
+    }
 }

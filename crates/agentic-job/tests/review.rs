@@ -270,3 +270,65 @@ fn check_gets_one_verdict_word_or_a_refusal_report_and_the_folded_output() {
         json!({"ok": false, "errors": ["Review must return exactly one comment or noop"]})
     );
 }
+
+/// CI's e2e-review agent, scripted by .github/agentic-job/e2e/review.sh,
+/// posts a verdict check accepts, naming the head it was run at, which
+/// that job looks for on the pull request.
+#[test]
+fn the_scripted_review_names_the_checked_out_sha() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let home = tempfile::tempdir().unwrap();
+    let status = Command::new("sh")
+        .arg(root.join(".github/agentic-job/e2e/review.sh"))
+        .env("HOME", home.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::create_dir(home.path().join("out")).unwrap();
+    let script: Value = serde_json::from_slice(
+        &std::fs::read(home.path().join(".config/fake-agent/demo.json")).unwrap(),
+    )
+    .unwrap();
+    let command = script
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["execute"]["command"].as_str())
+        .find(|command| command.contains("safe-outputs.jsonl"))
+        .unwrap();
+    let ran = Command::new("sh")
+        .args(["-c", command])
+        .current_dir(&root)
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    let line = std::fs::read_to_string(home.path().join("out/safe-outputs.jsonl")).unwrap();
+    let item: Value = serde_json::from_str(&line).unwrap();
+    let sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let sha = String::from_utf8(sha.stdout).unwrap();
+    let body = item["body"].as_str().unwrap();
+    assert!(
+        body.contains(&format!("\nReviewed SHA: {}\n", sha.trim())),
+        "{body}"
+    );
+    let collected = home.path().join("agent_output.json");
+    std::fs::write(
+        &collected,
+        json!({"items": [item], "errors": []}).to_string(),
+    )
+    .unwrap();
+    let verdict = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+        .args(["review", "verdict", "--target", "147", "--collected"])
+        .arg(&collected)
+        .arg("--report")
+        .arg(home.path().join("report.json"))
+        .output()
+        .unwrap();
+    assert!(verdict.status.success(), "{verdict:?}");
+    assert_eq!(verdict.stdout, b"APPROVE\n");
+}
