@@ -153,6 +153,9 @@ pub const NATIVE_OUTPUTS: &[&str] = &[
     "remove_labels",
     "close_issue",
     "close_pull_request",
+    PUSH_TO_PULL_REQUEST_BRANCH,
+    "create_issue",
+    CREATE_REVIEW_COMMENT,
 ];
 
 /// gh-aw's target field for an issue or a pull request alike. GitLab
@@ -5465,7 +5468,7 @@ max_patch_files = 10
 
         let with = |native: &str| format!("native_handlers = {native}\n{BOUNDS}");
         for (bounds, want) in [
-            (with(r#"["create_issue"]"#), "is not one of"),
+            (with(r#"["update_issue"]"#), "is not one of"),
             (with(r#"["add_comment", "add_comment"]"#), "twice"),
             (
                 with(r#"["add_comment"]"#).replace("add_comment = { max = 3 }\n", ""),

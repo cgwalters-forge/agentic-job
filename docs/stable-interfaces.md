@@ -105,8 +105,9 @@ bounds can allow:
 `missing_data`.
 
 The bounds' `native_handlers` may have `add_comment`,
-`create_pull_request`, `add_labels`, `remove_labels`, `close_issue` and
-`close_pull_request` published by agentic-job's own handlers instead of
+`create_pull_request`, `add_labels`, `remove_labels`, `close_issue`,
+`close_pull_request`, `push_to_pull_request_branch`, `create_issue` and
+`create_pull_request_review_comment` published by agentic-job's own handlers instead of
 gh-aw's, which send the same requests
 ([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)).
 

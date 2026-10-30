@@ -425,5 +425,82 @@
       "/repos/owner/repo/issues/7/comments": []
     },
     "faults": [{"attempt": 1, "method": "PATCH", "path": "/repos/owner/repo/issues/7", "status": 502}]
+  },
+  {
+    "name": "create-issue-sub-issue",
+    "about": "An issue made in a run for an issue event: it says it is related to the event's issue and becomes its sub-issue, the footer names that issue, and of its mentions only the event's people stay mentions.",
+    "event_name": "issues",
+    "event": {"action": "labeled", "issue": {"number": 7, "user": {"login": "reporter", "type": "User"}, "assignees": [{"login": "triager", "type": "User"}]}},
+    "config": {"create_issue": {"max": 1}},
+    "items": [{"type": "create_issue", "title": "Flaky test in check", "body": "Reported by @reporter, assigned to @triager; cc @stranger.", "labels": ["triage"]}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "node_id": "I_7", "title": "An issue", "state": "open", "labels": [], "user": {"login": "reporter"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"}
+    }
+  },
+  {
+    "name": "create-issue-sub-issue-fallback",
+    "about": "The forge refuses to link the new issue as the event's issue's sub-issue: the handler comments on the event's issue instead, and the issue is made all the same.",
+    "event_name": "issues",
+    "event": {"action": "labeled", "issue": {"number": 7, "user": {"login": "reporter", "type": "User"}, "assignees": []}},
+    "config": {"create_issue": {"max": 1}},
+    "items": [{"type": "create_issue", "title": "Flaky test in check", "body": "The test `check::patch` failed twice this week."}],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "node_id": "I_7", "title": "An issue", "state": "open", "labels": [], "user": {"login": "reporter"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    },
+    "faults": [{"attempt": 1, "method": "POST", "path": "/graphql", "status": 422}]
+  },
+  {
+    "name": "push-then-comment-rerun",
+    "about": "A push routed to agentic-job's handlers and the comment after it left to gh-aw's; a re-run finds both applied and publishes neither again.",
+    "attempts": 2,
+    "native": ["push_to_pull_request_branch"],
+    "env": {"BASE": "feature", "TREE": "{tree}"},
+    "config": {
+      "push_to_pull_request_branch": {"max": 1, "target": "7", "head": "{head:feature}", "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "max_patch_size": 1024, "max_patch_files": 100},
+      "add_comment": {"max": 1}
+    },
+    "items": [
+      {"type": "push_to_pull_request_branch", "branch": "feature", "message": "Address review"},
+      {"type": "add_comment", "item_number": 7, "body": "Pushed the fix."}
+    ],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "branches": {"feature": {"message": "lib: Add sub\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a - b\n}\n"}}},
+      "patch": {"base": "feature", "branch": "feature", "message": "sub: Saturate\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a.saturating_sub(b)\n}\n"}}
+    },
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "agentic-bot"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": true, "merged": false, "user": {"login": "agentic-bot"}, "head": {"ref": "feature", "label": "agentic-bot:feature", "sha": "{head:feature}", "repo": {"full_name": "agentic-bot/repo", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"}
+    }
+  },
+  {
+    "name": "issue-then-close-rerun",
+    "about": "An issue routed to agentic-job's handlers and the closing after it left to gh-aw's; a re-run's guard finds the issue by its name and the closed item, and opens and comments nothing again.",
+    "attempts": 2,
+    "native": ["create_issue"],
+    "config": {"create_issue": {"max": 1}, "close_issue": {"max": 1}},
+    "items": [
+      {"type": "create_issue", "title": "Follow-up for #7", "body": "What is left of #7."},
+      {"type": "close_issue", "issue_number": 7, "body": "Split into a follow-up."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": []
+    }
+  },
+  {
+    "name": "review-comments-outside-diff",
+    "about": "Two review comments, one on a path the pull request does not change: the handler leaves that one out of the review it submits, and both requests succeed.",
+    "config": {"create_pull_request_review_comment": {"max": 2}},
+    "items": [
+      {"type": "create_pull_request_review_comment", "path": "src/lib.rs", "line": 2, "body": "This could overflow, @owner."},
+      {"type": "create_pull_request_review_comment", "path": "README.md", "start_line": 1, "line": 2, "side": "LEFT", "body": "Not in this diff."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": false, "merged": false, "user": {"login": "owner"}, "head": {"ref": "feature", "label": "owner:feature", "sha": "1111111111111111111111111111111111111111", "repo": {"full_name": "owner/repo"}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"},
+      "/repos/owner/repo/pulls/7/files": [{"filename": "src/lib.rs", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@ -1,3 +1,3 @@\n pub fn add(a: u8, b: u8) -> u8 {\n-    a - b\n+    a + b\n }"}]
+    }
   }
 ]

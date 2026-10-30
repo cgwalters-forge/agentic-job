@@ -16,8 +16,10 @@
 //! talks to a loopback forge here, which records every
 //! request and keeps what was posted, so that a second attempt finds it;
 //! git pushes go to bare repositories in a scratch directory. Nothing is
-//! sent to a real forge. The forge's starting state and its failures are
-//! the case's input; everything in the golden files is recorded.
+//! sent to a real forge. The forge's starting state, its failures and the
+//! event the run is for (`event_name` and `event`, a dispatch with none
+//! by default) are the case's input; everything in the golden files is
+//! recorded.
 //!
 //! Each case is run again with the bounds routing its types of
 //! [`NATIVE`] (or its `native` alone) to agentic-job's own handlers
@@ -529,15 +531,51 @@ impl State {
                 }
                 (200, headers, Value::Array(shown))
             }
-            // A project's fields, as the seed's `/graphql/fields` lists them.
+            // A project's fields, as the seed's `/graphql/fields` lists them;
+            // an issue's node ID, and its sub-issues, kept in the issue.
             "POST" if path == "/graphql" => {
                 let query = body["query"].as_str().unwrap_or_default();
+                let variables = &body["variables"];
                 let data = if query.contains("projectV2(number:") {
                     json!({"organization": {"projectV2": {"id": "project"}}})
                 } else if query.contains("fields(") {
                     let nodes = self.store.get("/graphql/fields").cloned();
                     json!({"node": {"fields": {"nodes": nodes.unwrap_or_else(|| json!([])),
                         "pageInfo": {"hasNextPage": false, "endCursor": null}}}})
+                } else if query.contains("issue(number: $issueNumber)") {
+                    let issue = format!(
+                        "/repos/{}/{}/issues/{}",
+                        variables["owner"].as_str().unwrap_or_default(),
+                        variables["repo"].as_str().unwrap_or_default(),
+                        variables["issueNumber"]
+                    );
+                    let Some(issue) = self.store.get(&issue) else {
+                        return not_found;
+                    };
+                    json!({"repository": {"issue": {"id": issue["node_id"]}}})
+                } else if query.contains("addSubIssue(") {
+                    let node = |id: &Value| {
+                        self.store
+                            .iter()
+                            .find(|(key, value)| {
+                                key.contains("/issues/") && value["node_id"] == *id
+                            })
+                            .map(|(key, value)| (key.clone(), value["number"].clone()))
+                    };
+                    let (Some((parent, number)), Some((_, child))) =
+                        (node(&variables["parentId"]), node(&variables["subIssueId"]))
+                    else {
+                        return not_found;
+                    };
+                    self.store
+                        .entry(format!("{parent}/sub_issues"))
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"number": child}));
+                    json!({"addSubIssue": {
+                        "issue": {"id": variables["parentId"], "number": number},
+                        "subIssue": {"id": variables["subIssueId"], "number": child}}})
                 } else {
                     return not_found;
                 };
@@ -1230,6 +1268,7 @@ fn routed(case: &Value) -> Vec<&str> {
 
 /// The policy check's upload holds for CASE where the bounds route its
 /// [`routed`] types away from gh-aw's handlers; none route without one.
+/// A push's base is its pull request's branch.
 fn native_policy(case: &Value) -> Value {
     let routed = routed(case);
     if routed.is_empty() {
@@ -1238,7 +1277,7 @@ fn native_policy(case: &Value) -> Value {
     json!({
         "repo": REPO,
         "clone_url": format!("{SERVER}/{REPO}"),
-        "base": "main",
+        "base": case["env"]["BASE"].as_str().unwrap_or("main"),
         "kind": "branch",
         "max_outputs": 5,
         "max_patch_bytes": 1_048_576,
@@ -1461,7 +1500,9 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
         ),
     )
     .unwrap();
-    std::fs::write(scratch.path("event.json"), "{}").unwrap();
+    // The event apply was started by: a case's, or a dispatch's with nothing.
+    let event = case.get("event").cloned().unwrap_or_else(|| json!({}));
+    std::fs::write(scratch.path("event.json"), event.to_string()).unwrap();
     let mut text = case.to_string();
     for (placeholder, value) in prepare_git(&scratch, case, native) {
         text = text.replace(&placeholder, &value);
@@ -1556,7 +1597,10 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
             ("GITHUB_RUN_NUMBER", "1"),
             ("GITHUB_JOB", "apply"),
             ("GITHUB_WORKFLOW", "agentic-job"),
-            ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+            (
+                "GITHUB_EVENT_NAME",
+                case["event_name"].as_str().unwrap_or("workflow_dispatch"),
+            ),
             ("GITHUB_SHA", &"a".repeat(40)),
             ("GITHUB_REF", "refs/heads/main"),
             ("GITHUB_ACTOR", "owner"),

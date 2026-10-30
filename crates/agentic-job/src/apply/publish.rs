@@ -13,21 +13,26 @@
 //! the requests this leaves it (`--remainder`). Each request goes to one
 //! of the two: the remainder is written before anything is published,
 //! and not at all when this refuses, so gh-aw's step then finds none.
-//! A pull request that fails here has it written again: gh-aw's handler
-//! manager starts each comment after a failed pull request with a warning
+//! A pull request or push that fails here has it written again: gh-aw's
+//! handler manager starts each comment after a failed one with a warning
 //! that its changes were not applied, and its comments are left gh-aw's.
 //! The routed requests come first in the run's order and are published
-//! first, so the order of everything published is the run's.
+//! first, so the order of everything published is the run's. Review
+//! comments are buffered and submitted in one review after the other
+//! routed requests, as gh-aw's manager submits them after everything:
+//! a run with them leaves gh-aw's handlers nothing to publish.
 //!
 //! Where gh-aw's handlers would do what this does not, this refuses the
 //! run before the first write rather than do something else: a request
 //! after one of gh-aw's types, a field or setting this does not read, a
 //! temporary ID, a workflow input gh-aw reads from a file this ignores,
 //! a mention it would look up, or a label this cannot tell gh-aw would
-//! keep as written. A pull request that fails is not
+//! keep as written. A pull request or push that fails is not
 //! followed by the routed comments after it, which gh-aw would post with
-//! a note of its own; and nothing here falls back to opening an issue
-//! or commenting on a discussion. gh-aw reads settings this does not
+//! a note of its own; a push goes only onto the head the run was asked
+//! for, where gh-aw's handler would apply the patch on a branch rewritten
+//! since; and nothing here falls back to opening an issue or a pull
+//! request, or commenting on a discussion. gh-aw reads settings this does not
 //! (`GH_AW_SAFE_OUTPUT_MESSAGES`, `GH_AW_TRACKER_ID` and the like):
 //! apply.yml sets none of them for either.
 
@@ -40,10 +45,11 @@ use anyhow::{Context, Result, bail, ensure};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
+use super::git::{Moved, Push, TooLarge};
 use super::github::{Github, GithubPublisher, Refused};
 use super::{
-    ADD_COMMENT, ADD_LABELS, CLOSE_ISSUE, CLOSE_PULL_REQUEST, Close, Kind as ItemKind, Made,
-    Publisher, PullRequest, REMOVE_LABELS, Report, read_report,
+    ADD_COMMENT, ADD_LABELS, CLOSE_ISSUE, CLOSE_PULL_REQUEST, CREATE_ISSUE, Close,
+    Kind as ItemKind, Made, Publisher, PullRequest, REMOVE_LABELS, Report, read_report,
 };
 use crate::check::{self, handler_limits::LINK_RE};
 use crate::collect::markdown::outside_code;
@@ -52,7 +58,9 @@ use crate::collect::sanitize::{
 };
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, Policy};
+use crate::policy::{
+    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, PUSH_TO_PULL_REQUEST_BRANCH, Policy,
+};
 
 /// What this publishes of one type, as gh-aw's handler does.
 #[derive(Debug)]
@@ -156,6 +164,68 @@ pub(crate) const HANDLERS: &[Handler] = &[
         settings: &["max", "target-repo", "target"],
         fixed: &[("target", r#""*""#)],
     },
+    // The pull request is the handler's fixed `target`, which the number a
+    // request names does not change; the commit's message is the patch's.
+    // `head` and the replacement settings are apply.yml's, which the
+    // handler does not read.
+    Handler {
+        output: PUSH_TO_PULL_REQUEST_BRANCH,
+        fields: &["type", "repo", "pull_request_number", "branch", "message"],
+        settings: &[
+            "max",
+            "target",
+            "head",
+            "replacement_max_commits",
+            "replacement_base",
+            "protected_files",
+            "protect_top_level_dot_folders",
+            "protected_dot_folder_excludes",
+            "allow_workflows",
+            "protected_files_policy",
+            "max_patch_size",
+            "max_patch_files",
+            "signed_commits",
+            "fallback_as_pull_request",
+            "if_no_changes",
+            "target-repo",
+            "head-repo",
+            "allowed_repos",
+            "checkout_mapping",
+        ],
+        fixed: &[
+            ("signed_commits", "false"),
+            ("fallback_as_pull_request", "false"),
+            ("if_no_changes", r#""error""#),
+            ("protected_files_policy", r#""blocked""#),
+        ],
+    },
+    // No `temporary_id`, `parent` or other link to another issue, which
+    // check refuses too. The bounds' `allowed` and `blocked` are check's,
+    // which the handler does not read.
+    Handler {
+        output: CREATE_ISSUE,
+        fields: &["type", "repo", "title", "body", "labels"],
+        settings: &["max", "target-repo", "title_prefix", "allowed", "blocked"],
+        fixed: &[],
+    },
+    // On the handler's fixed `target`, whatever number a request names;
+    // buffered into one review of event COMMENT, which gh-aw's handler
+    // manager submits once every request is handled.
+    Handler {
+        output: CREATE_REVIEW_COMMENT,
+        fields: &[
+            "type",
+            "repo",
+            "pull_request_number",
+            "path",
+            "line",
+            "start_line",
+            "side",
+            "body",
+        ],
+        settings: &["max", "target-repo", "target"],
+        fixed: &[],
+    },
 ];
 
 /// The handler of OUTPUT, if this publishes it.
@@ -210,6 +280,10 @@ const URL_POLICY: &str = "allowed-or-code-region";
 /// The types gh-aw's handlers publish nothing for here: a routed request
 /// may come after one of them.
 const QUIET: &[&str] = &["noop", "missing_tool", "missing_data"];
+
+/// The types that push code, whose first failure gh-aw's handler manager
+/// notes in each comment after it (`CODE_PUSH_TYPES`).
+const CODE_PUSHES: &[&str] = &[CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH];
 
 /// What gh-aw's footer reads from GH_AW_TMP when there: an agent's
 /// metadata, and firewall and gateway logs. check's upload holds none.
@@ -482,6 +556,29 @@ impl Run {
             .map(|n| format!("#{n}")))
     }
 
+    /// The `#N` the footer of an issue or a review names
+    /// (`formatIssueBody`, the review buffer's footer): the event's issue
+    /// unless it is a pull request's, or else its pull request, or else its
+    /// discussion.
+    fn item_triggering(&self) -> Result<Option<String>> {
+        let issue = self.event_number("issue")?;
+        let of_pull = truthy(&self.event["issue"]["pull_request"]);
+        let pull = self
+            .event_number("pull_request")?
+            .or(issue.filter(|_| of_pull));
+        Ok(
+            match (
+                issue.filter(|_| !of_pull),
+                pull,
+                self.event_number("discussion")?,
+            ) {
+                (Some(n), _, _) | (None, Some(n), _) => Some(format!("#{n}")),
+                (None, None, Some(n)) => Some(format!("discussion #{n}")),
+                (None, None, None) => None,
+            },
+        )
+    }
+
     /// The number of the event's KEY (`issue`, `pull_request`,
     /// `discussion`), where it names one.
     fn event_number(&self, key: &str) -> Result<Option<u64>> {
@@ -742,6 +839,7 @@ fn split(items: &[Value], routed: &[String]) -> Result<Split, Vec<String>> {
     let mut errors = Vec::new();
     let (mut ours, mut rest) = (Vec::new(), Vec::new());
     let mut theirs: Option<&str> = None;
+    let mut fallback: Option<&str> = None;
     for (index, item) in items.iter().enumerate() {
         let Some(map) = item.as_object() else {
             errors.push(format!("request {} is not an object", index + 1));
@@ -751,6 +849,9 @@ fn split(items: &[Value], routed: &[String]) -> Result<Split, Vec<String>> {
         if !routed.iter().any(|routed| routed == output) {
             if !QUIET.contains(&output) {
                 theirs.get_or_insert(output);
+            }
+            if CODE_PUSHES.contains(&output) {
+                fallback.get_or_insert(output);
             }
             rest.push(item.clone());
             continue;
@@ -786,6 +887,27 @@ fn split(items: &[Value], routed: &[String]) -> Result<Split, Vec<String>> {
             item: map.clone(),
         });
     }
+    let routes = |output: &str| {
+        ours.iter()
+            .any(|routed| check::item_type(&routed.item) == output)
+    };
+    // gh-aw's handler manager submits the review once every request is
+    // handled, its own handlers' too: here it would come before theirs.
+    if let Some(theirs) = theirs.filter(|_| routes(CREATE_REVIEW_COMMENT)) {
+        errors.push(format!(
+            "a {CREATE_REVIEW_COMMENT} and a {theirs}, which gh-aw's handlers publish: the review \
+             is submitted after everything else, and would be before it"
+        ));
+    }
+    // apply.yml lets gh-aw's step open up to the run's create_issue count
+    // of issues, a pull request's in its place among them: with those
+    // opened here, there could be more.
+    if let Some(fallback) = fallback.filter(|_| routes(CREATE_ISSUE)) {
+        errors.push(format!(
+            "a {CREATE_ISSUE} and a {fallback}, which gh-aw's handlers publish and may open an \
+             issue for: the run's create_issue count bounds both"
+        ));
+    }
     if errors.is_empty() {
         Ok(Split { ours, rest })
     } else {
@@ -809,7 +931,18 @@ fn shape(output: &str, item: &Map<String, Value>) -> Vec<String> {
             "a {output} without a positive integer {key}, which agentic-job publish requires"
         ));
     }
-    if matches!(output, ADD_LABELS | REMOVE_LABELS) {
+    if output == CREATE_REVIEW_COMMENT {
+        errors.extend(review_comment_shape(item).err());
+    }
+    if output == CREATE_ISSUE {
+        errors.extend(
+            ["title", "body"]
+                .iter()
+                .filter(|key| item.get(**key).is_some_and(|value| !value.is_string()))
+                .map(|key| format!("a {output} whose {key} is not text")),
+        );
+    }
+    if matches!(output, ADD_LABELS | REMOVE_LABELS | CREATE_ISSUE) {
         match item.get("labels") {
             None => {}
             Some(Value::Array(labels)) => errors.extend(
@@ -841,6 +974,41 @@ fn shape(output: &str, item: &Map<String, Value>) -> Vec<String> {
         ));
     }
     errors
+}
+
+/// Why ITEM, a review comment, is not one gh-aw's handler buffers as it
+/// is: a path, a positive line (and start line at most that), a side of
+/// LEFT or RIGHT and a body, each as JSON's type for it.
+fn review_comment_shape(item: &Map<String, Value>) -> Result<(), String> {
+    let output = CREATE_REVIEW_COMMENT;
+    let line = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= MAX_SAFE_INTEGER)
+    };
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+    if !text("path") || !text("body") {
+        return Err(format!("a {output} without a path and a body"));
+    }
+    let Some(end) = line("line") else {
+        return Err(format!("a {output} without a positive integer line"));
+    };
+    if item.contains_key("start_line") && line("start_line").is_none_or(|start| start > end) {
+        return Err(format!(
+            "a {output} whose start_line is not a positive integer up to its line"
+        ));
+    }
+    if item
+        .get("side")
+        .is_some_and(|side| side != "LEFT" && side != "RIGHT")
+    {
+        return Err(format!("a {output} whose side is not LEFT or RIGHT"));
+    }
+    Ok(())
 }
 
 /// Whether gh-aw's label sanitizer (`sanitizeLabelContent`, the cut to
@@ -908,6 +1076,89 @@ enum Op {
         /// The `#N` the comment's footer names.
         triggering: Option<String>,
     },
+    Push {
+        index: usize,
+        max: u64,
+        push: Box<PushRequest>,
+    },
+    Issue {
+        index: usize,
+        max: u64,
+        issue: IssueRequest,
+    },
+    ReviewComment {
+        index: usize,
+        max: u64,
+        comment: ReviewComment,
+    },
+}
+
+/// A routed create_pull_request_review_comment, decided but for its
+/// body's mentions.
+#[derive(Debug, Clone)]
+struct ReviewComment {
+    /// The handler's `target-repo` and `target`.
+    repo: String,
+    number: u64,
+    path: String,
+    line: u64,
+    start_line: Option<u64>,
+    /// LEFT or RIGHT.
+    side: String,
+    /// As the request has it.
+    body: String,
+    /// The `#N` the review's footer names.
+    triggering: Option<String>,
+}
+
+/// A routed create_issue, decided but for its body's mentions.
+#[derive(Debug, Clone)]
+struct IssueRequest {
+    /// The handler's `target-repo`.
+    repo: String,
+    /// As the handler opens it: sanitized, behind its `title_prefix`.
+    title: String,
+    /// The request's, without a first heading repeating its title.
+    body: String,
+    /// As the request names them, once each.
+    labels: Vec<String>,
+    /// The event's issue, where the new one is in the run's repository:
+    /// the body says it is related, and it is made its sub-issue.
+    parent: Option<u64>,
+    /// The `#N` the footer names.
+    triggering: Option<String>,
+}
+
+/// A routed push_to_pull_request_branch, decided.
+#[derive(Debug, Clone)]
+struct PushRequest {
+    /// The handler's `target-repo`, which the pull request is in.
+    repo: String,
+    /// The handler's `head-repo`: the pull request has to be from it, and
+    /// the commit goes there.
+    head_repo: String,
+    /// The handler's `target`.
+    number: u64,
+    /// The policy's base: the pull request's branch.
+    branch: String,
+    /// The head the run was asked for, which check read the patch
+    /// against: the branch has to be there still.
+    head: String,
+    patch: Vec<u8>,
+    files: Vec<String>,
+    /// `max_patch_size`, which bounds the changed files too.
+    max_kb: u64,
+    allow_workflows: bool,
+    /// How gh-aw's handler ends it before it reads the forge, if it does.
+    early: Option<Early>,
+}
+
+/// A request gh-aw's handler fails, or skips with its result, from what
+/// it holds alone.
+#[derive(Debug, Clone)]
+enum Early {
+    Failed(String),
+    Skipped(Value),
 }
 
 /// A routed add_labels or remove_labels, decided.
@@ -934,7 +1185,10 @@ impl Op {
             Self::Comment { index, .. }
             | Self::PullRequest { index, .. }
             | Self::Labels { index, .. }
-            | Self::Close { index, .. } => *index,
+            | Self::Close { index, .. }
+            | Self::Push { index, .. }
+            | Self::Issue { index, .. }
+            | Self::ReviewComment { index, .. } => *index,
         }
     }
 
@@ -943,7 +1197,10 @@ impl Op {
             Self::Comment { max, .. }
             | Self::PullRequest { max, .. }
             | Self::Labels { max, .. }
-            | Self::Close { max, .. } => *max,
+            | Self::Close { max, .. }
+            | Self::Push { max, .. }
+            | Self::Issue { max, .. }
+            | Self::ReviewComment { max, .. } => *max,
         }
     }
 
@@ -962,6 +1219,9 @@ impl Op {
                 ..
             } => CLOSE_ISSUE,
             Self::Close { .. } => CLOSE_PULL_REQUEST,
+            Self::Push { .. } => PUSH_TO_PULL_REQUEST_BRANCH,
+            Self::Issue { .. } => CREATE_ISSUE,
+            Self::ReviewComment { .. } => CREATE_REVIEW_COMMENT,
         }
     }
 }
@@ -1105,6 +1365,42 @@ fn plan(
                     }),
                 });
             }
+            if output == CREATE_ISSUE {
+                return Ok(Op::Issue {
+                    index,
+                    max,
+                    issue: issue_request(&item, config, run)?,
+                });
+            }
+            if output == CREATE_REVIEW_COMMENT {
+                let target = setting(config, "target")?;
+                ensure!(
+                    NUMBER_RE.is_match(target),
+                    "a {output} without one pull request to comment on (the handler's target is \
+                     {target:?})"
+                );
+                // The handler reads the event as dispatched, for its footer.
+                run.read_as_dispatched()?;
+                let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default();
+                return Ok(Op::ReviewComment {
+                    index,
+                    max,
+                    comment: ReviewComment {
+                        repo,
+                        number: target.parse().context("the review comment's target")?,
+                        path: text("path").to_owned(),
+                        line: item.get("line").and_then(Value::as_u64).unwrap_or_default(),
+                        start_line: item.get("start_line").and_then(Value::as_u64),
+                        side: item
+                            .get("side")
+                            .and_then(Value::as_str)
+                            .unwrap_or("RIGHT")
+                            .to_owned(),
+                        body: text("body").to_owned(),
+                        triggering: run.item_triggering()?,
+                    },
+                });
+            }
             if output == ADD_COMMENT {
                 let target = setting(config, "target")?;
                 ensure!(
@@ -1123,6 +1419,15 @@ fn plan(
                 report = Some(read_report(checked)?);
             }
             let report = report.as_ref().context("check's report")?;
+            if output == PUSH_TO_PULL_REQUEST_BRANCH {
+                // The handler reads the event as dispatched, for its comment.
+                run.read_as_dispatched()?;
+                return Ok(Op::Push {
+                    index,
+                    max,
+                    push: Box::new(branch_push(&item, config, checked, report, policy)?),
+                });
+            }
             let (pr, failure) = pull_request(&item, config, checked, report, policy, run)?;
             Ok(Op::PullRequest {
                 index,
@@ -1300,14 +1605,7 @@ fn pull_request_failure(
     bytes: &[u8],
     files: &[String],
 ) -> Option<String> {
-    let positive = |key: &str, default: u64| {
-        config
-            .get(key)
-            .and_then(Value::as_u64)
-            .filter(|n| *n > 0)
-            .unwrap_or(default)
-    };
-    let max_files = positive("max_patch_files", 100);
+    let max_files = positive(config, "max_patch_files", 100);
     let count = files.len() as u64;
     if count > max_files {
         return Some(format!(
@@ -1316,13 +1614,42 @@ fn pull_request_failure(
              `safe-outputs.create-pull-request` in your workflow frontmatter."
         ));
     }
-    let max_kb = positive("max_patch_size", 4096);
-    let kb = (bytes.len() as u64).div_ceil(1024);
-    if kb > max_kb {
-        return Some(format!(
-            "Patch size ({kb} KB) exceeds maximum allowed size ({max_kb} KB)"
-        ));
+    if let Some(failure) = patch_size_failure(config, bytes) {
+        return Some(failure);
     }
+    let found = protected_files(config, files);
+    (!found.is_empty()).then(|| {
+        format!(
+            "Cannot create pull request: patch modifies protected files ({}). Add them to the \
+             allowed-files configuration field or set protected-files: fallback-to-issue to \
+             create a review issue instead.",
+            found.join(", ")
+        )
+    })
+}
+
+/// A handler's setting KEY of CONFIG where it is a positive integer, or
+/// DEFAULT.
+fn positive(config: &Map<String, Value>, key: &str, default: u64) -> u64 {
+    config
+        .get(key)
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// Why the handlers that carry a patch fail BYTES for its size under
+/// CONFIG, if they do.
+fn patch_size_failure(config: &Map<String, Value>, bytes: &[u8]) -> Option<String> {
+    let max_kb = positive(config, "max_patch_size", 4096);
+    let kb = (bytes.len() as u64).div_ceil(1024);
+    (kb > max_kb)
+        .then(|| format!("Patch size ({kb} KB) exceeds maximum allowed size ({max_kb} KB)"))
+}
+
+/// Those of FILES the handlers that carry a patch take for protected
+/// under CONFIG (`checkFileProtection`).
+fn protected_files<'a>(config: &Map<String, Value>, files: &'a [String]) -> Vec<&'a str> {
     let names = |key: &str| -> Vec<String> {
         config
             .get(key)
@@ -1343,7 +1670,7 @@ fn pull_request_failure(
         .filter(|name| !name.is_empty())
         .collect();
     let dot_folders = config.get("protect_top_level_dot_folders") == Some(&Value::Bool(true));
-    let found: Vec<&str> = files
+    files
         .iter()
         .filter(|file| {
             let basename = file.rsplit('/').next().unwrap_or_default();
@@ -1357,14 +1684,191 @@ fn pull_request_failure(
                     }))
         })
         .map(String::as_str)
-        .collect();
-    (!found.is_empty()).then(|| {
-        format!(
-            "Cannot create pull request: patch modifies protected files ({}). Add them to the \
-             allowed-files configuration field or set protected-files: fallback-to-issue to \
-             create a review issue instead.",
-            found.join(", ")
-        )
+        .collect()
+}
+
+/// The push ITEM asks for under the handler's CONFIG, with check's patch
+/// read again and held to the policy, as [`pull_request`] reads one. The
+/// pull request, its branch and its head are the policy's; the handler
+/// is given them, and nothing of the request names them.
+fn branch_push(
+    item: &Map<String, Value>,
+    config: &Map<String, Value>,
+    checked: &Path,
+    report: &Report,
+    policy: &Policy,
+) -> Result<PushRequest> {
+    let output = PUSH_TO_PULL_REQUEST_BRANCH;
+    let rules = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .with_context(|| format!("a {output}, which the policy does not allow"))?;
+    let target = setting(config, "target")?;
+    ensure!(
+        NUMBER_RE.is_match(target) && target == rules.target,
+        "a {output} without the policy's pull request to push to (the handler's target is {target:?})"
+    );
+    let head = setting(config, "head")?;
+    ensure!(
+        head == rules.head && super::COMMIT_RE.is_match(head),
+        "the {output} handler's head {head:?} is not the policy's"
+    );
+    let repo = setting(config, "target-repo")?;
+    ensure!(
+        repo.eq_ignore_ascii_case(&policy.repo),
+        "the {output} handler's target-repo {repo} is not the policy's {}",
+        policy.repo
+    );
+    let head_repo = setting(config, "head-repo")?;
+    ensure!(
+        REPO_RE.is_match(head_repo),
+        "the {output} handler's head-repo {head_repo:?} is not OWNER/NAME"
+    );
+    ensure!(
+        config.get("allowed_repos") == Some(&json!([head_repo])),
+        "the {output} handler allows other repositories than its head-repo"
+    );
+    // The workspace is the target's checkout, which gh-aw's handler would
+    // otherwise look for and apply the patch in.
+    ensure!(
+        config.get("checkout_mapping") == Some(&json!({repo.to_ascii_lowercase(): "."})),
+        "the {output} handler's checkout_mapping is not its target-repo's workspace"
+    );
+    let branch = item
+        .get("branch")
+        .and_then(Value::as_str)
+        .with_context(|| format!("a {output} without a branch"))?;
+    ensure!(
+        branch == policy.base,
+        "a {output} for the branch {branch:?}, not the policy's {}",
+        policy.base
+    );
+    let patch = report
+        .patch
+        .as_ref()
+        .with_context(|| format!("a {output}, and check accepted no patch"))?;
+    // apply.yml's guard pushes a replacement series itself, and leaves
+    // gh-aw's handler none.
+    ensure!(
+        patch.commit_files.is_none(),
+        "a replacement series, which the guard pushes"
+    );
+    let name = check::patch_file_name(branch);
+    ensure!(
+        patch.file == name,
+        "check accepted the patch {:?}, and the push's is {name}",
+        patch.file
+    );
+    ensure!(
+        patch.base_commit == head,
+        "check read the patch against {}, not the head {head} the run was asked for",
+        patch.base_commit
+    );
+    let bytes = files::read_regular(&checked.join(&name), policy.max_patch_bytes)
+        .with_context(|| format!("the patch {name}"))?;
+    ensure!(
+        bytes.len() == patch.bytes,
+        "the patch {name} is {} bytes, and check read {}",
+        bytes.len(),
+        patch.bytes
+    );
+    let rules = crate::policy::PatchRules {
+        commit_author: policy.commit_author.as_deref(),
+        ..rules.rules()
+    };
+    let reading = check::read_patch(&String::from_utf8_lossy(&bytes), &rules, head);
+    ensure!(
+        reading.problems.is_empty(),
+        "the patch {name}: {}",
+        reading.problems.join("; ")
+    );
+    ensure!(
+        reading.files == patch.files && !reading.files.is_empty(),
+        "the patch {name} names other paths than check reported"
+    );
+    // `validatePatch`, before the handler reads the forge.
+    let found = protected_files(config, &patch.files);
+    let early = match patch_size_failure(config, &bytes) {
+        Some(failure) => Some(Early::Failed(failure)),
+        None if !found.is_empty() => {
+            let error = format!(
+                "Cannot push to pull request branch: patch modifies protected files ({}). Add \
+                 them to the allowed-files configuration field or set protected-files: \
+                 fallback-to-issue to create a review issue instead.",
+                found.join(", ")
+            );
+            Some(Early::Skipped(json!({"success": false, "skipped": true,
+                "reasonCode": "POLICY_FILE_PROTECTION_DENIED", "error": error})))
+        }
+        None => None,
+    };
+    Ok(PushRequest {
+        repo: repo.to_owned(),
+        head_repo: head_repo.to_owned(),
+        number: target.parse().context("the push's target")?,
+        branch: branch.to_owned(),
+        head: head.to_owned(),
+        patch: bytes,
+        files: patch.files.clone(),
+        max_kb: positive(config, "max_patch_size", 4096),
+        allow_workflows: config.get("allow_workflows") == Some(&Value::Bool(true)),
+        early,
+    })
+}
+
+/// The issue ITEM asks for under the handler's CONFIG, as gh-aw's handler
+/// makes it, all but its body's mentions.
+fn issue_request(
+    item: &Map<String, Value>,
+    config: &Map<String, Value>,
+    run: &Run,
+) -> Result<IssueRequest> {
+    static HEADING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(&format!("^#+[{JS_SPACE}]*")).expect("a valid pattern"));
+    let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default();
+    let repo = setting(config, "target-repo")?;
+    let prefix = match config.get("title_prefix") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(prefix)) => prefix,
+        Some(_) => bail!("the create_issue handler's title_prefix is not text"),
+    };
+    let title = js_trim(text("title"));
+    let body = without_title_heading(title, text("body"))?;
+    // Without a title, the body's first line that holds anything.
+    let title = match title {
+        "" => text("body")
+            .split('\n')
+            .map(|line| js_trim(&HEADING.replace(line, "")).to_owned())
+            .find(|line| !line.is_empty())
+            .unwrap_or_else(|| "Agent Output".to_owned()),
+        title => title.to_owned(),
+    };
+    let mut title = sanitize_title(&title, prefix, run)?;
+    if js_trim(&title).is_empty() {
+        title = "Agent Output".to_owned();
+    }
+    let labels: Vec<String> = item
+        .get("labels")
+        .map(|labels| serde_json::from_value(labels.clone()))
+        .transpose()
+        .context("the request's labels")?
+        .unwrap_or_default();
+    Ok(IssueRequest {
+        title: apply_title_prefix(&title, prefix),
+        body,
+        labels: labels.into_iter().fold(Vec::new(), |mut kept, label| {
+            if !kept.contains(&label) {
+                kept.push(label);
+            }
+            kept
+        }),
+        // The handler compares the names as written.
+        parent: run
+            .event_number("issue")?
+            .filter(|_| repo == run.repository),
+        triggering: run.item_triggering()?,
+        repo: repo.to_owned(),
     })
 }
 
@@ -1431,7 +1935,7 @@ fn without_title_heading(title: &str, body: &str) -> Result<String> {
     // alone, and only ASCII matches ASCII then.
     ensure!(
         title.is_ascii() || !body.starts_with('#'),
-        "a pull request whose body starts with a heading and whose title is not ASCII"
+        "a body that starts with a heading under a title that is not ASCII"
     );
     let heading = Regex::new(&format!(
         r"^#{{1,6}}[{JS_SPACE}]+(?i-u:{})[{JS_SPACE}]*(?:\r?\n)*",
@@ -1444,9 +1948,15 @@ fn without_title_heading(title: &str, body: &str) -> Result<String> {
     })
 }
 
-/// `generateHistoryUrl`: a search for what the workflow made in REPO.
-fn history_url(run: &Run, repo: &str, search: &str) -> String {
-    let query = format!("repo:{repo} \"gh-aw-workflow-id: {}\"", run.workflow_id);
+/// `generateHistoryUrl`: a search for what the workflow made in REPO, of
+/// those things the search type SEARCH finds; for `issues`, with ISSUES
+/// only the issues.
+fn history_url(run: &Run, repo: &str, search: &str, issues: bool) -> String {
+    let only = if issues { " is:issue" } else { "" };
+    let query = format!(
+        "repo:{repo}{only} \"gh-aw-workflow-id: {}\"",
+        run.workflow_id
+    );
     let mut encoded = String::new();
     for byte in query.bytes() {
         match byte {
@@ -1683,18 +2193,32 @@ impl Outcome {
     }
 }
 
+/// How the routed requests ended, and what the review of the comments
+/// buffered for one made, which gh-aw's handler manager records after
+/// everything else: of each type, its handler's result.
+struct Published {
+    outcomes: Vec<Outcome>,
+    reviewed: Vec<(&'static str, Value)>,
+}
+
+/// gh-aw's type of what its review buffer makes of the comments.
+const SUBMIT_REVIEW: &str = "submit_pull_request_review";
+
 /// Publishes OPS in order with PUBLISHER, allowing the DEFAULTS mentions,
-/// and returns how each ended.
+/// and returns how each ended. Review comments are buffered, and submitted
+/// in one review after the others, as gh-aw's handler manager submits
+/// them.
 fn publish(
     ops: &[Op],
     publisher: &GithubPublisher,
     run: &Run,
     defaults: &[String],
     log: &mut dyn FnMut(&str),
-) -> Result<Vec<Outcome>> {
-    let mut outcomes = Vec::new();
+) -> Result<Published> {
+    let mut outcomes: Vec<Outcome> = Vec::new();
     let mut processed: std::collections::BTreeMap<&str, u64> = Default::default();
     let mut pushed_failed = None;
+    let mut review = Review::default();
     for op in ops {
         let count = processed.entry(op.output()).or_default();
         let max = op.max();
@@ -1710,54 +2234,950 @@ fn publish(
             continue;
         }
         *count += 1;
-        let outcome = match op {
-            Op::Comment { .. } if pushed_failed.is_some() => Outcome::failed(
+        let outcome = match (op, &pushed_failed) {
+            (Op::Comment { .. }, Some((output, error))) => Outcome::failed(
                 op,
-                format!(
-                    "not posted: the create_pull_request before it failed ({})",
-                    pushed_failed.as_deref().unwrap_or_default()
-                ),
+                format!("not posted: the {output} before it failed ({error})"),
             ),
-            Op::Comment {
-                item, repo, issue, ..
-            } => comment(op, item, repo, *issue, defaults, publisher, run),
-            Op::PullRequest {
-                failure: Some(failure),
-                ..
-            } => Outcome::failed(op, failure.clone()),
-            Op::PullRequest { pr, .. } => pull_request_outcome(op, pr, defaults, publisher, run),
-            Op::Labels { request, .. } if request.add => add_labels(op, request, &publisher.github),
-            Op::Labels { request, .. } => remove_labels(op, request, &publisher.github),
-            Op::Close {
-                repo,
-                close,
-                state_reason,
-                triggering,
-                ..
-            } => close_item(
-                op,
-                repo,
-                close,
-                state_reason.as_deref(),
-                triggering.as_deref(),
-                &publisher.github,
-                run,
-            ),
+            (op, _) => {
+                let mut buffer = (outcomes.len(), &mut review);
+                publish_one(op, publisher, run, defaults, &mut buffer, log)
+            }
         };
         if outcome.kind == Kind::Failed {
             let error = outcome.error.clone().unwrap_or_default();
-            log(&format!(
-                "✗ Message {} ({}) failed: {error}",
-                op.index() + 1,
-                op.output()
+            log(&command(
+                "error",
+                &format!(
+                    "✗ Message {} ({}) failed: {error}",
+                    op.index() + 1,
+                    op.output()
+                ),
             ));
-            if op.output() == CREATE_PULL_REQUEST {
-                pushed_failed = Some(error);
+            if CODE_PUSHES.contains(&op.output()) && pushed_failed.is_none() {
+                pushed_failed = Some((op.output(), error));
             }
         }
         outcomes.push(outcome);
     }
-    Ok(outcomes)
+    let mut reviewed = Vec::new();
+    if let Some(pull) = &review.pull {
+        match submit_review(pull, &review, run, &publisher.github, log) {
+            ReviewEnd::Made(result) => {
+                let comments = result["review_comments"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                reviewed.push((SUBMIT_REVIEW, result));
+                reviewed.extend(comments.into_iter().map(|c| (CREATE_REVIEW_COMMENT, c)));
+            }
+            // `rollbackReviewResultsForPR`, `skipReviewResultsForPR`.
+            ReviewEnd::Failed(error) => {
+                log(&command(
+                    "error",
+                    &format!(
+                        "✗ Failed to submit PR review for {}#{}: {error}",
+                        pull.repo, pull.number
+                    ),
+                ));
+                for (at, _) in &review.comments {
+                    outcomes[*at].kind = Kind::Failed;
+                    outcomes[*at].error = Some(format!("Review finalization failed: {error}"));
+                }
+            }
+            ReviewEnd::Skipped(reason) => {
+                log(&command("warning", &reason));
+                for (at, _) in &review.comments {
+                    outcomes[*at].kind = Kind::Skipped;
+                }
+            }
+        }
+    }
+    Ok(Published { outcomes, reviewed })
+}
+
+/// The review comments buffered for one review, as gh-aw's review buffer
+/// holds them.
+#[derive(Default)]
+struct Review {
+    /// What the first one read of the pull request.
+    pull: Option<ReviewedPull>,
+    /// Each comment as the forge is sent it, with the place of its outcome.
+    comments: Vec<(usize, Value)>,
+}
+
+/// The pull request a review is of.
+struct ReviewedPull {
+    repo: String,
+    number: u64,
+    /// Its head, which the review is of.
+    head: String,
+    /// The `#N` the review's footer names.
+    triggering: Option<String>,
+}
+
+/// How a review ended.
+enum ReviewEnd {
+    /// The review buffer's result.
+    Made(Value),
+    /// Not submitted, as a locked pull request takes none: why.
+    Skipped(String),
+    /// Not submitted: the error.
+    Failed(String),
+}
+
+/// Buffers COMMENT for the review, as gh-aw's handler does, its outcome
+/// to be at AT: the pull request read, and its body sanitized allowing
+/// the DEFAULTS mentions.
+fn buffer_review_comment(
+    op: &Op,
+    comment: &ReviewComment,
+    defaults: &[String],
+    github: &Github,
+    run: &Run,
+    at: usize,
+    review: &mut Review,
+) -> Outcome {
+    let ReviewComment {
+        repo,
+        number,
+        path,
+        line,
+        ..
+    } = comment;
+    let pull = match github.request("GET", &format!("/repos/{repo}/pulls/{number}"), None) {
+        Ok(pull) => pull,
+        Err(err) => {
+            return Outcome::failed(op, format!("Failed to fetch pull request details: {err:#}"));
+        }
+    };
+    let Some(head) = pull["head"]["sha"].as_str().filter(|sha| !sha.is_empty()) else {
+        return Outcome::failed(op, "Pull request head commit SHA not found".to_owned());
+    };
+    let body = sanitize_with(
+        js_trim(&comment.body),
+        MAX_SANITIZED,
+        &Mentions::Allowing {
+            aliases: defaults,
+            max: MAX_ALLOWED_MENTIONS,
+        },
+        &|host| run.keeps_link(host),
+    );
+    let mut sent = json!({"path": path, "line": line, "body": body});
+    let mut metadata = json!({"path": path, "line": line});
+    if let Some(start) = comment.start_line {
+        sent["start_line"] = json!(start);
+        metadata["start_line"] = json!(start);
+    }
+    sent["side"] = json!(comment.side);
+    metadata["side"] = json!(comment.side);
+    if comment.start_line.is_some() {
+        sent["start_side"] = json!(comment.side);
+    }
+    // The first comment's pull request is the review's.
+    review.pull.get_or_insert_with(|| ReviewedPull {
+        repo: repo.clone(),
+        number: *number,
+        head: head.to_owned(),
+        triggering: comment.triggering.clone(),
+    });
+    review.comments.push((at, sent));
+    Outcome::succeeded(
+        op,
+        json!({"success": true, "buffered": true, "deferred_manifest": true,
+            "pull_request_number": number, "repo": repo, "metadata": metadata}),
+    )
+}
+
+/// The review buffer's `MAX_REVIEW_BODY_LENGTH`, and its fallback for
+/// comments the forge could not anchor.
+const MAX_REVIEW_BODY: usize = 65_000;
+const FALLBACK_EXCERPT: usize = 500;
+const FALLBACK_HEADER: &str = "### Comments that could not be inline-anchored";
+const FALLBACK_EMPTY: &str = "_(empty comment body)_";
+const FALLBACK_TRUNCATED: &str =
+    "\n\n_(Fallback review body truncated to fit GitHub length limits.)_";
+const FALLBACK_OMITTED: &str =
+    "_(Unanchored comment details omitted to fit GitHub length limits.)_";
+
+/// The most times a review of a locked pull request is sent again, and the
+/// most it waits before each (`LOCKED_PR_RETRY_*`).
+const LOCKED_RETRIES: u32 = 3;
+const LOCKED_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Submits REVIEW of PULL as one review of event COMMENT, as gh-aw's review
+/// buffer does (`submitReview`): comments on paths the pull request does
+/// not change left out, the footer as its body, and those the forge cannot
+/// anchor put in its body instead.
+fn submit_review(
+    pull: &ReviewedPull,
+    review: &Review,
+    run: &Run,
+    github: &Github,
+    log: &mut dyn FnMut(&str),
+) -> ReviewEnd {
+    let ReviewedPull {
+        repo, number, head, ..
+    } = pull;
+    let body = format!("\n\n{}\n", footer(run, pull.triggering.as_deref(), None));
+    let mut comments: Vec<Value> = review.comments.iter().map(|(_, c)| c.clone()).collect();
+    match diff_paths(github, repo, *number) {
+        Ok(Some(paths)) if !paths.is_empty() => comments.retain(|comment| {
+            let path = comment["path"].as_str().unwrap_or_default();
+            let kept = paths.contains(path);
+            if !kept {
+                log(&command(
+                    "warning",
+                    &format!(
+                        "Skipping review comment at '{path}:{}' — path not found in PR #{number} diff",
+                        comment["line"]
+                    ),
+                ));
+            }
+            kept
+        }),
+        Ok(_) => {}
+        Err(err) => log(&command(
+            "warning",
+            &format!(
+                "Failed to validate comment paths against PR diff: {err:#}. Proceeding without \
+                 path validation."
+            ),
+        )),
+    }
+    let before = match review_state(github, repo, *number, "before", log) {
+        Ok(state) => state,
+        Err(error) => return ReviewEnd::Failed(error),
+    };
+    let path = format!("/repos/{repo}/pulls/{number}/reviews");
+    let operation = format!("pulls.createReview {repo}#{number}");
+    let create = |comments: &[Value], body: &str| {
+        let mut params = json!({"commit_id": head, "event": "COMMENT"});
+        if !comments.is_empty() {
+            params["comments"] = json!(comments);
+        }
+        if !body.is_empty() {
+            params["body"] = json!(body);
+        }
+        github.request_retrying_up_to("POST", &path, Some(&params), &operation, 1)
+    };
+    let made = |answer: Value, submitted: &[Value], log: &mut dyn FnMut(&str)| {
+        review_made(answer, submitted, before.clone(), pull, github, log)
+    };
+    let err = match create(&comments, &body) {
+        Ok(answer) => return made(answer, &comments, log),
+        Err(err) => err,
+    };
+    let message = format!("{err:#}");
+    if message.to_lowercase().contains("lock prevents review") {
+        for _ in 0..LOCKED_RETRIES {
+            std::thread::sleep(github.retry_wait.min(LOCKED_WAIT));
+            match create(&comments, &body) {
+                Ok(answer) => return made(answer, &comments, log),
+                Err(err)
+                    if format!("{err:#}")
+                        .to_lowercase()
+                        .contains("lock prevents review") => {}
+                Err(err) => return ReviewEnd::Failed(format!("{err:#}")),
+            }
+        }
+        return ReviewEnd::Skipped(format!("Review skipped — PR #{number} is locked"));
+    }
+    let unanchored = |message: &str| {
+        message.contains("Line could not be resolved")
+            || message.contains("Path could not be resolved")
+    };
+    if !unanchored(&message) || comments.is_empty() {
+        return ReviewEnd::Failed(message);
+    }
+    let indices = unanchored_indices(&err, comments.len());
+    if !indices.is_empty() && indices.len() < comments.len() {
+        let of = |lost: bool| -> Vec<Value> {
+            comments
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| indices.contains(at) == lost)
+                .map(|(_, comment)| comment.clone())
+                .collect()
+        };
+        let (lost, kept) = (of(true), of(false));
+        match create(&kept, &with_unanchored(&body, &lost)) {
+            Ok(answer) => return made(answer, &kept, log),
+            Err(err) => log(&command(
+                "warning",
+                &format!(
+                    "Failed to submit partially anchored PR review: {err:#}. Falling back to \
+                     body-only review."
+                ),
+            )),
+        }
+    }
+    match create(&[], &with_unanchored(&body, &comments)) {
+        Ok(answer) => made(answer, &[], log),
+        Err(err) => ReviewEnd::Failed(format!("{err:#}")),
+    }
+}
+
+/// The paths pull request NUMBER of REPO changes, its files' and the
+/// names they had, as the review buffer reads them: up to ten pages of
+/// 100, or None past that.
+fn diff_paths(github: &Github, repo: &str, number: u64) -> Result<Option<BTreeSet<String>>> {
+    const MAX_PAGES: u64 = 10;
+    const PER_PAGE: usize = 100;
+    let mut paths = BTreeSet::new();
+    for page in 1..=MAX_PAGES {
+        let files = github.request(
+            "GET",
+            &format!("/repos/{repo}/pulls/{number}/files?per_page={PER_PAGE}&page={page}"),
+            None,
+        )?;
+        let files = files.as_array().cloned().unwrap_or_default();
+        for file in &files {
+            for key in ["filename", "previous_filename"] {
+                if let Some(path) = file[key].as_str().filter(|path| !path.is_empty()) {
+                    paths.insert(path.to_owned());
+                }
+            }
+        }
+        if files.len() < PER_PAGE {
+            return Ok(Some(paths));
+        }
+    }
+    Ok(None)
+}
+
+/// What gh-aw records of the reviews of pull request NUMBER of REPO,
+/// PHASE (`before`, `after`) its review (`fetchPullRequestReviewState`):
+/// None where the forge failed it for now, and an error where it would
+/// not answer at all, which fails the review.
+fn review_state(
+    github: &Github,
+    repo: &str,
+    number: u64,
+    phase: &str,
+    log: &mut dyn FnMut(&str),
+) -> Result<Option<Value>, String> {
+    let read = || -> Result<Value> {
+        let pull = github.request("GET", &format!("/repos/{repo}/pulls/{number}"), None)?;
+        let reviews = github.request(
+            "GET",
+            &format!("/repos/{repo}/pulls/{number}/reviews?per_page=100"),
+            None,
+        )?;
+        let teams = match &pull["requested_teams"] {
+            Value::Null => &pull["requested_team_reviewers"],
+            teams => teams,
+        };
+        let teams: Vec<&str> = teams
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|team| {
+                team.as_str()
+                    .or_else(|| team["slug"].as_str())
+                    .or_else(|| team["name"].as_str())
+            })
+            .filter(|team| !team.is_empty())
+            .collect();
+        let reviews: Vec<Value> = reviews
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|review| {
+                let mut kept = Map::new();
+                if !review["id"].is_null() {
+                    kept.insert("id".into(), review["id"].clone());
+                }
+                for (key, value) in [
+                    ("user", &review["user"]["login"]),
+                    ("state", &review["state"]),
+                    ("submitted_at", &review["submitted_at"]),
+                ] {
+                    if truthy(value) {
+                        kept.insert(key.into(), value.clone());
+                    }
+                }
+                Value::Object(kept)
+            })
+            .filter(|review| review.as_object().is_some_and(|kept| !kept.is_empty()))
+            .collect();
+        Ok(
+            json!({"requested_reviewers": names_of(&pull["requested_reviewers"], "login"),
+            "requested_team_reviewers": teams, "reviews": reviews}),
+        )
+    };
+    match read() {
+        Ok(state) => Ok(Some(state)),
+        Err(err) if super::github::is_transient(&err) => {
+            log(&command(
+                "warning",
+                &format!(
+                    "Failed to capture {phase} PR review state for #{number}: {err:#}. \
+                     Continuing without execution-state metadata."
+                ),
+            ));
+            Ok(None)
+        }
+        Err(err) => Err(format!(
+            "ERR_API: Failed to capture {phase} PR review state for #{number}: {err:#} \
+             (non-transient)"
+        )),
+    }
+}
+
+/// The review buffer's result for the review the forge ANSWERed with
+/// SUBMITTED comments, its state BEFORE and after, and its comments' IDs.
+fn review_made(
+    answer: Value,
+    submitted: &[Value],
+    before: Option<Value>,
+    pull: &ReviewedPull,
+    github: &Github,
+    log: &mut dyn FnMut(&str),
+) -> ReviewEnd {
+    let ReviewedPull { repo, number, .. } = pull;
+    let after = match before {
+        Some(_) => match review_state(github, repo, *number, "after", log) {
+            Ok(state) => state,
+            Err(error) => return ReviewEnd::Failed(error),
+        },
+        None => None,
+    };
+    let id = &answer["id"];
+    let mut comments: Vec<Value> = submitted
+        .iter()
+        .map(|comment| {
+            let mut metadata = json!({"path": comment["path"], "line": comment["line"]});
+            if !comment["start_line"].is_null() {
+                metadata["start_line"] = comment["start_line"].clone();
+            }
+            metadata["side"] = comment["side"].clone();
+            metadata["review_id"] = id.clone();
+            json!({"repo": repo, "pull_request_number": number, "metadata": metadata})
+        })
+        .collect();
+    if !submitted.is_empty() {
+        let path = format!("/repos/{repo}/pulls/{number}/reviews/{id}/comments?per_page=100");
+        match github.request("GET", &path, None) {
+            Ok(Value::Array(listed)) if !listed.is_empty() => {
+                comments = listed
+                    .iter()
+                    .map(|comment| {
+                        let mut metadata = json!({"review_id": id});
+                        for key in ["node_id", "path", "side"] {
+                            if truthy(&comment[key]) {
+                                metadata[key] = comment[key].clone();
+                            }
+                        }
+                        for key in ["line", "start_line"] {
+                            if !comment[key].is_null() {
+                                metadata[key] = comment[key].clone();
+                            }
+                        }
+                        let mut ordered = Map::new();
+                        for key in ["review_id", "node_id", "path", "line", "start_line", "side"] {
+                            if let Some(value) = metadata.get(key) {
+                                ordered.insert(key.into(), value.clone());
+                            }
+                        }
+                        json!({"id": comment["id"], "url": comment["html_url"], "repo": repo,
+                            "pull_request_number": number, "metadata": ordered})
+                    })
+                    .collect();
+            }
+            Ok(_) => {}
+            Err(err) => log(&command(
+                "warning",
+                &format!("Could not resolve IDs for review comments on {repo}#{number}: {err:#}"),
+            )),
+        }
+    }
+    let mut metadata = json!({"review_id": id, "review_event": "COMMENT"});
+    if truthy(&answer["state"]) {
+        metadata["review_state"] = answer["state"].clone();
+    }
+    let mut result = json!({"success": true, "url": answer["html_url"], "number": number,
+        "review_id": id, "review_url": answer["html_url"], "pull_request_number": number,
+        "repo": repo, "event": "COMMENT", "comment_count": submitted.len(),
+        "review_comments": comments, "metadata": metadata});
+    if let Some(before) = before {
+        result["before_state"] = before;
+    }
+    if let Some(after) = after {
+        result["after_state"] = after;
+    }
+    ReviewEnd::Made(result)
+}
+
+/// The places of the comments the forge's refusal ERR says it could not
+/// anchor (`extractUnresolvableCommentIndices`), of COUNT.
+fn unanchored_indices(err: &anyhow::Error, count: usize) -> Vec<usize> {
+    static FIELD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"comments(?:\[|\.)(\d+)(?:\]|\.|$)").expect("a valid pattern")
+    });
+    let refused = err
+        .downcast_ref::<super::github::Retried>()
+        .and_then(|retried| retried.refused.as_ref())
+        .or_else(|| err.downcast_ref::<Refused>());
+    let mut indices: Vec<usize> = refused
+        .map(|refused| refused.errors.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|error| {
+            error["message"].as_str().is_some_and(|message| {
+                message.contains("Line could not be resolved")
+                    || message.contains("Path could not be resolved")
+            })
+        })
+        .filter_map(|error| FIELD.captures(error["field"].as_str()?))
+        .filter_map(|caps| caps[1].parse::<usize>().ok())
+        .filter(|at| *at < count)
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+/// BODY with COMMENTS in a section of their own, as excerpts the review's
+/// length allows (`appendUnanchoredCommentsSection`).
+fn with_unanchored(body: &str, comments: &[Value]) -> String {
+    let escape = |text: &str| {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    };
+    let block = |comment: &Value, text: &str| {
+        let summary = format!(
+            "{}:{}",
+            comment["path"].as_str().unwrap_or_default(),
+            comment["line"]
+        );
+        format!(
+            "<details><summary>{}</summary>\n\n{}\n\n</details>",
+            escape(&summary),
+            escape(text)
+        )
+    };
+    let prefix = if body.is_empty() {
+        format!("{FALLBACK_HEADER}\n\n")
+    } else {
+        format!("\n\n{FALLBACK_HEADER}\n\n")
+    };
+    let overhead: usize = comments
+        .iter()
+        .enumerate()
+        .map(|(at, comment)| usize::from(at > 0) * 2 + utf16_len(&block(comment, "")))
+        .sum();
+    let available =
+        MAX_REVIEW_BODY as i64 - (utf16_len(body) + utf16_len(&prefix) + overhead) as i64;
+    let limit = match comments.len() {
+        0 => FALLBACK_EXCERPT,
+        _ if available <= 0 => 0,
+        n => FALLBACK_EXCERPT.min(usize::try_from(available).unwrap_or(0) / n),
+    };
+    let blocks: Vec<String> = comments
+        .iter()
+        .map(|comment| {
+            let text = js_trim(comment["body"].as_str().unwrap_or_default());
+            if limit == 0 {
+                return block(comment, FALLBACK_EMPTY);
+            }
+            let excerpt = if utf16_len(text) > limit {
+                format!("{}…", utf16_prefix(text, limit.saturating_sub(1)))
+            } else {
+                text.to_owned()
+            };
+            block(
+                comment,
+                if excerpt.is_empty() {
+                    FALLBACK_EMPTY
+                } else {
+                    &excerpt
+                },
+            )
+        })
+        .collect();
+    let merged = format!("{body}{prefix}{}", blocks.join("\n\n"));
+    if utf16_len(&merged) <= MAX_REVIEW_BODY {
+        return merged;
+    }
+    let max = MAX_REVIEW_BODY - utf16_len(FALLBACK_TRUNCATED);
+    let omitted = format!("{body}{prefix}{FALLBACK_OMITTED}");
+    if utf16_len(body) <= max && utf16_len(&omitted) <= MAX_REVIEW_BODY {
+        return omitted;
+    }
+    format!("{}{FALLBACK_TRUNCATED}", utf16_prefix(body, max))
+}
+
+/// Publishes OP with PUBLISHER, as [`publish`] does once it is to: a
+/// review comment buffered in the review of REVIEW, its outcome to be at
+/// the place REVIEW names.
+fn publish_one(
+    op: &Op,
+    publisher: &GithubPublisher,
+    run: &Run,
+    defaults: &[String],
+    review: &mut (usize, &mut Review),
+    log: &mut dyn FnMut(&str),
+) -> Outcome {
+    match op {
+        Op::ReviewComment { comment, .. } => {
+            let (at, review) = review;
+            buffer_review_comment(op, comment, defaults, &publisher.github, run, *at, review)
+        }
+        Op::Comment {
+            item, repo, issue, ..
+        } => comment(op, item, repo, *issue, defaults, publisher, run),
+        Op::PullRequest {
+            failure: Some(failure),
+            ..
+        } => Outcome::failed(op, failure.clone()),
+        Op::PullRequest { pr, .. } => pull_request_outcome(op, pr, defaults, publisher, run),
+        Op::Labels { request, .. } if request.add => add_labels(op, request, &publisher.github),
+        Op::Labels { request, .. } => remove_labels(op, request, &publisher.github),
+        Op::Close {
+            repo,
+            close,
+            state_reason,
+            triggering,
+            ..
+        } => close_item(
+            op,
+            repo,
+            close,
+            state_reason.as_deref(),
+            triggering.as_deref(),
+            &publisher.github,
+            run,
+        ),
+        Op::Push { push, .. } => push_outcome(op, push, publisher, run, log),
+        Op::Issue { issue, .. } => issue_outcome(op, issue, defaults, &publisher.github, run, log),
+    }
+}
+
+/// `linkSubIssue`'s queries, as the handler sends them.
+const ISSUE_NODE_QUERY: &str = "\n      query($owner: String!, $repo: String!, $issueNumber: Int!) {\n        repository(owner: $owner, name: $repo) {\n          issue(number: $issueNumber) {\n            id\n          }\n        }\n      }\n    ";
+const ADD_SUB_ISSUE: &str = "\n      mutation AddSubIssue($parentId: ID!, $subIssueId: ID!) {\n        addSubIssue(input: { issueId: $parentId, subIssueId: $subIssueId }) {\n          issue {\n            id\n            number\n          }\n          subIssue {\n            id\n            number\n          }\n        }\n      }\n    ";
+
+/// Opens the issue of ISSUE, as gh-aw's handler does with apply.yml's
+/// settings, allowing the DEFAULTS mentions; one the event's issue is
+/// related to becomes its sub-issue, or that issue gets a comment saying
+/// so where the forge will not link them.
+fn issue_outcome(
+    op: &Op,
+    issue: &IssueRequest,
+    defaults: &[String],
+    github: &Github,
+    run: &Run,
+    log: &mut dyn FnMut(&str),
+) -> Outcome {
+    let IssueRequest { repo, labels, .. } = issue;
+    if labels.len() > MAX_LABELS {
+        return Outcome::failed(
+            op,
+            format!(
+                "E003: Cannot add more than {MAX_LABELS} labels (received {})",
+                labels.len()
+            ),
+        );
+    }
+    let body = sanitize_with(
+        &issue.body,
+        MAX_SANITIZED,
+        &Mentions::Allowing {
+            aliases: defaults,
+            max: MAX_ALLOWED_MENTIONS,
+        },
+        &|host| run.keeps_link(host),
+    );
+    // `formatIssueBody`: the footer and the workflow's marker after it.
+    let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
+    if let Some(parent) = issue.parent {
+        lines.push(format!("Related to #{parent}"));
+    }
+    let history = history_url(run, repo, "issues", true);
+    lines.extend([
+        String::new(),
+        footer(run, issue.triggering.as_deref(), Some(&history)),
+        String::new(),
+        format!("<!-- gh-aw-workflow-id: {} -->", run.workflow_id),
+        String::new(),
+    ]);
+    let body = with_provenance(run, js_trim(&lines.join("\n")));
+    if utf16_len(&body) > MAX_BODY_UNITS {
+        return Outcome::failed(
+            op,
+            format!(
+                "ERR_VALIDATION: Issue body exceeds GitHub's maximum length of {MAX_BODY_UNITS} \
+                 characters"
+            ),
+        );
+    }
+    let made = github.request_retrying(
+        "POST",
+        &format!("/repos/{repo}/issues"),
+        Some(
+            &json!({"title": issue.title, "body": hide_applied(&body), "labels": labels,
+            "assignees": []}),
+        ),
+        &format!("create_issue in {repo}"),
+    );
+    let made = match made {
+        Ok(made) => made,
+        Err(err) => {
+            let error = format!("{err:#}");
+            if error.contains("Issues has been disabled in this repository") {
+                return Outcome::failed(op, "Issues disabled for repository".to_owned());
+            }
+            return Outcome::failed(op, error);
+        }
+    };
+    // An answer naming no issue links nothing.
+    if let Some(parent) = issue.parent
+        && let Some(number) = made["number"].as_u64()
+        && let Err(err) = link_sub_issue(github, repo, parent, number)
+    {
+        // Best effort, as the handler's: the issue is made.
+        let path = format!("/repos/{repo}/issues/{parent}/comments");
+        let note = with_provenance(run, &format!("Created related issue: #{number}"));
+        if let Err(also) = github.request("POST", &path, Some(&json!({"body": note}))) {
+            log(&command(
+                "warning",
+                &format!(
+                    "Could not link #{number} as a sub-issue of #{parent} ({err:#}), nor \
+                     comment on it: {also:#}"
+                ),
+            ));
+        }
+    }
+    Outcome::succeeded(
+        op,
+        json!({"success": true, "repo": repo, "number": made["number"], "url": made["html_url"],
+            "body": body, "id": made["id"], "metadata": {"node_id": made["node_id"]},
+            "temporaryId": temporary_id(), "_repo": repo}),
+    )
+}
+
+/// Makes issue CHILD of REPO a sub-issue of PARENT there, as
+/// `linkSubIssue` does: both node IDs asked for, then linked.
+fn link_sub_issue(github: &Github, repo: &str, parent: u64, child: u64) -> Result<()> {
+    let (owner, name) = repo.split_once('/').context("the repository")?;
+    let node = |number: u64| -> Result<Value> {
+        let data = github.graphql(
+            ISSUE_NODE_QUERY,
+            json!({"owner": owner, "repo": name, "issueNumber": number}),
+        )?;
+        Ok(data["repository"]["issue"]["id"].clone())
+    };
+    let (parent, child) = (node(parent)?, node(child)?);
+    github.graphql(
+        ADD_SUB_ISSUE,
+        json!({"parentId": parent, "subIssueId": child}),
+    )?;
+    Ok(())
+}
+
+/// LINE as the workflow command KIND (`error`, `warning`), one line.
+fn command(kind: &str, line: &str) -> String {
+    format!("::{kind}::{}", crate::run::enter::one_line(line))
+}
+
+/// gh-aw's error when the branch moved on since the run was asked for and
+/// git refused the push (`nonFastForwardPatterns`); `fallback_as_pull_request`
+/// is off.
+const NON_FAST_FORWARD: &str = "Failed to push changes: remote PR branch changed while the \
+                                workflow was running (non-fast-forward). Re-run the workflow on \
+                                the latest PR branch state.";
+
+/// Pushes the patch of PUSH as one commit on its pull request's branch,
+/// as gh-aw's handler does under apply.yml's settings, and comments on
+/// the pull request with the commit. The branch has to be at the head the
+/// run was asked for still: one that moved on is not pushed to, and one
+/// rewritten since is refused, where gh-aw's handler would apply the
+/// patch on whatever it now holds.
+fn push_outcome(
+    op: &Op,
+    push: &PushRequest,
+    publisher: &GithubPublisher,
+    run: &Run,
+    log: &mut dyn FnMut(&str),
+) -> Outcome {
+    match &push.early {
+        Some(Early::Failed(error)) => return Outcome::failed(op, error.clone()),
+        Some(Early::Skipped(result)) => return Outcome::skipped(op, result.clone()),
+        None => {}
+    }
+    let PushRequest {
+        repo,
+        head_repo,
+        number,
+        ..
+    } = push;
+    let github = &publisher.github;
+    let Ok(pull) = github.request("GET", &format!("/repos/{repo}/pulls/{number}"), None) else {
+        return Outcome::failed(
+            op,
+            format!("Failed to determine branch name for PR {number} in {repo}"),
+        );
+    };
+    if pull["head"]["repo"].is_null() {
+        return Outcome::failed(
+            op,
+            "Cannot push to PR: head repository is null (likely a deleted fork)".to_owned(),
+        );
+    }
+    // gh-aw's handler takes a head naming no repository for `head-repo`;
+    // this does not.
+    let actual = pull["head"]["repo"]["full_name"]
+        .as_str()
+        .unwrap_or_default();
+    if !actual.eq_ignore_ascii_case(head_repo) {
+        return Outcome::failed(
+            op,
+            format!(
+                "Cannot push to PR: head repository '{actual}' does not match expected \
+                 '{head_repo}'. Writes to repositories other than the configured head-repo \
+                 remain blocked."
+            ),
+        );
+    }
+    let branch = normalize_branch(pull["head"]["ref"].as_str().unwrap_or_default());
+    if branch != push.branch {
+        return Outcome::failed(
+            op,
+            format!(
+                "the pull request's branch is {branch:?}, not {:?}, which the run was asked to \
+                 push to",
+                push.branch
+            ),
+        );
+    }
+    if let Some(blocked) = unpushable(github, head_repo, &branch, log) {
+        return Outcome::failed(op, blocked);
+    }
+    if !push.allow_workflows
+        && push
+            .files
+            .iter()
+            .any(|file| file.starts_with(".github/workflows/"))
+    {
+        return Outcome::failed(op, WORKFLOWS_SCOPE.to_owned());
+    }
+    let fork = format!("{}/{head_repo}.git", publisher.git);
+    let pushed = github.git().push(
+        &Push {
+            from: &fork,
+            base: &branch,
+            base_commit: &push.head,
+            to: &fork,
+            branch: &branch,
+            patch: &push.patch,
+            files: &push.files,
+            head: Some(&push.head),
+            committer: Some(super::github::ACTIONS_COMMITTER),
+            // So that the commit is the same whenever it is made.
+            at_author_date: true,
+            max_changed_kb: Some(push.max_kb),
+        },
+        None,
+    );
+    let commit = match pushed {
+        Ok(commit) => commit,
+        Err(err) if err.is::<Moved>() => return Outcome::failed(op, NON_FAST_FORWARD.to_owned()),
+        Err(err) if err.is::<TooLarge>() => return Outcome::failed(op, err.to_string()),
+        Err(err) => return Outcome::failed(op, format!("Failed to push changes: {err:#}")),
+    };
+    let commit_url = format!("{}/{head_repo}/commit/{commit}", run.server);
+    // `updateActivationCommentWithCommit`, without an activation comment:
+    // a new one on the pull request, whose failure fails nothing.
+    let note = format!(
+        "\n\nCommit pushed: [`{}`]({commit_url})\n\n{}",
+        &commit[..7],
+        footer(run, None, None)
+    );
+    let body = sanitize_with(&note, MAX_SANITIZED, &Mentions::All, &|host| {
+        run.keeps_link(host)
+    });
+    let path = format!("/repos/{repo}/issues/{number}/comments");
+    if let Err(err) = github.request("POST", &path, Some(&json!({"body": body}))) {
+        log(&command(
+            "warning",
+            &format!("Failed to create comment on {repo}#{number}: {err:#}"),
+        ));
+    }
+    let mut result = json!({"success": true, "number": number, "repo": repo,
+        "head_repo": head_repo, "url": format!("{}/{repo}/pull/{number}", run.server),
+        "branch_name": branch, "commit_sha": commit, "commit_url": commit_url});
+    if let Some(before) = pull["head"]["sha"].as_str().filter(|sha| !sha.is_empty()) {
+        result["before_state"] = json!({"head_sha": before});
+    }
+    result["after_state"] = json!({"head_sha": commit});
+    Outcome::succeeded(op, result)
+}
+
+/// gh-aw's error for a push of workflow files without `allow_workflows`
+/// (`buildWorkflowsScopeError`).
+const WORKFLOWS_SCOPE: &str = "Branch push rejected: the branch includes changes to workflow \
+     files (.github/workflows/**) requiring the 'workflows' scope. The token used for the \
+     safe-outputs checkout does not have this scope. Fix: configure \
+     'push-to-pull-request-branch.allow-workflows: true' with a GitHub App in \
+     'safe-outputs.github-app', or exclude workflow files from the changeset.";
+
+/// Why gh-aw's handler does not push to BRANCH of REPO
+/// (`checkBranchPushable`): the default branch, or one with protection
+/// rules, or whose rules cannot be read.
+fn unpushable(
+    github: &Github,
+    repo: &str,
+    branch: &str,
+    log: &mut dyn FnMut(&str),
+) -> Option<String> {
+    match github.request("GET", &format!("/repos/{repo}"), None) {
+        Ok(found) if found["default_branch"].as_str() == Some(branch) => {
+            return Some(format!(
+                "Cannot push to branch \"{branch}\": this is the repository's default branch. \
+                 Agents must not push directly to the default branch."
+            ));
+        }
+        Ok(_) => {}
+        Err(err) => log(&command(
+            "warning",
+            &format!("Could not check repository default branch: {err:#}"),
+        )),
+    }
+    let path = format!(
+        "/repos/{repo}/branches/{}/protection",
+        uri_component(branch)
+    );
+    let err = match github.request("GET", &path, None) {
+        Ok(_) => {
+            return Some(format!(
+                "Cannot push to branch \"{branch}\": this branch has protection rules. Agents \
+                 must not push directly to protected branches."
+            ));
+        }
+        Err(err) => err,
+    };
+    match err.downcast_ref::<Refused>().map(|refused| refused.status) {
+        Some(404) => None,
+        // The forge holds a push to its rules anyway.
+        Some(403) => {
+            log(&command(
+                "warning",
+                &format!(
+                    "Could not check branch protection rules for \"{branch}\" (insufficient \
+                     permissions): {err:#}"
+                ),
+            ));
+            None
+        }
+        _ => Some(format!(
+            "Cannot verify branch protection rules for \"{branch}\": {err:#}. Push blocked to \
+             prevent accidental writes to protected branches."
+        )),
+    }
 }
 
 /// Posts the comment of ITEM on ISSUE of REPO, as gh-aw's handler does.
@@ -1807,7 +3227,7 @@ fn comment(
         footer(
             run,
             triggering.as_deref(),
-            Some(&history_url(run, repo, "issues"))
+            Some(&history_url(run, repo, "issues", false))
         )
     );
     let body = with_provenance(run, &body);
@@ -1917,7 +3337,7 @@ fn pull_request_body(
         &|host| run.keeps_link(host),
     );
     let triggering = run.triggering(CREATE_PULL_REQUEST)?;
-    let history = history_url(run, &publisher.repo, "pullrequests");
+    let history = history_url(run, &publisher.repo, "pullrequests", false);
     let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
     lines.push(String::new());
     lines.push(footer(run, triggering.as_deref(), Some(&history)));
@@ -2266,8 +3686,18 @@ fn close_item(
 
 /// The manifest entry of a success (`extractCreatedItemFromResult`).
 fn manifest_entry(outcome: &Outcome, timestamp: &str) -> Option<Value> {
-    let result = &outcome.result;
-    if outcome.kind != Kind::Success || ["staged", "skipped"].iter().any(|key| result[*key] == true)
+    if outcome.kind != Kind::Success {
+        return None;
+    }
+    created_item(outcome.output, &outcome.result, timestamp)
+}
+
+/// The manifest entry of what a handler of OUTPUT made, by its RESULT;
+/// none for what it only buffered (`extractCreatedItemFromResult`).
+fn created_item(output: &str, result: &Value, timestamp: &str) -> Option<Value> {
+    if ["staged", "skipped", "deferred_manifest"]
+        .iter()
+        .any(|key| result[*key] == true)
     {
         return None;
     }
@@ -2305,7 +3735,7 @@ fn manifest_entry(outcome: &Outcome, timestamp: &str) -> Option<Value> {
         set,
     );
     let mut entry = Map::new();
-    entry.insert("type".into(), json!(outcome.output));
+    entry.insert("type".into(), json!(output));
     if let Some(url) = url {
         entry.insert("url".into(), url);
     }
@@ -2343,13 +3773,16 @@ fn manifest_entry(outcome: &Outcome, timestamp: &str) -> Option<Value> {
         entry.insert("temporaryId".into(), result["temporaryId"].clone());
     }
     // An answer without a node ID gives none, rather than a null one.
-    let metadata: Map<String, Value> = result["metadata"]
+    let mut metadata: Map<String, Value> = result["metadata"]
         .as_object()
         .into_iter()
         .flatten()
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    if output == PUSH_TO_PULL_REQUEST_BRANCH && truthy(&result["commit_sha"]) {
+        metadata.insert("commit_sha".into(), result["commit_sha"].clone());
+    }
     if !metadata.is_empty() {
         entry.insert("metadata".into(), Value::Object(metadata));
     }
@@ -2403,11 +3836,16 @@ fn outputs(outcomes: &[Outcome]) -> Vec<(&'static str, String)> {
     if outcomes.is_empty() {
         return outputs;
     }
+    let pushes_failed: Vec<String> = outcomes
+        .iter()
+        .filter(|o| o.kind == Kind::Failed && CODE_PUSHES.contains(&o.output))
+        .map(|o| format!("{}:{}", o.output, o.error.as_deref().unwrap_or_default()))
+        .collect();
     outputs.extend([
         ("create_discussion_errors", String::new()),
         ("create_discussion_error_count", "0".to_owned()),
-        ("code_push_failure_errors", String::new()),
-        ("code_push_failure_count", "0".to_owned()),
+        ("code_push_failure_errors", pushes_failed.join("\n")),
+        ("code_push_failure_count", pushes_failed.len().to_string()),
     ]);
     let first = |output: &str| {
         outcomes
@@ -2431,7 +3869,59 @@ fn outputs(outcomes: &[Outcome]) -> Vec<(&'static str, String)> {
             outputs.push(("comment_url", url.to_owned()));
         }
     }
+    if let Some(issue) = first(CREATE_ISSUE) {
+        if let Some(number) = issue["number"].as_u64() {
+            outputs.push(("created_issue_number", number.to_string()));
+        }
+        if let Some(url) = issue["url"].as_str() {
+            outputs.push(("created_issue_url", url.to_owned()));
+        }
+    }
+    if let Some(push) = first(PUSH_TO_PULL_REQUEST_BRANCH) {
+        for (name, key) in [
+            ("push_commit_sha", "commit_sha"),
+            ("push_commit_url", "commit_url"),
+        ] {
+            if let Some(value) = push[key].as_str().filter(|value| !value.is_empty()) {
+                outputs.push((name, value.to_owned()));
+            }
+        }
+    }
     outputs
+}
+
+/// What a handler that pushed writes to the step summary before gh-aw's
+/// handler manager writes its own, for OUTCOME on RUN.
+fn summary_section(run: &Run, outcome: &Outcome) -> Option<String> {
+    let result = &outcome.result;
+    let text = |key: &str| result[key].as_str().unwrap_or_default();
+    if outcome.kind != Kind::Success {
+        return None;
+    }
+    match outcome.output {
+        CREATE_PULL_REQUEST => Some(format!(
+            "\n\n## Pull Request\n- **Pull Request**: [#{}]({})\n- **Branch**: `{}`\n- **Base Branch**: `{}`\n",
+            result["number"],
+            text("url"),
+            text("branch_name"),
+            text("base"),
+        )),
+        PUSH_TO_PULL_REQUEST_BRANCH => {
+            let tree = format!(
+                "{}/{}/tree/{}",
+                run.server,
+                text("head_repo"),
+                text("branch_name")
+            );
+            Some(format!(
+                "\n## Push to Branch\n- **Branch**: `{}`\n- **Commit**: [{}]({})\n- **URL**: [{tree}]({tree})\n",
+                text("branch_name"),
+                text("commit_sha").get(..7).unwrap_or_default(),
+                text("commit_url"),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// `formatDisplayType`: `add_comment` as `Add Comment`.
@@ -2791,12 +4281,17 @@ pub(super) fn apply(
         Err(errors) => return refuse(errors),
     };
     // A refusal too, so before the remainder hands gh-aw the rest; only
-    // the routed comments and pull requests keep mentions, and so read
-    // the event's people.
-    let defaults = if ops
-        .iter()
-        .any(|op| matches!(op, Op::Comment { .. } | Op::PullRequest { .. }))
-    {
+    // the routed comments, pull requests, issues and review comments keep
+    // mentions, and so read the event's people.
+    let defaults = if ops.iter().any(|op| {
+        matches!(
+            op,
+            Op::Comment { .. }
+                | Op::PullRequest { .. }
+                | Op::Issue { .. }
+                | Op::ReviewComment { .. }
+        )
+    }) {
         run.default_mentions()
     } else {
         Ok(Vec::new())
@@ -2809,10 +4304,10 @@ pub(super) fn apply(
     let remainder = json!({"items": rest, "errors": []}).to_string();
     std::fs::write(records.remainder, remainder)
         .with_context(|| format!("writing {}", records.remainder.display()))?;
-    let outcomes = publish(&ops, publisher, run, &defaults, log)?;
+    let Published { outcomes, reviewed } = publish(&ops, publisher, run, &defaults, log)?;
     if let Some(failed) = outcomes
         .iter()
-        .find(|o| o.kind == Kind::Failed && o.output == CREATE_PULL_REQUEST)
+        .find(|o| o.kind == Kind::Failed && CODE_PUSHES.contains(&o.output))
     {
         let remainder = json!({"items": warn_of_failure(&rest, failed), "errors": []}).to_string();
         std::fs::write(records.remainder, remainder)
@@ -2824,10 +4319,15 @@ pub(super) fn apply(
         .append(true)
         .open(records.made)
         .with_context(|| format!("opening {}", records.made.display()))?;
-    for entry in outcomes
+    let entries = outcomes
         .iter()
         .filter_map(|o| manifest_entry(o, &timestamp))
-    {
+        .chain(
+            reviewed
+                .iter()
+                .filter_map(|(output, result)| created_item(output, result, &timestamp)),
+        );
+    for entry in entries {
         writeln!(made, "{entry}").with_context(|| format!("writing {}", records.made.display()))?;
     }
     if let Some(report) = error_report(run, records.workflow, &outcomes, &timestamp) {
@@ -2840,26 +4340,22 @@ pub(super) fn apply(
             .open(path)
             .with_context(|| format!("opening {}", path.display()))?;
         for (name, value) in outputs(&outcomes) {
-            // Numbers, URLs the forge gave and fixed words: one line each.
-            ensure!(!value.contains('\n'), "the output {name} is not one line");
-            writeln!(file, "{name}={value}")
-                .with_context(|| format!("writing {}", path.display()))?;
+            // A failure's words may take more than one line, which the
+            // runner reads up to a delimiter they cannot hold.
+            let line = if value.contains('\n') {
+                let delimiter = format!("ghadelimiter_{}", temporary_id());
+                format!("{name}<<{delimiter}\n{value}\n{delimiter}")
+            } else {
+                format!("{name}={value}")
+            };
+            writeln!(file, "{line}").with_context(|| format!("writing {}", path.display()))?;
         }
     }
     if let Some(path) = records.summary {
-        let mut text = String::new();
-        if let Some(pr) = outcomes
+        let mut text: String = outcomes
             .iter()
-            .find(|o| o.kind == Kind::Success && o.output == CREATE_PULL_REQUEST)
-        {
-            text += &format!(
-                "\n\n## Pull Request\n- **Pull Request**: [#{}]({})\n- **Branch**: `{}`\n- **Base Branch**: `{}`\n",
-                pr.result["number"],
-                pr.result["url"].as_str().unwrap_or_default(),
-                pr.result["branch_name"].as_str().unwrap_or_default(),
-                pr.result["base"].as_str().unwrap_or_default(),
-            );
-        }
+            .filter_map(|outcome| summary_section(run, outcome))
+            .collect();
         text += &summary(run, &outcomes, items);
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -2948,7 +4444,7 @@ fn publish_all(args: &Args) -> Result<bool> {
         summary: summary.as_deref(),
         workflow: &workflow,
     };
-    let mut log = |line: &str| println!("::error::{}", crate::run::enter::one_line(line));
+    let mut log = |line: &str| println!("{line}");
     apply(
         &Checked {
             items,
@@ -3026,14 +4522,19 @@ mod tests {
     /// What the loopback forge was sent, in order.
     type Sent = Arc<Mutex<Vec<Request>>>;
 
-    /// A forge holding SEED, which makes comments and pull requests, adds
-    /// and removes labels and changes items as publication.rs's does (IDs
-    /// from 1001), and answers FAULTS' requests with their status once.
+    /// A forge holding SEED, which makes comments, issues, pull requests
+    /// and reviews, adds and removes labels and changes items as
+    /// publication.rs's does (IDs from 1001), and answers FAULTS' requests
+    /// with their status once, and their `answer` or else a message.
     fn forge(seed: &Value, faults: &[Value]) -> (Github, Sent) {
         let mut seed = seed.as_object().cloned().unwrap_or_default();
-        let faults: Vec<(String, u16)> = faults
+        let faults: Vec<(String, u16, String)> = faults
             .iter()
             .map(|fault| {
+                let answer = match &fault["answer"] {
+                    Value::Null => json!({"message": "injected failure"}),
+                    answer => answer.clone(),
+                };
                 (
                     format!(
                         "{} {}",
@@ -3041,6 +4542,7 @@ mod tests {
                         fault["path"].as_str().unwrap()
                     ),
                     u16::try_from(fault["status"].as_u64().unwrap()).unwrap(),
+                    answer.to_string(),
                 )
             })
             .collect();
@@ -3057,9 +4559,9 @@ mod tests {
             });
             let asked = request.line.trim_end_matches(" HTTP/1.1");
             let (method, path) = asked.split_once(' ').unwrap();
-            if let Some(at) = faults.iter().position(|(fault, _)| fault == asked) {
-                let (_, status) = faults.remove(at);
-                return (status, json!({"message": "injected failure"}).to_string());
+            if let Some(at) = faults.iter().position(|(fault, ..)| fault == asked) {
+                let (_, status, answer) = faults.remove(at);
+                return (status, answer);
             }
             let comments = Regex::new(r"^/repos/([^/]+/[^/]+)/issues/(\d+)/comments$").unwrap();
             let labels = Regex::new(r"^(/repos/[^/]+/[^/]+/issues/\d+)/labels(?:/(.+))?$").unwrap();
@@ -3089,11 +4591,43 @@ mod tests {
                 }
                 return (200, Value::Array(held.clone()).to_string());
             }
+            // A list is the seed's, or else empty, whatever page is asked.
+            let listed = path.split('?').next().unwrap();
             match method {
-                "GET" => match seed.get(path) {
+                "GET" => match seed.get(path).or_else(|| seed.get(listed)) {
                     Some(value) => (200, value.to_string()),
+                    None if ["/files", "/reviews", "/comments"]
+                        .iter()
+                        .any(|list| listed.ends_with(list)) =>
+                    {
+                        (200, "[]".to_owned())
+                    }
                     None => (404, json!({"message": "Not Found"}).to_string()),
                 },
+                "POST" if path.ends_with("/reviews") => {
+                    next_id += 1;
+                    let id = next_id;
+                    let web = format!("{SERVER}/{REPO}/pull/7");
+                    let mut comments = vec![];
+                    for comment in request.body["comments"].as_array().into_iter().flatten() {
+                        next_id += 1;
+                        let mut comment = comment.clone();
+                        comment["id"] = json!(next_id);
+                        comment["html_url"] = json!(format!("{web}#discussion_r{next_id}"));
+                        comments.push(comment);
+                    }
+                    let review = json!({"id": id, "state": "COMMENTED", "body": request.body["body"],
+                        "commit_id": request.body["commit_id"],
+                        "user": {"login": "agentic-bot", "type": "User"},
+                        "html_url": format!("{web}#pullrequestreview-{id}")});
+                    seed.insert(format!("{path}/{id}/comments"), json!(comments));
+                    seed.entry(path.to_owned())
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                        .unwrap()
+                        .push(review.clone());
+                    (200, review.to_string())
+                }
                 "POST" if comments.is_match(path) => {
                     let caps = comments.captures(path).unwrap();
                     next_id += 1;
@@ -3116,6 +4650,53 @@ mod tests {
                     });
                     (201, pull.to_string())
                 }
+                "POST" if path == format!("/repos/{REPO}/issues") => {
+                    next_id += 1;
+                    let numbered =
+                        Regex::new(r"^/repos/[^/]+/[^/]+/(?:issues|pulls)/(\d+)$").unwrap();
+                    let number = seed
+                        .keys()
+                        .filter_map(|key| numbered.captures(key))
+                        .map(|caps| caps[1].parse::<u64>().unwrap())
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    let issue = json!({
+                        "id": next_id,
+                        "node_id": format!("N_{next_id}"),
+                        "number": number,
+                        "title": request.body["title"],
+                        "body": request.body["body"],
+                        "html_url": format!("{SERVER}/{REPO}/issues/{number}"),
+                    });
+                    seed.insert(format!("/repos/{REPO}/issues/{number}"), issue.clone());
+                    (201, issue.to_string())
+                }
+                // An issue's node ID, and linking a sub-issue to its parent.
+                "POST" if path == "/graphql" => {
+                    let variables = &request.body["variables"];
+                    let query = request.body["query"].as_str().unwrap();
+                    let data = if query.contains("issue(number: $issueNumber)") {
+                        let issue = format!(
+                            "/repos/{}/{}/issues/{}",
+                            variables["owner"].as_str().unwrap(),
+                            variables["repo"].as_str().unwrap(),
+                            variables["issueNumber"]
+                        );
+                        match seed.get(&issue) {
+                            Some(issue) => {
+                                json!({"repository": {"issue": {"id": issue["node_id"]}}})
+                            }
+                            None => return not_found,
+                        }
+                    } else if query.contains("addSubIssue(") {
+                        json!({"addSubIssue": {"issue": {"id": variables["parentId"]},
+                            "subIssue": {"id": variables["subIssueId"]}}})
+                    } else {
+                        return not_found;
+                    };
+                    (200, json!({"data": data}).to_string())
+                }
                 "PATCH" => match seed.get_mut(path).and_then(Value::as_object_mut) {
                     Some(item) => {
                         for (key, value) in request.body.as_object().unwrap() {
@@ -3135,22 +4716,44 @@ mod tests {
         (github, sent)
     }
 
-    /// The repositories publication.rs makes for a case with GIT: the
-    /// output repository and the fork under ROOT, each with one base
-    /// commit, and the case's patch, with check's base header and report
-    /// in CHECKED.
-    fn repositories(git: &Value, root: &Path, checked: &Path) {
+    /// Git in DIR as publication.rs runs it: no configuration of the
+    /// machine's, and a fixed date, so that each commit is the corpus's.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The repositories publication.rs makes for a case with GIT, as it
+    /// makes them: the output repository and the fork under ROOT, each
+    /// with the base commit on main and the case's branches, and the
+    /// case's patch from its base, with check's base header and report in
+    /// CHECKED. Returns what `{head:BRANCH}` stands for.
+    fn repositories(git: &Value, root: &Path, checked: &Path) -> Vec<(String, String)> {
         let seed = root.join("seed");
         std::fs::create_dir_all(&seed).unwrap();
-        sh(&seed, &["init", "-q"]);
+        self::git(&seed, &["init", "-q", "--initial-branch=main"]);
         let commit = |change: &Value| {
             for (name, content) in change["files"].as_object().unwrap() {
                 let file = seed.join(name);
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 std::fs::write(file, content.as_str().unwrap()).unwrap();
             }
-            sh(&seed, &["add", "--all"]);
-            sh(
+            self::git(&seed, &["add", "--all"]);
+            self::git(
                 &seed,
                 &[
                     "-c",
@@ -3170,18 +4773,45 @@ mod tests {
             std::fs::write(file, content.as_str().unwrap()).unwrap();
         }
         commit(&json!({"message": "Base", "files": {}}));
-        let base = sh(&seed, &["rev-parse", "HEAD"]);
+        for (branch, change) in git["branches"].as_object().into_iter().flatten() {
+            self::git(&seed, &["checkout", "-q", "-b", branch, "main"]);
+            commit(change);
+            self::git(&seed, &["checkout", "-q", "main"]);
+        }
         for repo in [REPO, FORK] {
             let bare = root.join(format!("{repo}.git"));
-            std::fs::create_dir_all(&bare).unwrap();
-            sh(&bare, &["init", "-q", "--bare"]);
-            sh(
-                &seed,
-                &["push", "-q", bare.to_str().unwrap(), "HEAD:refs/heads/main"],
+            std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+            self::git(
+                root,
+                &[
+                    "clone",
+                    "-q",
+                    "--bare",
+                    seed.to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
             );
         }
+        let heads: Vec<(String, String)> = self::git(
+            &seed,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .lines()
+        .map(|name| {
+            (
+                format!("{{head:{name}}}"),
+                self::git(&seed, &["rev-parse", name]),
+            )
+        })
+        .collect();
+        let from = git["patch"]["base"].as_str().unwrap_or("main");
+        let base = self::git(&seed, &["rev-parse", from]);
+        self::git(&seed, &["checkout", "-q", "-b", "agent", from]);
         commit(&git["patch"]);
-        let patch = sh(&seed, &["format-patch", "--stdout", "-1"]) + "\n";
+        let patch = self::git(
+            &seed,
+            &["format-patch", "--stdout", &format!("{from}..agent")],
+        ) + "\n";
         let (from, rest) = patch.split_once('\n').unwrap();
         let patch = format!("{from}\n{BASE_COMMIT_HEADER}: {base}\n{rest}");
         let branch = git["patch"]["branch"].as_str().unwrap();
@@ -3191,11 +4821,12 @@ mod tests {
         let report = json!({"ok": true, "errors": [], "items": [], "patch": {
             "file": name, "bytes": patch.len(), "base_commit": base, "files": files}});
         std::fs::write(checked.join(REPORT_FILE), report.to_string()).unwrap();
+        heads
     }
 
-    /// What was pushed to the fork's BRANCH beyond main, as publication.rs
-    /// records it.
-    fn pushed(root: &Path, branch: &str) -> Value {
+    /// What was pushed to the fork's BRANCH beyond SINCE, as
+    /// publication.rs records it.
+    fn pushed(root: &Path, branch: &str, since: &str) -> Value {
         let bare = root.join(format!("{FORK}.git"));
         let log = sh(
             &bare,
@@ -3203,7 +4834,7 @@ mod tests {
                 "log",
                 "--format=%H",
                 "--reverse",
-                &format!("main..{branch}"),
+                &format!("{since}..{branch}"),
             ],
         );
         log.lines()
@@ -3273,9 +4904,13 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let checked = root.path().join("checked");
             std::fs::create_dir_all(&checked).unwrap();
+            let mut text = case.to_string();
             if !case["git"].is_null() {
-                repositories(&case["git"], root.path(), &checked);
+                for (placeholder, value) in repositories(&case["git"], root.path(), &checked) {
+                    text = text.replace(&placeholder, &value);
+                }
             }
+            let case: Value = serde_json::from_str(&text).unwrap();
             let (github, sent) = forge(
                 &case["forge"],
                 case["faults"].as_array().map_or(&[], Vec::as_slice),
@@ -3293,7 +4928,11 @@ mod tests {
                     continue;
                 }
                 let api = publisher.github.api_url().to_owned();
-                let run = run(at as u64 + 1, &api);
+                let mut run = run(at as u64 + 1, &api);
+                if let Some(event) = case.get("event") {
+                    run.event = event.clone();
+                    run.event_name = case["event_name"].as_str().unwrap().to_owned();
+                }
                 let records_dir = tempfile::tempdir().unwrap();
                 let path = |file: &str| records_dir.path().join(file);
                 std::fs::write(path("output"), "").unwrap();
@@ -3323,7 +4962,7 @@ mod tests {
                     publisher.github.request(method, path, body).unwrap();
                 }
                 sent.lock().unwrap().clear();
-                let policy = policy();
+                let policy = case_policy(&case);
                 let inputs = Checked {
                     items,
                     handlers,
@@ -3438,10 +5077,28 @@ mod tests {
             }
             if let Some(branch) = case["git"]["patch"]["branch"].as_str() {
                 let want = &golden["pushed"][format!("{FORK}:refs/heads/{branch}")];
-                assert_eq!(&pushed(root.path(), branch), want, "{name}: pushed");
+                // A push's commit goes on the branch as it was.
+                let since = match case["git"]["branches"][branch].is_null() {
+                    true => "main".to_owned(),
+                    false => sh(&root.path().join("seed"), &["rev-parse", branch]),
+                };
+                assert_eq!(&pushed(root.path(), branch, &since), want, "{name}: pushed");
             }
         }
-        assert_eq!(compared, 21, "the corpus's cases of the routed types");
+        assert_eq!(compared, 31, "the corpus's cases of the routed types");
+    }
+
+    /// The policy check's upload holds for CASE, as publication.rs writes
+    /// it: a push's pull request branch is its base.
+    fn case_policy(case: &Value) -> Policy {
+        let mut policy = policy();
+        if let Some(push) = case["config"].get(PUSH_TO_PULL_REQUEST_BRANCH) {
+            policy.repo = REPO.to_owned();
+            policy.base = case["env"]["BASE"].as_str().unwrap().to_owned();
+            policy.safe_outputs.push_to_pull_request_branch =
+                Some(serde_json::from_value(push.clone()).unwrap());
+        }
+        policy
     }
 
     /// apply.yml's hook and `stripExecutionProvenance`, against what the
@@ -3492,7 +5149,7 @@ mod tests {
 
     /// A request of a type gh-aw's handlers keep.
     fn gh_aw_item() -> Value {
-        json!({"type": "create_issue", "title": "Flaky", "body": "Why."})
+        json!({"type": "create_discussion", "title": "Flaky", "body": "Why."})
     }
 
     /// Each request goes to one set of handlers, the routed ones in the
@@ -3657,7 +5314,7 @@ mod tests {
                     item["title"] = json!("Réparer");
                     item["body"] = json!("# Réparer\n\nA local reproduction.");
                 },
-                "whose title is not ASCII",
+                "under a title that is not ASCII",
             ),
         ];
         let run = run(1, "http://127.0.0.1:1");
@@ -4131,5 +5788,565 @@ mod tests {
         run.event = json!({"discussion": {"number": 3}});
         assert_eq!(run.closing_triggering().unwrap(), None);
         assert_eq!(run.context_kind().unwrap(), "issue");
+        // An issue's or a review's footer names a pull request's issue as
+        // the pull request, after an issue of its own.
+        for (event, want) in [
+            (json!({"issue": {"number": 5}}), Some("#5")),
+            (
+                json!({"issue": {"number": 5, "pull_request": {}}}),
+                Some("#5"),
+            ),
+            (
+                json!({"issue": {"number": 5, "pull_request": {}}, "pull_request": {"number": 6}}),
+                Some("#6"),
+            ),
+            (json!({"discussion": {"number": 3}}), Some("discussion #3")),
+            (json!({}), None),
+        ] {
+            run.event = event;
+            assert_eq!(run.item_triggering().unwrap().as_deref(), want);
+        }
+    }
+
+    /// The corpus's case NAME, with its repositories made under the
+    /// directory returned and its placeholders filled, check's upload in
+    /// the path returned, and the handlers' configuration it recorded.
+    fn corpus_case(name: &str) -> (tempfile::TempDir, PathBuf, Value, Value) {
+        let cases: Vec<Value> =
+            serde_json::from_value(read_json(&corpus().join("cases.json"))).unwrap();
+        let case = cases.iter().find(|case| case["name"] == name).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let checked = root.path().join("checked");
+        std::fs::create_dir_all(&checked).unwrap();
+        let mut text = case.to_string();
+        if !case["git"].is_null() {
+            for (placeholder, value) in repositories(&case["git"], root.path(), &checked) {
+                text = text.replace(&placeholder, &value);
+            }
+        }
+        let golden = read_json(&corpus().join(format!("{name}.json")));
+        let handlers = golden["attempts"][0]["handler_config"].clone();
+        (
+            root,
+            checked,
+            serde_json::from_str(&text).unwrap(),
+            handlers,
+        )
+    }
+
+    /// What publishing ITEMS of CASE under HANDLERS and POLICY did against
+    /// its forge with FAULTS: whether all were published, the request
+    /// lines sent, and the records.
+    fn publish_case(
+        case: &Value,
+        root: &Path,
+        checked: &Path,
+        items: &[Value],
+        handlers: &Value,
+        policy: &Policy,
+        faults: &[Value],
+    ) -> (bool, Vec<Request>, tempfile::TempDir) {
+        let (github, sent) = forge(&case["forge"], faults);
+        let publisher = GithubPublisher {
+            github,
+            git: root.display().to_string(),
+            item_repo: REPO.into(),
+            repo: REPO.into(),
+        };
+        let records = tempfile::tempdir().unwrap();
+        let path = |file: &str| records.path().join(file);
+        std::fs::write(path("output"), "").unwrap();
+        let run = run(1, "http://127.0.0.1:1");
+        let ok = apply(
+            &Checked {
+                items,
+                handlers: handlers.as_object().unwrap(),
+                dir: checked,
+                policy,
+            },
+            &run,
+            &publisher,
+            &Records {
+                remainder: &path("remainder.json"),
+                made: &path("made.jsonl"),
+                errors: &path("errors.json"),
+                output: Some(&path("output")),
+                summary: Some(&path("summary")),
+                workflow: "agentic-job",
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        let sent = std::mem::take(&mut *sent.lock().unwrap());
+        (ok, sent, records)
+    }
+
+    /// The writes among SENT, as `METHOD PATH`.
+    fn writes(sent: &[Request]) -> Vec<String> {
+        sent.iter()
+            .map(|request| request.line.trim_end_matches(" HTTP/1.1").to_owned())
+            .filter(|line| !line.starts_with("GET "))
+            .collect()
+    }
+
+    /// A push onto a branch someone moved since the run was asked for is
+    /// not made, in gh-aw's words for it; the routed comment after it is
+    /// not posted, and gh-aw's has the warning its manager would give it.
+    #[test]
+    fn a_push_onto_a_moved_branch_fails_and_stops_what_follows() {
+        for routed_comment in [true, false] {
+            let (root, checked, case, mut handlers) = corpus_case("push-to-pull-request-branch");
+            handlers[ADD_COMMENT] = json!({"max": 1, "target-repo": REPO, "target": "7"});
+            let seed = root.path().join("seed");
+            git(&seed, &["checkout", "-q", "feature"]);
+            std::fs::write(seed.join("NOTES"), "moved\n").unwrap();
+            git(&seed, &["add", "NOTES"]);
+            git(
+                &seed,
+                &[
+                    "-c",
+                    "user.name=Someone",
+                    "-c",
+                    "user.email=someone@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "Move",
+                ],
+            );
+            let fork = root.path().join(format!("{FORK}.git"));
+            git(&seed, &["push", "-q", fork.to_str().unwrap(), "feature"]);
+            let moved = git(&seed, &["rev-parse", "HEAD"]);
+            let mut policy = case_policy(&case);
+            if !routed_comment {
+                policy.native_handlers = vec![PUSH_TO_PULL_REQUEST_BRANCH.to_owned()];
+            }
+            let comment = json!({"type": ADD_COMMENT, "item_number": 7, "body": "Pushed."});
+            let items = [case["items"][0].clone(), comment.clone()];
+            let (ok, sent, records) = publish_case(
+                &case,
+                root.path(),
+                &checked,
+                &items,
+                &handlers,
+                &policy,
+                &[],
+            );
+            assert!(!ok);
+            assert!(writes(&sent).is_empty(), "{:?}", writes(&sent));
+            assert_eq!(git(&fork, &["rev-parse", "feature"]), moved);
+            let errors = read_json(&records.path().join("errors.json"));
+            assert_eq!(errors["failures"][0]["error"], NON_FAST_FORWARD);
+            let output = std::fs::read_to_string(records.path().join("output")).unwrap();
+            assert!(output.contains("code_push_failure_count=1\n"), "{output}");
+            let remainder = read_json(&records.path().join("remainder.json"))["items"].clone();
+            if routed_comment {
+                assert_eq!(remainder, json!([]));
+                assert_eq!(
+                    errors["failures"][1]["error"],
+                    format!(
+                        "not posted: the {PUSH_TO_PULL_REQUEST_BRANCH} before it failed \
+                         ({NON_FAST_FORWARD})"
+                    )
+                );
+            } else {
+                let body = remainder[0]["body"].as_str().unwrap();
+                assert!(
+                    body.starts_with(&format!(
+                        "\n\n---\n> [!WARNING]\n> The `{PUSH_TO_PULL_REQUEST_BRANCH}` operation \
+                         failed: {NON_FAST_FORWARD}. The code changes were not applied.\n\n"
+                    )) && body.ends_with("Pushed."),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// A push gh-aw's handler would make otherwise is refused before
+    /// anything is published; one of a protected file is skipped, as it
+    /// skips it, with nothing written.
+    #[test]
+    fn push_refusals() {
+        type Change = fn(&mut Value, &mut Value, &Path);
+        let cases: &[(Change, &str)] = &[
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["signed_commits"] = json!(true)
+                },
+                "signed_commits is not false",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["fallback_as_pull_request"] = json!(true);
+                },
+                "fallback_as_pull_request is not false",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["checkout_mapping"] = json!({})
+                },
+                "checkout_mapping",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["allowed_repos"] = json!(["a/b"])
+                },
+                "allows other repositories",
+            ),
+            (
+                |handlers, _, _| handlers[PUSH_TO_PULL_REQUEST_BRANCH]["target"] = json!("*"),
+                "the policy's pull request",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["head"] = json!("a".repeat(40))
+                },
+                "is not the policy's",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["title_prefix"] = json!("[x]")
+                },
+                "\"title_prefix\"",
+            ),
+            (
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["target-repo"] = json!("other/repo");
+                },
+                "target-repo other/repo is not the policy's",
+            ),
+            (
+                |_, item, _| item["branch"] = json!("other"),
+                "not the policy's feature",
+            ),
+            (
+                |_, item, _| item["commit_message"] = json!("x"),
+                "the field \"commit_message\"",
+            ),
+            (
+                |_, _, checked| {
+                    let path = checked.join(REPORT_FILE);
+                    let mut report = read_json(&path);
+                    report["patch"]["commit_files"] = json!([]);
+                    std::fs::write(path, report.to_string()).unwrap();
+                },
+                "replacement series",
+            ),
+        ];
+        for (change, want) in cases {
+            let (root, checked, case, mut handlers) = corpus_case("push-to-pull-request-branch");
+            let mut item = case["items"][0].clone();
+            change(&mut handlers, &mut item, &checked);
+            let (github, sent) = forge(&case["forge"], &[]);
+            let publisher = GithubPublisher {
+                github,
+                git: root.path().display().to_string(),
+                item_repo: REPO.into(),
+                repo: REPO.into(),
+            };
+            let records = tempfile::tempdir().unwrap();
+            let path = |file: &str| records.path().join(file);
+            let err = apply(
+                &Checked {
+                    items: &[item],
+                    handlers: handlers.as_object().unwrap(),
+                    dir: &checked,
+                    policy: &case_policy(&case),
+                },
+                &run(1, "http://127.0.0.1:1"),
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains(want), "{want}: {err:#}");
+            assert!(sent.lock().unwrap().is_empty(), "{want}");
+            assert!(!path("remainder.json").exists(), "{want}");
+        }
+
+        let (root, checked, case, mut handlers) = corpus_case("push-to-pull-request-branch");
+        handlers[PUSH_TO_PULL_REQUEST_BRANCH]["protected_files"] = json!(["sub.rs"]);
+        let items = [case["items"][0].clone()];
+        let policy = case_policy(&case);
+        let (ok, sent, records) = publish_case(
+            &case,
+            root.path(),
+            &checked,
+            &items,
+            &handlers,
+            &policy,
+            &[],
+        );
+        assert!(ok);
+        assert!(sent.is_empty());
+        let output = std::fs::read_to_string(records.path().join("output")).unwrap();
+        assert!(output.contains("status=completed_with_skips\n"), "{output}");
+        let summary = std::fs::read_to_string(records.path().join("summary")).unwrap();
+        assert!(
+            summary.contains("**Reason Code:** `POLICY_FILE_PROTECTION_DENIED`"),
+            "{summary}"
+        );
+    }
+
+    /// Issues and review comments this cannot publish as gh-aw does are
+    /// refused from what they hold, or from the handlers' settings and the
+    /// event, before anything is published.
+    #[test]
+    fn issue_and_review_comment_refusals() {
+        let routed = policy().native_handlers;
+        let issue = json!({"type": CREATE_ISSUE, "title": "Flaky", "body": "Why."});
+        let comment = json!({"type": CREATE_REVIEW_COMMENT, "path": "src/lib.rs", "line": 2,
+            "body": "Overflows."});
+        let with = |item: &Value, key: &str, value: Value| {
+            let mut item = item.clone();
+            item[key] = value;
+            item
+        };
+        for (items, want) in [
+            (
+                vec![with(&issue, "labels", json!(["a@b"]))],
+                "the label \"a@b\"",
+            ),
+            (vec![with(&issue, "title", json!(5))], "title is not text"),
+            (
+                vec![with(&issue, "parent", json!(7))],
+                "the field \"parent\"",
+            ),
+            (
+                vec![with(&comment, "line", json!(0))],
+                "positive integer line",
+            ),
+            (
+                vec![with(&comment, "line", json!("2"))],
+                "positive integer line",
+            ),
+            (vec![with(&comment, "start_line", json!(3))], "start_line"),
+            (
+                vec![with(&comment, "side", json!("UP"))],
+                "side is not LEFT or RIGHT",
+            ),
+            (vec![with(&comment, "body", json!(""))], "a path and a body"),
+            (
+                vec![with(&comment, "start_side", json!("LEFT"))],
+                "the field \"start_side\"",
+            ),
+            (
+                vec![comment.clone(), gh_aw_item()],
+                "the review is submitted after everything else",
+            ),
+        ] {
+            let errors = split(&items, &routed).unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
+        assert!(split(&[with(&comment, "start_line", json!(1))], &routed).is_ok());
+        // gh-aw's pull request or push may open an issue in its place.
+        for theirs in [
+            pull_request_item(),
+            json!({"type": PUSH_TO_PULL_REQUEST_BRANCH}),
+        ] {
+            let errors = split(&[issue.clone(), theirs], &[CREATE_ISSUE.to_owned()]).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("create_issue count bounds both")),
+                "{errors:?}"
+            );
+        }
+        let closing = json!({"type": CLOSE_ISSUE, "issue_number": 7, "body": "Done."});
+        assert!(split(&[issue.clone(), closing], &[CREATE_ISSUE.to_owned()]).is_ok());
+
+        let handlers = json!({
+            CREATE_ISSUE: {"max": 1, "target-repo": REPO, "title_prefix": ""},
+            CREATE_REVIEW_COMMENT: {"max": 1, "target-repo": REPO, "target": "7"},
+        });
+        type Change = fn(&mut Value, &mut Run);
+        let cases: &[(&Value, Change, &str)] = &[
+            (
+                &issue,
+                |handlers, _| handlers[CREATE_ISSUE]["labels"] = json!(["triage"]),
+                "\"labels\"",
+            ),
+            (
+                &issue,
+                |handlers, _| handlers[CREATE_ISSUE]["title_prefix"] = json!(5),
+                "title_prefix is not text",
+            ),
+            (
+                &issue,
+                |_, run| run.event = json!({"issue": {"number": "7"}}),
+                "is not one gh-aw writes as is",
+            ),
+            (
+                &comment,
+                |handlers, _| handlers[CREATE_REVIEW_COMMENT]["target"] = json!("*"),
+                "without one pull request",
+            ),
+            (
+                &comment,
+                |handlers, _| handlers[CREATE_REVIEW_COMMENT]["side"] = json!("LEFT"),
+                "\"side\"",
+            ),
+            (
+                &comment,
+                |_, run| run.event = json!({"inputs": {"aw_context": "{}"}}),
+                "aw_context",
+            ),
+        ];
+        for (item, change, want) in cases {
+            let mut handlers = handlers.clone();
+            let mut run = run(1, "http://127.0.0.1:1");
+            change(&mut handlers, &mut run);
+            let Split { ours, .. } = split(&[(*item).clone()], &routed).unwrap();
+            let errors = plan(
+                ours,
+                handlers.as_object().unwrap(),
+                Path::new("/nonexistent"),
+                &policy(),
+                &run,
+            )
+            .unwrap_err();
+            assert!(
+                errors.iter().any(|error| error.contains(want)),
+                "{want}: {errors:?}"
+            );
+        }
+    }
+
+    /// A review the forge refuses for comments it cannot anchor is
+    /// submitted again with those in its body, as gh-aw's buffer does; one
+    /// of a locked pull request is skipped; any other refusal fails the
+    /// comments buffered for it.
+    #[test]
+    fn reviews_fall_back_as_gh_aw_does() {
+        let (root, checked, case, _) = corpus_case("review-comment");
+        let handlers =
+            json!({CREATE_REVIEW_COMMENT: {"max": 2, "target-repo": REPO, "target": "7"}});
+        let items = [
+            json!({"type": CREATE_REVIEW_COMMENT, "path": "src/lib.rs", "line": 1, "body": "One."}),
+            json!({"type": CREATE_REVIEW_COMMENT, "path": "src/lib.rs", "line": 2, "body": "Two."}),
+        ];
+        let reviews = "POST /repos/owner/repo/pulls/7/reviews";
+        let unresolved = |errors: Value| {
+            json!({"method": "POST", "path": "/repos/owner/repo/pulls/7/reviews", "status": 422,
+                "answer": {"message": "Unprocessable Entity", "errors": errors}})
+        };
+        let line = json!({"resource": "PullRequestReviewComment", "field": "comments[1].line",
+            "message": "Line could not be resolved"});
+        let locked = json!({"method": "POST", "path": "/repos/owner/repo/pulls/7/reviews",
+            "status": 422, "answer": {"message": "Unprocessable Entity: lock prevents review"}});
+        let broken = json!({"method": "POST", "path": "/repos/owner/repo/pulls/7/reviews",
+            "status": 500});
+        let section = "### Comments that could not be inline-anchored";
+        // The faults, how many reviews are asked for, the comments and
+        // body of the last, and how the run ends.
+        type Want = (usize, &'static [u64], Option<&'static str>, &'static str);
+        let cases: Vec<(Vec<Value>, Want)> = vec![
+            (
+                vec![unresolved(json!([line]))],
+                (
+                    2,
+                    &[1],
+                    Some("<summary>src/lib.rs:2</summary>\n\nTwo."),
+                    "success",
+                ),
+            ),
+            (
+                vec![unresolved(json!(["Line could not be resolved"]))],
+                (
+                    2,
+                    &[],
+                    Some("<summary>src/lib.rs:1</summary>\n\nOne."),
+                    "success",
+                ),
+            ),
+            (
+                vec![locked.clone(), locked.clone(), locked.clone(), locked],
+                (4, &[1, 2], None, "completed_with_skips"),
+            ),
+            (vec![broken.clone(), broken], (2, &[1, 2], None, "failure")),
+        ];
+        for (faults, (asked, lines, body, status)) in cases {
+            let policy = policy();
+            let (ok, sent, records) = publish_case(
+                &case,
+                root.path(),
+                &checked,
+                &items,
+                &handlers,
+                &policy,
+                &faults,
+            );
+            let posted: Vec<&Request> = sent
+                .iter()
+                .filter(|request| request.line.starts_with(reviews))
+                .collect();
+            assert_eq!(posted.len(), asked, "{status}");
+            let last = &posted[asked - 1].body;
+            let got: Vec<u64> = last["comments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|comment| comment["line"].as_u64().unwrap())
+                .collect();
+            assert_eq!(got, lines, "{status}");
+            if let Some(body) = body {
+                let text = last["body"].as_str().unwrap();
+                assert!(text.contains(section) && text.contains(body), "{text}");
+            }
+            let output = std::fs::read_to_string(records.path().join("output")).unwrap();
+            assert!(output.contains(&format!("status={status}\n")), "{output}");
+            assert_eq!(ok, status != "failure");
+            let made =
+                std::fs::read_to_string(records.path().join("made.jsonl")).unwrap_or_default();
+            let made: Vec<Value> = made
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if status == "success" {
+                assert_eq!(made[0]["type"], SUBMIT_REVIEW);
+                assert_eq!(made.len(), 1 + lines.len());
+            } else {
+                assert!(made.is_empty(), "{made:?}");
+            }
+            if status == "failure" {
+                let errors = read_json(&records.path().join("errors.json"));
+                assert!(
+                    errors["failures"][1]["error"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Review finalization failed: ERR_API: "),
+                    "{errors}"
+                );
+            }
+        }
+    }
+
+    /// The fallback section keeps each comment to an excerpt, escaped.
+    #[test]
+    fn unanchored_comments_are_excerpts() {
+        let long = "x".repeat(FALLBACK_EXCERPT + 1);
+        let comments = [
+            json!({"path": "a&b.rs", "line": 3, "body": long}),
+            json!({"path": "c.rs", "line": 4, "body": "  "}),
+        ];
+        let body = with_unanchored("Footer.", &comments);
+        assert_eq!(
+            body,
+            format!(
+                "Footer.\n\n{FALLBACK_HEADER}\n\n<details><summary>a&amp;b.rs:3</summary>\n\n{}…\n\n\
+                 </details>\n\n<details><summary>c.rs:4</summary>\n\n{FALLBACK_EMPTY}\n\n</details>",
+                "x".repeat(FALLBACK_EXCERPT - 1)
+            )
+        );
     }
 }

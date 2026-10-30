@@ -258,6 +258,8 @@ impl Github {
                     files: &pr.files,
                     head: None,
                     committer: None,
+                    at_author_date: false,
+                    max_changed_kb: None,
                 },
                 None,
             )
