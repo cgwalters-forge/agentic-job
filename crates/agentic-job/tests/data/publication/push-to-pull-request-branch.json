@@ -136,7 +136,35 @@
             "body"
           ]
         }
-      ]
+      ],
+      "edits": [
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "push_to_pull_request_branch",
+              "branch": "feature",
+              "message": "Address review"
+            }
+          ]
+        }
+      ],
+      "pushed": {
+        "agentic-bot/repo:refs/heads/feature": [
+          {
+            "author": "Agent <agent@example.invalid>",
+            "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+            "message": "sub: Saturate",
+            "files": [
+              "src/sub.rs"
+            ]
+          }
+        ]
+      }
     }
   ],
   "pushed": {

@@ -1,0 +1,310 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "partial-pull-request-issue-trailers",
+  "attempts": [
+    {
+      "handler_config": {
+        "create_pull_request": {
+          "max": 1,
+          "protected_files": [],
+          "protect_top_level_dot_folders": true,
+          "protected_files_policy": "blocked",
+          "draft": true,
+          "max_patch_size": 1024,
+          "max_patch_files": 100,
+          "signed_commits": false,
+          "fallback_as_issue": false,
+          "preserve_branch_name": true,
+          "auto_close_issue": false,
+          "target-repo": "owner/repo",
+          "base_branch": "main",
+          "branch_prefix": "",
+          "title_prefix": "[partial: stopped at the timeout] ",
+          "head-repo": "agentic-bot/repo",
+          "allowed_repos": [
+            "agentic-bot/repo"
+          ]
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot"
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "create_pull_request",
+            "title": "Fix the overflow",
+            "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.\n\nCloses #7\n\nagentic-job-applied: 4242/0/6141739ca946cd33",
+            "branch": "agent-run-4242"
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "created_pr_number": "1",
+          "created_pr_url": "https://github.com/owner/repo/pull/1",
+          "items_applied": "1",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "1",
+          "items_warnings": "0",
+          "processed_count": "1",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [
+          "::warning::Multi-repo support disabled: GITHUB_TOKEN not available for dynamic checkout"
+        ],
+        "summary": "\n\n## Pull Request\n- **Pull Request**: [#1](https://github.com/owner/repo/pull/1)\n- **Branch**: `agent-run-4242`\n- **Base Branch**: `main`\n<details>\n<summary>✅ Safe Output Processing Summary (1 applied, 0 skipped, 0 failed)</summary>\n\nProcessed 1 safe-output message(s).\n\nStatus: **success**\n\nApplied: **1** · Skipped: **0** · Warnings: **0** · Failed: **0** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Success | Create Pull Request | 1 |  |\n\n<details>\n<summary>✅ Create Pull Request - Success (Message 1)</summary>\n\n### Create Pull Request\n\n**Target:** [owner/repo#1](https://github.com/owner/repo/pull/1)\n\n**Temporary ID:** `{temporary_id}`\n\n**Title:** Fix the overflow\n\n</details>\n\n</details>\n\n",
+        "made": [
+          {
+            "type": "create_pull_request",
+            "url": "https://github.com/owner/repo/pull/1",
+            "number": 1,
+            "repo": "owner/repo",
+            "provider": "github",
+            "id": 1001,
+            "target": {
+              "provider": "github",
+              "repository": "owner/repo",
+              "number": 1
+            },
+            "temporaryId": "{temporary_id}",
+            "metadata": {
+              "node_id": "N_1001"
+            },
+            "timestamp": "{time}"
+          }
+        ],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls?head=agentic-bot%3Aagent-run-4242&state=all&per_page=100",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/collaborators?affiliation=direct&per_page=30",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "POST",
+          "path": "/repos/owner/repo/pulls",
+          "api_version": "2026-03-10",
+          "body": {
+            "title": "[partial: stopped at the timeout] Fix the overflow",
+            "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.\n\nCloses #7\n\n<!-- agentic-job-applied: 4242/0/6141739ca946cd33 -->\n\n> Generated by [agentic-job](https://github.com/owner/repo/actions/runs/4242) · [◷](https://github.com/search?q=repo%3Aowner%2Frepo+%22gh-aw-workflow-id%3A+agentic-job%22&type=pullrequests)\n\n\n\n<!-- gh-aw-workflow-id: agentic-job -->\n\n<!-- gh-aw-agentic-workflow: agentic-job, id: 4242, workflow_id: agentic-job, run: https://github.com/owner/repo/actions/runs/4242 -->\n<!-- gh-aw-execution: {\"version\":1,\"repo_id\":\"77\",\"repository\":\"owner/repo\",\"aw_workflow_id\":\"agentic\\u002djob\",\"run_id\":\"4242\",\"run_attempt\":\"1\",\"run_url\":\"https://github.com/owner/repo/actions/runs/4242\",\"publishing_job\":{\"key\":\"apply\",\"check_run_id\":\"9001\"}} -->",
+            "head": "agentic-bot:agent-run-4242",
+            "head_repo": "agentic-bot/repo",
+            "base": "main",
+            "draft": true
+          },
+          "keys": [
+            "title",
+            "body",
+            "head",
+            "head_repo",
+            "base",
+            "draft"
+          ]
+        }
+      ],
+      "edits": [
+        {
+          "step": "Mark what a partial run opens or posts",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "create_pull_request",
+              "title": "Fix the overflow",
+              "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.",
+              "branch": "agent-run-4242"
+            }
+          ]
+        },
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "create_pull_request",
+              "title": "Fix the overflow",
+              "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.\n\nCloses #7",
+              "branch": "agent-run-4242"
+            }
+          ]
+        }
+      ],
+      "pushed": {
+        "agentic-bot/repo:refs/heads/agent-run-4242": [
+          {
+            "author": "Agent <agent@example.invalid>",
+            "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+            "message": "lib: Check for overflow\n\nGenerated-by: https://github.com/cgwalters/#llms\nCo-authored-by: Contributor <contributor@example.invalid>",
+            "files": [
+              "src/lib.rs"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "handler_config": {
+        "create_pull_request": {
+          "max": 1,
+          "protected_files": [],
+          "protect_top_level_dot_folders": true,
+          "protected_files_policy": "blocked",
+          "draft": true,
+          "max_patch_size": 1024,
+          "max_patch_files": 100,
+          "signed_commits": false,
+          "fallback_as_issue": false,
+          "preserve_branch_name": true,
+          "auto_close_issue": false,
+          "target-repo": "owner/repo",
+          "base_branch": "main",
+          "branch_prefix": "",
+          "title_prefix": "[partial: stopped at the timeout] ",
+          "head-repo": "agentic-bot/repo",
+          "allowed_repos": [
+            "agentic-bot/repo"
+          ]
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot",
+          "pull-request-number": "1",
+          "pull-request-url": "https://github.com/owner/repo/pull/1"
+        },
+        "annotations": [],
+        "summary": "<h3>Already applied by an earlier attempt, so left out</h3>\n<ul><li>create_pull_request: https://github.com/owner/repo/pull/1</li></ul>\n",
+        "items": [],
+        "skipped": [
+          {
+            "type": "create_pull_request",
+            "name": "agentic-job-applied: 4242/0/6141739ca946cd33",
+            "url": "https://github.com/owner/repo/pull/1"
+          }
+        ]
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "items_applied": "0",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "0",
+          "items_warnings": "0",
+          "processed_count": "0",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [],
+        "summary": "",
+        "made": [],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls?head=agentic-bot%3Aagent-run-4242&state=all&per_page=100",
+          "api_version": ""
+        }
+      ],
+      "edits": [
+        {
+          "step": "Mark what a partial run opens or posts",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "create_pull_request",
+              "title": "Fix the overflow",
+              "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.",
+              "branch": "agent-run-4242"
+            }
+          ]
+        },
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "create_pull_request",
+              "title": "Fix the overflow",
+              "body": "**Partial work.** The run was stopped at its timeout before the task was done; this is what it handed back.\n\nChecks the length first.\n\nCloses #7",
+              "branch": "agent-run-4242"
+            }
+          ]
+        }
+      ],
+      "pushed": {}
+    }
+  ],
+  "pushed": {
+    "agentic-bot/repo:refs/heads/agent-run-4242": [
+      {
+        "author": "Agent <agent@example.invalid>",
+        "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+        "message": "lib: Check for overflow\n\nGenerated-by: https://github.com/cgwalters/#llms\nCo-authored-by: Contributor <contributor@example.invalid>",
+        "files": [
+          "src/lib.rs"
+        ]
+      }
+    ]
+  }
+}

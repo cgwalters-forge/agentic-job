@@ -5,15 +5,15 @@
 //! record before it may replace them, and the record has to come from the
 //! pinned code, not from what someone expects it to do.
 //!
-//! Each case runs four of apply.yml's steps: the one that writes the
+//! Each case runs apply.yml's steps: the one that writes the
 //! handlers' configuration, then the guard that leaves out what an earlier
 //! attempt applied (policy's binary, as apply.yml runs it), the check of
 //! project fields and the one that runs gh-aw's handler manager, the last
 //! two scripts read from apply.yml and run by the pinned
-//! `actions/github-script` bundle. The steps before the guard that edit the requests (a review's
-//! folded findings, a partial run's note, a pull request's issue) are not
-//! run: the requests are as those steps would leave a complete run's
-//! without an issue. Its client talks to a loopback forge here, which records every
+//! `actions/github-script` bundle. The request-editing steps before the guard
+//! also run where applicable (folded review findings, a partial run's note,
+//! and a pull request's issue link), recording their results. Its client
+//! talks to a loopback forge here, which records every
 //! request and keeps what was posted, so that a second attempt finds it;
 //! git pushes go to bare repositories in a scratch directory. Nothing is
 //! sent to a real forge. The forge's starting state and its failures are
@@ -69,6 +69,9 @@ const PROJECT_STEP: &str = "Check the project fields before anything is publishe
 const APPLY_STEP: &str = "Apply the outputs with gh-aw's handlers";
 const ROUTE_STEP: &str = "Which outputs agentic-job publishes";
 const PUBLISH_STEP: &str = "Publish the outputs routed to agentic-job";
+const FOLD_STEP: &str = "Put a review's inline findings in its comment";
+const PARTIAL_STEP: &str = "Mark what a partial run opens or posts";
+const ISSUE_STEP: &str = "Say which issue a pull request is for";
 
 /// The calling, output and item repository unless a case says otherwise.
 const REPO: &str = "owner/repo";
@@ -184,6 +187,78 @@ fn corpus_is_recorded_at_apply_pins() {
         .collect();
     files.sort();
     assert_eq!(files, names, "a golden file without its case");
+}
+
+/// Regeneration must still exercise these paths, not bless a case that
+/// accidentally stopped reaching its handler or its second attempt.
+#[test]
+fn recorded_followups_exercise_their_paths() {
+    for name in ["push-rerun-trailers", "push-rerun-half-applied"] {
+        let recorded = read_json(&golden(name));
+        let attempts = recorded["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 2, "{name}");
+        assert!(
+            !attempts[0]["pushed"].as_object().unwrap().is_empty(),
+            "{name}"
+        );
+        assert_eq!(attempts[1]["pushed"], json!({}), "{name}");
+        assert_eq!(attempts[1]["guard"]["items"], json!([]), "{name}");
+        assert_eq!(
+            attempts[1]["guard"]["skipped"][0]["type"], "push_to_pull_request_branch",
+            "{name}"
+        );
+        if name == "push-rerun-half-applied" {
+            assert!(
+                attempts[0]["apply"]["annotations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|note| note.as_str().unwrap().contains("Failed to create comment"))
+            );
+        }
+    }
+    for (name, branch) in [
+        ("push-rerun-trailers", "feature"),
+        ("partial-pull-request-issue-trailers", "agent-run-4242"),
+    ] {
+        let recorded = read_json(&golden(name));
+        let commit = &recorded["pushed"][format!("{FORK}:refs/heads/{branch}")][0];
+        assert_eq!(commit["author"], "Agent <agent@example.invalid>");
+        let message = commit["message"].as_str().unwrap();
+        assert!(message.contains("\nGenerated-by: https://github.com/cgwalters/#llms\n"));
+        assert!(message.contains("\nCo-authored-by: Contributor <contributor@example.invalid>"));
+        assert!(!message.contains("Co-authored-by: github-actions"));
+    }
+    let recorded = read_json(&golden("handler-comment-pagination"));
+    let requests = recorded["attempts"][0]["requests"].as_array().unwrap();
+    assert!(
+        requests.iter().any(|r| r["step"] == "apply"
+            && r["path"].as_str().unwrap().ends_with("per_page=100&page=2"))
+    );
+    assert!(requests.iter().any(|r| r["step"] == "apply"
+        && r["method"] == "PATCH"
+        && r["path"] == "/repos/owner/repo/issues/comments/900"));
+    for (name, edit_steps) in [
+        (
+            "partial-pull-request-issue-trailers",
+            vec![PARTIAL_STEP, ISSUE_STEP],
+        ),
+        ("review-folded-findings-rerun", vec![FOLD_STEP]),
+    ] {
+        let recorded = read_json(&golden(name));
+        for attempt in recorded["attempts"].as_array().unwrap() {
+            let edits = attempt["edits"].as_array().unwrap();
+            assert_eq!(
+                edits
+                    .iter()
+                    .map(|edit| edit["step"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                edit_steps
+            );
+            assert!(edits.iter().all(|edit| edit["exit"] == 0));
+        }
+        assert_eq!(recorded["attempts"][1]["guard"]["items"], json!([]));
+    }
 }
 
 /// The keys of a JSON object in the order they were sent.
@@ -1231,13 +1306,16 @@ fn seed(case: &Value) -> Value {
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .unwrap();
-        for id in 1..=count.as_u64().unwrap() {
-            comments.push(json!({
+        // Filler precedes any seeded match, so that the handler has to
+        // reach the next page to find it.
+        let filler = (1..=count.as_u64().unwrap()).map(|id| {
+            json!({
                 "id": id,
                 "body": format!("Comment {id}."),
                 "user": {"login": "someone-else", "type": "User"},
-            }));
-        }
+            })
+        });
+        comments.splice(0..0, filler);
     }
     Value::Object(seed)
 }
@@ -1511,6 +1589,25 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
     let attempts = case["attempts"].as_u64().unwrap_or(1);
     let mut recorded = vec![];
     for attempt in 1..=attempts {
+        let before_attempt = branches(&scratch);
+        if has_patch {
+            // A re-run has a fresh checkout and fetches the head again
+            // before its trial and guard; do not keep the first attempt's
+            // stale target-base ref (or its handler's working branch).
+            let workspace = scratch.path("workspace");
+            scratch.git(&workspace, &["checkout", "--quiet", "main"]);
+            let base = &vars["BASE"];
+            scratch.git(
+                &workspace,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    &format!("{SERVER}/{}", if base == "main" { REPO } else { FORK }),
+                    &format!("+refs/heads/{base}:refs/agentic-job/target-base"),
+                ],
+            );
+        }
         forge.state().attempt = attempt;
         fresh_tmp(&scratch, case, &tmp, native);
         let mut env = base.clone();
@@ -1535,6 +1632,37 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
         env.extend(read_commands(&github_env));
 
         let mut steps = Map::new();
+        let mut edits = vec![];
+        if paths.is_some() {
+            if case["review"] == true {
+                // check.yml produces this upload with policy's binary;
+                // apply.yml moves it into place, rather than folding twice.
+                let folded = Command::new(env!("CARGO_BIN_EXE_agentic-job"))
+                    .args(["review", "fold"])
+                    .arg(tmp.join("agent_output.json"))
+                    .output()
+                    .unwrap();
+                assert!(folded.status.success(), "{name}: review fold");
+                std::fs::write(tmp.join("folded.json"), folded.stdout).unwrap();
+            }
+            for (enabled, name) in [
+                (case["review"] == true, FOLD_STEP),
+                (!vars["PARTIAL"].is_empty(), PARTIAL_STEP),
+                (has_patch, ISSUE_STEP),
+            ] {
+                if !enabled {
+                    continue;
+                }
+                let (exit, outputs, annotations, summary) =
+                    bash_step(doc, &scratch, name, &env, str::to_owned);
+                edits.push(json!({
+                    "step": name, "exit": exit, "outputs": outputs,
+                    "annotations": annotations, "summary": summary,
+                    "items": read_json(&tmp.join("agent_output.json"))["items"],
+                }));
+                assert_eq!(exit, 0, "{name}: request edit failed");
+            }
+        }
         for (label, step_name) in [("guard", GUARD_STEP), ("apply", APPLY_STEP)] {
             // A guard that fails skips the handlers, as a failed step does.
             if label == "apply" && steps["guard"]["exit"] != 0 {
@@ -1619,6 +1747,12 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
             "apply": steps.get("apply").cloned().unwrap_or(Value::Null),
             "requests": requests,
         });
+        if !edits.is_empty() {
+            attempt["edits"] = json!(edits);
+        }
+        if has_patch {
+            attempt["pushed"] = pushed(&scratch, &before_attempt);
+        }
         for label in ["project", "publish"] {
             if let Some(result) = steps.get(label) {
                 attempt[label] = result.clone();
@@ -1660,6 +1794,57 @@ fn checkout(var: &str, want: &str) -> PathBuf {
     path
 }
 
+/// Keep CI diagnostics useful without letting a large golden swamp the log.
+fn drift_diff(expected: &Path, actual: &Path) -> String {
+    const MAX_LINES: usize = 120;
+    const MAX_BYTES: usize = 16 * 1024;
+    let diff = Command::new("git")
+        .args([
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-color",
+            "--unified=3",
+            "--",
+        ])
+        .args([expected, actual])
+        .output()
+        .unwrap();
+    assert!(
+        matches!(diff.status.code(), Some(0 | 1)),
+        "git diff: {}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    let text = String::from_utf8_lossy(&diff.stdout);
+    let mut shown = String::new();
+    for (at, line) in text.split_inclusive('\n').enumerate() {
+        if at >= MAX_LINES || shown.len() + line.len() > MAX_BYTES {
+            shown.push_str("\n[diff truncated; full actual file is saved at the path above]\n");
+            break;
+        }
+        shown.push_str(line);
+    }
+    shown
+}
+
+#[test]
+fn drift_diff_is_unified_and_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = dir.path().join("expected.json");
+    let actual = dir.path().join("actual.json");
+    std::fs::write(&expected, "old\n").unwrap();
+    std::fs::write(&actual, "new\n").unwrap();
+    let diff = drift_diff(&expected, &actual);
+    assert!(diff.contains("@@ -1 +1 @@\n-old\n+new\n"), "{diff}");
+    for text in ["new\n".repeat(200), "x".repeat(32 * 1024)] {
+        std::fs::write(&actual, text).unwrap();
+        let diff = drift_diff(&expected, &actual);
+        assert!(diff.contains("[diff truncated;"));
+        assert!(diff.len() < 17 * 1024);
+        assert!(diff.lines().count() <= 122);
+    }
+}
+
 #[test]
 #[ignore = "needs the pinned gh-aw and github-script checkouts; CI's publication job runs it"]
 fn handlers_publish_as_recorded() {
@@ -1683,7 +1868,15 @@ fn handlers_publish_as_recorded() {
         } else if std::fs::read_to_string(golden(name)).ok().as_deref() != Some(&text) {
             let actual = std::env::temp_dir().join(format!("publication-{name}.json"));
             std::fs::write(&actual, &text).unwrap();
+            eprintln!(
+                "{name} (now: {})\n{}",
+                actual.display(),
+                drift_diff(&golden(name), &actual)
+            );
             drifted.push(format!("{name} (now: {})", actual.display()));
+            // A stale expectation must not hide its diff behind a routed
+            // parity assertion against that same stale expectation.
+            continue;
         }
         // Here, as each one's gh-aw_TMP is the one fixed directory.
         assert_routed_as_recorded(&run_case(Some(&paths), &case, true), &case);

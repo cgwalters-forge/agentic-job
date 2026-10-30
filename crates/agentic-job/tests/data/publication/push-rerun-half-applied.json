@@ -1,0 +1,268 @@
+{
+  "pins": {
+    "gh_aw": "462ed682857c4ab64d40f2c85e3738fa27834839",
+    "github_script": "3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  },
+  "case": "push-rerun-half-applied",
+  "attempts": [
+    {
+      "handler_config": {
+        "push_to_pull_request_branch": {
+          "max": 1,
+          "target": "7",
+          "head": "1667df612591d67b882a89951c1f5fca9fcda99f",
+          "protected_files": [],
+          "protect_top_level_dot_folders": true,
+          "protected_files_policy": "blocked",
+          "max_patch_size": 1024,
+          "max_patch_files": 100,
+          "signed_commits": false,
+          "fallback_as_pull_request": false,
+          "if_no_changes": "error",
+          "target-repo": "owner/repo",
+          "head-repo": "agentic-bot/repo",
+          "allowed_repos": [
+            "agentic-bot/repo"
+          ],
+          "checkout_mapping": {
+            "owner/repo": "."
+          }
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot"
+        },
+        "annotations": [],
+        "summary": "",
+        "items": [
+          {
+            "type": "push_to_pull_request_branch",
+            "branch": "feature",
+            "message": "Address review"
+          }
+        ],
+        "skipped": []
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "code_push_failure_count": "0",
+          "code_push_failure_errors": "",
+          "create_discussion_error_count": "0",
+          "create_discussion_errors": "",
+          "items_applied": "1",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "1",
+          "items_warnings": "0",
+          "processed_count": "1",
+          "push_commit_sha": "c714ec1a63a0db71f1644760f14a236975df3cbb",
+          "push_commit_url": "https://github.com/agentic-bot/repo/commit/c714ec1a63a0db71f1644760f14a236975df3cbb",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [
+          "::warning::Failed to create comment on owner/repo#7: injected failure"
+        ],
+        "summary": "\n## Push to Branch\n- **Branch**: `feature`\n- **Commit**: [c714ec1](https://github.com/agentic-bot/repo/commit/c714ec1a63a0db71f1644760f14a236975df3cbb)\n- **URL**: [https://github.com/agentic-bot/repo/tree/feature](https://github.com/agentic-bot/repo/tree/feature)\n<details>\n<summary>✅ Safe Output Processing Summary (1 applied, 0 skipped, 0 failed)</summary>\n\nProcessed 1 safe-output message(s).\n\nStatus: **success**\n\nApplied: **1** · Skipped: **0** · Warnings: **0** · Failed: **0** · Cancelled: **0** · Deferred: **0**\n\n| Outcome | Type | Count | Reason |\n|---|---|---:|---|\n| Success | Push To Pull Request Branch | 1 |  |\n\n<details>\n<summary>✅ Push To Pull Request Branch - Success (Message 1)</summary>\n\n### Push To Pull Request Branch\n\n**Target:** [owner/repo#7](https://github.com/owner/repo/pull/7)\n\n</details>\n\n</details>\n\n",
+        "made": [
+          {
+            "type": "push_to_pull_request_branch",
+            "url": "https://github.com/owner/repo/pull/7",
+            "number": 7,
+            "repo": "owner/repo",
+            "provider": "github",
+            "target": {
+              "provider": "github",
+              "repository": "owner/repo",
+              "number": 7
+            },
+            "metadata": {
+              "commit_sha": "c714ec1a63a0db71f1644760f14a236975df3cbb"
+            },
+            "before_state": {
+              "head_sha": "1667df612591d67b882a89951c1f5fca9fcda99f"
+            },
+            "after_state": {
+              "head_sha": "c714ec1a63a0db71f1644760f14a236975df3cbb"
+            },
+            "timestamp": "{time}"
+          }
+        ],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/rate_limit",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls/7",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/agentic-bot/repo",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "GET",
+          "path": "/repos/agentic-bot/repo/branches/feature/protection",
+          "api_version": "2026-03-10"
+        },
+        {
+          "step": "apply",
+          "method": "POST",
+          "path": "/repos/owner/repo/issues/7/comments",
+          "api_version": "2026-03-10",
+          "body": {
+            "body": "Commit pushed: [`c714ec1`](https://github.com/agentic-bot/repo/commit/c714ec1a63a0db71f1644760f14a236975df3cbb)\n\n> Generated by [agentic-job](https://github.com/owner/repo/actions/runs/4242)"
+          },
+          "keys": [
+            "body"
+          ]
+        }
+      ],
+      "edits": [
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "push_to_pull_request_branch",
+              "branch": "feature",
+              "message": "Address review"
+            }
+          ]
+        }
+      ],
+      "pushed": {
+        "agentic-bot/repo:refs/heads/feature": [
+          {
+            "author": "Agent <agent@example.invalid>",
+            "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+            "message": "sub: Saturate",
+            "files": [
+              "src/sub.rs"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "handler_config": {
+        "push_to_pull_request_branch": {
+          "max": 1,
+          "target": "7",
+          "head": "1667df612591d67b882a89951c1f5fca9fcda99f",
+          "protected_files": [],
+          "protect_top_level_dot_folders": true,
+          "protected_files_policy": "blocked",
+          "max_patch_size": 1024,
+          "max_patch_files": 100,
+          "signed_commits": false,
+          "fallback_as_pull_request": false,
+          "if_no_changes": "error",
+          "target-repo": "owner/repo",
+          "head-repo": "agentic-bot/repo",
+          "allowed_repos": [
+            "agentic-bot/repo"
+          ],
+          "checkout_mapping": {
+            "owner/repo": "."
+          }
+        }
+      },
+      "guard": {
+        "exit": 0,
+        "outputs": {
+          "poster": "agentic-bot"
+        },
+        "annotations": [],
+        "summary": "<h3>Already applied by an earlier attempt, so left out</h3>\n<ul><li>push_to_pull_request_branch: https://github.com/owner/repo/pull/7</li></ul>\n",
+        "items": [],
+        "skipped": [
+          {
+            "type": "push_to_pull_request_branch",
+            "url": "https://github.com/owner/repo/pull/7"
+          }
+        ]
+      },
+      "apply": {
+        "exit": 0,
+        "outputs": {
+          "items_applied": "0",
+          "items_cancelled": "0",
+          "items_deferred": "0",
+          "items_failed": "0",
+          "items_skipped": "0",
+          "items_succeeded": "0",
+          "items_warnings": "0",
+          "processed_count": "0",
+          "result": "",
+          "status": "success"
+        },
+        "annotations": [],
+        "summary": "",
+        "made": [],
+        "errors": null
+      },
+      "requests": [
+        {
+          "step": "guard",
+          "method": "GET",
+          "path": "/user",
+          "api_version": ""
+        }
+      ],
+      "edits": [
+        {
+          "step": "Say which issue a pull request is for",
+          "exit": 0,
+          "outputs": {},
+          "annotations": [],
+          "summary": "",
+          "items": [
+            {
+              "type": "push_to_pull_request_branch",
+              "branch": "feature",
+              "message": "Address review"
+            }
+          ]
+        }
+      ],
+      "pushed": {}
+    }
+  ],
+  "pushed": {
+    "agentic-bot/repo:refs/heads/feature": [
+      {
+        "author": "Agent <agent@example.invalid>",
+        "committer": "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+        "message": "sub: Saturate",
+        "files": [
+          "src/sub.rs"
+        ]
+      }
+    ]
+  }
+}

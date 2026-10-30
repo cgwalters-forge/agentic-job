@@ -244,6 +244,81 @@
     }
   },
   {
+    "name": "push-rerun-trailers",
+    "about": "A completed push is not repeated. The patch author's identity and Generated-by and co-author trailers survive apply.yml's unsigned handler configuration.",
+    "attempts": 2,
+    "env": {"BASE": "feature", "TREE": "{tree}"},
+    "config": {"push_to_pull_request_branch": {"max": 1, "target": "7", "head": "{head:feature}", "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "push_to_pull_request_branch", "branch": "feature", "message": "Address review"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "branches": {"feature": {"message": "lib: Add sub\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a - b\n}\n"}}},
+      "patch": {"base": "feature", "branch": "feature", "message": "sub: Saturate\n\nGenerated-by: https://github.com/cgwalters/#llms\nCo-authored-by: Contributor <contributor@example.invalid>\nCo-authored-by: Another Contributor <another@example.invalid>\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a.saturating_sub(b)\n}\n"}}
+    },
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "agentic-bot"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": true, "merged": false, "user": {"login": "agentic-bot"}, "head": {"ref": "feature", "label": "agentic-bot:feature", "sha": "{head:feature}", "repo": {"full_name": "agentic-bot/repo", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"}
+    }
+  },
+  {
+    "name": "push-rerun-half-applied",
+    "about": "The commit lands but the forge refuses the handler's activation comment. A re-run recognizes the checked tree on the original parent and does not push twice or retry the lost activation note.",
+    "attempts": 2,
+    "env": {"BASE": "feature", "TREE": "{tree}"},
+    "config": {"push_to_pull_request_branch": {"max": 1, "target": "7", "head": "{head:feature}", "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "push_to_pull_request_branch", "branch": "feature", "message": "Address review"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "branches": {"feature": {"message": "lib: Add sub\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a - b\n}\n"}}},
+      "patch": {"base": "feature", "branch": "feature", "message": "sub: Saturate\n", "files": {"src/sub.rs": "pub fn sub(a: u8, b: u8) -> u8 {\n    a.saturating_sub(b)\n}\n"}}
+    },
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "agentic-bot"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/pulls/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "draft": true, "merged": false, "user": {"login": "agentic-bot"}, "head": {"ref": "feature", "label": "agentic-bot:feature", "sha": "{head:feature}", "repo": {"full_name": "agentic-bot/repo", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}, "html_url": "https://github.com/owner/repo/pull/7"}
+    },
+    "faults": [{"attempt": 1, "method": "POST", "path": "/repos/owner/repo/issues/7/comments", "status": 500}]
+  },
+  {
+    "name": "handler-comment-pagination",
+    "about": "The handler, not the re-run guard, finds an older workflow comment beyond the first page and replaces it rather than creating another. This gh-aw-only setting does not change apply routing.",
+    "native": [],
+    "config": {"add_comment": {"max": 1, "replace_older_comments": true}},
+    "items": [{"type": "add_comment", "item_number": 7, "body": "Updated report."}],
+    "filler": {"/repos/owner/repo/issues/7/comments": 100},
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "An issue", "state": "open", "labels": [], "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/issues/7", "repository_url": "{api}/repos/owner/repo"},
+      "/repos/owner/repo/issues/7/comments": [{"id": 900, "body": "Old report.\n\n<!-- gh-aw-workflow-id: agentic-job -->", "user": {"login": "agentic-bot", "type": "User"}}],
+      "/repos/owner/repo/issues/comments/900": {"id": 900, "body": "Old report.\n\n<!-- gh-aw-workflow-id: agentic-job -->", "user": {"login": "agentic-bot", "type": "User"}, "html_url": "https://github.com/owner/repo/issues/7#issuecomment-900"}
+    }
+  },
+  {
+    "name": "partial-pull-request-issue-trailers",
+    "about": "Before the guard, apply marks a partial PR's body and links the caller's issue. A re-run digests those edited requests consistently. The pushed commit preserves its author, Generated-by and co-author trailers without adding a bot co-author.",
+    "attempts": 2,
+    "native": ["create_pull_request"],
+    "env": {"ISSUE": "7", "PARTIAL": "[partial: stopped at the timeout] ", "STOPPED": "its timeout"},
+    "config": {"create_pull_request": {"max": 1, "protected_files": [], "protect_top_level_dot_folders": true, "protected_files_policy": "blocked", "draft": true, "max_patch_size": 1024, "max_patch_files": 100}},
+    "items": [{"type": "create_pull_request", "title": "Fix the overflow", "body": "Checks the length first.", "branch": "agent-run-4242"}],
+    "git": {
+      "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> u8 {\n    a + b\n}\n"},
+      "patch": {"branch": "agent-run-4242", "message": "lib: Check for overflow\n\nGenerated-by: https://github.com/cgwalters/#llms\nCo-authored-by: Contributor <contributor@example.invalid>\n", "files": {"src/lib.rs": "pub fn add(a: u8, b: u8) -> Option<u8> {\n    a.checked_add(b)\n}\n"}}
+    }
+  },
+  {
+    "name": "review-folded-findings-rerun",
+    "about": "Check's review fold generates the upload; apply moves it into place before the guard, and the re-run recognizes the folded verdict comment rather than posting the findings as a separate review.",
+    "attempts": 2,
+    "review": true,
+    "config": {"add_comment": {"max": 1}, "create_pull_request_review_comment": {"max": 1}},
+    "items": [
+      {"type": "add_comment", "item_number": 7, "body": "VERDICT: CHANGES\nCheck the arithmetic."},
+      {"type": "create_pull_request_review_comment", "path": "src/lib.rs", "line": 2, "body": "This could overflow."}
+    ],
+    "forge": {
+      "/repos/owner/repo/issues/7": {"number": 7, "title": "A pull request", "state": "open", "labels": [], "pull_request": {"url": "{api}/repos/owner/repo/pulls/7"}, "user": {"login": "owner"}, "html_url": "https://github.com/owner/repo/pull/7", "repository_url": "{api}/repos/owner/repo"}
+    }
+  },
+  {
     "name": "no-write",
     "about": "noop and missing_data: nothing is posted.",
     "env": {"COMMENT_TARGET": ""},
