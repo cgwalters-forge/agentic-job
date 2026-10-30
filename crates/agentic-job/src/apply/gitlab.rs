@@ -369,6 +369,15 @@ impl Gitlab {
                 && answer["ref"] == reference.as_str(),
             "GET {path}: status pipeline does not match the trusted project, SHA and ref"
         );
+        // GitLab exposed the archive flag in 18.5. Older responses cannot
+        // prove eligibility; do not silently accept a possibly archived pipeline.
+        let archived = answer["archived"].as_bool().with_context(|| {
+            format!("GET {path}: GitLab status requires GitLab 18.5+ with a boolean pipeline archived field")
+        })?;
+        ensure!(
+            !archived && answer.get("yaml_errors") == Some(&Value::Null),
+            "GET {path}: status pipeline is archived or has unavailable/invalid CI configuration"
+        );
         Ok((project, url, reference, *pipeline))
     }
 
@@ -436,7 +445,11 @@ impl Gitlab {
             http: &self.http,
             url: &self.api,
             authorization: &format!("Bearer {}", self.token),
-            token: &self.token,
+            secrets: &[
+                &BASE64.encode(format!("{GIT_USER}:{}", self.token)),
+                &encoded(&self.token),
+                &self.token,
+            ],
         }
         .request(method, path, body)
         .map_err(|err| {
@@ -1253,7 +1266,9 @@ mod tests {
                 return ok(&json!({"id": sha, "web_url": format!("{COMMIT_URL}{sha}")}));
             }
             if line == "GET /api/v4/projects/1/pipelines/7" {
-                return ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"}));
+                return ok(
+                    &json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main", "archived": false, "yaml_errors": null}),
+                );
             }
             if line.contains("/statuses?") {
                 let page: usize = line
@@ -1408,7 +1423,7 @@ mod tests {
     #[test]
     fn unsupported_status_context_is_refused_before_other_writes() {
         let sha = "4".repeat(40);
-        let pipeline = json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"});
+        let pipeline = json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main", "archived": false, "yaml_errors": null});
         let mut cases = vec![(None, pipeline.clone(), "requires trusted")];
         for (key, value) in [
             ("id", json!(8)),
@@ -1424,6 +1439,36 @@ mod tests {
                 "does not match the trusted",
             ));
         }
+        for (key, value) in [
+            ("archived", json!(true)),
+            ("yaml_errors", json!("invalid CI configuration")),
+        ] {
+            let mut answer = pipeline.clone();
+            answer[key] = value;
+            cases.push((
+                Some(("main".into(), 7)),
+                answer,
+                "status pipeline is archived",
+            ));
+        }
+        // GitLab 17.9 through 18.4 expose yaml_errors but not archived in
+        // Entities::Ci::Pipeline. Their response must explain the minimum.
+        for value in [None, Some(Value::Null), Some(json!("false"))] {
+            let mut answer = pipeline.clone();
+            let fields = answer.as_object_mut().unwrap();
+            fields.remove("archived");
+            if let Some(value) = value {
+                fields.insert("archived".into(), value);
+            }
+            cases.push((Some(("main".into(), 7)), answer, "requires GitLab 18.5+"));
+        }
+        let mut answer = pipeline.clone();
+        answer.as_object_mut().unwrap().remove("yaml_errors");
+        cases.push((
+            Some(("main".into(), 7)),
+            answer,
+            "status pipeline is archived",
+        ));
         for (context, pipeline, refusal) in cases {
             let (server, requests) = mock(if context.is_some() {
                 vec![
@@ -1466,7 +1511,9 @@ mod tests {
             let (server, requests) = mock(vec![
                 ok(&repo()),
                 ok(&json!({"id": sha, "web_url": COMMIT_URL})),
-                ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": token})),
+                ok(
+                    &json!({"id": 7, "project_id": 1, "sha": sha, "ref": token, "archived": false, "yaml_errors": null}),
+                ),
                 ok(&json!([])),
                 (
                     code,
@@ -1495,6 +1542,33 @@ mod tests {
                     .count(),
                 1
             );
+        }
+    }
+
+    #[test]
+    fn status_errors_scrub_credentials_crossing_the_truncation_boundary() {
+        let token = format!("test+status/{}", "credential".repeat(10));
+        for secret in [
+            token.to_owned(),
+            encoded(&token),
+            BASE64.encode(format!("{GIT_USER}:{token}")),
+        ] {
+            // Leave only a prefix inside the shared API's error budget.
+            // Scrubbing later cannot recognize that prefix as a credential.
+            let padding = "x".repeat(super::super::git::SHOWN_CHARS - 60);
+            let (server, requests) = mock(vec![(500, format!("{padding}{secret}"))]);
+            let publisher = Gitlab::new(&server, "owner/name", token.clone(), &[]).unwrap();
+            let err = format!(
+                "{:#}",
+                publisher.request(GET, "/projects/1", None).unwrap_err()
+            );
+            assert!(err.contains("HTTP 500"), "{err}");
+            assert!(!err.contains(&secret[..5]), "{err}");
+            assert!(
+                err.contains("[token]"),
+                "credential must be scrubbed before truncation: {err}"
+            );
+            assert_eq!(requests.try_iter().count(), 1);
         }
     }
 
@@ -1533,7 +1607,7 @@ mod tests {
                 "GET /api/v4/projects/fork%2Fname" => project(2, "fork/name", "public", Some(1)),
                 MR => mr.clone(),
                 "GET /api/v4/projects/1/pipelines/7" => {
-                    json!({"id": 7, "project_id": 1, "sha": known, "ref": "main"})
+                    json!({"id": 7, "project_id": 1, "sha": known, "ref": "main", "archived": false, "yaml_errors": null})
                 }
                 line if line == commit => {
                     json!({"id": known, "web_url": format!("{COMMIT_URL}{known}")})
@@ -1873,7 +1947,9 @@ mod tests {
         let (server, _requests) = mock(vec![
             ok(&repo()),
             ok(&json!({"id": sha, "web_url": "https://gitlab.example/c"})),
-            ok(&json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main"})),
+            ok(
+                &json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main", "archived": false, "yaml_errors": null}),
+            ),
             ok(&json!([])),
             ok(&json!({"id": 1, "status": "canceled", "name": "agentic-job"})),
         ]);

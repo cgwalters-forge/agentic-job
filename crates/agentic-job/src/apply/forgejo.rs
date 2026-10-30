@@ -306,8 +306,8 @@ pub(super) struct Api<'a> {
     pub url: &'a str,
     /// The `Authorization` header: the forge's own scheme.
     pub authorization: &'a str,
-    /// Scrubbed from every error.
-    pub token: &'a str,
+    /// Credential forms scrubbed before error text is truncated, longest first.
+    pub secrets: &'a [&'a str],
 }
 
 impl Api<'_> {
@@ -372,7 +372,7 @@ impl Api<'_> {
                 .call(),
             _ => bail!("{method} {path}: not a request apply makes"),
         };
-        let scrub = |text: &str| text.replace(self.token, "[token]");
+        let scrub = |text: &str| git::shown(self.secrets, text);
         let mut response = match response {
             Ok(response) => response,
             Err(err) => bail!("{method} {path}: {}", scrub(&err.to_string())),
@@ -391,7 +391,7 @@ impl Api<'_> {
             bail!(
                 "{method} {path}: HTTP {}: {}",
                 status.as_u16(),
-                git::shown(&[self.token], &text)
+                scrub(&text)
             );
         }
         Ok((response.headers().clone(), text))
@@ -431,7 +431,7 @@ impl Forgejo {
             http: &self.http,
             url: &self.api,
             authorization: &format!("token {}", self.token),
-            token: &self.token,
+            secrets: &[&self.token],
         }
         .request_text(GET, &path, None)?;
         let patch = super::inline::forgejo_patch(&diff, &comment.path)?;
@@ -459,7 +459,7 @@ impl Forgejo {
                 http: &self.http,
                 url: &self.api,
                 authorization: &format!("token {}", self.token),
-                token: &self.token,
+                secrets: &[&self.token],
             }
             .request_text_with_headers(GET, &path, None)?;
             let count = headers
@@ -545,7 +545,7 @@ impl Forgejo {
             http: &self.http,
             url: &self.api,
             authorization: &format!("token {}", self.token),
-            token: &self.token,
+            secrets: &[&self.token],
         }
         .request(method, path, body)
     }
