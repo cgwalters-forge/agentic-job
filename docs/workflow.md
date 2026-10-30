@@ -79,6 +79,21 @@ separate jobs on separate machines. The apply job's additional checks are
    It runs gh-aw's handlers on the checked outputs:
     a branch and a draft pull request, comments.
 
+## Which tokens reach what
+
+| Where | What it holds |
+| --- | --- |
+| The agent | the agent job's own `GITHUB_TOKEN` as `GH_TOKEN`, with `contents`, `issues`, `pull-requests` and `actions` **read** only, expiring with the job, unless `github-reads: false` ([GitHub reads](#github-reads-from-the-agent)); the inference proxy's token for this one run. Not the identity-token request credential, not a model key, not an MCP server's credential, not `SAFE_OUTPUTS_PAT` |
+| The runner's user in the agent job | the agent itself: so the reusable workflow's agent job passes on no model key or MCP credential, and `run --runner-home` refuses `api-key` and MCP servers ([the agent job](#running-it-on-github)); the same read-only job token; under `github-oidc`, the run token the register job before it got, in the `run` step only (the agent job has no `id-token`: [the run token](#the-run-token)); `ACTIONS_RUNTIME_TOKEN` in JavaScript actions; whatever the caller's own steps add, such as a network join. Losing root does not separate a step from these ([what a later step can still do](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#one-trust-level-for-the-rest-of-the-job)) |
+| `policy`, `check` | the job token with `contents` and `actions` read; no secret. With `require-safe-outputs-pat`, the policy call's `apply-token` job reads with `SAFE_OUTPUTS_PAT` in one step, in the apply environment |
+| `apply` | `SAFE_OUTPUTS_PAT` when the call passes a nonempty one, else the job token with what the call granted ([the apply job and its token](#the-apply-job-and-its-token)) |
+| `activate`, `notify`, `conclude` | the job token with what the call granted, for labels, reactions and status comments; notify and conclude prefer `SAFE_OUTPUTS_PAT` for status comments whenever supplied, including same-repository items |
+
+`SAFE_OUTPUTS_PAT` is gh-aw's `safe-outputs.github-token` for
+[cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs).
+A pull request needs it: apply opens one from a fork of the account
+the token belongs to.
+
 ## Optional threat detection
 
 Set the caller repository variable `AGENTIC_JOB_DETECT_MODEL` to a model served
@@ -1002,7 +1017,7 @@ operator for the following. The proxy is a
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker);
 nothing else speaks the run API that the default `github-oidc` and
 `plain` registrations use
-([what it must provide](../README.md#inference)). Hosted Ubuntu alone
+([what it must provide](inference.md#what-a-broker-provides)). Hosted Ubuntu alone
 cannot reach a private proxy.
 
 - **Proxy URL and audience:** set repository variables `INFERENCE_URL` and
