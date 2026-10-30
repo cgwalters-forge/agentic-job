@@ -36,7 +36,7 @@ const BOT: &str = "bot";
 /// Fixtures of a throwaway server, not secrets.
 const PASSWORD: &str = "test-password-not-secret";
 /// What apply needs and no more: read the repositories, push the branch,
-/// open the pull request and comment.
+/// open the pull request, comment, create labelled issues and close items.
 const SCOPES: &[&str] = &["write:repository", "write:issue"];
 
 const PROXY_VARS: &[&str] = &[
@@ -470,4 +470,112 @@ fn apply_publishes_to_forgejo() {
     want.extend(["Docs".to_owned(), "docs".to_owned()]);
     want.sort();
     assert_eq!(labels(&forge, &admin, &target), want);
+
+    // Use the same scoped bot token for creation and closing, not the
+    // bootstrap admin credential. Read back actual state and comments.
+    let metadata = policy(
+        &forge,
+        dir.path(),
+        "metadata",
+        r#"
+create_issue = { max = 1, allowed = ["bug", "status/triaged"] }
+close_issue = { max = 1 }
+close_pull_request = { max = 1 }
+"#,
+    );
+    let creating = dir.path().join("create-issue");
+    checked_items(
+        &creating,
+        &[json!({
+            "type": "create_issue", "repo": target, "title": "Created by apply",
+            "body": format!("Investigate, @{ADMIN}."), "labels": ["bug", "status/triaged"]
+        })],
+    );
+    let output = apply(&forge, &metadata, &creating, token);
+    assert_success("agentic-job apply create_issue", &output);
+    let url = String::from_utf8(output.stdout).unwrap();
+    let number: u64 = url.trim().rsplit('/').next().unwrap().parse().unwrap();
+    let created = forge.get(&bot, &format!("/repos/{target}/issues/{number}"));
+    assert_eq!(created["html_url"], url.trim());
+    assert_eq!(created["user"]["login"], BOT);
+    assert_eq!(created["title"], "Created by apply");
+    assert_eq!(
+        created["body"],
+        format!("Investigate, {neutralized}.{footer}")
+    );
+    let mut names: Vec<_> = created["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|label| label["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["bug", "status/triaged"]);
+
+    let pull_number = pull["number"].as_u64().unwrap();
+    let comments = |number| forge.get(&bot, &format!("/repos/{target}/issues/{number}/comments"));
+    let issue_before = comments(number);
+    let pull_before = comments(pull_number);
+    for (name, wrong) in [
+        (
+            "close-issue-as-pull",
+            json!({"type": "close_pull_request", "repo": target, "pull_request_number": number, "body": "Wrong kind."}),
+        ),
+        (
+            "close-pull-as-issue",
+            json!({"type": "close_issue", "repo": target, "issue_number": pull_number, "body": "Wrong kind."}),
+        ),
+    ] {
+        let checked = dir.path().join(name);
+        // An otherwise valid earlier operation must not write either.
+        checked_items(
+            &checked,
+            &[
+                json!({"type": "create_issue", "repo": target, "title": "Must not appear", "body": "Refused batch."}),
+                wrong,
+            ],
+        );
+        let before = forge.get(&bot, &format!("/repos/{target}/issues?state=all"));
+        let output = apply(&forge, &metadata, &checked, token);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not a"),
+            "{output:?}"
+        );
+        assert_eq!(
+            forge.get(&bot, &format!("/repos/{target}/issues?state=all")),
+            before
+        );
+        assert_eq!(comments(number), issue_before);
+        assert_eq!(comments(pull_number), pull_before);
+    }
+
+    let closing = dir.path().join("close-items");
+    checked_items(
+        &closing,
+        &[
+            json!({"type": "close_issue", "repo": target, "issue_number": number, "body": format!("Done, @{ADMIN}.")}),
+            json!({"type": "close_pull_request", "repo": target, "pull_request_number": pull_number, "body": format!("Superseded, @{ADMIN}.")}),
+        ],
+    );
+    let output = apply(&forge, &metadata, &closing, token);
+    assert_success("agentic-job apply close issue and PR", &output);
+    let closed_comments: Vec<_> = [(number, "Done"), (pull_number, "Superseded")]
+        .into_iter()
+        .map(|(number, reason)| {
+            let state = forge.get(&bot, &format!("/repos/{target}/issues/{number}"));
+            assert_eq!(state["state"], "closed");
+            let posted = comments(number);
+            let [comment] = posted.as_array().unwrap().as_slice() else {
+                panic!("{posted}")
+            };
+            assert_eq!(comment["user"]["login"], BOT);
+            assert_eq!(comment["body"], format!("{reason}, {neutralized}.{footer}"));
+            posted
+        })
+        .collect();
+    let output = apply(&forge, &metadata, &closing, token);
+    assert_success("agentic-job apply close rerun", &output);
+    assert_eq!(comments(number), closed_comments[0]);
+    assert_eq!(comments(pull_number), closed_comments[1]);
 }

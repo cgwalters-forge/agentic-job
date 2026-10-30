@@ -118,6 +118,10 @@ Off GitHub, `agentic-job apply --forge forgejo` publishes
 ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)). With
 `--status` and `--status-sha` it also sets the caller's commit status,
 context `agentic-job`; no request type sets one.
+Forgejo label preflight follows batch order per item, so an authorized
+remove-then-add exclusive-label transition works in one batch; live
+pre-write checks remain in place. Repository label listings accept up to
+1000 labels and refuse overflow before writes.
 `agentic-job apply --forge gitlab` publishes `add_comment`, to the
 caller's `--comment-target` of the `--comment-target-kind` it names,
 `create_pull_request`, `push_to_pull_request_branch`, `create_issue`,
