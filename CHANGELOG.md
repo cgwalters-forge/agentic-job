@@ -25,6 +25,12 @@ says what a caller may rely on across versions.
   Another run's pending/running job refuses instead of taking over its
   identity. Status remains opt-in, with no agent-visible request or new
   token permissions; ambiguous legacy status calls fail explicitly.
+- apply's guard against applying twice what an earlier attempt applied
+  is policy's binary, `agentic-job applied`, in place of a github-script
+  step, with the same names, refusals, re-closing and outputs; apply's
+  token now goes to the binary there, as it does for the fork step. Its
+  step annotation on a refusal no longer starts `Unhandled error: Error:`
+  (docs/workflow.md#running-apply-again).
 - Forgejo and GitLab `apply` now publish the neutral
   `create_pull_request_review_comment` output, off unless bounded in policy.
   `check --review-head SHA` binds it to the caller's fixed PR/MR and admitted

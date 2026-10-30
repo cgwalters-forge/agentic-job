@@ -136,14 +136,12 @@ test('scripted fix from a different caller layout reaches the target checkout an
       writeFileSync(join(outputs, 'agent_output.json'), JSON.stringify({ items: [request], errors: [] }));
       const report = join(outputs, 'report.json');
       writeFileSync(report, JSON.stringify({ patch: { file: 'aw-agent-run-7.patch' } }));
-      Object.assign(process.env, { OUTPUT_REPO: 'Owner/Target', ITEM_REPO: 'Owner/Target', TREE: tree, TOKEN_IS_PAT: 'false', REPORT: report });
-      global.core.summary.addHeading = () => global.core.summary;
-      global.core.summary.addList = () => global.core.summary;
-      const guard = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split('\n      - ')[0]
-        .split('script: |\n')[1].split('\n').filter(line => line.startsWith('            ')).map(line => line.slice(12)).join('\n');
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-      await new AsyncFunction('require', 'process', 'core', 'github', 'exec', guard)(require, process, global.core, global.github,
-        { getExecOutput: async (program, args) => { assert.equal(program, 'git'); return command(work, args); } });
+      // A push asks the forge nothing; the token is never sent.
+      const guard = spawnSync(join(__dirname, '../target/debug/agentic-job'), ['applied', '--dir', outputs, '--report', report,
+        '--output-repo', 'Owner/Target', '--repo', 'Owner/Target', '--item-repo', 'Owner/Target', '--fork', 'bot/target',
+        '--base', 'agent-run-7', '--tree', tree, '--token-is-pat', 'false'],
+      { cwd: work, encoding: 'utf8', env: { ...process.env, GH_TOKEN: 'test-token-not-secret', GITHUB_OUTPUT: join(root, 'output') } });
+      assert.equal(guard.status, 0, guard.stdout + guard.stderr);
       assert.deepEqual(JSON.parse(readFileSync(join(outputs, 'agent_output.json'), 'utf8')).items, []);
       assert.deepEqual(JSON.parse(readFileSync(join(outputs, 'skipped.json'), 'utf8')),
         [{ type: request.type, url: 'https://github.com/Owner/Target/pull/42' }]);

@@ -7,9 +7,10 @@
 //!
 //! Each case runs four of apply.yml's steps: the one that writes the
 //! handlers' configuration, then the guard that leaves out what an earlier
-//! attempt applied, the check of project fields and the one that runs
-//! gh-aw's handler manager, the last three scripts read from apply.yml and
-//! run by the pinned `actions/github-script` bundle. The steps before the guard that edit the requests (a review's
+//! attempt applied (policy's binary, as apply.yml runs it), the check of
+//! project fields and the one that runs gh-aw's handler manager, the last
+//! two scripts read from apply.yml and run by the pinned
+//! `actions/github-script` bundle. The steps before the guard that edit the requests (a review's
 //! folded findings, a partial run's note, a pull request's issue) are not
 //! run: the requests are as those steps would leave a complete run's
 //! without an issue. Its client talks to a loopback forge here, which records every
@@ -1249,10 +1250,12 @@ fn bash_step(
     name: &str,
     env: &[(String, String)],
     edit: impl Fn(&str) -> String,
-) -> (i32, BTreeMap<String, String>, Vec<String>) {
+) -> (i32, BTreeMap<String, String>, Vec<String>, String) {
     let step = step(doc, name);
     let output_file = scratch.path("github-output");
+    let summary = scratch.path("step-summary");
     std::fs::write(&output_file, "").unwrap();
+    std::fs::write(&summary, "").unwrap();
     let output = Command::new("bash")
         .args([
             "-eo",
@@ -1264,6 +1267,8 @@ fn bash_step(
         .envs(env.iter().cloned())
         .envs(literal_env(&step["env"]))
         .env("GITHUB_OUTPUT", &output_file)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .current_dir(scratch.path("workspace"))
         .output()
         .unwrap();
     if std::env::var_os("AGENTIC_JOB_TEST_VERBOSE").is_some() {
@@ -1274,6 +1279,7 @@ fn bash_step(
         output.status.code().unwrap_or(-1),
         read_commands(&output_file),
         annotations(&output.stdout),
+        std::fs::read_to_string(&summary).unwrap(),
     )
 }
 
@@ -1289,7 +1295,7 @@ fn publish_steps(
     tmp: &Path,
 ) -> Value {
     forge.state().step = "publish".into();
-    let (exit, outputs, _) = bash_step(doc, scratch, ROUTE_STEP, env, str::to_owned);
+    let (exit, outputs, ..) = bash_step(doc, scratch, ROUTE_STEP, env, str::to_owned);
     assert_eq!(exit, 0, "{ROUTE_STEP}");
     if outputs.get("native").map(String::as_str) != Some("true") {
         return json!({"routed": false});
@@ -1297,7 +1303,7 @@ fn publish_steps(
     let mut env = env.to_vec();
     env.push(("GH_TOKEN".into(), TOKEN.into()));
     let server = format!("file://{}", scratch.path("server").display());
-    let (exit, outputs, annotations) = bash_step(doc, scratch, PUBLISH_STEP, &env, |script| {
+    let (exit, outputs, annotations, _) = bash_step(doc, scratch, PUBLISH_STEP, &env, |script| {
         // Git's server alone, as gh-aw's handlers have it: the bare
         // repositories. The links it writes still name GITHUB_SERVER_URL.
         let from = r#"--server "$GITHUB_SERVER_URL""#;
@@ -1568,15 +1574,22 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
                 }
             }
             forge.state().step = label.into();
-            let step = step(doc, step_name);
-            let mut step_env = env.clone();
-            step_env.extend(literal_env(&step["env"]));
-            let (exit, outputs, annotations, summary) = github_script(
-                paths,
-                &scratch,
-                &step_env,
-                step["with"]["script"].as_str().unwrap(),
-            );
+            let (exit, outputs, annotations, summary) = if label == "guard" {
+                // Policy's binary, given the token as GH_TOKEN.
+                let mut env = env.clone();
+                env.push(("GH_TOKEN".into(), TOKEN.into()));
+                bash_step(doc, &scratch, step_name, &env, str::to_owned)
+            } else {
+                let step = step(doc, step_name);
+                let mut step_env = env.clone();
+                step_env.extend(literal_env(&step["env"]));
+                github_script(
+                    paths,
+                    &scratch,
+                    &step_env,
+                    step["with"]["script"].as_str().unwrap(),
+                )
+            };
             let mut result = json!({
                 "exit": exit,
                 "outputs": outputs,

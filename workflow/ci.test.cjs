@@ -11,7 +11,6 @@ const ci = fs.readFileSync(path.join(__dirname, '../.github/workflows/ci.yml'), 
 const stepScript = id => ci.split(`      - id: ${id}\n`)[1].split('        run: |\n')[1].split(/\n(?! {10})/)[0]
   .split('\n').map(line => line.slice(10)).join('\n');
 const script = stepScript('paths');
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n/)[0];
 const gates = {
   full: ['lint', 'javascript', 'rust', 'vibe', 'claude-acp', 'corpus', 'publication', 'static', 'confined', 'confined-cleanup'],
@@ -20,44 +19,15 @@ const gates = {
     'e2e-secondary', 'e2e-secondary-refused', 'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
-test('the full-run CI harness skips its comment on the second apply attempt', async () => {
+// What the guard leaves out is src/apply/applied.rs's to test; this is
+// that the harness runs it with e2e-full's settings.
+test('the full-run CI harness runs the apply guard again as e2e-full applied', () => {
   const section = block('e2e-dispatch-verify').split('      - name: "Run the full run\'s apply guard again"\n')[1].split(/\n {6}(?! )/)[0];
-  const source = section.split('          script: |\n')[1].split('\n')
-    .filter(line => line.startsWith(' '.repeat(12))).map(line => line.slice(12)).join('\n');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-rerun-'));
-  try {
-    // Use the harness's environment, not a separately maintained guard fixture.
-    const env = Object.fromEntries([...section.split('        with:\n')[0]
-      .matchAll(/^          ([A-Z_]+): (.+)$/gm)].map(([, key, value]) => [key,
-        value.replaceAll('${{ runner.temp }}', dir).replaceAll('${{ github.repository }}', 'owner/target').replace(/^["'](.*)["']$/, '$1')]));
-    env.GITHUB_RUN_ID = '123';
-    fs.mkdirSync(env.GH_AW_TMP, { recursive: true });
-    const file = path.join(env.GH_AW_TMP, 'agent_output.json');
-    const output = { items: [{ type: 'add_comment', body: 'result' }] };
-    let comments = [];
-    const github = { rest: { issues: { listComments: Symbol('listComments') } },
-      paginate: async (method, params) => {
-        assert.equal(method, github.rest.issues.listComments);
-        assert.deepEqual(params, { owner: 'owner', repo: 'target', issue_number: 64, per_page: 100 });
-        return comments;
-      } };
-    const summary = { addHeading() { return this; }, addList() { return this; }, async write() {} };
-    const core = { setOutput() {}, summary };
-    const run = new AsyncFunction('require', 'process', 'core', 'github', source);
-    fs.writeFileSync(file, JSON.stringify(output));
-    await run(require, { env }, core, github);
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'skipped.json'))), []);
-    const posted = JSON.parse(fs.readFileSync(file)).items[0];
-    const name = posted.body.split('\n\n').at(-1);
-    comments = [{ user: { login: 'github-actions[bot]' }, body: `result\n\n<!-- ${name} -->`, html_url: 'https://example.test/comment' }];
-    fs.writeFileSync(file, JSON.stringify(output));
-    await run(require, { env }, core, github);
-    assert.deepEqual(JSON.parse(fs.readFileSync(file)).items, []);
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(env.GH_AW_TMP, 'skipped.json'))),
-      [{ type: 'add_comment', name, url: 'https://example.test/comment' }]);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  assert.match(section, /"\$RUNNER_TEMP\/agentic-job" applied --dir "\$RUNNER_TEMP\/rerun" /);
+  assert.match(section, / --comment-target 64 /);
+  assert.match(section, / --token-is-pat false$/);
+  const prefix = block('e2e-full').match(/\n {6}artifact-prefix: (\S+)\n/)[1];
+  assert.match(section, new RegExp(` --artifact-prefix ${prefix} `));
 });
 
 // The runner's user is the agent by default, everywhere a caller can

@@ -21,7 +21,7 @@
           "poster": "agentic-bot"
         },
         "annotations": [
-          "::error::Unhandled error: Error: a close_issue names #7, which is a pull request"
+          "::error::a close_issue names #7, which is a pull request"
         ],
         "summary": "",
         "items": [

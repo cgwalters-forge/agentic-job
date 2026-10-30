@@ -1489,11 +1489,6 @@ jobs:
       # outputs check accepted, leaves out the comment the first attempt
       # posted, and the comment is there once. The handlers that would post again are not run here; that
       # they post only what the guard keeps is apply.test.cjs's to show.
-      # Where apply has gh-aw's scripts: the guard names the branch with them.
-      - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
-        if: ${{ always() && needs.e2e-full.result == 'success' }}
-        with:
-          destination: ${{ runner.temp }}/gh-aw/actions
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ always() && needs.e2e-full.result == 'success' }}
         with:
@@ -1504,27 +1499,19 @@ jobs:
         with:
           name: full-checked-outputs
           path: ${{ runner.temp }}/rerun
+      # The guard as apply runs it: this commit's binary, with e2e-full's
+      # settings. e2e-full passes no SAFE_OUTPUTS_PAT: its apply posted with
+      # the job token. Its artifact prefix is what its names digest.
       - name: "Run the full run's apply guard again"
         if: ${{ always() && needs.e2e-full.result == 'success' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_TMP: ${{ runner.temp }}/rerun
-          REPORT: ${{ runner.temp }}/rerun/report.json
-          # e2e-full passes no SAFE_OUTPUTS_PAT: its apply posted with the job token.
-          TOKEN_IS_PAT: 'false'
-          OUTPUT_REPO: ${{ github.repository }}
-          ITEM_REPO: ${{ github.repository }}
-          COMMENT_TARGET: "64"
-          # e2e-full's, which its name is digested with.
-          ARTIFACT_PREFIX: full-
-        with:
-          script: |
-            const workflow = require('node:fs').readFileSync('.github/workflows/apply.yml', 'utf8');
-            const section = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
-            const guard = section.split('script: |\n')[1].split('\n')
-              .filter(line => line.startsWith(' '.repeat(12))).map(line => line.slice(12)).join('\n');
-            const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-            await new AsyncFunction('require', 'process', 'core', 'github', guard)(require, process, core, github);
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          install -m 0755 "$RUNNER_TEMP/dist/agentic-job-x86_64-unknown-linux-musl" "$RUNNER_TEMP/agentic-job"
+          "$RUNNER_TEMP/agentic-job" applied --dir "$RUNNER_TEMP/rerun" --report "$RUNNER_TEMP/rerun/report.json" \
+            --output-repo "$REPO" --repo "$REPO" --item-repo "$REPO" --comment-target 64 \
+            --artifact-prefix full- --token-is-pat false
       - name: The re-run left out what was applied, and the comment is there once
         if: ${{ always() && needs.e2e-full.result == 'success' }}
         env:

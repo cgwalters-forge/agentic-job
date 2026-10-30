@@ -32,8 +32,7 @@
       "guard": {
         "exit": 0,
         "outputs": {
-          "poster": "agentic-bot",
-          "result": ""
+          "poster": "agentic-bot"
         },
         "annotations": [],
         "summary": "",
@@ -171,8 +170,7 @@
         "outputs": {
           "poster": "agentic-bot",
           "pull-request-number": "1",
-          "pull-request-url": "https://github.com/owner/repo/pull/1",
-          "result": ""
+          "pull-request-url": "https://github.com/owner/repo/pull/1"
         },
         "annotations": [],
         "summary": "<h3>Already applied by an earlier attempt, so left out</h3>\n<ul><li>create_pull_request: https://github.com/owner/repo/pull/1</li></ul>\n",

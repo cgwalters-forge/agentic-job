@@ -18,8 +18,7 @@
       "guard": {
         "exit": 0,
         "outputs": {
-          "poster": "agentic-bot",
-          "result": ""
+          "poster": "agentic-bot"
         },
         "annotations": [],
         "summary": "<h3>Already applied by an earlier attempt, so left out</h3>\n<ul><li>close_issue: undefined</li></ul>\n",

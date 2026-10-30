@@ -696,7 +696,7 @@ fn url_host(url: &str) -> Option<String> {
 }
 
 /// `normalizeBranchName`, without a salt.
-fn normalize_branch(name: &str) -> String {
+pub(super) fn normalize_branch(name: &str) -> String {
     static INVALID: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9\-_/.]+").expect("a valid pattern"));
     static DASHES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-+").expect("a valid pattern"));

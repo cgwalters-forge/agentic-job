@@ -574,176 +574,33 @@ jobs:
       # A comment is hidden again, even one a maintainer unhid since.
       # Review comments and replies are posted again; a thread resolved
       # before is left as it is.
+      # Policy's binary does this (`agentic-job applied`, in
+      # crates/agentic-job/src/apply/applied.rs), with the token as the fork
+      # step's: it refuses a close_issue naming a pull request or a
+      # transferred issue, a reply off the run's pull request and a pull
+      # request without a fork before writing anything, and pushes a
+      # replacement series itself, as `agentic-job replacement push` does.
       - name: Leave out what an earlier attempt applied
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
           # Where a pull request's branch is pushed: the step above's fork, or
           # a push's head repository.
           FORK: ${{ steps.fork.outputs.repo }}
-          # Whether the token below is the PAT; the secret itself stays there.
+          # Whether GH_TOKEN is the PAT.
           TOKEN_IS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT != '' }}
           TREE: ${{ steps.trial.outputs.tree }}
           REPLACEMENT_HEAD: ${{ steps.trial.outputs.head }}
-        with:
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
-          script: |
-            const fs = require('node:fs');
-            const { createHash } = require('node:crypto');
-            const file = `${process.env.GH_AW_TMP}/agent_output.json`;
-            const output = JSON.parse(fs.readFileSync(file, 'utf8'));
-            const [owner, repo] = process.env.OUTPUT_REPO.split('/');
-            // The job token posts as github-actions[bot] and cannot read
-            // /user; a PAT posts as the user it names. Any other bot's post
-            // is not this token's. A PAT that /user does not name (an app's
-            // token) has no one here, and nothing posted counts as applied.
-            const me = process.env.TOKEN_IS_PAT === 'true'
-              ? await github.rest.users.getAuthenticated().then(({ data }) => data.login, () => null)
-              : 'github-actions[bot]';
-            if (me === null) core.warning('GET /user does not name the SAFE_OUTPUTS_PAT token, so nothing posted before counts as applied, and a re-run posts again');
-            // For the link to the issue, which is looked for the same way.
-            core.setOutput('poster', me ?? '');
-            const ours = user => me !== null && user?.login === me;
-            // The patch check accepted is what a pull request applies.
-            const patch = () => {
-              const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
-              if (!report.patch?.file) throw new Error('a pull request is to be opened, and check accepted no patch');
-              return fs.readFileSync(`${process.env.GH_AW_TMP}/${require('node:path').basename(report.patch.file)}`);
-            };
-            const skippedFile = `${process.env.GH_AW_TMP}/skipped.json`;
-            // Issues and pull requests share numbers, and gh-aw's close_issue
-            // handler closes and comments on a pull request through the
-            // issues API without looking; check cannot tell them apart. So a
-            // close_issue naming a pull request refuses the run here, before
-            // anything is applied, rather than let it close what the bounds
-            // only grant close_pull_request for. So does one whose issue was
-            // transferred: the API follows it to the other repository.
-            // REPO is read only for a close_issue: CI's re-run of this guard has no job env.
-            const issueOf = item => {
-              const [owner, repo] = process.env.REPO.split('/');
-              return { owner, repo, issue_number: item.issue_number };
-            };
-            const issues = new Map();
-            for (const item of output.items.filter(item => item.type === 'close_issue')) {
-              const { data } = await github.rest.issues.get(issueOf(item));
-              if (data.pull_request) throw new Error(`a close_issue names #${item.issue_number}, which is a pull request`);
-              if (String(data.repository_url).toLowerCase() !== `${process.env.GITHUB_API_URL}/repos/${process.env.REPO}`.toLowerCase()) {
-                throw new Error(`a close_issue names #${item.issue_number}, which is not an issue of ${process.env.REPO}`);
-              }
-              issues.set(item.issue_number, data);
-            }
-            // gh-aw's reply handler posts to the replies URL of the run's
-            // pull request without looking up the comment it names, which
-            // check cannot either. So a reply to a comment on another pull
-            // request, or in another repository, refuses the run here,
-            // before anything is applied, whatever the forge would make of it.
-            for (const item of output.items.filter(item => item.type === 'reply_to_pull_request_review_comment')) {
-              const [itemOwner, itemRepo] = process.env.ITEM_REPO.split('/');
-              const pull = `${process.env.GITHUB_API_URL}/repos/${process.env.ITEM_REPO}/pulls/${process.env.COMMENT_TARGET}`;
-              const { data } = await github.rest.pulls.getReviewComment({ owner: itemOwner, repo: itemRepo, comment_id: Number(item.comment_id) });
-              if (String(data.pull_request_url).toLowerCase() !== pull.toLowerCase()) {
-                throw new Error(`a reply_to_pull_request_review_comment names comment ${item.comment_id}, which is not on pull request #${process.env.COMMENT_TARGET} of ${process.env.ITEM_REPO}`);
-              }
-            }
-            const kept = [], skipped = [];
-            for (const [index, item] of output.items.entries()) {
-              if (item.type === 'push_to_pull_request_branch') {
-                const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
-                if (report.patch?.commit_files) {
-                  const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch;
-                  require('node:child_process').execFileSync(`${process.env.RUNNER_TEMP}/apply-binary/agentic-job`, ['replacement', 'push',
-                    '--remote', `https://github.com/${process.env.FORK}`, '--branch', process.env.BASE,
-                    '--original-head', config.head, '--replacement-head', process.env.REPLACEMENT_HEAD], { stdio: 'inherit' });
-                  skipped.push({ type: item.type, url: `https://github.com/${owner}/${repo}/pull/${config.target}` });
-                  continue;
-                }
-                // The fork was checked above and fetched before the trial.
-                // Like the post-push check, require exactly one parent and
-                // the checked tree: an unrelated advance is not applied.
-                const config = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/config.json`, 'utf8')).push_to_pull_request_branch;
-                const parents = await exec.getExecOutput('git', ['show', '-s', '--format=%P', 'refs/agentic-job/target-base'], { silent: true });
-                const tree = await exec.getExecOutput('git', ['rev-parse', 'refs/agentic-job/target-base^{tree}'], { silent: true });
-                if (parents.stdout.trim() === config.head && tree.stdout.trim() === process.env.TREE) {
-                  skipped.push({ type: item.type, url: `https://github.com/${owner}/${repo}/pull/${config.target}` });
-                } else {
-                  kept.push(item);
-                }
-                continue;
-              }
-              if (!['add_comment', 'close_issue', 'close_pull_request', 'create_issue', 'create_pull_request'].includes(item.type)) { kept.push(item); continue; }
-              // An input and JSON hold no NUL, so the prefix, the request and the patch cannot run into each other.
-              const hash = createHash('sha256').update(process.env.ARTIFACT_PREFIX ?? '').update('\0').update(JSON.stringify(item));
-              if (item.type === 'create_pull_request') hash.update('\0').update(patch());
-              const name = `agentic-job-applied: ${process.env.GITHUB_RUN_ID}/${index}/${hash.digest('hex').slice(0, 16)}`;
-              // The last name in a body is the one put there after what was asked.
-              const marked = found => ours(found.user) &&
-                [...String(found.body).matchAll(/<!-- (agentic-job-applied: \d+\/\d+\/[0-9a-f]{16}) -->/g)].at(-1)?.[1] === name;
-              let found;
-              if (item.type === 'add_comment') {
-                const target = /^\d+$/.test(process.env.COMMENT_TARGET) ? process.env.COMMENT_TARGET : item.item_number;
-                if (/^\d+$/.test(String(target))) {
-                  const [itemOwner, itemRepo] = process.env.ITEM_REPO.split('/');
-                  const comments = await github.paginate(github.rest.issues.listComments, { owner: itemOwner, repo: itemRepo, issue_number: Number(target), per_page: 100 });
-                  found = comments.find(marked);
-                }
-              } else if (item.type === 'close_pull_request') {
-                // Its handler comments again on a pull request already closed.
-                const [prOwner, prRepo] = process.env.REPO.split('/');
-                const pull = { owner: prOwner, repo: prRepo, pull_number: item.pull_request_number };
-                const comments = await github.paginate(github.rest.issues.listComments, { owner: prOwner, repo: prRepo, issue_number: item.pull_request_number, per_page: 100 });
-                found = comments.find(marked);
-                // The handler comments before it closes, so an attempt can
-                // stop between the two: close what is still open, as the
-                // handler would (its configuration has no filters), without
-                // a second comment.
-                if (found && (await github.rest.pulls.get(pull)).data.state !== 'closed') {
-                  await github.rest.pulls.update({ ...pull, state: 'closed' });
-                }
-              } else if (item.type === 'close_issue') {
-                // The same for an issue: its handler comments again on one
-                // already closed. Check held it to the run's repository. An
-                // issue someone reopened is left open, even one reopened
-                // before this run: a re-run does not overrule a person.
-                const issue = issues.get(item.issue_number);
-                const comments = await github.paginate(github.rest.issues.listComments, { ...issueOf(item), per_page: 100 });
-                found = comments.find(marked);
-                if (found && issue.state !== 'closed' && issue.state_reason !== 'reopened') {
-                  await github.rest.issues.update({ ...issueOf(item), state: 'closed', state_reason: item.state_reason ?? 'completed' });
-                }
-              } else if (item.type === 'create_pull_request') {
-                // The branch is this run's, checked above; the handler names it so, in the fork.
-                if (!process.env.FORK) throw new Error('a pull request is to be opened, and there is no fork to open it from');
-                const { normalizeBranchName } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/normalize_branch_name.cjs`);
-                const prefix = normalizeBranchName(process.env.BRANCH_PREFIX);
-                const branch = prefix && !item.branch.startsWith(prefix) ? prefix + item.branch : item.branch;
-                const head = `${process.env.FORK.split('/')[0]}:${branch}`;
-                const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, head, state: 'all', per_page: 100 });
-                found = pulls.find(pull => marked(pull) && (pull.state === 'open' || pull.merged_at));
-                if (found) {
-                  core.setOutput('pull-request-number', found.number);
-                  core.setOutput('pull-request-url', found.html_url);
-                }
-              } else {
-                // gh-aw finds its own marked issues the same way; search lags seconds behind.
-                const { data } = await github.rest.search.issuesAndPullRequests({ q: `repo:${owner}/${repo} is:issue in:body "${name}"`, per_page: 100 });
-                found = data.items.find(marked);
-              }
-              if (found) {
-                skipped.push({ type: item.type, name, url: found.html_url });
-              } else {
-                kept.push({ ...item, body: `${item.body ?? ''}\n\n${name}` });
-              }
-            }
-            fs.writeFileSync(file, JSON.stringify({ ...output, items: kept }));
-            fs.writeFileSync(skippedFile, JSON.stringify(skipped));
-            if (skipped.length) {
-              await core.summary.addHeading('Already applied by an earlier attempt, so left out', 3)
-                .addList(skipped.map(({ type, url }) => `${type}: ${url}`)).write();
-            }
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" applied --dir "$GH_AW_TMP" --report "$REPORT" \
+            --output-repo "$OUTPUT_REPO" --repo "$REPO" --item-repo "$ITEM_REPO" --comment-target "$COMMENT_TARGET" \
+            --branch-prefix "$BRANCH_PREFIX" --artifact-prefix "$ARTIFACT_PREFIX" --fork "$FORK" --base "$BASE" \
+            --tree "$TREE" --replacement-head "$REPLACEMENT_HEAD" --token-is-pat "$TOKEN_IS_PAT"
       # Every project field is read from the live project before either
       # publisher below writes anything: a field or value the pinned
       # handler would skip, create or misaddress refuses the whole run.

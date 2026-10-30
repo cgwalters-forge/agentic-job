@@ -57,6 +57,8 @@ pub enum Command {
     Apply(crate::apply::Args),
     /// Link checked pull requests to the caller's issue before publication
     LinkIssue(crate::apply::issue_reference::Args),
+    /// Leave out of apply's checked outputs what an earlier attempt applied, and name the rest
+    Applied(crate::apply::applied::Args),
     /// Publish on GitHub, as gh-aw's handlers would, the checked outputs the policy's native_handlers route here
     Publish(crate::apply::publish::Args),
     /// Open the policy's checked secondary pull request on GitHub, from SAFE_OUTPUTS_PAT's fork, after apply's handlers
@@ -114,6 +116,7 @@ impl Command {
             Self::Detect(args) => crate::detect::run(args),
             Self::Apply(args) => crate::apply::run(args),
             Self::LinkIssue(args) => crate::apply::issue_reference::run(args),
+            Self::Applied(args) => crate::apply::applied::run(args),
             Self::Publish(args) => crate::apply::publish::run(args),
             Self::SecondaryPullRequest(args) => crate::apply::secondary::run(args),
             Self::Replacement(command) => command.run(),
