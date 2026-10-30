@@ -39,6 +39,11 @@ const RETRY_WAIT: Duration = Duration::from_secs(30);
 
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(240);
 
+/// The most pages of a list read: 10,000 entries.
+const MAX_PAGES: u32 = 100;
+
+const PER_PAGE: usize = 100;
+
 /// The statuses gh-aw's `isTransientError` retries.
 const TRANSIENT_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];
 
@@ -97,6 +102,31 @@ pub(super) fn segment(text: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// TEXT as one value of a URL's query: everything but letters, digits
+/// and `-._~` escaped.
+fn query(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The URL a `link` header gives as `rel="next"`.
+fn next_link(link: &str) -> Option<&str> {
+    link.split(',').find_map(|part| {
+        let (url, params) = part.trim().split_once(';')?;
+        params
+            .split(';')
+            .any(|param| param.trim() == "rel=\"next\"")
+            .then(|| url.trim().strip_prefix('<')?.strip_suffix('>'))
+            .flatten()
+    })
 }
 
 /// GitHub's REST API and git, with one token.
@@ -263,7 +293,6 @@ impl Github {
     }
 
     /// The API's address.
-    #[cfg(test)]
     pub(super) fn api_url(&self) -> &str {
         &self.api
     }
@@ -292,6 +321,17 @@ impl Github {
     /// Sends METHOD with BODY to PATH under the API, and returns the
     /// answer's status and text.
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String)> {
+        self.call_linked(method, path, body)
+            .map(|(status, text, _)| (status, text))
+    }
+
+    /// [`Self::call`], with the answer's `link` header.
+    fn call_linked(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, String, Option<String>)> {
         let url = format!("{}{path}", self.api);
         let authorization = format!("Bearer {}", self.token);
         let version = self.api_version.unwrap_or_default();
@@ -344,13 +384,18 @@ impl Github {
             Unanswered(format!("{method} {path}: {}", self.shown(&err.to_string())))
         })?;
         let status = response.status().as_u16();
+        let link = response
+            .headers()
+            .get("link")
+            .and_then(|link| link.to_str().ok())
+            .map(str::to_owned);
         match response
             .body_mut()
             .with_config()
             .limit(self.max_response)
             .read_to_string()
         {
-            Ok(text) => Ok((status, text)),
+            Ok(text) => Ok((status, text, link)),
             Err(err) => bail!("{method} {path}: {}", self.shown(&err.to_string())),
         }
     }
@@ -450,6 +495,66 @@ impl Github {
             authorization: format!("Basic {basic}"),
             token: &self.token,
         }
+    }
+
+    /// Every entry of the list at PATH, 100 a page, as octokit's
+    /// `paginate` reads it: the next page is the one the answer's `link`
+    /// header names, which has to be under the API, up to [`MAX_PAGES`].
+    fn pages(&self, path: &str) -> Result<Vec<Value>> {
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut next = Some(format!("{path}{separator}per_page={PER_PAGE}"));
+        let mut all = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let Some(path) = next.take() else {
+                return Ok(all);
+            };
+            let (status, text, link) = self.call_linked("GET", &path, None)?;
+            ensure!(
+                (200..300).contains(&status),
+                "GET {path}: HTTP {status}: {}",
+                self.shown(&text)
+            );
+            let answer: Value = serde_json::from_str(&text)
+                .with_context(|| format!("GET {path}: the response is not JSON"))?;
+            let entries = answer
+                .as_array()
+                .with_context(|| format!("GET {path}: the answer is not a list"))?;
+            all.extend(entries.iter().cloned());
+            if let Some(url) = link.as_deref().and_then(next_link) {
+                let rest = url
+                    .strip_prefix(&self.api)
+                    .filter(|rest| rest.starts_with('/'))
+                    .with_context(|| {
+                        format!("GET {path}: the next page {url:?} is not the API's")
+                    })?;
+                next = Some(rest.to_owned());
+            }
+        }
+        ensure!(next.is_none(), "GET {path}: more than {MAX_PAGES} pages");
+        Ok(all)
+    }
+
+    /// The comments on issue or pull request NUMBER of REPO.
+    pub(super) fn issue_comments(&self, repo: &str, number: &str) -> Result<Vec<Value>> {
+        self.pages(&format!("/repos/{repo}/issues/{number}/comments"))
+    }
+
+    /// The pull requests of REPO from HEAD (`owner:branch`), in any state.
+    pub(super) fn pulls(&self, repo: &str, head: &str) -> Result<Vec<Value>> {
+        self.pages(&format!(
+            "/repos/{repo}/pulls?head={}&state=all",
+            query(head)
+        ))
+    }
+
+    /// The first page of 100 issues and pull requests QUERY finds; an
+    /// answer without its list is an error, not an empty one.
+    pub(super) fn search_issues(&self, query_text: &str) -> Result<Vec<Value>> {
+        let path = format!("/search/issues?q={}&per_page={PER_PAGE}", query(query_text));
+        self.get(&path)?["items"]
+            .as_array()
+            .cloned()
+            .with_context(|| format!("GET {path}: the answer holds no items"))
     }
 
     /// The user the token is of, as `GET /user` names it: the identity
@@ -681,6 +786,53 @@ pub(super) mod tests {
             assert_eq!(is_repo(name), repo, "{name:?}");
         }
         assert_eq!(segment("fix/a b#%?"), "fix/a%20b%23%25%3F");
+    }
+
+    /// A list is read on as its `link` header says, only under the API and
+    /// only so far.
+    #[test]
+    fn pages_follow_the_link_header() {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::forgejo::tests::serve_with_headers;
+
+        for (next, want) in [
+            ("{API}/l?per_page=100&page=2", Ok(vec![1, 2])),
+            (
+                "https://elsewhere.example/l?page=2",
+                Err("is not the API's"),
+            ),
+            ("{API}/l?per_page=100", Err("more than 100 pages")),
+        ] {
+            let api = Arc::new(Mutex::new(String::new()));
+            let at = api.clone();
+            let (server, requests) = serve_with_headers(usize::MAX, move |request| {
+                let next = next.replace("{API}", &at.lock().unwrap());
+                let link = format!("link: <{next}>; rel=\"next\", <{next}>; rel=\"last\"\r\n");
+                match request.line.split(' ').nth(1).unwrap() {
+                    "/l?per_page=100" => (200, link, "[1]".into()),
+                    _ => (200, String::new(), "[2]".into()),
+                }
+            });
+            *api.lock().unwrap() = server.clone();
+            let github = Github::new(&server, TOKEN.to_owned()).unwrap();
+            let got = github
+                .pages("/l")
+                .map(|all| all.iter().map(|n| n.as_u64().unwrap()).collect::<Vec<_>>());
+            match want {
+                Ok(want) => assert_eq!(got.unwrap(), want),
+                Err(want) => {
+                    let err = format!("{:#}", got.unwrap_err());
+                    assert!(err.contains(want), "{next}: {err}");
+                }
+            }
+            assert!(
+                requests.try_iter().all(|r| r.line.starts_with("GET /l?")),
+                "{next}"
+            );
+        }
+        assert_eq!(next_link(r#"<a>; rel="prev", <b>; rel="next""#), Some("b"));
+        assert_eq!(next_link(r#"<a>; rel="last""#), None);
     }
 
     /// What gh-aw's handler retries is tried again, at most

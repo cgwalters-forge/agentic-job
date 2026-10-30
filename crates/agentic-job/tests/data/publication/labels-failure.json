@@ -29,8 +29,7 @@
       "guard": {
         "exit": 0,
         "outputs": {
-          "poster": "agentic-bot",
-          "result": ""
+          "poster": "agentic-bot"
         },
         "annotations": [],
         "summary": "",

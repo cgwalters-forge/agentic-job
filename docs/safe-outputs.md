@@ -1169,8 +1169,9 @@ credential. Before it may publish, it has to send what the pinned
 handlers send. `crates/agentic-job/tests/publication.rs` records that
 from the pinned code itself, not from what anyone expects of it: each
 case of `tests/data/publication/cases.json` runs apply.yml's step that
-writes the handlers' configuration, its re-run guard and its handler
-step, the last two in the `actions/github-script` bundle apply.yml pins,
+writes the handlers' configuration, its re-run guard (policy's binary,
+`agentic-job applied`) and its handler step, the last in the
+`actions/github-script` bundle apply.yml pins,
 against a loopback forge that records every request and keeps what was
 posted, with git pushes going to local bare repositories. Nothing reaches
 a real forge. The steps that edit the requests before the guard (a
@@ -1219,9 +1220,10 @@ publish those types with `agentic-job publish` instead of gh-aw's
 handlers, in a step of policy's binary before gh-aw's: a port of those
 handlers at the pin, on the GitHub [`Publisher`](../crates/agentic-job/src/apply/github.rs)
 and its client, which hold apply's token. It is off by default; every
-other type stays gh-aw's, and so does everything before the handlers
-(the fork step, the patch's trial, the partial note, the issue link and
-the guard against re-runs, which also finishes a half-closed item).
+other type stays gh-aw's, and everything before the handlers runs as
+before (the fork step, the patch's trial, the partial note, the issue
+link and the guard against re-runs, `agentic-job applied`, which also
+finishes a half-closed item).
 `push_to_pull_request_branch`, `create_issue` and
 `create_pull_request_review_comment` are not ported yet: their corpus
 cases pass through gh-aw's handlers alone.

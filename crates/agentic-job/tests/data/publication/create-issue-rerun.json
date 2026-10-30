@@ -16,8 +16,7 @@
       "guard": {
         "exit": 0,
         "outputs": {
-          "poster": "agentic-bot",
-          "result": ""
+          "poster": "agentic-bot"
         },
         "annotations": [],
         "summary": "",
@@ -130,8 +129,7 @@
       "guard": {
         "exit": 0,
         "outputs": {
-          "poster": "agentic-bot",
-          "result": ""
+          "poster": "agentic-bot"
         },
         "annotations": [],
         "summary": "<h3>Already applied by an earlier attempt, so left out</h3>\n<ul><li>create_issue: https://github.com/owner/repo/issues/1</li></ul>\n",

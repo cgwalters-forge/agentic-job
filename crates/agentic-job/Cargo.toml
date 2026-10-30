@@ -25,7 +25,8 @@ ring.workspace = true
 rustix.workspace = true
 secure-host = { path = "../secure-host" }
 serde.workspace = true
-serde_json.workspace = true
+# Numbers read as JavaScript reads them, for apply's applied names.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 tar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

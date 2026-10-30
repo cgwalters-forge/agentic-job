@@ -23,6 +23,7 @@
 //! write ([`Op::Status`]): its state, commit and link are the caller's,
 //! and its context is [`STATUS_CONTEXT`]. No request can ask for one.
 
+pub mod applied;
 pub mod forgejo;
 mod git;
 pub(crate) mod github;

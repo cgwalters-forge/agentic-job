@@ -1914,8 +1914,15 @@ merged pull request's branch is deleted, even the pull request. So
 before the handlers run, apply names each comment, issue and pull
 request `agentic-job-applied: RUNID/POSITION/DIGEST`, by the run, its
 place among the outputs and the first 16 hex digits of the SHA-256 of
-the `artifact-prefix` and the request (for a pull request, and the patch
-`check` accepted). The calls of one run share its ID, and two of them can
+the `artifact-prefix`, a NUL and the request as JavaScript's
+`JSON.stringify` writes it (for a pull request, and a NUL and the patch
+`check` accepted), so that names written before this moved into policy's
+binary still match. Policy's binary does it (`agentic-job applied`),
+with apply's token in `GH_TOKEN`, as for the fork step. Before writing
+anything it refuses a `close_issue` naming a pull request or an issue
+transferred to another repository, a reply to a review comment off the
+run's pull request, and a pull request without a fork to open it from.
+The calls of one run share its ID, and two of them can
 hand back the same request, so the prefix, which tells them apart, is
 part of the name. Apply puts the name last in the body, so its first line
 is still the verdict or the partial run's note; the handlers' client
@@ -1923,7 +1930,11 @@ turns that line into an HTML comment as it is sent. An attempt then
 leaves out each request whose name it finds last in a body already
 posted:
 
-- a comment, among the comments on its target;
+- a comment, among the comments on its target, every page of them as
+  the forge's `link` header names them;
+- a closing comment on an issue or pull request, which is then closed if
+  it is still open (the handler comments before it closes), unless
+  someone reopened the issue;
 - a pull request, on an open or merged pull request from the run's
   branch (the job's `pull-request` output is then that one's);
 - an issue, through the forge's search, as gh-aw finds its own issues.
@@ -1957,7 +1968,7 @@ another app's bot included, is ignored. A token in `SAFE_OUTPUTS_PAT`
 that `GET /user` does not name, such as an app's, has no one whose
 posts count: nothing is left out, and a re-run posts again. `check`
 refuses any request holding the name, so the agent cannot make one
-request look applied by posting another. Closing an issue, adding
+request look applied by posting another. Adding
 labels and setting a project field are left to be done again: done
 twice they leave the forge as once, unless someone undid them in
 between. A re-run of apply runs `conclude` again too; it edits the same

@@ -141,19 +141,19 @@ const LIMIT_CALL = /(?<!function )\b(enforceCommentLimits|tryEnforceArrayLimit|e
 // history link and a workflow name as long as apply.yml lets the caller's
 // be.
 const APPLY = join(HERE, "../.github/workflows/apply.yml");
+const APPLIED = join(HERE, "../crates/agentic-job/src/apply/applied.rs");
 const MAX_WORKFLOW_NAME = 100;
-// apply.yml's additions at their longest, each with the text there it comes
-// from: a partial run's note before the body (of the longer reason), and the
-// marker after it, which becomes an HTML comment as it is sent (its index
-// given an id's digits).
+// The note and marker at their longest, checked against their source.
 const STOPPED = "a request, task or spending limit, or an error that ended the agent's turn";
 const APPLY_ADDS = [
   [`'${STOPPED.replace("'", "''")}'`, ""],
   ['"**Partial work.** The run was stopped at $STOPPED before the task was done; this is what it handed back."',
     `**Partial work.** The run was stopped at ${STOPPED} before the task was done; this is what it handed back.\n\n`],
   ['|= "\\($note)\\n\\n\\(.)"', ""],
-  ["`agentic-job-applied: ${process.env.GITHUB_RUN_ID}/${index}/${hash.digest('hex').slice(0, 16)}`", ""],
-  ["body: `${item.body ?? ''}\\n\\n${name}`", `\n\n<!-- agentic-job-applied: ${"9".repeat(20)}/${"9".repeat(20)}/${"f".repeat(16)} -->`],
+  ['hash.finish().as_ref()[..8]', "", APPLIED],
+  ['format!("{b:02x}")', "", APPLIED],
+  ['format!("agentic-job-applied: {run}/{index}/{digest}")', "", APPLIED],
+  ['format!("{body}\\n\\n{name}")', `\n\n<!-- agentic-job-applied: ${"9".repeat(20)}/${"9".repeat(20)}/${"f".repeat(16)} -->`, APPLIED],
   ['"<!-- $1 -->"', ""],
   [`const MAX_WORKFLOW_NAME = ${MAX_WORKFLOW_NAME};`, ""],
 ];
@@ -174,9 +174,8 @@ function footer(checkout) {
   const historyUrl = generateHistoryUrl({ owner, repo, itemType: "discussion_comment", workflowId: "agentic-job", serverUrl: "https://github.com" });
   const parts = assembleMarkdownBodyParts({ includeFooter: true, workflowName: name, runUrl, historyUrl, triggeringIssueNumber: Number(id) });
   let added = appendExecutionProvenance(`\n\n${parts.footer}`, name, runUrl);
-  const apply = readFileSync(APPLY, "utf8");
-  for (const [text, adds] of APPLY_ADDS) {
-    if (!apply.includes(text)) throw new Error(`apply.yml no longer has \`${text}\``);
+  for (const [text, adds, file = APPLY] of APPLY_ADDS) {
+    if (!readFileSync(file, "utf8").includes(text)) throw new Error(`${file} no longer has \`${text}\``);
     added += adds;
   }
   return { links: (added.match(/https?:\/\/[^\s]+/g) || []).length, length: added.length };

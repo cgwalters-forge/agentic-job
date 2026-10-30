@@ -227,7 +227,13 @@ fn apply_series(mails: &[&str], checked: &[Vec<&str>], temp: &Path, dir: &Path) 
 /// Pushes `replacement` over `branch` with a lease on the pinned head. A
 /// branch already at `replacement` is this series pushed by an earlier
 /// attempt; any other head, the same tree included, is a concurrent write.
-fn push(repo: &Path, remote: &str, branch: &str, original: &str, replacement: &str) -> Result<()> {
+pub(super) fn push(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    original: &str,
+    replacement: &str,
+) -> Result<()> {
     ensure!(
         COMMIT_RE.is_match(original) && COMMIT_RE.is_match(replacement),
         "Invalid replacement heads"
@@ -264,7 +270,7 @@ fn push(repo: &Path, remote: &str, branch: &str, original: &str, replacement: &s
 
 /// Runs git in REPO without hooks, signing or the machine's and user's
 /// configuration; the repository's own (the checkout's credentials) stays.
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Process::new("git")
         .args([
             "-c",
