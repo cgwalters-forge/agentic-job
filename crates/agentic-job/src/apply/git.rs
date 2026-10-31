@@ -56,6 +56,7 @@ pub(super) struct Git<'a> {
     pub authorization: String,
     /// Scrubbed from whatever git says.
     pub token: &'a str,
+    pub extra_secrets: Vec<String>,
 }
 
 /// One push of a checked patch.
@@ -129,12 +130,15 @@ impl Git<'_> {
     /// What git's errors are scrubbed of, longest first: the whole header
     /// value, its credential (the base64 of a `Basic` one, which a server
     /// error may echo and anyone can decode), and the raw token.
-    fn secrets(&self) -> [&str; 3] {
+    pub(super) fn secrets(&self) -> Vec<&str> {
         let credential = self
             .authorization
             .split_once(' ')
             .map_or(self.authorization.as_str(), |(_, credential)| credential);
-        [&self.authorization, credential, self.token]
+        let mut secrets = vec![self.authorization.as_str(), credential, self.token];
+        secrets.extend(self.extra_secrets.iter().map(String::as_str));
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets
     }
 
     /// Runs git in DIR with only the configuration given here: not the
@@ -365,6 +369,7 @@ mod tests {
             let git = Git {
                 authorization: authorization.clone(),
                 token: &token,
+                extra_secrets: Vec::new(),
             };
             let echoes = [
                 format!("Authorization: {authorization}"),

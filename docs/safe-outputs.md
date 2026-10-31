@@ -24,6 +24,44 @@ The applying job's `SAFE_OUTPUTS_PAT` is our equivalent of gh-aw's
 See [the token mapping and setup](workflow.md#the-apply-job-and-its-token)
 for repository bounds, job-token limits and default-branch environment storage.
 
+## Caller-bound publisher roles (GitHub)
+
+The threat is credential substitution: a comment operation borrowing the
+fork-push credential, or a missing role secret falling back to a stronger PAT.
+The optional trusted workflow input `role-bindings` prevents that. Neither
+requests nor agent output can set a role, token name, actor ID or App ID.
+
+| Operation | Fixed role | Secret |
+| --- | --- | --- |
+| Run-status comment | `status` | `STATUS_TOKEN` |
+| Review or result comment, inline review, push-result comment | `review` | `REVIEW_TOKEN` |
+| Fork creation, disabling fork Actions, git push | `fork_push` | `PUSH_TOKEN` |
+| Upstream PR publication, issue/label/close metadata | `publication` | `PUBLICATION_TOKEN` |
+
+An empty mapping preserves today's single `SAFE_OUTPUTS_PAT`/job-token fallback,
+including the PAT supplied as `STATUS_TOKEN` in policy/apply. A nonempty mapping
+must bind all four roles. Missing credentials, wrong authenticated numeric actor
+IDs or wrong App IDs refuse; there is no fallback. Apply checks all credentials
+before its first fork/write. Each status job checks only its own credential.
+Roles may deliberately share a credential, but doing so loses separation.
+
+Configured GitHub App roles require an authenticated GraphQL `Bot` viewer with
+the configured numeric `actor_id`; the viewer's App is resolved through
+`GET /apps/SLUG` and must match `app_id`. Unsupported viewer queries fail closed.
+Rerun/ownership detection requires both the actor ID and REST
+`performed_via_github_app.id`, never login text alone. User App tokens with an
+`app_id` are not supported: `/user` or viewer identifies the user, not which App
+issued that user's token. Fork-push still needs a user's credential and `/user`
+to find its fork. Plain user bindings omit `app_id`; their owned objects must
+have no App provenance.
+
+Role mode requires every writing request to use a supported `native_handlers`
+entry. Legacy-only handlers and replacement-series pushes refuse before the
+first write. Forgejo and GitLab role routing is unfinished and is not enabled by
+this GitHub workflow input. No App, key storage, minting or refresh is added.
+Live installation-token viewer behavior and App provenance proof await operator
+provisioning; offline tests do not establish them.
+
 ## What is gh-aw's, and why
 
 One script is run as gh-aw ships it: its handlers

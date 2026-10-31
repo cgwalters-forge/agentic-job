@@ -11,6 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
 use super::git::{self, Git, Push};
+use super::roles::{self, Credential, Role};
 use super::{
     BranchPush, Close, CommitStatus, LabelChange, Made, NewIssue, Op, Publisher, PullRequest, owner,
 };
@@ -133,6 +134,7 @@ fn next_link(link: &str) -> Option<&str> {
 }
 
 /// GitHub's REST API and git, with one token.
+#[derive(Clone)]
 pub struct Github {
     api: String,
     token: String,
@@ -145,6 +147,8 @@ pub struct Github {
     pub(super) retry_wait: Duration,
     /// The `X-GitHub-Api-Version` asked for, if not the forge's default.
     api_version: Option<&'static str>,
+    roles: Option<std::collections::BTreeMap<Role, Credential>>,
+    role: Role,
 }
 
 /// A request the forge refused: its status and its message, as octokit
@@ -320,6 +324,8 @@ impl Github {
             fork_wait: FORK_WAIT,
             retry_wait: RETRY_WAIT,
             api_version: None,
+            roles: None,
+            role: Role::Publication,
         })
     }
 
@@ -337,10 +343,89 @@ impl Github {
     /// The API the runner names (`GITHUB_API_URL`), with the token in the
     /// environment variable VAR, which must not be empty.
     pub fn from_env(var: &str) -> Result<Self> {
+        Self::from_role_env(Role::Publication, var)
+    }
+
+    pub(super) fn from_role_env(role: Role, var: &str) -> Result<Self> {
+        let bindings = roles::read(&|key| std::env::var(key).ok())?;
+        let api = std::env::var(API_URL_VAR).unwrap_or_else(|_| DEFAULT_API.to_owned());
+        if let Some(bindings) = bindings {
+            let mut client = Self::new(&api, String::new())?;
+            client.roles = Some(bindings);
+            // Apply validates the complete set before any fork or other write.
+            // Status jobs deliberately receive only the status credential.
+            for checked in Role::ALL {
+                if role != Role::Status || checked == Role::Status {
+                    client.for_role(checked)?.check_identity()?;
+                }
+            }
+            return client.for_role(role);
+        }
         let token = std::env::var(var).unwrap_or_default();
         ensure!(!token.is_empty(), "{var} is not set");
-        let api = std::env::var(API_URL_VAR).unwrap_or_else(|_| DEFAULT_API.to_owned());
         Self::new(&api, token)
+    }
+
+    pub(super) fn for_role(&self, role: Role) -> Result<Self> {
+        let mut client = self.clone();
+        if let Some(bindings) = &self.roles {
+            let credential = bindings.get(&role).context("caller role is not bound")?;
+            ensure!(
+                !credential.token.is_empty(),
+                "{} is missing for configured role",
+                role.token_env()
+            );
+            client.token.clone_from(&credential.token);
+            client.role = role;
+        }
+        Ok(client)
+    }
+
+    fn check_identity(&self) -> Result<()> {
+        let expected = &self.roles.as_ref().context("no role bindings")?[&self.role].identity;
+        // Installation tokens need not implement GET /user. If viewer is not
+        // available, refuse: never infer identity from caller-supplied login text.
+        let viewer = self.graphql(
+            "query { viewer { databaseId __typename login } }",
+            json!({}),
+        )?;
+        ensure!(
+            viewer["viewer"]["databaseId"].as_u64() == Some(expected.actor_id),
+            "{} has the wrong authenticated actor identity",
+            self.role.token_env()
+        );
+        ensure!(
+            expected.app_id.is_none() || viewer["viewer"]["__typename"] == "Bot",
+            "configured App roles require an authenticated Bot actor; user App tokens are not supported"
+        );
+        if let Some(app_id) = expected.app_id {
+            let login = viewer["viewer"]["login"]
+                .as_str()
+                .context("authenticated Bot has no login")?;
+            let slug = login.strip_suffix("[bot]").unwrap_or(login);
+            ensure!(
+                !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                "authenticated Bot has no App slug"
+            );
+            let app = self.get(&format!("/apps/{slug}"))?;
+            ensure!(
+                app["id"].as_u64() == Some(app_id),
+                "{} has the wrong App identity",
+                self.role.token_env()
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn configured(&self) -> bool {
+        self.roles.is_some()
+    }
+
+    pub(super) fn owns(&self, role: Role, object: &Value, legacy: Option<&str>) -> bool {
+        match &self.roles {
+            Some(bindings) => bindings[&role].identity.owns(object),
+            None => legacy.is_some_and(|login| object["user"]["login"] == login),
+        }
     }
 
     /// Takes answers of up to MAX bytes.
@@ -431,7 +516,7 @@ impl Github {
             .limit(self.max_response)
             .read_to_string()
         {
-            Ok(text) => Ok((status, text, link)),
+            Ok(text) => Ok((status, self.scrub(&text), link)),
             Err(err) => bail!("{method} {path}: {}", self.shown(&err.to_string())),
         }
     }
@@ -457,8 +542,7 @@ impl Github {
     pub(super) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         let (status, text) = self.call(method, path, body)?;
         if !(200..300).contains(&status) {
-            let mut refused = Refused::of(status, &text);
-            refused.message = refused.message.replace(&self.token, "[token]");
+            let refused = Refused::of(status, &text);
             return Err(refused.into());
         }
         if text.trim().is_empty() {
@@ -537,7 +621,7 @@ impl Github {
                 .collect();
             bail!(
                 "Request failed due to following response errors:\n - {}",
-                messages.join("\n - ")
+                self.shown(&messages.join("\n - "))
             );
         }
         Ok(answer["data"].clone())
@@ -566,7 +650,35 @@ impl Github {
     }
 
     pub(super) fn shown(&self, text: &str) -> String {
-        git::shown(&[&self.token], text)
+        self.scrub(text).chars().take(git::SHOWN_CHARS).collect()
+    }
+
+    fn secrets(&self) -> Vec<String> {
+        let mut secrets = vec![self.token.clone()];
+        if let Some(bindings) = &self.roles {
+            secrets.extend(bindings.values().map(|credential| credential.token.clone()));
+        }
+        let encoded: Vec<_> = secrets
+            .iter()
+            .flat_map(|token| {
+                [
+                    BASE64.encode(token),
+                    BASE64.encode(format!("x-access-token:{token}")),
+                ]
+            })
+            .collect();
+        secrets.extend(encoded);
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets
+    }
+
+    fn scrub(&self, text: &str) -> String {
+        self.secrets()
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .fold(text.to_owned(), |text, secret| {
+                text.replace(secret, "[token]")
+            })
     }
 
     /// Git with the token, as GitHub's git takes it.
@@ -575,6 +687,7 @@ impl Github {
         Git {
             authorization: format!("Basic {basic}"),
             token: &self.token,
+            extra_secrets: self.secrets(),
         }
     }
 
@@ -763,6 +876,7 @@ impl Publisher for GithubPublisher {
         // owner, and leaves out `head_repo`.
         let own = pr.push_repo.eq_ignore_ascii_case(&self.repo);
         self.github
+            .for_role(Role::ForkPush)?
             .git()
             .push(
                 &Push {
@@ -836,6 +950,108 @@ pub(super) mod tests {
     use super::*;
 
     pub(in crate::apply) const TOKEN: &str = "test-token-not-secret";
+
+    pub(in crate::apply) fn bound(mut github: Github) -> Github {
+        github.roles = Some(
+            Role::ALL
+                .into_iter()
+                .map(|role| {
+                    (
+                        role,
+                        Credential {
+                            identity: roles::Identity {
+                                actor_id: 7,
+                                app_id: None,
+                            },
+                            token: ["fake", role.token_env(), "credential"].join("-"),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        github.for_role(Role::Publication).unwrap()
+    }
+
+    #[test]
+    fn role_credentials_fail_closed_and_check_numeric_identity() {
+        for (id, kind, app, expected_app, accepted) in [
+            (7, "User", None, None, true),
+            (8, "User", None, None, false),
+            (7, "Bot", Some(42), Some(42), true),
+            (7, "Bot", Some(43), Some(42), false),
+            (7, "User", Some(42), Some(42), false),
+        ] {
+            let routes = [
+                (
+                    "POST /graphql".to_owned(),
+                    (
+                        200,
+                        json!({"data": {"viewer": {
+                    "databaseId": id, "__typename": kind, "login": "trusted[bot]"}}}),
+                    ),
+                ),
+                ("GET /apps/trusted".to_owned(), (200, json!({"id": app}))),
+            ];
+            let (github, requests) = forge(routes.into_iter().collect());
+            let mut github = bound(github);
+            github
+                .roles
+                .as_mut()
+                .unwrap()
+                .get_mut(&Role::Publication)
+                .unwrap()
+                .identity
+                .app_id = expected_app;
+            assert_eq!(
+                github.check_identity().is_ok(),
+                accepted,
+                "{id}/{kind}/{app:?}/{expected_app:?}"
+            );
+            assert!(
+                requests
+                    .try_iter()
+                    .all(|r| r.line.starts_with("GET ") || r.line.starts_with("POST /graphql "))
+            );
+        }
+        let mut github =
+            bound(Github::new("http://127.0.0.1:1", ["legacy", "stronger"].join("-")).unwrap());
+        for role in Role::ALL {
+            assert!(
+                github
+                    .for_role(role)
+                    .unwrap()
+                    .token
+                    .contains(role.token_env())
+            );
+            github
+                .roles
+                .as_mut()
+                .unwrap()
+                .get_mut(&role)
+                .unwrap()
+                .token
+                .clear();
+            assert!(github.for_role(role).is_err());
+        }
+    }
+
+    #[test]
+    fn every_role_secret_and_encoded_credential_is_scrubbed() {
+        let github = bound(Github::new("http://127.0.0.1:1", String::new()).unwrap());
+        for credential in github.roles.as_ref().unwrap().values() {
+            for secret in [
+                credential.token.clone(),
+                BASE64.encode(&credential.token),
+                BASE64.encode(format!("x-access-token:{}", credential.token)),
+            ] {
+                assert_eq!(
+                    github.scrub(&format!("before {secret} after")),
+                    "before [token] after"
+                );
+                assert_eq!(git::shown(&github.git().secrets(), &secret), "[token]");
+            }
+        }
+    }
 
     /// A forge that answers `METHOD PATH` with the status and JSON ROUTES
     /// give it, and 404 for anything else, and a client of it whose fork

@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use crate::exit::Exit;
+use crate::policy::Load;
 
 const TOKEN_VAR: &str = "SAFE_OUTPUTS_PAT";
 const API_URL_VAR: &str = "GITHUB_API_URL";
@@ -28,6 +29,12 @@ pub struct Args {
     /// The repository apply writes to, OWNER/NAME
     #[arg(long, value_name = "REPO")]
     pub output_repo: String,
+    /// Check role-mode routing before apply's first write
+    #[arg(long, requires = "outputs")]
+    pub role_policy: Option<std::path::PathBuf>,
+    /// Apply's checked request file
+    #[arg(long, requires = "role_policy")]
+    pub outputs: Option<std::path::PathBuf>,
 }
 
 /// What the forge answered a GET: its status, its `x-oauth-scopes`
@@ -39,6 +46,33 @@ pub struct Answer {
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
+    if std::env::var(crate::apply::roles::BINDINGS_ENV).is_ok_and(|text| !text.is_empty()) {
+        let policy = crate::policy::Policy::load(
+            args.role_policy
+                .as_deref()
+                .context("role mode requires --role-policy")?,
+        )?;
+        let path = args
+            .outputs
+            .as_deref()
+            .context("role mode requires --outputs")?;
+        let bytes = crate::files::read_regular(path, 4 << 20)?;
+        let outputs: Value = serde_json::from_slice(&bytes)?;
+        let items = outputs["items"]
+            .as_array()
+            .context("checked outputs have no items")?;
+        for item in items {
+            let output = item["type"].as_str().context("output has no type")?;
+            ensure!(
+                ["noop", "missing_data", "missing_tool"].contains(&output)
+                    || (policy.native_handlers.iter().any(|native| native == output)
+                        && crate::apply::publish::handler(output).is_some()),
+                "role credentials require every writing output to use a native handler"
+            );
+        }
+        crate::apply::github::Github::from_env("GH_TOKEN")?;
+        return Ok(Exit::Success);
+    }
     // A secret the caller did not pass reads as empty in Actions, like an
     // unset one: the two cannot be told apart, nor need be.
     let token = std::env::var(TOKEN_VAR).unwrap_or_default();

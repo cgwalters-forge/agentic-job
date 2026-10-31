@@ -547,6 +547,9 @@ fn read_js(path: &Path) -> Result<Js> {
 /// `GET /user` names for a PAT. A PAT it does not name (an app's token)
 /// has no one, and nothing posted counts as applied.
 fn identity(github: &Github, pat: bool) -> Option<String> {
+    if github.configured() {
+        return None;
+    }
     if !pat {
         return Some(JOB_TOKEN_AUTHOR.to_owned());
     }
@@ -558,8 +561,8 @@ fn identity(github: &Github, pat: bool) -> Option<String> {
 
 impl Guard<'_> {
     /// Whether FOUND is ME's, with NAME the last name in its body.
-    fn marked(&self, found: &Value, name: &str) -> bool {
-        self.me.is_some_and(|me| found["user"]["login"] == me)
+    fn marked(&self, found: &Value, name: &str, role: super::roles::Role) -> bool {
+        self.github.owns(role, found, self.me)
             && POSTED_NAME_RE
                 .captures_iter(found["body"].as_str().unwrap_or_default())
                 .last()
@@ -769,7 +772,8 @@ impl Guard<'_> {
     ) -> Result<Option<Value>> {
         let args = self.args;
         let github = self.github;
-        let marked = |found: &&Value| self.marked(found, name);
+        let role = super::roles::Role::output(kind);
+        let marked = |found: &&Value| self.marked(found, name, role);
         let found = match kind {
             ADD_COMMENT => {
                 let target = if DIGITS_RE.is_match(&args.comment_target) {
@@ -853,7 +857,7 @@ impl Guard<'_> {
                     .pulls(&args.output_repo, &head)?
                     .into_iter()
                     .find(|pull| {
-                        self.marked(pull, name)
+                        self.marked(pull, name, role)
                             && (pull["state"] == "open"
                                 || truthy(Some(&Js::from_value(&pull["merged_at"]))))
                     });
@@ -942,8 +946,19 @@ fn guard(args: &Args) -> Result<()> {
         "GITHUB_RUN_ID {run:?} is not a run ID"
     );
     let github = Github::from_env(GH_TOKEN_ENV)?.with_max_response(MAX_PAGE_BYTES);
+    if github.configured() {
+        let report = read_js(&args.report)?;
+        ensure!(
+            !truthy(
+                report
+                    .get("patch")
+                    .and_then(|patch| patch.get("commit_files"))
+            ),
+            "role credentials do not support replacement pushes"
+        );
+    }
     let me = identity(&github, args.token_is_pat);
-    if me.is_none() {
+    if me.is_none() && !github.configured() {
         println!(
             "::warning::GET /user does not name the SAFE_OUTPUTS_PAT token, so nothing posted \
              before counts as applied, and a re-run posts again"

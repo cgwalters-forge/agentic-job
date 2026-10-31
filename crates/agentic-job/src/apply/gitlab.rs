@@ -696,6 +696,7 @@ impl Gitlab {
         Git {
             authorization: format!("Basic {credential}"),
             token: &self.token,
+            extra_secrets: Vec::new(),
         }
     }
 

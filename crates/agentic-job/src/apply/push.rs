@@ -76,7 +76,10 @@ pub enum Command {
 
 impl Command {
     pub fn run(&self) -> Result<Exit> {
-        let github = Github::from_env(GH_TOKEN_ENV)?;
+        let github = match self {
+            Self::Resolve(_) => Github::from_env(GH_TOKEN_ENV)?,
+            Self::Target(_) => Github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?,
+        };
         match self {
             Self::Resolve(args) => {
                 let pull = resolve(&github, args)?;

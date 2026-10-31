@@ -24,6 +24,10 @@ name: agentic-job policy
 on:
   workflow_call:
     inputs:
+      role-bindings:
+        description: Caller-only apply role identities; status uses STATUS_TOKEN instead of the legacy PAT
+        type: string
+        default: ""
       id:
         description: The caller's name for this run (an issue, a board item); in summary.json as `item`
         type: string
@@ -301,6 +305,9 @@ on:
         type: string
         default: ""
     secrets:
+      STATUS_TOKEN:
+        description: Status role credential, only passed to notify
+        required: false
       SAFE_OUTPUTS_PAT:
         description: Optional apply credential, for opted-in status comments and `require-safe-outputs-pat`
         required: false
@@ -954,7 +961,7 @@ jobs:
   # write token does, and never to the agent's machine.
   apply-token:
     needs: policy
-    if: ${{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' }}
+    if: ${{ inputs.role-bindings == '' && inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' }}
     runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     environment: ${{ inputs.apply-environment }}
@@ -1058,7 +1065,8 @@ jobs:
           WHAT: ${{ steps.target.outputs.what }}
           TEXT: ⏳ [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) is running.
           REPO: ${{ needs.policy.outputs.item != '' && github.repository || inputs.item-repo || inputs.output-repo || github.repository }}
-          STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
+          APPLY_ROLE_BINDINGS: ${{ inputs.role-bindings }}
+          STATUS_TOKEN: ${{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT || inputs.role-bindings != '' && secrets.STATUS_TOKEN || '' }}
           STATUS_COMMENT: ${{ inputs.status-comment }}
         run: |
           chmod +x notify-bin/agentic-job

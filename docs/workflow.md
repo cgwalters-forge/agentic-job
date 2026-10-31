@@ -1402,6 +1402,44 @@ refused at the proxy whatever the token. CI's `e2e-full` proves both:
 its scripted agent reads its repository with `gh api` and asks for its
 comment only after GitHub refused it a GraphQL comment.
 
+### Caller-configured role credentials
+
+`agentic-job.yml`, `policy.yml` and `apply.yml` accept `role-bindings` (empty by
+default). It is caller configuration, not a policy/report/request field. For
+example, with operator-provisioned identities (IDs below are placeholders):
+
+```yaml
+with:
+  role-bindings: >-
+    {"status":{"actor_id":101,"app_id":201},
+     "review":{"actor_id":102,"app_id":202},
+     "fork_push":{"actor_id":103},
+     "publication":{"actor_id":104,"app_id":204}}
+secrets:
+  STATUS_TOKEN: ${{ secrets.STATUS_TOKEN }}
+  REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+  PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+  PUBLICATION_TOKEN: ${{ secrets.PUBLICATION_TOKEN }}
+```
+
+These are existing, caller-minted tokens, not private keys. Explicitly forward
+the secrets even when an apply environment provides their same-name values.
+Status notify/conclude receive the status token; review, push and publication
+tokens go only to apply. No role token is forwarded to agent or check. Policy's
+read-only job does not receive the status token either. Checkout uses the push
+credential, while upstream API steps use publication. Fork Actions remain off.
+This stops missing comment secrets borrowing a code-writing token; sharing
+secrets deliberately removes that benefit. The mapping is limited to four
+roles and 4096 bytes, with bounded API reads and no minting/refresh sidecar.
+
+Route all writing types through `native_handlers` in the caller bounds; legacy
+handlers and replacement-series pushes are refused in role mode before a fork
+is created. `require-safe-outputs-pat` remains a legacy-only early check; role
+credentials are instead checked at apply's boundary and status's own boundary.
+With an empty mapping all existing PAT/job-token behavior, including status's
+PAT fallback, remains unchanged. See the [fixed table and provenance limits](safe-outputs.md#caller-bound-publisher-roles-github).
+Forgejo/GitLab role routing and live App proof are not implemented here.
+
 ### The apply job and its token
 
 Check and apply serve any job that proposes writes, including the

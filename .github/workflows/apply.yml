@@ -23,6 +23,10 @@ name: agentic-job apply
 on:
   workflow_call:
     inputs:
+      role-bindings:
+        description: Caller-only JSON binding status, review, fork_push and publication to numeric actor_id and optional app_id; empty keeps legacy token selection
+        type: string
+        default: ""
       policy:
         description: "`toJSON(needs.policy.outputs)` of the policy.yml call"
         type: string
@@ -36,6 +40,18 @@ on:
         type: string
         required: true
     secrets:
+      STATUS_TOKEN:
+        description: Status role credential; never falls back in role mode
+        required: false
+      REVIEW_TOKEN:
+        description: Review and result comment role credential
+        required: false
+      PUSH_TOKEN:
+        description: Fork creation and git push credential, separate from upstream publication
+        required: false
+      PUBLICATION_TOKEN:
+        description: Upstream pull request and metadata publication credential
+        required: false
       # Explicit optional credential for apply and status comments. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
@@ -98,6 +114,11 @@ jobs:
       # `true` when the secondary pull request was asked for and not opened.
       secondary-failed: ${{ steps.secondary.outputs.failed }}
     env:
+      APPLY_ROLE_BINDINGS: ${{ inputs.role-bindings }}
+      STATUS_TOKEN: ${{ secrets.STATUS_TOKEN }}
+      REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+      PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+      PUBLICATION_TOKEN: ${{ secrets.PUBLICATION_TOKEN }}
       OUTPUT_REPO: ${{ fromJSON(inputs.policy).output-repo || github.repository }}
       # The issue the caller made the run for, a number policy checked, and
       # the repository it and a comment's target are in: the output
@@ -169,7 +190,7 @@ jobs:
           ref: ${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}
           fetch-depth: 0
           # Same selection as the handlers; only apply gets this PAT.
-          token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          token: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
           persist-credentials: true
       - uses: github/gh-aw/actions/setup@462ed682857c4ab64d40f2c85e3738fa27834839 # v0.91.12-7
         with:
@@ -227,6 +248,15 @@ jobs:
           artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           path: ${{ runner.temp }}/apply-binary
           digest-mismatch: error
+      # Prevent a missing/misbound role from borrowing the legacy PAT. Reject
+      # legacy handlers and replacement pushes before the first fork write.
+      - name: Check caller role credentials and routing
+        if: ${{ inputs.role-bindings != '' && fromJSON(inputs.policy).apply-staged != 'true' }}
+        run: |
+          test "$(jq -r '.patch.commit_files == null' "$REPORT")" = true
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" check-apply-token --output-repo "$OUTPUT_REPO" \
+            --role-policy "$GH_AW_TMP/policy.json" --outputs "$GH_AW_TMP/agent_output.json"
       # A pull request is opened from a fork of the output repository owned
       # by whoever the token names, never from a branch of the output
       # repository: its CI then runs the agent's commit as a fork's, with a
@@ -271,7 +301,7 @@ jobs:
         id: fork
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
           REPLACEMENT: ${{ steps.replacement.outputs.enabled }}
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
@@ -584,7 +614,7 @@ jobs:
         id: applied
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
           ARTIFACT_PREFIX: ${{ fromJSON(inputs.policy).artifact-prefix }}
@@ -612,7 +642,7 @@ jobs:
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          github-token: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           script: |
             // The pinned handler otherwise reports success for skipped values.
             const pending = new Map();
@@ -701,7 +731,7 @@ jobs:
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' && steps.route.outputs.native == 'true' && steps.project.outcome == 'success' }}
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           GH_AW_WORKFLOW_ID: agentic-job
           GH_AW_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
           GH_AW_WORKFLOW_NAME: ${{ github.workflow }}
@@ -738,7 +768,7 @@ jobs:
           PROJECT_CHECKED: ${{ steps.project.outcome }}
         with:
           # Use the checkout's credential selection for API writes too.
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          github-token: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           script: |
             const dir = `${process.env.RUNNER_TEMP}/gh-aw/actions`;
             // The footer names the workflow twice; handback check allows for
@@ -1022,7 +1052,7 @@ jobs:
       - name: Mark a continued pull request ready, or a draft at a checkpoint
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
+          GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           READY: ${{ steps.complete.outputs.ready }}
         run: |
           jq -e '.push_to_pull_request_branch.ready_when_complete == true' "$GH_AW_TMP/config.json" > /dev/null || exit 0
@@ -1163,7 +1193,8 @@ jobs:
         env:
           ITEM: ${{ fromJSON(inputs.policy).notify-item }}
           REPO: ${{ fromJSON(inputs.policy).notify-repo }}
-          STATUS_TOKEN: ${{ secrets.SAFE_OUTPUTS_PAT }}
+          APPLY_ROLE_BINDINGS: ${{ inputs.role-bindings }}
+          STATUS_TOKEN: ${{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT || inputs.role-bindings != '' && secrets.STATUS_TOKEN || '' }}
           # Only with `notify: comment`: a missing-data status otherwise keeps to the marked comment.
           STATUS_COMMENT: ${{ fromJSON(inputs.policy).notify == 'comment' && fromJSON(inputs.policy).status-comment || '' }}
           TEXT: ${{ steps.ended.outputs.text }}
