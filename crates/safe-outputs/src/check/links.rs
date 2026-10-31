@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 use regex::{Captures, Regex};
 use serde_json::Value;
 
-use crate::policy::Policy;
+use crate::contract::Policy;
 
 /// What the collector leaves of a Markdown link or image to a host it
 /// redacts: the link's text, then the redaction in a second pair of
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn hosts_the_collector_redacts() {
-        let mut policy = crate::policy::tests::policy();
+        let mut policy = crate::check::fixtures::policy();
         // gh-aw's own list, as in a policy written by hand.
         policy.allowed_domains.clear();
         let body = |text: &str| json!({"type": "add_comment", "body": text});
@@ -295,7 +295,7 @@ mod tests {
             ]
         );
         // As `policy` writes it: an https link to any public host is kept.
-        policy.allowed_domains = crate::policy::link_domains().to_vec();
+        policy.allowed_domains = crate::link_domains().to_vec();
         let text = format!("{text} [any](https://arbitrary-host.example.net/report#src)");
         assert_eq!(
             redacted_hosts(&body(&text), &policy),

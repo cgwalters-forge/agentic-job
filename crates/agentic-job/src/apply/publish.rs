@@ -59,7 +59,7 @@ use crate::collect::sanitize::{
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, PUSH_TO_PULL_REQUEST_BRANCH, Policy,
+    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, Load, PUSH_TO_PULL_REQUEST_BRANCH, Policy,
 };
 
 /// What this publishes of one type, as gh-aw's handler does.

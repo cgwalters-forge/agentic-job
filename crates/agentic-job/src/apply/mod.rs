@@ -51,8 +51,8 @@ use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
 use crate::policy::{
-    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, ITEM_NUMBER, KIND_TARGETS, MISSING_DATA, NOOP,
-    PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
+    CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, ITEM_NUMBER, KIND_TARGETS, Load, MISSING_DATA,
+    NOOP, PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy,
 };
 
 /// Check's verdict, as the check job uploads it.

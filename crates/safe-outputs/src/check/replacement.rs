@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{BASE_COMMIT_HEADER, PatchInfo, read_patch};
-use crate::policy::Push;
+use crate::contract::Push;
 
 pub const REPLACEMENT_FILE: &str = "replacement.json";
 

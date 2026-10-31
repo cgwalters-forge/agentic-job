@@ -75,7 +75,7 @@ use self::upload::{Gate, Staging};
 use crate::config::checked::Checked;
 use crate::config::{self, Config};
 use crate::exit::Exit;
-use crate::policy;
+use crate::policy::{self, Load};
 use crate::redact::Redactor;
 use crate::session::bridge::{Bridge, Listen};
 use crate::session::process::SandboxUser;

@@ -10,7 +10,7 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 
 - `crates/agentic-job/`: CLI, policy, event admission, sessions, sandbox, run, check and audit code.
 - `crates/secure-host/`: host setup with nothing agent-specific, which agentic-job depends on; being split out ([layout](docs/layout.md#rust-workspace)).
-- `crates/safe-outputs/`: request vocabulary and gh-aw's collector as a library, with no dependency on the other crates ([boundary](docs/safe-outputs.md#library-boundary)).
+- `crates/safe-outputs/`: request vocabulary, gh-aw's collector, the policy, bounds parsing and the check of a hand-back as a library, with no dependency on the other crates ([boundary](docs/safe-outputs.md#library-boundary)).
 - `crates/agentic-job/src/bin/fake-agent.rs`: scripted agent for protocol and end-to-end tests.
 - `crates/agentic-job/tests/`: CLI integration tests; `data/` fixtures and `corpus/` old/new implementation parity tests.
 - `egress/`: Python filtering proxy policy, tests and hash-pinned dependencies embedded in the binary.
@@ -122,11 +122,13 @@ the job token, whether or not an apply environment is configured.
 labels/status; none may execute agent-produced code. Release/pin publishing
 and CI end-to-end cleanup also have write-capable jobs: review their permissions.
 
-The boundaries include `src/policy.rs`, `src/check/` (especially patch parsing),
+The boundaries include `src/policy.rs`, `src/check/`,
 `src/redact.rs`, `src/run/handback.rs`, upload/probe code,
 `src/event/`, sandbox setup/helper/network/check code and `egress/` policy,
-all under the agentic-job crate unless a root path is given, and all of
-`crates/secure-host/` (`files.rs` and the egress proxy among it). Keep size/count/path/type
+all under the agentic-job crate unless a root path is given, all of
+`crates/secure-host/` (`files.rs` and the egress proxy among it), and
+`crates/safe-outputs/`'s `contract.rs`, `bounds.rs` and `check/`
+(especially patch parsing). Keep size/count/path/type
 limits, no-follow regular-file reads and fail-closed refusals intact.
 See the host's [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md)
 and [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),

@@ -1,6 +1,6 @@
 [package]
 name = "safe-outputs"
-description = "gh-aw's safe-output request vocabulary and collector: validate and sanitize an outputs.jsonl, bounded, without an agent run or a CI system"
+description = "gh-aw's safe-output contract: the request vocabulary and collector, the policy and its bounds, and the check of a hand-back against them, bounded, without an agent run or a CI system"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `Kind` as a command-line value, for a caller that takes it as one.
+clap = ["dep:clap"]
+
 # Nothing of agentic-job or secure-host: callers read the policy, the
 # hand-back and their credentials, and give this the text and settings.
 [dependencies]
 anyhow.workspace = true
+# A replacement commit's Date header (check::replacement).
+chrono.workspace = true
+clap = { workspace = true, optional = true }
 regex.workspace = true
 serde.workspace = true
 # The collector's results follow the configuration's and the request's
@@ -22,4 +29,7 @@ serde.workspace = true
 # here, not left to whatever else the binary links (agent-client-protocol
 # brings `preserve_order` to agentic-job).
 serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
+# A bounds file's `[trigger]` table, carried unread where its caller
+# gives no type of its own.
+toml.workspace = true
 unicode-normalization.workspace = true

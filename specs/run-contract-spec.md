@@ -172,7 +172,7 @@ a malicious workflow edit: exempting `.github` presumes the operator requires
 approval of fork pull request workflow runs, keeps the apply account neither
 a member nor a collaborator of the target, keeps self-hosted runners
 unreachable from them and reviews before merge.
-Enforcement: [check/patch.rs](../crates/agentic-job/src/check/patch.rs), tests
+Enforcement: [check/patch.rs](../crates/safe-outputs/src/check/patch.rs), tests
 `what_is_refused` and `unprotected_names_and_folders_follow_the_policy`;
 [patch_git.rs](../crates/agentic-job/tests/patch_git.rs),
 `what_git_writes_is_read_as_git_means_it` and `the_reader_names_all_that_git_am_changes`.
@@ -481,7 +481,7 @@ and partial-run restrictions. It MUST force-push only with a lease on the
 original admitted head, accept only the exact reconstructed head as already
 applied on a rerun, and verify the resulting remote head. A valid author date
 and fixed committer identity MUST make reconstruction deterministic.
-Enforcement: [replacement.rs](../crates/agentic-job/src/check/replacement.rs),
+Enforcement: [replacement.rs](../crates/safe-outputs/src/check/replacement.rs),
 `replacement_series_are_individually_bounded` in
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), and apply's
 [replacement.rs](../crates/agentic-job/src/apply/replacement.rs).
@@ -660,7 +660,7 @@ These limitations are not additional guarantees:
 
 - Project-update payload checking restricts exact projects and fields,
   explicit repository and issue-only numeric content, and string/number field
-  values in [check/mod.rs](../crates/agentic-job/src/check/mod.rs), `redirections_to`.
+  values in [check/mod.rs](../crates/safe-outputs/src/check/mod.rs), `redirections_to`.
   That payload grammar has no dedicated enforcing test here and is not part of
   the tested conformance claim.
 - RC-018 decides by `apply-environment`, not by the secret: the policy job

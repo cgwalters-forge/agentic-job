@@ -53,10 +53,14 @@ serve at fixed points of setup's order. The image and the
 the run token's probes in `run/probe.rs`.
 
 `crates/safe-outputs` is gh-aw's safe-output contract as a library: the
-request vocabulary and forge profile (`vocabulary.rs`) and gh-aw's
-collector and sanitizer, ported (`collect/`). It depends on neither
-agentic-job nor secure-host; agentic-job re-exports it at its old paths
-(`policy::Forge`, `check::OUTPUTS_FILE`, `collect::collect`, ...).
+request vocabulary and forge profile (`vocabulary.rs`), gh-aw's
+collector and sanitizer, ported (`collect/`), the policy and its
+validation (`contract.rs`), bounds parsing and the intersection of two
+bounds files' policies (`bounds.rs`), and the check of a hand-back with
+its patch, link, handler-limit and replacement rules (`check/`). It
+depends on neither agentic-job nor secure-host; agentic-job re-exports
+it at its old paths (`policy::Policy`, `check::read_patch`,
+`collect::collect`, ...).
 [safe-outputs.md](safe-outputs.md#library-boundary) lists what moved and
 what stays.
 
@@ -66,10 +70,10 @@ Paths below are relative to `crates/agentic-job/src/`.
 | --- | --- |
 | `main.rs`, `cli.rs`, `exit.rs` | Command dispatch and exit states |
 | `config/` | TOML types, validation and composition from workflow inputs |
-| `policy.rs` | Bounds, per-run policy and gh-aw configuration |
+| `policy.rs` | Reading bounds and policy files, and compiling a run's request into its policy |
 | `event/` | Event admission, run guards and fenced task context |
 | `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
-| `check/` | Output policy and strict mail-patch parsing |
+| `check/` | The `check` command: reading the hand-back, secret scanning, memory, checkpoints and the report, around the library's check |
 | `collect.rs` | The `collect` command: the safe-outputs collector on a hand-back and policy, for `handback check`, check.yml and callers off GitHub |
 | `apply/` | Publishing checked outputs behind `Publisher`: Forgejo's, and on GitHub the types the bounds route away from gh-aw's handlers (`publish.rs`) |
 | `audit.rs` | Offline artifact inspection and finding codes |

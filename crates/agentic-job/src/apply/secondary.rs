@@ -23,7 +23,7 @@ use super::{COMMIT_RE, Report, footer, mentions, owner, read_report, with_footer
 use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{CREATE_PULL_REQUEST, Forge, PatchRules, Policy, Secondary};
+use crate::policy::{CREATE_PULL_REQUEST, Forge, Load, PatchRules, Policy, Secondary};
 
 /// The environment variable holding apply's token, as apply.yml names it:
 /// a user's, which can fork.

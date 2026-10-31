@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = join(HERE, "validation.json");
-const LIMITS_OUT = join(HERE, "../crates/agentic-job/src/check/handler-limits.json");
+const LIMITS_OUT = join(HERE, "../crates/safe-outputs/src/check/handler-limits.json");
 const HANDLERS_DIR = "actions/setup/js";
 const LOCK_DIR = ".github/workflows";
 const LOCK_SUFFIX = ".lock.yml";
