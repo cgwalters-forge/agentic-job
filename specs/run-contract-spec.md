@@ -392,9 +392,9 @@ posts`, the `a run that handed back ...` cases, `a run with no result says
 so once per run and call, by the token that posts`, `a run with no result
 quotes its reason through the pinned gh-aw sanitizer`, `the reason of a run
 with no result is sanitized as the handlers sanitize a comment` and the
-`conclude says ...` cases; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
-capabilities and token boundary` and `the URL of what apply made is an output
-of dispatch, by way of the wrapper`; [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`conclude says ...` cases; [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs),
+`the_dispatch_caller_fixes_capabilities_and_token_boundary`,
+`the_dispatch_callers_inputs_and_outputs_are_wired` and
 the issue and `item-repo` cases of
 `the_request_step_tells_the_policy_command_its_token_and_targets`; [status.rs](../crates/agentic-job/src/apply/status.rs), test
 `writes`; [policy.rs](../crates/agentic-job/src/policy.rs), the `an item in ...`
@@ -462,8 +462,8 @@ head, with the checked tree`, `a partial run's push is not applied, whatever
 else it posts` and `target base fetching never advances the
 output repository and a stale base is refused`;
 [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs), the push cases of
-`the_request_step_tells_the_policy_command_its_token_and_targets`; [dispatch.test.cjs](../workflow/dispatch.test.cjs), `caller fixes
-capabilities and token boundary`.
+`the_request_step_tells_the_policy_command_its_token_and_targets` and
+`the_dispatch_caller_fixes_capabilities_and_token_boundary`.
 
 **RC-023 — Bounded history replacement.** A push MAY replace its full series
 only when the caller explicitly bounds `replacement_max_commits` (default
@@ -558,14 +558,20 @@ guard` and `the job fails unless every output was applied and a pull request
 asked for was opened`, and `target base fetching never advances the output
 repository and a stale base is refused`; [policy.rs](../crates/agentic-job/src/policy.rs), test
 `what_the_job_token_cannot_apply_is_refused` (RC-018);
-[dispatch.test.cjs](../workflow/dispatch.test.cjs), `real agent preflight
-names all missing deployment variables together`;
+[dispatch.rs](../crates/agentic-job/src/dispatch.rs), the `without its
+variables` cases of test `refusals`;
 [ci.yml](../.github/workflows/ci.yml), the inline `changes` path classifier
 and required `ci` gate (workflow enforcement, not a live forge test).
-[ci.test.cjs](../workflow/ci.test.cjs) executes the inline classifier against
-local Git histories, including hostile script edits, renames and missing history.
-It also tests privileged job gating and the required check's acceptance/refusal
-matrix for skipped, failed and cancelled jobs.
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)'
+`the_path_classifier_reads_real_git_paths_without_running_them` executes the
+inline classifier against local Git histories, including hostile script
+edits, renames and missing history;
+`privileged_ci_jobs_run_only_under_the_e2e_gate_or_on_push` and
+`ci_gates_skip_what_a_queue_tested_and_run_everything_otherwise` test
+privileged job gating, and
+`the_aggregate_accepts_a_skip_only_under_a_gate_that_said_false` the
+required check's acceptance/refusal matrix for skipped, failed and
+cancelled jobs.
 Classification does not execute a script from the pull request's tree;
 human edits to the proposed workflow still require review.
 
@@ -622,8 +628,8 @@ Enforcement: [workflows.rs](../crates/agentic-job/tests/workflows.rs),
 policy call of another commit, and apply an empty checked ID` and `apply
 takes only this run's check output, whatever the caller wired`;
 [specs](../specs/README.md), `BrokenWiring`;
-[dispatch.test.cjs](../workflow/dispatch.test.cjs),
-`caller fixes capabilities and token boundary`.
+`the_dispatch_caller_fixes_capabilities_and_token_boundary` in
+[workflows.rs](../crates/agentic-job/tests/workflows.rs).
 
 **RC-016 — Steps before `secure-host`.** A caller's steps between `prepare`
 and `secure-host` run as the runner user with sudo, and MAY join a network,

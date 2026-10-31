@@ -293,9 +293,6 @@ jobs:
           ZIZMOR: ${{ runner.temp }}/zizmor
           ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/workflow-commands.test.cjs
-      # Read-only contract tests; no forge token or agent-produced code.
-      - run: node --test workflow/dispatch.test.cjs
-      - run: node --test workflow/ci.test.cjs
       # Credentialless cross-repository fix: the pinned real handler writes
       # only local git fixtures, with mock forge reads. No new permissions.
       # apply's tests run gh-aw's pinned comment handler from the same checkout.
@@ -355,9 +352,9 @@ jobs:
   # `agentic-job apply` against a real Forgejo (crates/agentic-job/tests/forgejo.rs):
   # a throwaway service container on loopback, bootstrapped by the test,
   # with no secret of this repository. Read-only job token. Not listed in
-  # required-checks until it has proven stable (workflow/ci.test.cjs
-  # excludes it by name until then). The image is pinned by hand: bump it
-  # to the next LTS release.
+  # required-checks until it has proven stable (tests/workflows.rs's
+  # aggregate test excludes it by name until then). The image is pinned
+  # by hand: bump it to the next LTS release.
   forgejo:
     needs: changes
     if: ${{ needs.changes.outputs.full == 'true' }}

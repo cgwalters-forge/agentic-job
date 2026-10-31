@@ -425,8 +425,10 @@ says why on the issue.
 ## Verification
 
 `cargo test -p agentic-job dispatch` covers every preflight refusal and each
-profile's task text; `node --test workflow/dispatch.test.cjs`
-checks the caller's shape and runs all shipped sessions; `cargo test -p agentic-job review`
+profile's task text; the dispatch tests in
+[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs) check the
+caller's shape, and `the_shipped_dispatch_setups_hand_back_through_a_fake_agent_session`
+plays every shipped session; `cargo test -p agentic-job review`
 covers hostile review routing and output cases.
 CI calls the **same dispatch.yml**, running research wherever it runs its
 end-to-end jobs, plus review on PRs; triage takes the same path with other
