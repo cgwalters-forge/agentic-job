@@ -290,7 +290,9 @@ pub fn bpftool_install(os_release: &str, kernel: &str) -> Result<(&'static str, 
                 ]),
             ))
         }
-        Some("rhel") => Ok(("dnf", strings(&["install", "-y", "bpftool"]))),
+        Some("rhel" | "centos") if platform::supported(os_release) => {
+            Ok(("dnf", strings(&["install", "-y", "bpftool"])))
+        }
         other => bail!(
             "no bpftool package known for {}",
             other.unwrap_or("this host")
@@ -963,6 +965,20 @@ mod tests {
         let dnf = ("dnf", strings(&["install", "-y", "bpftool"]));
         assert_eq!(bpftool_install(ubuntu, kernel).unwrap(), apt);
         assert_eq!(bpftool_install(rhel, "6.12.0-55.el10.x86_64").unwrap(), dnf);
+        for (id, version, accepted) in [
+            ("centos", "10", true),
+            ("centos", "9", false),
+            ("centos", "10.0", false),
+            ("almalinux", "10", false),
+            ("rocky", "10", false),
+        ] {
+            let release = format!("ID={id}\nVERSION_ID={version}\nID_LIKE=rhel\n");
+            let result = bpftool_install(&release, "6.12.0-55.el10.x86_64");
+            assert_eq!(result.is_ok(), accepted, "{release}");
+            if accepted {
+                assert_eq!(result.unwrap(), dnf);
+            }
+        }
         for (release, kernel, refusal) in [
             (ubuntu, "7.0 -x", "unexpected kernel release"),
             (ubuntu, "", "unexpected kernel release"),

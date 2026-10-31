@@ -20,7 +20,7 @@ inputs:
   config:
     description: >-
       A host configuration file (TOML: the `[sandbox]`, `[egress]` and `[setup]` tables). Empty for
-      this repository's hosted.toml, with the egress proxy on, rather than the new action's default
+      this repository's os-release-selected default, with the egress proxy on
     default: ""
   check:
     description: Prove the result with `agentic-job sandbox check` before the step returns; `false` leaves that to the job
@@ -87,6 +87,18 @@ runs:
           echo "::error::secure-host now forwards to cgwalters-forge/actions/secure-host, which takes only config, check and image-archive, not ${set[*]}: drop them, or name cgwalters-forge/agentic-job/secure-host at an earlier commit (docs/secure-host.md)"
           exit 1
         fi
+    - name: Select the host configuration
+      id: config
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [ -z "$CONFIG" ]; then
+          default=$(bash "$ACTION_PATH/default-config.sh")
+          CONFIG="$ACTION_PATH/$default"
+        fi
+        printf 'path=%s\n' "$CONFIG" >> "$GITHUB_OUTPUT"
     # The new action sets egress.write-policy from its own `egress` input,
     # over the file's value, so a configuration that asks for the policy
     # would silently run without it (and a later step could POST the job's
@@ -103,7 +115,7 @@ runs:
       id: egress
       shell: bash
       env:
-        CONFIG: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
+        CONFIG: ${{ steps.config.outputs.path }}
       run: |
         if grep -Eq "^[[:space:]]*([^#[:space:]].*)?\\\\|'''|\"\"\"" -- "$CONFIG"; then
           echo "::error::$CONFIG has a backslash outside a comment or a multi-line string, so the forwarder cannot tell whether it sets egress.write-policy: write the file without them"
@@ -112,7 +124,7 @@ runs:
         mode=off
         if grep -Eq "^[[:space:]]*([^#[:space:]].*)?write-policy[\"']?[[:space:]]*=[[:space:]]*true" -- "$CONFIG"; then mode=write-policy; fi
         echo "mode=$mode" >> "$GITHUB_OUTPUT"
-    # Without a config, this repository's hosted one, as the old action
+    # Without a config, this repository's host-specific default, as the old action
     # had: the new action's own default turns the egress proxy off, and
     # the v0.6 image's binary still creates its second user, so a step
     # that runs untrusted code as it would lose the proxy's rules. With
@@ -121,7 +133,7 @@ runs:
     # GITHUB_ENV, refusing any other name.
     - uses: cgwalters-forge/actions/secure-host@636b20b87bc94417999062ada22700ef4d6a8836 # main, with secure-host:v0.6.3
       with:
-        config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}
+        config: ${{ steps.config.outputs.path }}
         check: ${{ inputs.check }}
         egress: ${{ steps.egress.outputs.mode }}
         image-archive: ${{ inputs.image-archive }}

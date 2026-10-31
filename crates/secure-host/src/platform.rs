@@ -10,7 +10,7 @@ use regex::Regex;
 
 /// The one refusal, whatever the reason: a missing, unreadable, ambiguous
 /// or unsupported release file alike.
-pub const REFUSAL: &str = "secure-host: requires Ubuntu 26.04 or RHEL 10; cannot establish a supported host from /etc/os-release";
+pub const REFUSAL: &str = "secure-host: requires Ubuntu 26.04 or RHEL 10 or CentOS Stream 10; cannot establish a supported host from /etc/os-release";
 
 pub const OS_RELEASE: &str = "/etc/os-release";
 
@@ -24,7 +24,7 @@ static FIELD: LazyLock<Regex> = LazyLock::new(|| {
 static RHEL_10: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^10(?:\.[0-9]+)*$").expect("a valid pattern"));
 
-/// Whether os-release TEXT names Ubuntu 26.04 or RHEL 10. A malformed or
+/// Whether os-release TEXT names Ubuntu 26.04, RHEL 10 or CentOS Stream 10. A malformed or
 /// repeated `ID` or `VERSION_ID` line refuses the whole file.
 pub fn supported(text: &str) -> bool {
     let mut id = None;
@@ -51,6 +51,7 @@ pub fn supported(text: &str) -> bool {
     match (id.flatten(), version.flatten().unwrap_or_default()) {
         (Some("ubuntu"), version) => version == "26.04",
         (Some("rhel"), version) => RHEL_10.is_match(version),
+        (Some("centos"), "10") => true,
         _ => false,
     }
 }
@@ -80,7 +81,10 @@ mod tests {
             ("rhel", "11", false),
             ("rhel", "100", false),
             ("rhel", "10.", false),
-            ("centos", "10", false),
+            ("centos", "10", true),
+            ("centos", "9", false),
+            ("centos", "10.0", false),
+            ("centos", "11", false),
             ("rocky", "10", false),
             ("almalinux", "10", false),
             ("fedora", "44", false),
@@ -92,8 +96,36 @@ mod tests {
                     "# release\nNAME=\"Example Linux\"\nID={quote}{id}{quote}\nVERSION_ID={quote}{version}{quote}\nID_LIKE=\"ubuntu rhel\"\n"
                 );
                 assert_eq!(supported(&text), expected, "{id} {version} {quote}");
+                let selected = default_config(&text);
+                assert_eq!(selected.status.success(), expected, "{text}");
+                let config = if id == "ubuntu" {
+                    "hosted.toml"
+                } else {
+                    "rhel-cloud.toml"
+                };
+                assert_eq!(
+                    String::from_utf8(selected.stdout).unwrap().trim(),
+                    if expected { config } else { "" },
+                    "{text}"
+                );
             }
         }
+    }
+
+    // The action must choose before it has a Rust binary. Exercise its bootstrap
+    // selector with the admission table so its independent parser cannot drift.
+    fn default_config(text: &str) -> std::process::Output {
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("os-release");
+        std::fs::write(&release, text).unwrap();
+        std::process::Command::new("bash")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../secure-host/default-config.sh"
+            ))
+            .arg(release)
+            .output()
+            .unwrap()
     }
 
     #[test]
@@ -112,6 +144,9 @@ mod tests {
             "ID=ubuntu\nVERSION_ID=\"26.04'\n",
         ] {
             assert!(!supported(text), "{text:?}");
+            let selected = default_config(text);
+            assert!(!selected.status.success(), "{text:?}");
+            assert!(selected.stdout.is_empty(), "{text:?}");
         }
     }
 

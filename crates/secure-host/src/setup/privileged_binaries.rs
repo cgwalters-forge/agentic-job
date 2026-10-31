@@ -61,7 +61,7 @@ fn entries<'a>(data: &'a str, id: &str, version: &str) -> Result<Vec<Entry<'a>>>
     }
     ensure!(
         !entries.is_empty(),
-        "no privileged binary allowlist for {id} {version}; supported images are Ubuntu 26.04 and RHEL 10"
+        "no privileged binary allowlist for {id} {version}; supported images are Ubuntu 26.04, RHEL 10 and CentOS Stream 10"
     );
     Ok(entries)
 }
@@ -155,6 +155,12 @@ mod tests {
         for (id, version, accepted) in [
             ("ubuntu", "26.04", true),
             ("rhel", "10", true),
+            ("centos", "10", true),
+            ("centos", "9", false),
+            ("centos", "10.0", false),
+            ("almalinux", "10", false),
+            ("rocky", "10", false),
+            ("fedora", "44", false),
             ("ubuntu", "24.04", false),
             ("rhel", "9", false),
         ] {

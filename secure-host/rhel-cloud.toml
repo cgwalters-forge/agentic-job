@@ -1,0 +1,23 @@
+# Default for RHEL 10 and CentOS Stream 10 cloud hosts. Untrusted steps must
+# not reach these local listeners; stop and mask their activation units too.
+# Other images may need their own config: sandbox check still refuses every
+# unexpected listener. There are deliberately no allow-sockets exceptions.
+[sandbox]
+stop-services = [
+    "docker.socket",
+    "docker.service",
+    "containerd.service",
+    "cockpit.socket",
+    "cockpit.service",
+    "sssd-kcm.socket",
+    "sssd-kcm.service",
+    "gssproxy.service",
+    "sshd.socket",
+    "sshd.service",
+    "sshd-unix-local.socket",
+]
+close-resolved = true
+
+# As in hosted.toml, leave the egress proxy and its network rules on.
+[setup]
+packages = ["nftables"]

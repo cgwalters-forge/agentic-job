@@ -1,5 +1,6 @@
-# What the action sets up when its `config` input names no file: GitHub's
-# hosted `ubuntu-26.04`. Another runner image listens on other sockets:
+# What the action selects for Ubuntu 26.04 when `config` names no file:
+# GitHub's hosted image. RHEL 10 and CentOS Stream 10 use rhel-cloud.toml.
+# Another runner image listens on other sockets:
 # `agentic-job sandbox check` fails on each one that is left and names
 # it, and a job on such an image passes a file of its own.
 

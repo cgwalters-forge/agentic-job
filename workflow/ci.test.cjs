@@ -530,11 +530,10 @@ test('the public secure-host forwards to the pinned new action and refuses the o
   const [, ...version] = read('Cargo.toml').match(/^version = "(\d+)\.(\d+)\.(\d+)"$/m);
   const older = (a, b) => a.map(Number).reduce((cmp, n, i) => cmp || Math.sign(n - Number(b[i])), 0) <= 0;
   assert.ok(older(tag, version), `${line} is newer than the workspace's ${version.join('.')}`);
-  // The new action is the last step. Without a config, the hosted one beside
-  // it, which keeps the egress proxy on, never the new action's default,
+  // The new action is last, with the selected host config (proxy on), not its default,
   // which turns it off; its trust-store step runs under egress: write-policy.
   assert.ok(forwarder.endsWith(`${line}\n      with:\n` +
-    "        config: ${{ inputs.config || format('{0}/hosted.toml', github.action_path) }}\n" +
+    '        config: ${{ steps.config.outputs.path }}\n' +
     '        check: ${{ inputs.check }}\n' +
     '        egress: ${{ steps.egress.outputs.mode }}\n' +
     '        image-archive: ${{ inputs.image-archive }}\n'));
