@@ -45,6 +45,10 @@ Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`
 ([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
 
+Both `runner` and `agent-runner` default to the JSON string
+`"ubuntu-26.04"`. Explicit labels and runner groups still resolve in the
+calling repository; architecture-specific and special runners are not remapped.
+
 `status-comment` preserves opening whole-line hidden caller comments, except
 tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
 [status provenance contract](workflow.md).

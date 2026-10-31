@@ -890,7 +890,7 @@ for the bounds, just as for agent runs.
 ```yaml
 jobs:
   proposals:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions: {}
     steps:
       - run: mkdir proposals && printf '%s\n' '{"type":"noop","message":"No proposals today."}' > proposals/outputs.jsonl
@@ -1146,7 +1146,7 @@ the actions' cleanup steps, runs without it
 ([the lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock)),
 which is one more reason the machine must not be one that runs another
 job afterwards. `runner` is for the other
-three jobs and defaults to `ubuntu-24.04`; where no release fits the
+three jobs and defaults to `ubuntu-26.04`; where no release fits the
 workflow's commit, the policy job builds the binary there with rustup,
 and apt for the musl compiler. Labels resolve
 in the calling repository.
