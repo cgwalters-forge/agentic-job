@@ -1,14 +1,15 @@
-//! `agentic-job collect`: what gh-aw's collector (`collect_ndjson_output.cjs`
-//! at the commit apply.yml pins gh-aw's handlers at) makes of a hand-back's
-//! `outputs.jsonl`, for check.yml and for a caller off GitHub. It writes
-//! the `{items, errors}` that `check --collected` reads.
+//! What gh-aw's collector (`collect_ndjson_output.cjs` at the commit
+//! apply.yml pins gh-aw's handlers at) makes of a hand-back's
+//! `outputs.jsonl`: the `{items, errors}` that `agentic-job collect` writes
+//! for check.yml and for a caller off GitHub, and `check --collected` reads.
+//! [`collect_bytes`] takes the file as read, bounded; [`collect`] its text.
 //!
 //! The requests it takes are those of [`TYPES`], every type a policy may
 //! allow, each validated and its text sanitized as gh-aw's collector does
 //! for that type ([`sanitize`]). Any other type is an error: passed on
 //! unvalidated, it would reach an applier unsanitized. Fixtures that
 //! gh-aw's collector wrote, on the same lines and configuration, hold the
-//! two to the same result (`tests/data/collect`).
+//! two to the same result (agentic-job's `tests/data/collect`).
 //!
 //! Where the two differ, this mostly refuses more: a line that is not
 //! JSON is not repaired, nor is JSON that serde_json cannot hold (a lone
@@ -44,38 +45,22 @@
 //! session, so the agent is told of a field error in the words the check
 //! job refuses it in. [`field_guide`] tells it the fields.
 
-pub(crate) mod markdown;
-pub(crate) mod sanitize;
+pub mod markdown;
+pub mod sanitize;
 
-use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, ensure};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use self::sanitize::{is_js_space, js_trim};
-use crate::check::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
-use crate::exit::Exit;
-use crate::files::{self, ReadError};
-use crate::policy::{
+use crate::vocabulary::{
     CREATE_REVIEW_COMMENT, Forge, HIDE_COMMENT, HIDE_REASONS, KIND_TARGETS, MARK_READY,
-    PUSH_TO_PULL_REQUEST_BRANCH, Policy, REPLY_TO_REVIEW_COMMENT, RESOLVE_REVIEW_THREAD,
+    MAX_OUTPUTS_BYTES, OUTPUTS_FILE, PUSH_TO_PULL_REQUEST_BRANCH, REPLY_TO_REVIEW_COMMENT,
+    RESOLVE_REVIEW_THREAD,
 };
-
-#[derive(Debug, clap::Args)]
-pub struct Args {
-    /// The policy.json that `policy` printed for this run
-    #[arg(long, value_name = "FILE")]
-    pub policy: PathBuf,
-    /// The directory holding the handed-back outputs
-    #[arg(long, value_name = "DIR")]
-    pub outputs: PathBuf,
-    /// Where to write what was collected, which `check --collected` reads
-    #[arg(long, value_name = "FILE")]
-    pub collected: PathBuf,
-}
 
 /// What the collector made of the requests: those it took, sanitized,
 /// and why it refused the others.
@@ -1569,40 +1554,6 @@ pub fn field_guide(name: &str, forge: Forge) -> Option<String> {
     Some(fields.join(", "))
 }
 
-/// The configuration the collector is given for POLICY: its
-/// `safe_outputs`, with its secondary pull request's `max` added to
-/// `create_pull_request`'s, since the collector counts a pull request of
-/// either repository alike; `check` counts each against its own.
-pub fn config(policy: &Policy) -> Result<Map<String, Value>> {
-    let Value::Object(mut config) = serde_json::to_value(&policy.safe_outputs)? else {
-        bail!("the policy's safe_outputs is not an object");
-    };
-    if let Some(secondary) = &policy.secondary_pull_request
-        && let Some(Value::Object(pull)) = config.get_mut("create_pull_request")
-    {
-        let max = pull.get("max").and_then(Value::as_u64).unwrap_or(0);
-        pull.insert("max".into(), (max + u64::from(secondary.max)).into());
-    }
-    Ok(config)
-}
-
-/// What [`collect`] makes of the `outputs.jsonl` in OUTPUTS under
-/// POLICY: none at all if there is none, as gh-aw's collector takes a
-/// missing file.
-pub fn collect_dir(outputs: &Path, policy: &Policy) -> Result<Collected> {
-    let path = outputs.join(OUTPUTS_FILE);
-    let text = match files::read_regular(&path, MAX_OUTPUTS_BYTES) {
-        Ok(bytes) => {
-            String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?
-        }
-        Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => bail!("{} {err}", path.display()),
-    };
-    Ok(collect(&text, &config(policy)?, policy.forge, &|host| {
-        policy.keeps_link_to(host)
-    }))
-}
-
 /// Whether a `noop`'s MESSAGE is an agent trying the tool out.
 fn is_probe(message: Option<&Value>) -> bool {
     let Some(Value::String(message)) = message else {
@@ -1615,10 +1566,57 @@ fn is_probe(message: Option<&Value>) -> bool {
     PROBE_MESSAGES.contains(&words.join(" ").to_lowercase().as_str())
 }
 
+/// The fields a neutral inline comment (a [`CREATE_REVIEW_COMMENT`] off
+/// GitHub) may have: a single line, no range or review.
+const INLINE_FIELDS: &[&str] = &[
+    "type",
+    "repo",
+    "pull_request_number",
+    "path",
+    "line",
+    "side",
+    "body",
+];
+
+/// Refuse a neutral inline comment's unmapped fields before collection can
+/// drop them, including nulls.
+pub fn inline_field_names(item: &Map<String, Value>) -> Result<()> {
+    for key in item.keys() {
+        ensure!(
+            INLINE_FIELDS.contains(&key.as_str()),
+            "neutral inline comment field {key} is not representable (multiline ranges are not supported)"
+        );
+    }
+    Ok(())
+}
+
+/// What [`collect`] makes of BYTES, an [`OUTPUTS_FILE`] as read, refused
+/// whole past [`MAX_OUTPUTS_BYTES`] or where it is not UTF-8, rather than
+/// collected in part. Reading the file, no-follow and bounded, is the
+/// caller's.
+pub fn collect_bytes(
+    bytes: &[u8],
+    config: &Map<String, Value>,
+    forge: Forge,
+    keeps_link: &dyn Fn(&str) -> bool,
+) -> Result<Collected> {
+    ensure!(
+        u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_OUTPUTS_BYTES),
+        "{OUTPUTS_FILE} is over {MAX_OUTPUTS_BYTES} bytes"
+    );
+    let text =
+        std::str::from_utf8(bytes).with_context(|| format!("{OUTPUTS_FILE} is not UTF-8"))?;
+    Ok(collect(text, config, forge, keeps_link))
+}
+
 /// What gh-aw's collector makes of TEXT, the lines of an `outputs.jsonl`,
 /// under CONFIG, the policy's `safe_outputs` as its `config.json`, with
 /// https links kept to the hosts KEEPS_LINK takes, and the fields of
 /// FORGE's profile ([`forge_fields`]).
+///
+/// TEXT is not bounded here: this is for text the caller has bounded, a
+/// file it read with at most [`MAX_OUTPUTS_BYTES`] or one request; any
+/// other caller uses [`collect_bytes`].
 pub fn collect(
     text: &str,
     config: &Map<String, Value>,
@@ -1703,8 +1701,7 @@ fn request(
     if forge != Forge::Github && kind == CREATE_REVIEW_COMMENT {
         // Dropping a range or review field would silently turn the finding
         // into a different operation before check could refuse it.
-        crate::apply::inline::field_names(&item)
-            .map_err(|err| format!("Line {line}: {kind}: {err:#}"))?;
+        inline_field_names(&item).map_err(|err| format!("Line {line}: {kind}: {err:#}"))?;
     }
     let extra = forge_fields(forge, of.name);
     // Dropped, a target naming an issue or a merge request would leave
@@ -1724,22 +1721,6 @@ fn request(
         ));
     }
     of.validate(&item, extra, line, keeps_link).map(Some)
-}
-
-pub fn run(args: &Args) -> Result<Exit> {
-    let policy = Policy::load(&args.policy)?;
-    let path = &args.collected;
-    let collected = collect_dir(&args.outputs, &policy)?;
-    let json = serde_json::to_string(&collected).context("writing what was collected")?;
-    std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;
-    for error in &collected.errors {
-        eprintln!("error: {}", crate::run::enter::one_line(error));
-    }
-    Ok(if collected.errors.is_empty() {
-        Exit::Success
-    } else {
-        Exit::Failure
-    })
 }
 
 #[cfg(test)]

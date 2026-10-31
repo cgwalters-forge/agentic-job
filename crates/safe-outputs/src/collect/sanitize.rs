@@ -21,7 +21,7 @@ use unicode_normalization::UnicodeNormalization;
 use super::markdown::{balance, outside_code};
 
 /// JavaScript's `\s`, the body of a character class.
-pub(crate) const JS_SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
+pub const JS_SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
 
 /// Whether C is in JavaScript's `\s`, which is also what its `trim` drops.
 pub fn is_js_space(c: char) -> bool {
@@ -904,7 +904,7 @@ mod tests {
     use super::*;
 
     fn keeps_public(host: &str) -> bool {
-        crate::policy::link_domains()
+        crate::link_domains()
             .iter()
             .any(|tld| host == tld || host.ends_with(&format!(".{tld}")))
     }

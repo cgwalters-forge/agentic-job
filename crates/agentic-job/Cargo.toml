@@ -23,6 +23,7 @@ futures.workspace = true
 regex.workspace = true
 ring.workspace = true
 rustix.workspace = true
+safe-outputs = { path = "../safe-outputs" }
 secure-host = { path = "../secure-host" }
 serde.workspace = true
 # Numbers read as JavaScript reads them, for apply's applied names.

@@ -1362,7 +1362,7 @@ configuration (`crates/agentic-job/tests/data/collect`, regenerated with
 built-in field rules with `safe-outputs/validation.json`. Where they
 differ it mostly refuses more (a line that is not JSON is not
 repaired); the other differences are in characters no renderer takes
-for a line end, listed in `src/collect/mod.rs`. Like gh-aw's, it passes a
+for a line end, listed in `crates/safe-outputs/src/collect/mod.rs`. Like gh-aw's, it passes a
 few fields on unchecked, where gh-aw has no check for their type
 (`assign_to_user`'s `assignees`, `update_project`'s `fields`, …); `check`
 holds those to the policy.
@@ -1920,3 +1920,75 @@ The Forgejo publisher above implements only its listed subset of this
 contract, and the [GitLab one](#publishing-to-gitlab) all of it but
 `create_pull_request_review_comment`,
 with GitLab's mentions and quick actions broken.
+
+## Library boundary
+
+The safe-output contract is becoming a component of its own
+([tracker#1047](https://github.com/cgwalters-forge/tracker/issues/1047)),
+so that another project, or a deterministic CI job, can collect and
+check requests without agentic-job's runner, secure-host or GitHub's
+environment. The first step is `crates/safe-outputs`, a library in this
+workspace that depends on neither agentic-job nor secure-host. It reads
+no file, environment or credential: it is given text and settings.
+In the end, bounds parsing and publication safety belong to the
+component, and event admission, run identity, artifacts, checkpoints and
+credential acquisition to its caller; so far only the collector and the
+vocabulary it needs have moved.
+
+Moved into `crates/safe-outputs`, with no change in behaviour:
+
+| What | From | To |
+| --- | --- | --- |
+| Output type names, `OUTPUT_TYPES`, `HIDE_REASONS`, the review-thread types | `policy.rs` | `vocabulary.rs` |
+| `Forge` (its name, `holds`, `refuses_field`), `CONTRACT`, `NEUTRAL_OUTPUTS`, `ITEM_NUMBER`, `KIND_TARGETS` | `policy.rs` | `vocabulary.rs` |
+| `GH_AW_LINK_DOMAINS`, `link_domains` and `top-level-domains.txt`; the link rule `Policy::keeps_link_to` now calls | `policy.rs` | `vocabulary.rs` |
+| `OUTPUTS_FILE`, `MAX_OUTPUTS_BYTES` | `check/mod.rs` | `vocabulary.rs` |
+| The collector's type table, validation, `field_guide` and `collect`; the sanitizer and Markdown scanning | `collect/` | `collect/` |
+| The neutral inline comment's field list, which the collector refuses before it could drop a field | `apply/inline.rs` | `collect::inline_field_names` |
+
+`collect::collect_bytes` is the bounded entry point: it refuses a file
+past `MAX_OUTPUTS_BYTES` or not UTF-8 whole, and otherwise returns the
+same `{items, errors}` as `collect`, which takes text its caller has
+already bounded. Reading the file without following a link stays with
+the caller; agentic-job's `collect` reads it with secure-host's
+`files::read_regular`, as before. agentic-job re-exports the vocabulary
+and the collector at their old paths, so `policy.json`, the wire format,
+the sanitizer's results and every refusal are unchanged.
+
+Staying in agentic-job: the `collect` command's arguments, exit state and
+printing, and the configuration it builds from `policy.json` (a
+secondary pull request's `max` added to `create_pull_request`'s)
+(`collect.rs`); bounds parsing and admission (`policy.rs`, its
+`context` and `dispatch` modules, `event/`), including the refusal of a
+type the forge profile does not hold, which is a local trait so that the
+per-forge bounds of [#2107](https://github.com/cgwalters-forge/agentic-job/pull/2107)
+apply on top unchanged; `check/`, which reads the run's artifacts and
+policy; `apply/` and the credentials it acquires; `handback.rs`, run
+identity, artifacts and checkpoints. Bounds parsing is to move once
+the per-forge shape of #2107 settles, so that the public contract changes
+once ([#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393)).
+
+gh-aw has no library to depend on instead. At the pinned commit its
+safe-output code is CommonJS under `actions/setup/js`
+(`collect_ndjson_output.cjs`, `safe_output_type_validator.cjs`,
+`sanitize_content.cjs`, `sanitize_content_core.cjs`,
+`safe_output_handler_manager.cjs`), built by `make actions-build` and
+committed; the `actions/setup` action, a `node24` action, copies those
+files to a destination (and can report a tracing span), nothing more. That directory's `package.json` has
+development dependencies and no name or version, so nothing is
+published to npm. The per-type rules exist only inside the workflows
+gh-aw's compiler writes, which is why `safe-outputs/validation.mjs`
+reads them out of gh-aw's own compiled workflows. Reuse of gh-aw's code
+means pinning that action's commit, as apply.yml does.
+
+The pinned JavaScript stays outside the library, as adapters at its
+edge: gh-aw's handlers, which apply.yml runs under
+`actions/github-script` on GitHub; `safe-outputs/validation.mjs`, which
+regenerates `validation.json` and the handler limits; and the corpus
+harness (`crates/agentic-job/tests/corpus/collect.cjs`,
+`handlers.test.mjs`), which drives gh-aw's collector and handlers to
+write and compare fixtures ([#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026)).
+The library's tests read `safe-outputs/validation.json` and the parity
+fixtures in `crates/agentic-job/tests/data/collect` where they are, rather
+than copies; those move with the crate if it becomes its own
+repository.

@@ -42,8 +42,7 @@ use crate::policy::{
 };
 use crate::redact;
 
-/// The requests the agent wrote, one JSON object to a line.
-pub const OUTPUTS_FILE: &str = "outputs.jsonl";
+pub use safe_outputs::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
 
 /// Which repository, branch and commit a patch is against.
 pub const BASE_FILE: &str = "base.json";
@@ -51,7 +50,6 @@ pub const BASE_FILE: &str = "base.json";
 /// The same, for the policy's secondary pull request's patch.
 pub const SECONDARY_BASE_FILE: &str = "secondary-base.json";
 
-pub const MAX_OUTPUTS_BYTES: u64 = 1 << 20;
 const MAX_BASE_BYTES: u64 = 4096;
 /// How much of a `memory.json` is read where the policy allows none: it
 /// is refused whatever it holds, but read with a bound like the rest.

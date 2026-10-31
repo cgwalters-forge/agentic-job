@@ -23,30 +23,18 @@ mod context;
 mod dispatch;
 use dispatch::admission as dispatch_admission;
 
-/// The output type that carries a patch for a new pull request.
-pub const CREATE_PULL_REQUEST: &str = "create_pull_request";
-
-/// The output type that carries a patch for an open pull request's
-/// branch: one commit on top of the head the run started from.
-pub const PUSH_TO_PULL_REQUEST_BRANCH: &str = "push_to_pull_request_branch";
-
-/// The output type that says the run did nothing, and why.
-pub const NOOP: &str = "noop";
-
-/// The output type that says the run could not do its task without
-/// something it was not given: a prerequisite, a decision, another
-/// repository.
-pub const MISSING_DATA: &str = "missing_data";
+// The request vocabulary and forge profile are the safe-outputs library's;
+// what admits a request against bounds stays here.
+pub use safe_outputs::{
+    CONTRACT, CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, Forge, GH_AW_LINK_DOMAINS, HIDE_COMMENT,
+    HIDE_REASONS, ITEM_NUMBER, KIND_TARGETS, MARK_READY, MISSING_DATA, NEUTRAL_OUTPUTS, NOOP,
+    OUTPUT_TYPES, PUSH_TO_PULL_REQUEST_BRANCH, REPLY_TO_REVIEW_COMMENT, RESOLVE_REVIEW_THREAD,
+    REVIEW_THREAD_OUTPUTS, link_domains,
+};
 
 /// The output type that sets fields on a Projects v2 board: a destination
 /// of its own, outside the output repository.
 const UPDATE_PROJECT: &str = "update_project";
-
-/// The output type that takes a pull request out of draft. Off unless a
-/// bounds file lists it: apply opens a pull request as a draft unless its
-/// work is complete under `ready_when_complete`, and this, like `draft:
-/// false` in an update, would take one out of draft on the agent's word.
-pub const MARK_READY: &str = "mark_pull_request_as_ready_for_review";
 
 /// The fields an update may change, of those gh-aw's rules let a request
 /// hold; bounds list which in `fields`, and `check` refuses any other key.
@@ -71,78 +59,6 @@ pub fn update_fields(output: &str) -> Option<&'static [&'static str]> {
         .map(|(_, fields)| *fields)
 }
 
-/// The output types a bounds file may list. Each is one that gh-aw's
-/// collector validates with the configuration written here; another type
-/// needs settings of its own, so it is added here with them and not by a
-/// caller's file alone.
-pub const OUTPUT_TYPES: &[&str] = &[
-    CREATE_PULL_REQUEST,
-    "add_comment",
-    "create_issue",
-    "create_discussion",
-    HIDE_COMMENT,
-    CREATE_REVIEW_COMMENT,
-    REPLY_TO_REVIEW_COMMENT,
-    RESOLVE_REVIEW_THREAD,
-    "close_issue",
-    "add_labels",
-    "remove_labels",
-    "update_issue",
-    "update_pull_request",
-    MARK_READY,
-    "add_reviewer",
-    "assign_to_user",
-    "close_pull_request",
-    "link_sub_issue",
-    "create_check_run",
-    "update_project",
-    PUSH_TO_PULL_REQUEST_BRANCH,
-    NOOP,
-    "missing_tool",
-    MISSING_DATA,
-];
-
-/// The forge a run's outputs are applied on, from the bounds file: what
-/// the caller's repository says, never the request. The wire format is
-/// gh-aw's on every forge; this decides which of its types and fields
-/// mean the same there (docs/safe-outputs.md#neutral-profile).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Forge {
-    #[default]
-    Github,
-    Forgejo,
-    Gitlab,
-}
-
-/// The version of the neutral profile [`Forge`] and [`NEUTRAL_OUTPUTS`]
-/// describe, written into `policy.json`. It follows the gh-aw commit the
-/// type names and fields are read from,
-/// 462ed682857c4ab64d40f2c85e3738fa27834839, and is raised when a type or
-/// field changes meaning there, so that check refuses a policy written
-/// for another profile rather than read its types the new way.
-pub const CONTRACT: u32 = 1;
-
-/// The types whose fields mean the same on GitHub, Forgejo and GitLab,
-/// and the only ones a run off GitHub may be allowed. A list of what is
-/// held, not of what is refused: a type nobody has mapped onto a forge
-/// stays GitHub-only, so a publisher never meets a request it would have
-/// to guess at.
-pub const NEUTRAL_OUTPUTS: &[&str] = &[
-    CREATE_PULL_REQUEST,
-    PUSH_TO_PULL_REQUEST_BRANCH,
-    "add_comment",
-    "create_issue",
-    "close_issue",
-    "close_pull_request",
-    "add_labels",
-    "remove_labels",
-    CREATE_REVIEW_COMMENT,
-    NOOP,
-    "missing_tool",
-    MISSING_DATA,
-];
-
 /// The types apply can publish on GitHub with agentic-job's own handlers
 /// (`agentic-job publish`) in place of gh-aw's, where the bounds'
 /// `native_handlers` name them; every other type stays gh-aw's.
@@ -158,37 +74,12 @@ pub const NATIVE_OUTPUTS: &[&str] = &[
     CREATE_REVIEW_COMMENT,
 ];
 
-/// gh-aw's target field for an issue or a pull request alike. GitLab
-/// numbers the two apart (`#5` and `!5` are different items), so there a
-/// request names `issue_number` or `pull_request_number`; one naming this
-/// could act on the wrong item.
-pub const ITEM_NUMBER: &str = "item_number";
+/// Admission of a bounds file's outputs against the forge profile.
+trait ForgeAdmission {
+    fn check_outputs<'a>(self, outputs: impl IntoIterator<Item = &'a str>) -> Result<()>;
+}
 
-/// gh-aw's target fields that name the kind of item: an issue, and a pull
-/// request (on GitLab a merge request). On GitLab, `add_labels` and
-/// `remove_labels` name their item by exactly one of these.
-pub const KIND_TARGETS: &[&str] = &["issue_number", "pull_request_number"];
-
-impl Forge {
-    /// The name a bounds file gives it.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Github => "github",
-            Self::Forgejo => "forgejo",
-            Self::Gitlab => "gitlab",
-        }
-    }
-
-    /// Whether the profile holds OUTPUT on this forge.
-    pub fn holds(self, output: &str) -> bool {
-        self == Self::Github || NEUTRAL_OUTPUTS.contains(&output)
-    }
-
-    /// Whether a request on this forge may not have the field KEY.
-    pub fn refuses_field(self, key: &str) -> bool {
-        self == Self::Gitlab && key == ITEM_NUMBER
-    }
-
+impl ForgeAdmission for Forge {
     /// The first of OUTPUTS the profile does not hold, as a refusal.
     fn check_outputs<'a>(self, outputs: impl IntoIterator<Item = &'a str>) -> Result<()> {
         for output in outputs {
@@ -252,36 +143,6 @@ const MAX_CHECK_RUN_NAME: usize = 64;
 /// The longest discussion category bounds may pin, as for a check run's
 /// name: room for a readable name, slug or node ID.
 const MAX_DISCUSSION_CATEGORY: usize = 64;
-
-/// Hides (minimizes) a comment on the run's triggering item: moderation of
-/// what other people wrote there, so it is listed in bounds only by callers
-/// who want an agent to do that.
-pub const HIDE_COMMENT: &str = "hide_comment";
-
-/// Inline review comments on the run's triggering pull request, without a
-/// verdict: a new comment on a line of its diff, a reply to one, and
-/// resolving a thread. Check and apply hold each to that pull request, so
-/// text an agent read cannot steer it to comment on, or resolve the
-/// threads of, another one.
-pub const CREATE_REVIEW_COMMENT: &str = "create_pull_request_review_comment";
-pub const REPLY_TO_REVIEW_COMMENT: &str = "reply_to_pull_request_review_comment";
-pub const RESOLVE_REVIEW_THREAD: &str = "resolve_pull_request_review_thread";
-pub const REVIEW_THREAD_OUTPUTS: &[&str] = &[
-    CREATE_REVIEW_COMMENT,
-    REPLY_TO_REVIEW_COMMENT,
-    RESOLVE_REVIEW_THREAD,
-];
-
-/// The reasons gh-aw's collector lets a `hide_comment` give (its enum,
-/// which it normalizes requests to), and so all `allowed_reasons` may name.
-pub const HIDE_REASONS: &[&str] = &[
-    "SPAM",
-    "ABUSE",
-    "OFF_TOPIC",
-    "OUTDATED",
-    "RESOLVED",
-    "LOW_QUALITY",
-];
 
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
@@ -357,41 +218,6 @@ pub const DEFAULT_PROTECTED_FILES: &[&str] = &[
     "CLAUDE.md",
     "AGENTS.md",
 ];
-
-/// The domains whose links gh-aw's sanitizer keeps when it is given none
-/// (`buildAllowedDomains` in `sanitize_content_core.cjs` at the pinned
-/// commit). `GH_AW_ALLOWED_DOMAINS` replaces this list, not extends it.
-pub const GH_AW_LINK_DOMAINS: &[&str] = &[
-    "github.com",
-    "github.io",
-    "githubusercontent.com",
-    "githubassets.com",
-    "github.dev",
-    "codespaces.new",
-];
-
-/// IANA's list of top-level domains (`just refresh-top-level-domains`).
-const TOP_LEVEL_DOMAINS: &str = include_str!("top-level-domains.txt");
-
-/// What `policy` gives gh-aw as `GH_AW_ALLOWED_DOMAINS`: every top-level
-/// domain, lowercase, so that its sanitizer keeps a link to any public
-/// host as written (#918). The pinned sanitizer has no setting that keeps
-/// every https link, and no wildcard for every domain; it does keep a
-/// listed domain's subdomains. Links to an address, a host of one label
-/// or a domain newer than this list are still redacted, as is every
-/// non-https URL outside code. The filter stopped no leak (the sandbox
-/// holds no credential worth one, and its reads are open to any host) and
-/// cost reports their sources.
-pub fn link_domains() -> &'static [String] {
-    static DOMAINS: LazyLock<Vec<String>> = LazyLock::new(|| {
-        TOP_LEVEL_DOMAINS
-            .lines()
-            .filter(|line| !line.starts_with('#') && !line.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect()
-    });
-    &DOMAINS
-}
 
 /// The output types that name people: `allowed` lists the logins they may
 /// name, exactly as written, since the handlers compare them so.
@@ -1472,18 +1298,7 @@ impl Policy {
     /// Whether gh-aw's sanitizer keeps a link to HOST, as its
     /// `sanitizeUrlDomains` decides: the domain itself or a subdomain.
     pub fn keeps_link_to(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        let kept = |domain: &str| {
-            host == domain
-                || host
-                    .strip_suffix(domain)
-                    .is_some_and(|sub| sub.ends_with('.'))
-        };
-        if self.allowed_domains.is_empty() {
-            GH_AW_LINK_DOMAINS.iter().any(|domain| kept(domain))
-        } else {
-            self.allowed_domains.iter().any(|domain| kept(domain))
-        }
+        safe_outputs::keeps_link(&self.allowed_domains, host)
     }
 
     /// Reads the `policy.json` that `policy` printed.

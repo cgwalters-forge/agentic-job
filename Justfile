@@ -34,7 +34,7 @@ test-safe-output-handlers:
 collect-fixtures gh-aw-js:
     #!/usr/bin/env bash
     set -euo pipefail
-    domains=$(grep -v '^#' crates/agentic-job/src/top-level-domains.txt | tr '[:upper:]' '[:lower:]' | paste -sd, -)
+    domains=$(grep -v '^#' crates/safe-outputs/src/top-level-domains.txt | tr '[:upper:]' '[:lower:]' | paste -sd, -)
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     for case in crates/agentic-job/tests/data/collect/*/; do
@@ -147,10 +147,10 @@ agents-lock spec package +links:
     cargo run --quiet --locked --bin pinned-agents -- lock "$1" "${@:3}" < "$dir/package-lock.json"
 
 # IANA's top-level domains, the hosts whose https links gh-aw keeps in
-# what a run posts (policy::link_domains). A domain added since the last
-# refresh has its links redacted until this runs; review the diff.
+# what a run posts (safe_outputs::link_domains). A domain added since the
+# last refresh has its links redacted until this runs; review the diff.
 refresh-top-level-domains:
-    curl --fail --silent --show-error --proto '=https' --output crates/agentic-job/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt
+    curl --fail --silent --show-error --proto '=https' --output crates/safe-outputs/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt
 
 # The documentation site in site/, a rendering of docs/ and the README.
 # Dependencies come from the lock alone, without their install scripts.

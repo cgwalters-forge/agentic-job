@@ -1569,7 +1569,7 @@ fn run_case(paths: Option<&Paths>, case: &Value, native: bool) -> Value {
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
     .collect();
     let domains: Vec<String> = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/top-level-domains.txt"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../safe-outputs/src/top-level-domains.txt"),
     )
     .unwrap()
     .lines()
