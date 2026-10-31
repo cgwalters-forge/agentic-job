@@ -39,11 +39,16 @@ Inputs:
 - applying: `output-repo`, `item-repo`, `apply-environment`,
   `apply-partial`, `apply-staged`, `require-safe-outputs-pat`,
   `comment-target`, `issue`, `notify`, `status-comment`,
-  `title-prefix`, `branch-prefix`, `artifact-prefix`.
+  `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
 
 Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
 rather than by `inherit`
 ([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
+Optional `STATUS_TOKEN`, `REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN`
+bind the four fixed roles when `role-bindings` is nonempty; there is no legacy
+fallback in that mode. The JSON binds every role to a positive `actor_id` and
+optional positive `app_id`, not token names or agent-selected identities
+([role credentials](workflow.md#caller-configured-role-credentials)).
 
 Both `runner` and `agent-runner` default to the JSON string
 `"ubuntu-26.04"`. Explicit labels and runner groups still resolve in the

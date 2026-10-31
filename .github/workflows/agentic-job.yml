@@ -32,6 +32,10 @@ name: agentic-job
 on:
   workflow_call:
     inputs:
+      role-bindings:
+        description: Caller-only JSON identities for status, review, fork_push and publication; empty preserves legacy credentials
+        type: string
+        default: ""
       id:
         description: The caller's name for this run (an issue, a board item); in summary.json as `item`
         type: string
@@ -340,6 +344,18 @@ on:
         type: string
         default: ""
     secrets:
+      STATUS_TOKEN:
+        description: Status role token, passed only to policy notify and apply
+        required: false
+      REVIEW_TOKEN:
+        description: Review and result comment role token, apply only
+        required: false
+      PUSH_TOKEN:
+        description: Fork and git push role token, apply only
+        required: false
+      PUBLICATION_TOKEN:
+        description: Upstream publication role token, apply only
+        required: false
       # Explicit optional credential for apply and status comments. Never use inherit.
       # Callers must pass this name even for an environment secret;
       # the environment's same-name value takes precedence (docs/workflow.md).
@@ -417,7 +433,9 @@ jobs:
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository,excessive-permissions] Call this revision; inherit caller permissions for activate/notify while policy.yml narrows its policy job to read-only.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      STATUS_TOKEN: ${{ secrets.STATUS_TOKEN }}
     with:
+      role-bindings: ${{ inputs.role-bindings }}
       id: ${{ inputs.id }}
       task: ${{ inputs.task }}
       task-artifact: ${{ inputs.task-artifact }}
@@ -579,7 +597,12 @@ jobs:
     uses: ./.github/workflows/apply.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
     secrets:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      STATUS_TOKEN: ${{ secrets.STATUS_TOKEN }}
+      REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+      PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+      PUBLICATION_TOKEN: ${{ secrets.PUBLICATION_TOKEN }}
     with:
+      role-bindings: ${{ inputs.role-bindings }}
       policy: ${{ toJSON(needs.policy.outputs) }}
       agent: ${{ toJSON(needs.agent) }}
       check: ${{ toJSON(needs.check) }}

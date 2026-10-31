@@ -98,6 +98,76 @@ fn named_step<'a>(doc: &'a yaml_rust2::Yaml, name: &str) -> &'a yaml_rust2::Yaml
     step
 }
 
+#[test]
+fn caller_role_credentials_stay_out_of_agent_and_check_jobs() {
+    let wrapper = definition("agentic-job.yml");
+    for secret in [
+        "STATUS_TOKEN",
+        "REVIEW_TOKEN",
+        "PUSH_TOKEN",
+        "PUBLICATION_TOKEN",
+    ] {
+        assert_eq!(
+            wrapper["jobs"]["apply"]["secrets"][secret].as_str(),
+            Some(format!("${{{{ secrets.{secret} }}}}").as_str())
+        );
+        for job in ["agent", "check"] {
+            assert!(wrapper["jobs"][job]["secrets"][secret].is_badvalue());
+        }
+        if secret != "STATUS_TOKEN" {
+            assert!(wrapper["jobs"]["policy"]["secrets"][secret].is_badvalue());
+        }
+    }
+    for file in ["apply.yml", "policy.yml", "agentic-job.yml"] {
+        let doc = definition(file);
+        assert_eq!(
+            doc["on"]["workflow_call"]["inputs"]["role-bindings"]["default"].as_str(),
+            Some("")
+        );
+    }
+    let apply = definition("apply.yml");
+    let steps = apply["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(
+        position("Check caller role credentials and routing")
+            < position("Fork the output repository for the pull request")
+    );
+    let fork = named_step(&apply, "Fork the output repository for the pull request");
+    assert!(
+        fork["env"]["GH_TOKEN"]
+            .as_str()
+            .unwrap()
+            .ends_with("|| secrets.PUSH_TOKEN }}")
+    );
+    for (file, step) in [
+        ("apply.yml", "Tell the item how the run ended"),
+        ("policy.yml", "Comment that the run started"),
+    ] {
+        // Match status invocations rather than presentation names, which may change.
+        let doc = definition(file);
+        let status: Vec<_> = self::steps(&doc)
+            .into_iter()
+            .filter(|step| step["env"]["STATUS_TOKEN"].as_str().is_some())
+            .collect();
+        assert_eq!(status.len(), 1, "{file}: {step}");
+        assert_eq!(
+            status[0]["env"]["STATUS_TOKEN"].as_str(),
+            Some(
+                "${{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT || inputs.role-bindings != '' && secrets.STATUS_TOKEN || '' }}"
+            )
+        );
+        assert_eq!(
+            status[0]["env"]["APPLY_ROLE_BINDINGS"].as_str(),
+            Some("${{ inputs.role-bindings }}")
+        );
+    }
+}
+
 /// Runs the actual workflow or composite step, without job credentials or
 /// user configuration from this process. Every invocation has a temporary HOME.
 fn run_step(file: &str, name: &str, dir: &Path, env: &[(&str, &str)]) -> Output {
@@ -1776,7 +1846,7 @@ fn composed_agents_keep_policy_source_and_trusted_edges() {
     }
     for file in ["agentic-job.yml", "example-compose.yml"] {
         let doc = definition(file);
-        for (name, values) in [
+        for (name, mut values) in [
             (
                 "check",
                 vec![
@@ -1800,6 +1870,9 @@ fn composed_agents_keep_policy_source_and_trusted_edges() {
                 ],
             ),
         ] {
+            if file == "agentic-job.yml" && name == "apply" {
+                values.push(("role-bindings", "${{ inputs.role-bindings }}"));
+            }
             let with = doc["jobs"][name]["with"].as_hash().unwrap();
             assert_eq!(with.len(), values.len());
             for (key, value) in values {
@@ -3189,7 +3262,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "policy.yml",
         "apply-token",
         &[
-            r"needs: policy\n    if: \$\{\{ inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' \}\}",
+            r"needs: policy\n    if: \$\{\{ inputs.role-bindings == '' && inputs.require-safe-outputs-pat && needs.policy.outputs.admitted == 'true' \}\}",
             r"environment: \$\{\{ inputs.apply-environment \}\}\n    permissions:\n      contents: read",
             r#"agentic-job check-apply-token --output-repo "\$OUTPUT_REPO""#,
         ],
@@ -3231,7 +3304,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"fromJSON\(inputs.policy\).notify != 'none' && fromJSON\(inputs.policy\).notified == 'true'",
             r"REPO: \$\{\{ fromJSON\(inputs.policy\).notify-repo \}\}",
             r#"conclude-binary/agentic-job" status\n"#,
-            r"STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}",
+            r"STATUS_TOKEN: \$\{\{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT \|\| inputs.role-bindings != '' && secrets.STATUS_TOKEN \|\| '' \}\}",
         ],
         &["Post the refusal to the comment target"],
     ),

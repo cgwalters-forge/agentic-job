@@ -35,6 +35,7 @@ pub mod publish;
 pub mod push;
 pub mod replacement;
 pub mod result;
+pub mod roles;
 pub mod secondary;
 pub mod status;
 

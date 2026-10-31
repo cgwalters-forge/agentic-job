@@ -169,7 +169,7 @@ impl Status {
             )?;
             let comments = comments.as_array().context("the comments are not a list")?;
             let found = comments.iter().find(|comment| {
-                comment["user"]["login"] == author
+                github.owns(super::roles::Role::Status, comment, Some(author))
                     && comment["body"]
                         .as_str()
                         .is_some_and(|body| body.ends_with(&format!("\n\n{MARKER}")))
@@ -213,7 +213,7 @@ impl Status {
         let here = comment["issue_url"]
             .as_str()
             .is_some_and(|url| url.to_lowercase().ends_with(&at));
-        if comment["user"]["login"] != author || !here {
+        if !github.owns(super::roles::Role::Status, &comment, Some(author)) || !here {
             summary(&format!(
                 "Status comment: comment {id} is not {author}'s on {repo}#{}; using the marked \
                  status comment.",
@@ -265,7 +265,8 @@ pub fn run(_args: &Args) -> Result<Exit> {
         }
     };
     let status = Status::from_env(get)?;
-    let personal = get(STATUS_TOKEN_ENV).is_some();
+    let configured = get(super::roles::BINDINGS_ENV).is_some();
+    let personal = configured || get(STATUS_TOKEN_ENV).is_some();
     let caller = get("GITHUB_REPOSITORY").unwrap_or_else(|| status.repo.clone());
     if !personal && !status.repo.eq_ignore_ascii_case(&caller) {
         summary(
@@ -279,10 +280,13 @@ pub fn run(_args: &Args) -> Result<Exit> {
     } else {
         GH_TOKEN_ENV
     };
-    let github = Github::from_env(token)?.with_max_response(MAX_PAGE_BYTES);
+    let github =
+        Github::from_role_env(super::roles::Role::Status, token)?.with_max_response(MAX_PAGE_BYTES);
     // The credential's identity plus the marker keeps copied markers from
     // redirecting edits.
-    let author = if personal {
+    let author = if configured {
+        "configured status identity".to_owned()
+    } else if personal {
         github
             .login()
             .context("the status token has no authenticated user identity")?

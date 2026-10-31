@@ -2286,7 +2286,8 @@ fn publish(
     }
     let mut reviewed = Vec::new();
     if let Some(pull) = &review.pull {
-        match submit_review(pull, &review, run, &publisher.github, log) {
+        let github = publisher.github.for_role(super::roles::Role::Review)?;
+        match submit_review(pull, &review, run, &github, log) {
             ReviewEnd::Made(result) => {
                 let comments = result["review_comments"]
                     .as_array()
@@ -2846,6 +2847,19 @@ fn publish_one(
     review: &mut (usize, &mut Review),
     log: &mut dyn FnMut(&str),
 ) -> Outcome {
+    let github = match publisher
+        .github
+        .for_role(super::roles::Role::output(op.output()))
+    {
+        Ok(github) => github,
+        Err(err) => return Outcome::failed(op, format!("{err:#}")),
+    };
+    let publisher = &GithubPublisher {
+        github,
+        git: publisher.git.clone(),
+        item_repo: publisher.item_repo.clone(),
+        repo: publisher.repo.clone(),
+    };
     match op {
         Op::ReviewComment { comment, .. } => {
             let (at, review) = review;
@@ -3125,7 +3139,10 @@ fn push_outcome(
         run.keeps_link(host)
     });
     let path = format!("/repos/{repo}/issues/{number}/comments");
-    if let Err(err) = github.request("POST", &path, Some(&json!({"body": body}))) {
+    let commented = github
+        .for_role(super::roles::Role::Review)
+        .and_then(|github| github.request("POST", &path, Some(&json!({"body": body}))));
+    if let Err(err) = commented {
         log(&command(
             "warning",
             &format!("Failed to create comment on {repo}#{number}: {err:#}"),

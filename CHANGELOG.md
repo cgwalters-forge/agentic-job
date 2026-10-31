@@ -13,6 +13,13 @@ says what a caller may rely on across versions.
   job runs secure-host and `cargo fmt --all`, and hands the patch to check
   and apply through `proposals-artifact`. CI's `e2e-deterministic` runs it
   staged (docs/safe-outputs.md#without-an-agent).
+- GitHub apply optionally binds status, review/result comments, fork-push and
+  upstream publication to caller-configured role tokens (`role-bindings`).
+  Explicit mappings fail closed on missing or wrong credentials, separate push
+  from publication, and use numeric actor/App provenance for ownership.
+  Legacy PAT fallback is unchanged without a mapping. Role mode requires native
+  handlers and excludes replacement pushes; Forgejo/GitLab routing and live App
+  proof remain unfinished (docs/safe-outputs.md#caller-bound-publisher-roles-github).
 - apply's result step, which sets `result-url` and the no-result outputs
   and summary, is policy's binary, `agentic-job result`, in place of a
   github-script step, with the same outputs, summary and sanitized reason.

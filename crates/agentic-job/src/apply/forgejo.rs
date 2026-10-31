@@ -730,6 +730,7 @@ impl Forgejo {
         let git = Git {
             authorization: format!("token {}", self.token),
             token: &self.token,
+            extra_secrets: Vec::new(),
         };
         git.push(
             &Push {
@@ -929,6 +930,7 @@ impl Publisher for Forgejo {
         let git = Git {
             authorization: format!("token {}", self.token),
             token: &self.token,
+            extra_secrets: Vec::new(),
         };
         let fork = self.remote(&push.push_repo);
         git.push(

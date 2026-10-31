@@ -242,10 +242,11 @@ impl Github {
             .clone_url
             .strip_suffix(&format!("/{}", pr.repo))
             .with_context(|| format!("{} is not where git finds {}", pr.clone_url, pr.repo))?;
-        let me = self.login()?;
-        let fork = self.fork(&me, &pr.repo, &pr.own_repo, server)?;
+        let push = self.for_role(super::roles::Role::ForkPush)?;
+        let me = push.login()?;
+        let fork = push.fork(&me, &pr.repo, &pr.own_repo, server)?;
         let pushing = || format!("pushing {} to {fork}", pr.branch);
-        let commit = self
+        let commit = push
             .git()
             .push(
                 &Push {
@@ -649,6 +650,34 @@ mod tests {
             (204, String::new()),
             (200, json!({"enabled": false}).to_string()),
         ]
+    }
+
+    #[test]
+    fn fork_and_publication_use_separate_credentials() {
+        let (root, pr) = forked_repository();
+        let mut answers = forked(fork());
+        answers.extend(actions_off());
+        answers.push((
+            201,
+            json!({"html_url": "https://github.com/owner/name/pull/9"}).to_string(),
+        ));
+        let (server, requests) = mock(answers);
+        let github = super::super::github::tests::bound(github(&server));
+        github.open(&pr).unwrap();
+        let sent: Vec<_> = requests.try_iter().collect();
+        assert_eq!(sent.len(), 5);
+        for (index, request) in sent.iter().enumerate() {
+            let variable = if index == 4 {
+                "PUBLICATION_TOKEN"
+            } else {
+                "PUSH_TOKEN"
+            };
+            assert_eq!(
+                request.authorization,
+                format!("Bearer {}", ["fake", variable, "credential"].join("-"))
+            );
+        }
+        assert_eq!(pushed(root.path()), format!("refs/heads/{BRANCH}"));
     }
 
     #[test]
