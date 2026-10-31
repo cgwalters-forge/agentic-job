@@ -9,7 +9,7 @@ permissions:
   contents: read
 jobs:
   tlc:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A cold build of the runner, then about half a minute of TLC.
     timeout-minutes: 10
     steps:

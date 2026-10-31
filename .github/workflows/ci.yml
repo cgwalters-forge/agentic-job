@@ -22,7 +22,7 @@ env:
 jobs:
   # Job-level filtering keeps the required ci check present on docs-only runs.
   changes:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -135,7 +135,7 @@ jobs:
   lint:
     needs: changes
     if: ${{ needs.changes.outputs.full == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -228,7 +228,7 @@ jobs:
   javascript:
     needs: changes
     if: ${{ needs.changes.outputs.full == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -265,7 +265,7 @@ jobs:
   rust:
     needs: changes
     if: ${{ needs.changes.outputs.full == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -716,7 +716,7 @@ jobs:
   proposals:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions: {}
     steps:
       - run: mkdir proposals && printf '%s\n' '{"type":"noop","message":"No proposals today."}' > proposals/outputs.jsonl
@@ -1403,7 +1403,7 @@ jobs:
   e2e-dispatch-verify:
     if: ${{ always() && needs.changes.outputs.e2e == 'true' }}
     needs: [changes, static, e2e-dispatch, e2e-compose, e2e-full]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -2152,7 +2152,7 @@ jobs:
   confined-cleanup:
     needs: [changes, confined]
     if: ${{ needs.changes.outputs.full == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -2184,7 +2184,7 @@ jobs:
   required-checks:
     if: ${{ always() }}
     needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: "A fork's pull request cannot run the end-to-end jobs"
@@ -2219,7 +2219,7 @@ jobs:
   ci:
     if: ${{ always() }}
     needs: required-checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:

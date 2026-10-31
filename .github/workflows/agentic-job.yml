@@ -140,7 +140,7 @@ on:
       runner:
         description: The runner of the policy, check and apply jobs, as JSON (a label or a list of labels). It needs rustup, apt and Node
         type: string
-        default: '"ubuntu-24.04"'
+        default: '"ubuntu-26.04"'
       agent-runner:
         description: The runner the agent runs on, as JSON. It is thrown away after the job, and needs systemd 257 and sudo for its user until `sandbox setup`, which takes it away
         type: string
