@@ -298,7 +298,7 @@ jobs:
       - run: node --test workflow/ci.test.cjs
       # Credentialless cross-repository fix: the pinned real handler writes
       # only local git fixtures, with mock forge reads. No new permissions.
-      # apply's tests run gh-aw's pinned sanitizer from the same checkout.
+      # apply's tests run gh-aw's pinned comment handler from the same checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw

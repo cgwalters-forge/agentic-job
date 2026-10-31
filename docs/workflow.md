@@ -1882,9 +1882,11 @@ enabled, conclude puts the result link in the item's single status comment.
 A link that cannot be posted fails no run.
 A run whose checked outputs are only `noop`, `missing_tool` or
 `missing_data` makes nothing anyone would see: its run summary says "No
-result" with the agent's reason, passed through gh-aw's sanitizer as the
-handlers run it (mentions, HTML comments and URLs off its allowlist
-neutralized, cut at 1000 characters) and quoted line by line. With
+result" with the agent's reason, sanitized as gh-aw's handlers sanitize
+it (mentions, HTML comments and URLs off its allowlist neutralized, cut
+at 1000 characters) and quoted line by line. Policy's binary,
+`agentic-job result`, writes these outputs and the summary from
+`applied.json` and the checked outputs, in a step given no token. With
 `notify: comment`, the status comment includes the quoted reason.
 When these outputs are `missing_data` with at most `noop` beside it, and the
 hand-back has no patch or memory, the run is blocked: it could not proceed

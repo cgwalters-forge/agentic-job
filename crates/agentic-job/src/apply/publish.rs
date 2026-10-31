@@ -430,8 +430,46 @@ pub(super) struct Run {
     /// The event's payload, `{}` without one.
     event: Value,
     actor: String,
+    links: Links,
+}
+
+/// The links gh-aw's sanitizer keeps, as a step's `GH_AW_SAFE_OUTPUTS_URLS`
+/// and `GH_AW_ALLOWED_DOMAINS` and the runner's server and API URLs say.
+#[derive(Debug, Clone)]
+pub(super) struct Links {
     /// The hosts links are kept to (`buildAllowedDomains`).
     domains: Vec<String>,
+}
+
+impl Links {
+    /// The policy from VARIABLE; refused unless it is [`URL_POLICY`].
+    pub(super) fn read(variable: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        let var = |name: &str| variable(name).unwrap_or_default();
+        let urls = var("GH_AW_SAFE_OUTPUTS_URLS");
+        ensure!(
+            urls == URL_POLICY,
+            "GH_AW_SAFE_OUTPUTS_URLS is {urls:?}, and this sanitizes as {URL_POLICY:?} only"
+        );
+        let server = variable("GITHUB_SERVER_URL").unwrap_or_else(|| "https://github.com".into());
+        Ok(Self {
+            domains: allowed_domains(
+                &var("GH_AW_ALLOWED_DOMAINS"),
+                &[&server, &var("GITHUB_API_URL")],
+            ),
+        })
+    }
+
+    /// Whether gh-aw's sanitizer keeps a link to HOST.
+    pub(super) fn keeps(&self, host: &str) -> bool {
+        let host = host.to_lowercase();
+        self.domains.iter().any(|domain| {
+            let domain = domain.to_lowercase();
+            match domain.strip_prefix("*.") {
+                Some(base) => host == base || host.ends_with(&format!(".{base}")),
+                None => host == domain || host.ends_with(&format!(".{domain}")),
+            }
+        })
+    }
 }
 
 impl Run {
@@ -465,11 +503,7 @@ impl Run {
             REPO_RE.is_match(&repository),
             "GITHUB_REPOSITORY {repository:?} is not OWNER/NAME"
         );
-        let urls = var("GH_AW_SAFE_OUTPUTS_URLS");
-        ensure!(
-            urls == URL_POLICY,
-            "GH_AW_SAFE_OUTPUTS_URLS is {urls:?}, and this sanitizes as {URL_POLICY:?} only"
-        );
+        let links = Links::read(variable)?;
         let mut workflow_name = var("GH_AW_WORKFLOW_NAME");
         if workflow_name.is_empty() {
             workflow_name = "Workflow".into();
@@ -486,10 +520,7 @@ impl Run {
             None => json!({}),
         };
         Ok(Self {
-            domains: allowed_domains(
-                &var("GH_AW_ALLOWED_DOMAINS"),
-                &[&server, &var("GITHUB_API_URL")],
-            ),
+            links,
             server,
             repository,
             repository_id: numeric("GITHUB_REPOSITORY_ID")?,
@@ -515,14 +546,7 @@ impl Run {
 
     /// Whether gh-aw's sanitizer keeps a link to HOST.
     fn keeps_link(&self, host: &str) -> bool {
-        let host = host.to_lowercase();
-        self.domains.iter().any(|domain| {
-            let domain = domain.to_lowercase();
-            match domain.strip_prefix("*.") {
-                Some(base) => host == base || host.ends_with(&format!(".{base}")),
-                None => host == domain || host.ends_with(&format!(".{domain}")),
-            }
-        })
+        self.links.keeps(host)
     }
 
     /// The `#N` a footer names, if the event names an issue, a pull

@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- apply's result step, which sets `result-url` and the no-result outputs
+  and summary, is policy's binary, `agentic-job result`, in place of a
+  github-script step, with the same outputs, summary and sanitized reason.
+  The step no longer receives apply's write token: it makes no forge
+  writes (docs/workflow.md#what-a-run-leaves).
 - Secure-host admits CentOS Stream 10 by exact `ID=centos`, `VERSION_ID=10`
   with its own privileged-binary allowlist. The forwarder selects a RHEL 10 /
   CentOS Stream 10 cloud default that stops local listeners without socket
