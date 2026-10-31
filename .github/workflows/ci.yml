@@ -745,6 +745,25 @@ jobs:
       proposals-artifact: board-proposals
       artifact-prefix: proposals-
 
+  # A deterministic producer behind secure-host, cargo fmt, hands back a
+  # patch and a pull request request with no agent; check must accept
+  # them, and the staged apply writes nothing. e2e-staged, which GitHub
+  # makes on first use, holds no secret.
+  e2e-deterministic:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
+    permissions:
+      contents: read
+      issues: read # the agent job's GitHub reads
+      pull-requests: read # the agent job's GitHub reads
+      actions: read # the agent job's GitHub reads, and apply's look-up of check's upload
+      id-token: write # GitHub validates the skipped register job's permission too
+    uses: ./.github/workflows/example-deterministic.yml # zizmor: ignore[self-repository] Exercise the reusable workflow under test.
+    with:
+      scripted: true
+      apply-staged: true
+      apply-environment: e2e-staged
+
   e2e-full:
     needs: [changes, static]
     if: ${{ needs.changes.outputs.e2e == 'true' }}
@@ -2183,7 +2202,7 @@ jobs:
 
   required-checks:
     if: ${{ always() }}
-    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
+    needs: [changes, lint, javascript, rust, vibe, claude-acp, corpus, publication, static, sandbox, secure-host, secure-host-options, secure-host-no-user, world-write, world-write-runtime, secure-host-image, secure-host-write-policy, confined, confined-cleanup, proposals, e2e-proposals, e2e-deterministic, e2e-scratch, e2e-full, e2e-limit, e2e-write-policy, e2e-sandbox, e2e-event, e2e-analysis, e2e-analysis-refused, e2e-secondary, e2e-secondary-refused, e2e-people, e2e-items-scratch, e2e-items, e2e-threads-scratch, e2e-threads, e2e-check-run, e2e-review, e2e-dispatch, e2e-compose, e2e-dispatch-verify, e2e-verify]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -2207,7 +2226,7 @@ jobs:
             $fork_e2e == "false" and all(to_entries[]; .value.result == "success" or (.value.result == "skipped" and (
             ($full == "false" and .key != "changes") or
             ($host == "false" and (.key | IN("sandbox", "secure-host", "secure-host-options", "secure-host-no-user", "world-write", "world-write-runtime", "secure-host-image", "secure-host-write-policy"))) or
-            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-secondary", "e2e-secondary-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
+            ($e2e == "false" and (.key | IN("proposals", "e2e-proposals", "e2e-deterministic", "e2e-scratch", "e2e-full", "e2e-limit", "e2e-write-policy", "e2e-sandbox", "e2e-event", "e2e-analysis", "e2e-analysis-refused", "e2e-secondary", "e2e-secondary-refused", "e2e-people", "e2e-items-scratch", "e2e-items", "e2e-threads-scratch", "e2e-threads", "e2e-check-run", "e2e-review", "e2e-dispatch", "e2e-compose", "e2e-dispatch-verify", "e2e-verify"))) or
             (.key == "e2e-check-run" and $event == "push") or
             (.key == "e2e-review" and $review != "true"))))
         run: >-

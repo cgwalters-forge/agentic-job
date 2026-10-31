@@ -946,6 +946,7 @@ grant `issues: read`. Even proposals-only callers need the register
 job's `id-token: write` and the agent job's reads: GitHub validates the reusable workflow's
 permission requests before deciding which jobs to skip. No OIDC token is requested in proposals mode.
 CI's `e2e-proposals` runs this noop producer and call without a sandbox or model.
+For a producer that proposes a change, see [without an agent](safe-outputs.md#without-an-agent).
 The artifact name selects untrusted data only; it does not select the policy,
 binary or handler code. Upload just the hand-back files, not a checkout.
 For patch proposals the existing branch, base and patch guards still apply.

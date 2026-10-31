@@ -2569,6 +2569,114 @@ fn checked(files: &[(&str, &str)], extra: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// The deterministic example, as another repository copies it with the
+/// local paths pinned, passes the check without an exemption.
+#[test]
+fn deterministic_example_passes_when_pinned() {
+    const FILE: &str = ".github/workflows/example-deterministic.yml";
+    let text = std::fs::read_to_string(root().join(FILE)).unwrap();
+    let mut pinned = text.clone();
+    for (local, remote) in [
+        ("./secure-host", "cgwalters-forge/actions/secure-host"),
+        (
+            "./.github/workflows/agentic-job.yml",
+            "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml",
+        ),
+    ] {
+        let from = format!("uses: {local} ");
+        assert_eq!(pinned.matches(&from).count(), 1, "{local}");
+        pinned = pinned.replace(&from, &format!("uses: {remote}@{PIN} "));
+    }
+    let (status, stdout, stderr) = checked(&[(FILE, &pinned)], &[]);
+    assert_eq!(status, 0, "{stdout}{stderr}");
+    // As it is here, unpinned, only the exemption admits it.
+    let (status, stdout, _) = checked(&[(FILE, &text)], &[]);
+    assert_eq!(status, 1, "{stdout}");
+}
+
+/// The deterministic example's producer step, with a stand-in for cargo
+/// fmt, hands back what check accepts under the example's call: a pull
+/// request request with its patch where the formatter changed something,
+/// else a noop.
+#[test]
+fn deterministic_example_hands_back_what_check_accepts() {
+    const REPO: &str = "cgwalters-forge/agentic-job";
+    const BRANCH: &str = "agent-run-7";
+    let git = |dir: &Path, args: &[&str]| {
+        let status = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@localhost"])
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    for (formatter, want) in [
+        ("printf 'fn  f() {}\\n' >> lib.rs", "create_pull_request"),
+        ("", "noop"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, bin) = (dir.path().join("work"), dir.path().join("bin"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        executable(&bin.join("cargo"), &format!("#!/bin/sh\n{formatter}\n"));
+        std::fs::write(work.join("lib.rs"), "fn main() {}\n").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["add", "lib.rs"]);
+        git(&work, &["commit", "-qm", "base"]);
+        let search = format!("{}:/usr/bin:/bin", path(&bin));
+        let output = run_step(
+            "example-deterministic.yml",
+            "Format, and hand back the change",
+            &work,
+            &[("PATH", &search), ("REPO", REPO), ("BRANCH", BRANCH)],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let allow = root().join(".github/agentic-job/allow.toml");
+        let policy = Command::new(BIN)
+            .args(["policy", "--allow", path(&allow), "--repo", REPO])
+            .args(["--clone-url", &format!("https://github.com/{REPO}")])
+            .args(["--base", "main", "--kind", "branch"])
+            .args([
+                "--outputs",
+                "create_pull_request,noop",
+                "--max-outputs",
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert!(policy.status.success(), "{policy:?}");
+        std::fs::write(dir.path().join("policy.json"), &policy.stdout).unwrap();
+        let proposals = work.join("proposals");
+        for (command, extra) in [
+            ("collect", &[][..]),
+            ("check", &["--report", "report.json", "--run-id", "7"][..]),
+        ] {
+            let output = Command::new(BIN)
+                .args([
+                    command,
+                    "--policy",
+                    "policy.json",
+                    "--outputs",
+                    path(&proposals),
+                ])
+                .args(["--collected", "collected.json"])
+                .args(extra)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{want}: {command}: {output:?}");
+        }
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["ok"], true, "{want}: {report}");
+        assert_eq!(report["items"][0]["type"], want, "{report}");
+        assert_eq!(report["patch"].is_null(), want == "noop", "{report}");
+    }
+}
+
 const LIST: &str = ".github/agentic-job/workflows.toml";
 
 /// Files by path, extra arguments, the exit status, and what stdout or

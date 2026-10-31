@@ -920,15 +920,45 @@ has: when the pull request cannot be opened after the push, the error
 names the pushed commit and branch, which stays in the fork until someone
 opens the pull request from it or deletes it.
 
-## What the agent does
+## Without an agent
 
-The producer need not be an agent. Any caller job can upload `outputs.jsonl`
-and pass its artifact name as `proposals-artifact` to the reusable workflow;
-see the [ten-line caller example](workflow.md#proposals-from-a-non-agent-job).
-The same collector, policy check and apply handlers run on separate machines,
-without sandbox setup or inference. For non-patch requests only `outputs.jsonl`
-is needed. Optional `base.json` and `aw-BRANCH.patch` use the same hand-back
-contract and patch checks described below; no other files are accepted.
+The producer need not be an agent. Any job can upload a hand-back and
+pass its artifact name as `proposals-artifact` to the reusable workflow,
+which then runs no agent job: policy, check and apply are the same jobs,
+on separate machines, as for an agent's
+([proposals from a non-agent job](workflow.md#proposals-from-a-non-agent-job)).
+Check trusts the producer no more than an agent: the artifact name picks
+untrusted data, never the policy, binary or handlers, and every rule
+below holds. For requests without a change only `outputs.jsonl` is
+needed. A change adds `base.json`, `{"repo": "OWNER/NAME", "ref": "BASE",
+"commit": "SHA"}`, and one `aw-BRANCH.patch`: `git format-patch` of one
+commit on that base, with an `X-GH-AW-Base-Commit: SHA` header after
+its first line, on the branch `agent-run-RUNID` of the same run, which
+apply requires. No other file is needed.
+
+[example-deterministic.yml](../.github/workflows/example-deterministic.yml)
+is such a job: it runs secure-host, then `cargo fmt --all`, and hands
+back the change as a `create_pull_request`, or a `noop` when nothing
+changed. CI's `e2e-deterministic` runs it with `apply-staged`. The
+producer needs only `contents: read`, and its job runs secure-host before
+the formatter, as [`workflows check`](workflows-check.md) requires of a
+job that does not call the reusable workflow: what it builds or formats
+runs as the runner's user, without root or a credential that can write.
+The smallest call that can open a pull request from it:
+
+- `id`, `repo`, `allow` and `proposals-artifact`; no task, agent or
+  configuration.
+- `outputs: create_pull_request,noop`, within the bounds file's
+  `[outputs]`, `max_patch_bytes` and `max_patch_files`; the example
+  also narrows `max-outputs` to `"1"`, the one request it makes.
+- `apply-environment` with `SAFE_OUTPUTS_PAT` passed explicitly: policy
+  refuses `create_pull_request` without one, as the job token cannot fork.
+  A comment needs no environment, only `issues: write` for the job token.
+- `contents`, `issues`, `pull-requests` and `actions` read, and
+  `id-token: write`, which GitHub validates for the skipped register job;
+  nothing requests an OIDC token.
+
+## What the agent does
 
 `run`'s brief tells the agent to put its requests in
 `out/safe-outputs.jsonl` under its home and to leave its change

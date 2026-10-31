@@ -15,7 +15,7 @@ const block = job => '\n' + ci.split(`\n  ${job}:\n`)[1].split(/\n  [a-z][a-z0-9
 const gates = {
   full: ['lint', 'javascript', 'rust', 'vibe', 'claude-acp', 'corpus', 'publication', 'static', 'confined', 'confined-cleanup'],
   host: ['sandbox', 'secure-host', 'secure-host-options', 'secure-host-no-user', 'world-write', 'world-write-runtime', 'secure-host-image', 'secure-host-write-policy'],
-  e2e: ['proposals', 'e2e-proposals', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
+  e2e: ['proposals', 'e2e-proposals', 'e2e-deterministic', 'e2e-scratch', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event', 'e2e-analysis', 'e2e-analysis-refused',
     'e2e-secondary', 'e2e-secondary-refused', 'e2e-people', 'e2e-items-scratch', 'e2e-items', 'e2e-threads-scratch', 'e2e-threads', 'e2e-check-run', 'e2e-review', 'e2e-dispatch', 'e2e-compose', 'e2e-dispatch-verify', 'e2e-verify'],
 };
 
