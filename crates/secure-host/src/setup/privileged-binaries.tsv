@@ -52,3 +52,25 @@ rhel 10 /usr/sbin/pam_timestamp_check 0 0 4755
 rhel 10 /usr/bin/write 0 tty 2755
 rhel 10 /usr/libexec/utempter/utempter 0 utmp 2711
 rhel 10 /usr/bin/plocate 0 plocate 2755
+# CentOS Stream 10: separate rows, based on the RHEL-identity workaround's
+# passing sandbox check in agentic-job#1808; not evidence for other rebuilds.
+centos 10 /usr/bin/sudo 0 0 4111
+centos 10 /usr/bin/su 0 0 4755
+centos 10 /usr/bin/passwd 0 0 4755
+centos 10 /usr/bin/chfn 0 0 4711
+centos 10 /usr/bin/chsh 0 0 4711
+centos 10 /usr/bin/gpasswd 0 0 4755
+centos 10 /usr/bin/newgrp 0 0 4755
+centos 10 /usr/bin/mount 0 0 4755
+centos 10 /usr/bin/umount 0 0 4755
+centos 10 /usr/bin/chage 0 0 4755
+centos 10 /usr/bin/pkexec 0 0 4755
+centos 10 /usr/bin/crontab 0 0 4755
+centos 10 /usr/bin/at 0 0 4755
+centos 10 /usr/lib/polkit-1/polkit-agent-helper-1 0 0 4755
+centos 10 /usr/sbin/grub2-set-bootflag 0 0 4755
+centos 10 /usr/sbin/unix_chkpwd 0 0 4755
+centos 10 /usr/sbin/pam_timestamp_check 0 0 4755
+centos 10 /usr/bin/write 0 tty 2755
+centos 10 /usr/libexec/utempter/utempter 0 utmp 2711
+centos 10 /usr/bin/plocate 0 plocate 2755

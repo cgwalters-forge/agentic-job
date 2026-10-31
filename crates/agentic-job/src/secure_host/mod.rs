@@ -44,7 +44,7 @@ pub enum Command {
 /// started as [`NAME`]. `[setup]` may still install agent CLIs.
 #[derive(Debug, Subcommand)]
 pub enum Host {
-    /// Refuse a host that is not Ubuntu 26.04 or RHEL 10, by /etc/os-release
+    /// Refuse a host that is not Ubuntu 26.04, RHEL 10 or CentOS Stream 10, by /etc/os-release
     Supported,
     /// As root: bound apt's network waits and keep it off the Azure mirror
     Apt,

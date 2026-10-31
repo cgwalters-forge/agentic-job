@@ -81,7 +81,10 @@ the next in the same major version.
 - **The secure-host configuration**, the action's `config` input
   (`agentic-job config --host`): `[sandbox]`, `[egress]` and `[setup]`
   of the runner configuration, and nothing else
-  ([secure-host](secure-host.md)).
+  ([secure-host](secure-host.md)). With no `config`, the forwarder selects
+  its Ubuntu 26.04 or RHEL 10 / CentOS Stream 10 cloud file by exact
+  `ID` and supported `VERSION_ID` (never `ID_LIKE`); an unsupported host
+  has no default. An explicit file replaces the selected default whole.
 
 ## Safe outputs
 

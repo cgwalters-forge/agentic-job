@@ -702,13 +702,33 @@ mod tests {
     #[test]
     fn a_host_file_has_only_the_machines_tables() {
         // Read at test time: secure-host/ is outside crates/.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../secure-host/hosted.toml");
-        let text = std::fs::read_to_string(path).unwrap();
-        let host = HostConfig::parse(&text).unwrap();
-        assert!(host.sandbox.close_resolved);
-        // What CI's confined job proves, with no override.
-        assert!(host.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
-        assert_eq!(Config::from(host), Config::parse(&text).unwrap());
+        for name in ["hosted.toml", "rhel-cloud.toml"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../secure-host")
+                .join(name);
+            let text = std::fs::read_to_string(path).unwrap();
+            let host = HostConfig::parse(&text).unwrap();
+            assert!(host.sandbox.close_resolved);
+            // What CI's confined job proves, with no override.
+            assert!(host.sandbox.runner_rules().iter().all(|(_, on, _)| *on));
+            if name == "rhel-cloud.toml" {
+                assert!(host.sandbox.check.allow_sockets.is_empty());
+                for unit in [
+                    "cockpit.socket",
+                    "cockpit.service",
+                    "sssd-kcm.socket",
+                    "sssd-kcm.service",
+                    "gssproxy.service",
+                    "sshd-unix-local.socket",
+                ] {
+                    assert!(
+                        host.sandbox.stop_services.iter().any(|s| s == unit),
+                        "{unit}"
+                    );
+                }
+            }
+            assert_eq!(Config::from(host), Config::parse(&text).unwrap());
+        }
         assert_eq!(Config::from(HostConfig::default()), Config::default());
         for text in [
             "[inference]\nurl = \"http://proxy.example:18080\"",

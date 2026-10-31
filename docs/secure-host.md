@@ -35,8 +35,10 @@ forward keeps the old action. At `@main` or a later commit:
   step after it is the runner's user's. The old action's outputs are
   gone, so a step that reads them gets an empty string.
 - Without a `config`, the forwarder passes this repository's
-  [`hosted.toml`](../secure-host/hosted.toml), as the old action did, and
-  not the new action's default, which turns egress filtering off: the
+  [`hosted.toml`](../secure-host/hosted.toml) for Ubuntu 26.04 or
+  [`rhel-cloud.toml`](../secure-host/rhel-cloud.toml) for RHEL 10 and
+  CentOS Stream 10, selected from `/etc/os-release`, and not the new
+  action's default, which turns egress filtering off: the
   v0.6 image's binary still creates its second user, and a step that
   runs code as it keeps writing only through the proxy's rules. A
   `config` of the caller's own replaces it whole. The new action sets
@@ -50,7 +52,7 @@ forward keeps the old action. At `@main` or a later commit:
   `ci.test.cjs` refuses a pin whose two copies differ or whose tag is
   newer than the workspace's version.
 - The floor is ubuntu-26.04, the runner the new action is written for;
-  the image admits exactly Ubuntu 26.04 and RHEL 10
+  the pinned image admits exactly Ubuntu 26.04 and RHEL 10
   ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).
 - Setting another input of the old action that chose the host fails the
   step and names the new action: `lock`, `egress`,
@@ -65,6 +67,18 @@ The action's documents describe the image it pins (v0.6.3). Main has
 changed the host since, and a forwarder caller gets these only with the
 next image release:
 
+- Host admission also accepts CentOS Stream 10, by exact `ID=centos` and
+  `VERSION_ID=10`, with separate privileged-binary allowlist rows. Ubuntu
+  26.04 and RHEL 10 (including minor releases) remain admitted. `ID_LIKE`
+  never grants admission: CentOS 9, AlmaLinux, Rocky, Fedora and other
+  untested distributions stay refused. The forwarder's default selection
+  uses the same match; an unknown host with no explicit config fails
+  before forwarding. Its RHEL-family cloud config stops cockpit,
+  sssd-kcm, gssproxy and sshd (including `sshd-unix-local.socket`) so
+  untrusted code cannot reach those listeners; it adds no socket
+  exceptions. An explicit `config` still replaces the default whole.
+  The pinned image does not yet admit CentOS Stream 10, even with this
+  default; use an image built from this source until the pin moves.
 - `sandbox.deny-runner-metadata`, `sandbox.unlink-worker-diagnostics`
   and `sandbox.deny-runner-reads` follow `sandbox.lock-runner` unless a
   configuration sets them, and setup and `sandbox check` print what each
@@ -267,7 +281,7 @@ The forwarder's inputs are the new action's; every one is optional.
 
 | Input | What it sets |
 | --- | --- |
-| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Default: [the forwarder's own](../secure-host/hosted.toml), for GitHub's hosted `ubuntu-26.04`, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
+| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
 | `check` | `false` skips `sandbox check --record`, whose passing record lets the run action's check skip its probes ([sandbox-check.md](sandbox-check.md)). Default `true` |
 | `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
 

@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Secure-host admits CentOS Stream 10 by exact `ID=centos`, `VERSION_ID=10`
+  with its own privileged-binary allowlist. The forwarder selects a RHEL 10 /
+  CentOS Stream 10 cloud default that stops local listeners without socket
+  exceptions; AlmaLinux, Rocky and untested releases remain refused.
 - Repair live Forgejo inline-review assertions: deleted-line comments identify
   the fixture's base commit, while the review and checked target bind current
   head. Keep the subsequent stale-head, out-of-diff and pending-review
