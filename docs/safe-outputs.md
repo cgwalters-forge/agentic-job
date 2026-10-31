@@ -1930,10 +1930,11 @@ check requests without agentic-job's runner, secure-host or GitHub's
 environment. The first step is `crates/safe-outputs`, a library in this
 workspace that depends on neither agentic-job nor secure-host. It reads
 no file, environment or credential: it is given text and settings.
-In the end, bounds parsing and publication safety belong to the
-component, and event admission, run identity, artifacts, checkpoints and
-credential acquisition to its caller; so far only the collector and the
-vocabulary it needs have moved.
+Bounds parsing, the check and publication safety belong to the
+component, and event admission, run identity, artifacts, checkpoints,
+memory, secret scanning and credential acquisition to its caller. The
+collector, the policy, bounds parsing and the check have moved;
+publication (`apply/`) has not.
 
 Moved into `crates/safe-outputs`, with no change in behaviour:
 
@@ -1945,6 +1946,23 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | `OUTPUTS_FILE`, `MAX_OUTPUTS_BYTES` | `check/mod.rs` | `vocabulary.rs` |
 | The collector's type table, validation, `field_guide` and `collect`; the sanitizer and Markdown scanning | `collect/` | `collect/` |
 | The neutral inline comment's field list, which the collector refuses before it could drop a field | `apply/inline.rs` | `collect::inline_field_names` |
+| `Policy` and its parts (`Kind`, `SafeOutputs`, `OutputLimit`, `PullRequest`, `Push`, `PatchRules`, `Memory`, `Secondary`, `ContextRepo`), `Policy::validate`, the protected-file defaults, globs and name patterns, and which clone URLs a policy may name | `policy.rs`, `run/clone.rs` | `contract.rs` |
+| `Bounds` (its `[trigger]` table typed by the caller), `SecondaryPullRequest`, `Unprotected`, `Bounds::validate`, `clone_url_problem`, and `intersect`, which holds a run to the organization's bounds too | `policy.rs` | `bounds.rs` |
+| Counts, targets and redirections (`redirections_to`), patch names, `base.json` and the run's branch, the patch rules, link repair, handler limits and replacement series | `check/` | `check/` |
+| `CheckedTarget`, the trusted head of a neutral inline comment that check writes and apply reads back, and `checked_target` | `apply/inline.rs` | `check/inline.rs` |
+
+`check::check` is the check's entry point. It is given the hand-back's
+files as its caller read them (`Handback`), the collector's result, the
+policy, and what the trusted caller says of the run (`Trusted`: the fixed
+comment target and the run's identifier); the policy already holds the
+repository, base, pinned head, targets and limits that the read-only
+policy job compiled. It reads no runner or Actions state. Two things it
+asks its caller for, in the order its refusals have always come: what the
+caller's own publishers refuse (`Publishers`: apply's neutral inline
+comments and its native handlers), and a lifecycle callback given the
+request that carries the patch, where agentic-job checks the checkpoint
+and memory. The returned refusals are in the order found; agentic-job's
+`Verdict` drops repeats, as before.
 
 `collect::collect_bytes` is the bounded entry point: it refuses a file
 past `MAX_OUTPUTS_BYTES` or not UTF-8 whole, and otherwise returns the
@@ -1958,15 +1976,26 @@ the sanitizer's results and every refusal are unchanged.
 Staying in agentic-job: the `collect` command's arguments, exit state and
 printing, and the configuration it builds from `policy.json` (a
 secondary pull request's `max` added to `create_pull_request`'s)
-(`collect.rs`); bounds parsing and admission (`policy.rs`, its
-`context` and `dispatch` modules, `event/`), including the refusal of a
-type the forge profile does not hold, which is a local trait so that the
-per-forge bounds of [#2107](https://github.com/cgwalters-forge/agentic-job/pull/2107)
-apply on top unchanged; `check/`, which reads the run's artifacts and
-policy; `apply/` and the credentials it acquires; `handback.rs`, run
-identity, artifacts and checkpoints. Bounds parsing is to move once
-the per-forge shape of #2107 settles, so that the public contract changes
-once ([#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393)).
+(`collect.rs`); reading bounds and policy files (`policy::Load`),
+compiling a run's request into its policy (`policy::Compile`, whose body
+is as it was) and admission (`policy.rs`, its `context` and `dispatch`
+modules, `event/`); `check/`, the adapter that keeps the hand-back's
+layout and the report: it reads the directory without following a link,
+holds each file to its size, refuses a private key and warns of other
+secret-shaped strings (`redact.rs`, whose patterns stay here, apart from
+the library and from [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026)),
+checks `memory.json` and the checkpoint, and writes `Verdict`; `apply/`
+and the credentials it acquires; `handback.rs`, run identity, artifacts
+and checkpoints.
+
+The per-forge bounds of [#2107](https://github.com/cgwalters-forge/agentic-job/pull/2107)
+([#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393))
+integrate here: its `[github]`, `[forgejo]` and `[gitlab]` sections, and
+the refusals of none or two, change the `Bounds` struct and
+`Bounds::validate`, now in `bounds.rs`; the refusal of a type the forge
+profile does not hold stays a crate-private trait, `ForgeAdmission`, in
+`contract.rs`. Its changes to `compile` and its tests apply where they
+were, in `policy.rs`. `policy.json` is unchanged by it, so the check is too.
 
 gh-aw has no library to depend on instead. At the pinned commit its
 safe-output code is CommonJS under `actions/setup/js`
@@ -1991,4 +2020,6 @@ write and compare fixtures ([#2026](https://github.com/cgwalters-forge/agentic-j
 The library's tests read `safe-outputs/validation.json` and the parity
 fixtures in `crates/agentic-job/tests/data/collect` where they are, rather
 than copies; those move with the crate if it becomes its own
-repository.
+repository. Its check tests read the policies in
+`crates/safe-outputs/tests/data`, which agentic-job's tests compare with
+what `policy` compiles, so that neither drifts from the other.

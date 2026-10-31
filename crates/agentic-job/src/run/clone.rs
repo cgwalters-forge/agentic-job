@@ -10,6 +10,10 @@ use anyhow::{Context, Result, ensure};
 use super::agent::GITHUB_TOKEN_FILE;
 use super::enter::{Runner, Sandbox, one_line};
 use crate::policy::{Policy, SECONDARY_DIR};
+// Which clone URLs a policy may name is the contract's, which validates
+// `policy.json` with it; `run` clones only those.
+pub use safe_outputs::contract::check_clone_url as check_url;
+use safe_outputs::contract::{CLONE_TRANSPORTS as TRANSPORTS, check_clone_url_in as check_url_in};
 
 /// Under the sandbox user's home: the checkouts, and what the agent
 /// hands back.
@@ -22,11 +26,6 @@ const DEPTH: &str = "50";
 /// job's own limit.
 const CLONE_TIMEOUT_S: &str = "900";
 const GIT_TIMEOUT_S: &str = "120";
-/// The transports a clone may use. `https` is what a caller's bounds
-/// admit; `file` reads only what the sandbox user can, and is for tests
-/// and a mirror on the machine. Anything else git knows (`ext::`, which
-/// runs a command, among them) is refused by git itself with these.
-const TRANSPORTS: &[&str] = &["https", "file"];
 /// A target whose clone URL `policy` admitted over plain `http` (a host
 /// in the bounds' `allow_http`) also gets `http`. Nothing else does, so a
 /// redirect cannot downgrade an https clone.
@@ -51,22 +50,6 @@ pub fn check_ref(name: &str) -> Result<()> {
             && !name.starts_with(['-', '.', '/'])
             && !name.contains(".."),
         "{name:?} is not a branch or tag name of letters, digits and _ . / -"
-    );
-    Ok(())
-}
-
-/// Whether URL is one a clone may use.
-pub fn check_url(url: &str) -> Result<()> {
-    check_url_in(url, TRANSPORTS)
-}
-
-fn check_url_in(url: &str, transports: &[&str]) -> Result<()> {
-    let transport = url.split_once("://").map(|(scheme, _)| scheme);
-    ensure!(
-        transport.is_some_and(|scheme| transports.contains(&scheme))
-            && !url.contains(|c: char| c.is_whitespace() || c.is_control()),
-        "{url:?} is not an {} URL",
-        transports.join(" or ")
     );
     Ok(())
 }

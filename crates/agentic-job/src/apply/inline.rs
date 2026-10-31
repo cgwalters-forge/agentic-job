@@ -2,20 +2,14 @@
 //! No review verdict, replies, resolution, or lossy range conversion.
 
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{COMMIT_RE, MAX_BODY_CHARS, Target, mentions, with_footer};
+use super::{MAX_BODY_CHARS, Target, mentions, with_footer};
 use crate::policy::Policy;
 
-/// Trusted check context, not a field in an agent's request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CheckedTarget {
-    pub repo: String,
-    pub number: u64,
-    pub head: String,
-}
+// The target check writes and apply reads back is the library's, so that
+// neither depends on the other for it.
+pub use safe_outputs::check::inline::{CheckedTarget, checked_target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineComment {
@@ -24,26 +18,6 @@ pub struct InlineComment {
     pub line: u64,
     pub left: bool,
     pub body: String,
-}
-
-pub(crate) fn checked_target(
-    comment: Option<(&str, u64)>,
-    head: Option<&str>,
-    policy: &Policy,
-) -> Result<CheckedTarget> {
-    let (repo, number) = comment.context("neutral inline comments need a fixed comment target")?;
-    ensure!(
-        repo.eq_ignore_ascii_case(&policy.repo) && number > 0,
-        "neutral inline comments need the policy's repository and fixed PR/MR"
-    );
-    let head = head
-        .filter(|head| COMMIT_RE.is_match(head))
-        .context("neutral inline comments require --review-head, the admitted full head SHA")?;
-    Ok(CheckedTarget {
-        repo: policy.repo.clone(),
-        number,
-        head: head.to_owned(),
-    })
 }
 
 /// Refuse unsupported fields in check too, before publishing can be attempted.

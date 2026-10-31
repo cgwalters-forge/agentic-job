@@ -6,49 +6,42 @@
 //! which knows the request types, counts them, and validates and
 //! sanitizes their fields; it is run before this, configured with the
 //! policy's `safe_outputs`, and its result is given here with
-//! `--collected`. Nothing of it is done again. What is done
-//! here is what gh-aw leaves to the workflow it generates, or does not do
-//! at all: the hand-back holds only the files it may, within their sizes
-//! and free of private keys (other secret-shaped strings are warnings: see
-//! [`redact`]); the requests fit the policy; a pull
-//! request comes with exactly its patch, against the policy's repository
-//! and base; and the patch passes the rules of [`patch`]. One thing of
-//! the collector's is mended: a Markdown link it redacted is made plain
-//! text again ([`links`]).
+//! `--collected`. Nothing of it is done again. What is done here is what
+//! gh-aw leaves to the workflow it generates, or does not do at all, and
+//! most of it is the safe-outputs library's ([`safe_outputs::check`]): the
+//! requests fit the policy; a pull request comes with exactly its patch,
+//! against the policy's repository and base; and the patch passes the
+//! rules of [`read_patch`]. This is the run's side of it: the hand-back
+//! holds only the files it may, within their sizes, read without
+//! following a link, and free of private keys (other secret-shaped
+//! strings are warnings: see [`redact`]); its memory and checkpoint
+//! ([`memory`], [`checkpoint`]); and the report.
 
 pub mod checkpoint;
-pub mod handler_limits;
-pub mod links;
 pub mod memory;
-mod patch;
-pub mod replacement;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
-pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
 use crate::exit::Exit;
 use crate::files;
-use crate::policy::{
-    CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, KIND_TARGETS, MARK_READY, MISSING_DATA, NOOP,
-    PUSH_TO_PULL_REQUEST_BRANCH, PatchRules, Policy, REVIEW_THREAD_OUTPUTS, Secondary,
-    update_fields,
-};
+use crate::policy::{Forge, Load, MISSING_DATA, NOOP, PUSH_TO_PULL_REQUEST_BRANCH, Policy};
 use crate::redact;
+use safe_outputs::check::inline::CheckedTarget;
+use safe_outputs::check::{Collected, Publishers, Trusted};
 
+pub use safe_outputs::check::{
+    BASE_COMMIT_HEADER, BASE_FILE, PatchInfo, PatchReading, RUN_BRANCH_PREFIX, SECONDARY_BASE_FILE,
+    handler_limits, is_patch_file_name, is_run_branch, item_type, links, map_holds_marker,
+    patch_file_name, patch_file_name_in, read_patch, replacement, secondary_target,
+};
+#[cfg(test)]
+use safe_outputs::check::{CREATE_ISSUE, ISSUE_LINKS, target_key};
 pub use safe_outputs::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
-
-/// Which repository, branch and commit a patch is against.
-pub const BASE_FILE: &str = "base.json";
-
-/// The same, for the policy's secondary pull request's patch.
-pub const SECONDARY_BASE_FILE: &str = "secondary-base.json";
 
 const MAX_BASE_BYTES: u64 = 4096;
 /// How much of a `memory.json` is read where the policy allows none: it
@@ -65,13 +58,6 @@ const SHOWN_CHARS: usize = 300;
 
 /// How much of a commit id the summary shows.
 const SHORT_COMMIT: usize = 12;
-
-static PATCH_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^aw-[a-z0-9][a-z0-9._-]{0,99}\.patch$").expect("a valid pattern")
-});
-
-static COMMIT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9a-f]{40}$").expect("a valid pattern"));
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -106,7 +92,7 @@ pub struct Args {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub inline_target: Option<crate::apply::inline::CheckedTarget>,
+    pub inline_target: Option<CheckedTarget>,
     pub ok: bool,
     /// Every reason for a refusal.
     pub errors: Vec<String>,
@@ -133,36 +119,6 @@ pub struct Verdict {
     /// reports it so and succeeds.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
-}
-
-/// The patch of an accepted pull request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PatchInfo {
-    pub file: String,
-    pub bytes: usize,
-    pub base_commit: String,
-    /// The paths the patch names. git can still apply it to others (see
-    /// [`patch`]): whoever applies it compares this with what changed.
-    pub files: Vec<String>,
-    /// Present only for a bounded replacement; apply checks every commit diff.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_files: Option<Vec<Vec<String>>>,
-}
-
-/// What gh-aw's collector writes: the requests it accepted, and why it
-/// refused the others.
-#[derive(Debug, Deserialize)]
-struct Collected {
-    items: Vec<Map<String, Value>>,
-    errors: Vec<String>,
-}
-
-/// `base.json`.
-#[derive(Debug, Deserialize)]
-struct Base {
-    repo: String,
-    r#ref: String,
-    commit: String,
 }
 
 impl Verdict {
@@ -289,76 +245,23 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// The output type that opens an issue, and the fields of one that act
-/// on other issues.
-const CREATE_ISSUE: &str = "create_issue";
-const ISSUE_LINKS: &[&str] = &["parent", "blocked_by"];
+/// apply's own publishers, whose refusals check makes before the session
+/// ends rather than after it: neutral inline comments, and the types the
+/// bounds route to `agentic-job publish`.
+pub(crate) struct Apply;
 
-pub(crate) fn item_type(item: &Map<String, Value>) -> &str {
-    item.get("type").and_then(Value::as_str).unwrap_or_default()
-}
+impl Publishers for Apply {
+    fn inline_comment(&self, item: &Map<String, Value>, forge: Forge) -> Result<()> {
+        crate::apply::inline::fields(item, forge)
+    }
 
-/// What gh-aw's collector appends, of its own, to a result holding no
-/// request but `missing_tool` and `missing_data`, or none at all.
-const COLLECTORS_INCOMPLETE: &str = "report_incomplete";
-
-/// The diagnostics a hand-back may hold beside the incomplete report.
-const DIAGNOSTICS: &[&str] = &["missing_tool", "missing_data"];
-
-/// Drops the collector's incomplete report, which says no more than the
-/// run's own exit does and which no policy allows, so that a hand-back
-/// of nothing or of diagnostics only passes as before. Only the last
-/// item, and only where the collector puts one: anything else of that
-/// type, an agent's included (which the collector refuses as of a type
-/// its configuration lacks), is left to be refused below.
-fn drop_collectors_incomplete(items: &mut Vec<Map<String, Value>>) {
-    if let Some((last, rest)) = items.split_last()
-        && item_type(last) == COLLECTORS_INCOMPLETE
-        && rest
-            .iter()
-            .all(|item| DIAGNOSTICS.contains(&item_type(item)))
-    {
-        items.pop();
+    fn native_refusals(&self, items: &[Value], routed: &[String]) -> Vec<String> {
+        crate::apply::publish::refusals(items, routed)
     }
 }
 
-/// What the apply job writes, hidden, into each body it posts, so that a
-/// re-run finds what was already applied and skips it. A request holding
-/// it could make a re-run skip another request, so none may.
-const APPLIED_MARKER: &str = "agentic-job-applied";
-
-fn holds_marker(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.to_ascii_lowercase().contains(APPLIED_MARKER),
-        Value::Array(values) => values.iter().any(holds_marker),
-        Value::Object(map) => map_holds_marker(map),
-        _ => false,
-    }
-}
-
-pub(crate) fn map_holds_marker(map: &Map<String, Value>) -> bool {
-    map.iter().any(|(key, value)| {
-        key.to_ascii_lowercase().contains(APPLIED_MARKER) || holds_marker(value)
-    })
-}
-
-/// The policy's secondary pull request, if ITEM is the request for it: a
-/// `create_pull_request` whose `repo` is that repository, exactly.
-pub(crate) fn secondary_target<'a>(
-    item: &Map<String, Value>,
-    policy: &'a Policy,
-) -> Option<&'a Secondary> {
-    policy.secondary_pull_request.as_ref().filter(|target| {
-        item_type(item) == CREATE_PULL_REQUEST
-            && item.get("repo").and_then(Value::as_str) == Some(target.repo.as_str())
-    })
-}
-
-/// The fields of a request that would take it out of the policy. gh-aw's
-/// rules let a request name a repository of its own, and a pull request a
-/// base branch and whether it is a draft; whether a handler honours them
-/// is the handler's configuration, which this does not see. The policy
-/// has fixed all three, so a request that says otherwise is refused.
+/// The fields of a request that would take it out of the policy
+/// ([`safe_outputs::check::redirections_to`]), with apply's publishers.
 #[cfg(test)]
 fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
     redirections_to(item, policy, None)
@@ -369,532 +272,7 @@ pub(crate) fn redirections_to(
     policy: &Policy,
     comment: Option<(&str, u64)>,
 ) -> Vec<String> {
-    let output = item_type(item);
-    let differs = |key: &str, same: &dyn Fn(&str) -> bool| {
-        item.get(key)
-            .filter(|value| !value.as_str().is_some_and(same))
-            .map(|value| format!("a {output} with {key} {value}, which is not the policy's"))
-    };
-    // The one request that may name another repository, and then only as
-    // the policy writes it, as `run` does: gh-aw's handler compares it so.
-    if let Some(target) = secondary_target(item, policy) {
-        let mut problems: Vec<String> = differs("base", &|base| base == target.base)
-            .into_iter()
-            .collect();
-        if item
-            .get("draft")
-            .is_some_and(|draft| draft != &Value::Bool(true))
-        {
-            problems.push(format!("a {output} that is not a draft"));
-        }
-        return problems;
-    }
-    let repo = if matches!(output, "add_comment" | HIDE_COMMENT)
-        || REVIEW_THREAD_OUTPUTS.contains(&output)
-    {
-        comment.map_or(policy.repo.as_str(), |(repo, _)| repo)
-    } else {
-        &policy.repo
-    };
-    let mut problems: Vec<String> = differs("repo", &|value| value.eq_ignore_ascii_case(repo))
-        .into_iter()
-        .collect();
-    problems.extend(
-        item.keys()
-            .filter(|key| policy.forge.refuses_field(key))
-            .map(|key| {
-                format!(
-                    "a {output} with {key}, which this forge cannot resolve: it numbers issues \
-                     and pull requests apart"
-                )
-            }),
-    );
-    if output == "add_comment"
-        && let Some((_, target)) = comment
-    {
-        for key in [
-            "item_number",
-            "pr",
-            "pr_number",
-            "issue_number",
-            "pull_request_number",
-            "pull_number",
-            "pr-number",
-        ] {
-            if let Some(value) = item.get(key) {
-                let number = value
-                    .as_u64()
-                    .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()));
-                if number != Some(target) {
-                    problems.push(format!(
-                        "an add_comment with {key} outside the caller's fixed item"
-                    ));
-                }
-            }
-        }
-        // These select an existing comment or a discussion reply, not the
-        // caller's issue/PR. No trusted comment-ID allowlist is configured.
-        for key in [
-            "comment_id",
-            "commentId",
-            "comment-id",
-            "reply_to_id",
-            "target",
-        ] {
-            if item.contains_key(key) {
-                problems.push(format!(
-                    "an add_comment with {key}, outside the caller's fixed destination"
-                ));
-            }
-        }
-    }
-    if output == HIDE_COMMENT {
-        // Hiding moderates what other people wrote, so only on the item
-        // the run was started for: apply gives the handler that number as
-        // its target, and the handler refuses a comment on any other item,
-        // which only it can look up. Without a fixed item (`*`) there is
-        // none to hold it to.
-        if comment.is_none() {
-            problems.push(format!(
-                "a {output} needs the run's triggering issue or pull request as its comment target"
-            ));
-        }
-        // The handler hides as spam a request without a reason.
-        let reason = item.get("reason").map_or(Some("SPAM"), Value::as_str);
-        let allowed = policy
-            .safe_outputs
-            .others
-            .get(output)
-            .map_or(&[][..], |limit| &limit.allowed_reasons[..]);
-        if !reason.is_some_and(|reason| allowed.iter().any(|allowed| allowed == reason)) {
-            problems.push(format!(
-                "a {output} for reason {}, which the policy does not allow",
-                item.get("reason")
-                    .map_or_else(|| "SPAM (none given)".to_owned(), Value::to_string)
-            ));
-        }
-    }
-    if REVIEW_THREAD_OUTPUTS.contains(&output) {
-        if output == crate::policy::CREATE_REVIEW_COMMENT
-            && policy.forge != Forge::Github
-            && let Err(err) = crate::apply::inline::fields(item, policy.forge)
-        {
-            problems.push(format!("{err:#}"));
-        }
-        // On the run's triggering pull request only: apply gives the
-        // handlers its number as their target, so a request cannot name
-        // another, and the handlers (and apply, for a reply) refuse a
-        // comment or thread on any other, which only they can look up.
-        // Without a fixed item (`*`) there is no pull request to hold them
-        // to; one that is an issue the forge refuses at apply.
-        match comment {
-            None => problems.push(format!(
-                "a {output} needs the run's triggering pull request as its comment target"
-            )),
-            Some((_, target)) => {
-                if let Some(value) = item.get("pull_request_number")
-                    && value.as_u64() != Some(target)
-                {
-                    problems.push(format!(
-                        "a {output} with pull_request_number {value}, which is not the run's pull request #{target}"
-                    ));
-                }
-            }
-        }
-    }
-    if output == CREATE_PULL_REQUEST {
-        problems.extend(differs("base", &|base| base == policy.base));
-        if item
-            .get("draft")
-            .is_some_and(|draft| draft != &Value::Bool(true))
-        {
-            problems.push(format!("a {output} that is not a draft"));
-        }
-    }
-    if output == PUSH_TO_PULL_REQUEST_BRANCH {
-        // The pull request and its branch are the request's, not the
-        // agent's: the handler pushes to the number configured, and finds
-        // the patch by the branch.
-        problems.extend(differs("branch", &|branch| branch == policy.base));
-        let target = policy
-            .safe_outputs
-            .push_to_pull_request_branch
-            .as_ref()
-            .map(|push| push.target.as_str());
-        for key in [
-            "pull_request_number",
-            "pr_number",
-            "pull_number",
-            "pr",
-            "item_number",
-        ] {
-            if let Some(value) = item.get(key) {
-                let number = value
-                    .as_u64()
-                    .map(|n| n.to_string())
-                    .or_else(|| value.as_str().map(str::to_owned));
-                if number.as_deref() != target {
-                    problems.push(format!(
-                        "a {output} with {key} {value}, which is not the policy's pull request"
-                    ));
-                }
-            }
-        }
-    }
-    if output == "update_project" {
-        // Only the board proposal grammar is exposed. The handler also supports
-        // project/schema/draft mutations and aliases: none are bounded here.
-        const KEYS: &[&str] = &[
-            "type",
-            "project",
-            "target_repo",
-            "content_type",
-            "content_number",
-            "fields",
-        ];
-        for key in item.keys().filter(|key| !KEYS.contains(&key.as_str())) {
-            problems.push(format!("an update_project with unsupported field {key}"));
-        }
-        let limit = policy.safe_outputs.others.get(output);
-        if !item
-            .get("project")
-            .and_then(Value::as_str)
-            .is_some_and(|project| {
-                limit.is_some_and(|limit| limit.projects.iter().any(|allowed| allowed == project))
-            })
-        {
-            problems.push("an update_project outside the policy's named projects".to_owned());
-        }
-        if item.get("target_repo").and_then(Value::as_str) != Some(policy.repo.as_str()) {
-            problems
-                .push("an update_project requires the policy's explicit target_repo".to_owned());
-        }
-        if item.get("content_type").and_then(Value::as_str) != Some("issue")
-            || !item
-                .get("content_number")
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0 && n <= 2_147_483_647)
-        {
-            problems.push(
-                "an update_project requires issue content and a positive integer content_number"
-                    .to_owned(),
-            );
-        }
-        match item.get("fields").and_then(Value::as_object) {
-            Some(fields) if !fields.is_empty() => {
-                for (field, value) in fields {
-                    if !limit.is_some_and(|limit| limit.fields.contains(field)) {
-                        problems.push(format!(
-                            "an update_project with field {field:?} not listed in the policy"
-                        ));
-                    }
-                    if !(value.is_string() || value.is_number()) {
-                        problems.push(format!(
-                            "an update_project with unsupported value for {field:?}"
-                        ));
-                    }
-                }
-            }
-            _ => problems.push("an update_project requires a nonempty fields object".to_owned()),
-        }
-    }
-    let single_target = target_key(output);
-    let kind_named;
-    let targets: &[&str] = match output {
-        "close_pull_request" => &["pull_request_number"],
-        "link_sub_issue" => &["parent_issue_number", "sub_issue_number"],
-        // GitLab numbers issues and merge requests apart, so a label
-        // request names which by its field: exactly one, as another is
-        // refused below as an unsupported target.
-        "add_labels" | "remove_labels" if policy.forge == Forge::Gitlab => {
-            kind_named = [KIND_TARGETS
-                .iter()
-                .copied()
-                .find(|key| item.contains_key(*key))
-                .unwrap_or(KIND_TARGETS[0])];
-            &kind_named
-        }
-        _ => single_target.as_slice(),
-    };
-    if !targets.is_empty() {
-        if !item
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo))
-        {
-            problems.push(format!("a {output} requires the policy's explicit repo"));
-        }
-        // Do not let handler fallback to event context, aliases or temporary
-        // IDs choose an item. Repository scope remains the compiled run's repo.
-        for key in targets {
-            if !item
-                .get(*key)
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
-            {
-                problems.push(format!("a {output} requires a positive integer {key}"));
-            }
-        }
-        for alias in [
-            "item_number",
-            "issue_number",
-            "pr_number",
-            "pull_number",
-            "pull_request_number",
-            "pr",
-            "target",
-            "duplicate_of",
-        ] {
-            if !targets.contains(&alias) && item.contains_key(alias) {
-                problems.push(format!("a {output} with unsupported target field {alias}"));
-            }
-        }
-    }
-    if let Some(known) = update_fields(output).or((output == MARK_READY).then_some(&[][..])) {
-        // Every key is named: gh-aw's handlers act on fields their
-        // configuration says to leave alone (`UPDATE_FIELDS`), so the
-        // policy's list, not the handler's, decides. `draft` and
-        // `update_branch` are refused like any field the bounds leave out,
-        // so a pull request stays a draft unless the bounds say otherwise.
-        let listed = policy
-            .safe_outputs
-            .others
-            .get(output)
-            .map_or(&[][..], |limit| &limit.fields[..]);
-        let allowed = |key: &str| known.contains(&key) && listed.iter().any(|field| field == key);
-        for key in item.keys().map(String::as_str) {
-            let permitted = matches!(key, "type" | "repo")
-                || Some(key) == target_key(output)
-                || (output == MARK_READY && key == "reason")
-                // How a body is combined with the current one.
-                || (key == "operation" && allowed("body"))
-                || allowed(key);
-            if !permitted {
-                problems.push(format!(
-                    "a {output} with {key}, which the policy does not let it change"
-                ));
-            }
-        }
-    }
-    if output == "remove_labels"
-        && item
-            .get("labels")
-            .and_then(Value::as_array)
-            .is_none_or(|labels| labels.is_empty())
-    {
-        problems.push("a remove_labels requires a nonempty labels array".to_owned());
-    }
-    if output == "create_check_run" {
-        // An agent-chosen success could satisfy a required check by that name.
-        if item.get("conclusion").and_then(Value::as_str) == Some("success") {
-            problems.push("a create_check_run that concludes success".to_owned());
-        }
-        // The handler posts on this pull request's head, in the calling
-        // repository; without one it would take the apply job's own commit.
-        if !item
-            .get("pull_request_number")
-            .and_then(Value::as_u64)
-            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
-        {
-            problems.push(
-                "a create_check_run requires a positive integer pull_request_number".to_owned(),
-            );
-        }
-        for alias in ["pr_number", "pull_number", "pr", "item_number", "target"] {
-            if item.contains_key(alias) {
-                problems.push(format!(
-                    "a create_check_run with unsupported target field {alias}"
-                ));
-            }
-        }
-    }
-    if output == "create_discussion" {
-        // The handler takes a request's category over the pinned one, so an
-        // agent could post in Announcements or a category others watch.
-        let pinned = policy
-            .safe_outputs
-            .others
-            .get(output)
-            .and_then(|limit| limit.category.as_deref());
-        problems.extend(differs("category", &|category| Some(category) == pinned));
-    }
-    if matches!(output, CREATE_ISSUE | "add_labels" | "remove_labels")
-        && let Some(limit) = policy.safe_outputs.others.get(output)
-        && (limit.allowed.is_some() || !limit.blocked.is_empty())
-        && let Some(labels) = item.get("labels")
-    {
-        match labels.as_array() {
-            Some(labels) => {
-                // The pinned label handlers use max for both requests and
-                // labels per request. Refuse rather than silently drop labels.
-                if output != CREATE_ISSUE && labels.len() > limit.max as usize {
-                    problems.push(format!("a {output} exceeding the per-request label limit"));
-                }
-                for label in labels {
-                    let permitted = label.as_str().is_some_and(|label| {
-                        label == label.trim()
-                            // A conservative fixed-point subset of gh-aw's
-                            // sanitizer: no Unicode hardening, mention escaping,
-                            // punctuation removal or UTF-16 truncation can alter it.
-                            && (output == CREATE_ISSUE
-                                || (!label.is_empty()
-                                    && label.len() <= 64
-                                    && !label.starts_with('-')
-                                    && label.bytes().all(|b| {
-                                        b.is_ascii_alphanumeric() || b" -_./:".contains(&b)
-                                    })))
-                            && !limit
-                                .blocked
-                                .iter()
-                                .any(|blocked| blocked.eq_ignore_ascii_case(label))
-                            && limit.allowed.as_ref().is_none_or(|allowed| {
-                                allowed
-                                    .iter()
-                                    .any(|allowed| allowed.eq_ignore_ascii_case(label))
-                            })
-                    });
-                    if !permitted {
-                        problems.push(format!(
-                            "a {output} with label {label}, outside the policy's label limits"
-                        ));
-                    }
-                }
-            }
-            None => problems.push(format!("a {output} whose labels are not an array")),
-        }
-    }
-    if let Some((key, people)) = match output {
-        "add_reviewer" => Some(("pull_request_number", "reviewers")),
-        "assign_to_user" => Some(("issue_number", "assignees")),
-        _ => None,
-    } {
-        // Whoever is named is notified. The handlers silently drop a login
-        // outside `allowed`, and fall back to the triggering item without a
-        // number, so check refuses instead; `policy` requires the list.
-        if !item
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo))
-        {
-            problems.push(format!("a {output} requires the policy's explicit repo"));
-        }
-        if !item
-            .get(key)
-            .and_then(Value::as_u64)
-            .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
-        {
-            problems.push(format!("a {output} requires a positive integer {key}"));
-        }
-        // Other targets, and other ways to name people: teams and the
-        // singular `assignee` have no bounds here.
-        for alias in [
-            "item_number",
-            "issue_number",
-            "pull_request_number",
-            "pr_number",
-            "pull_number",
-            "pr",
-            "target",
-            "team_reviewers",
-            "assignee",
-        ] {
-            if alias != key && item.contains_key(alias) {
-                problems.push(format!("a {output} with unsupported field {alias}"));
-            }
-        }
-        let limit = policy.safe_outputs.others.get(output);
-        match item.get(people).and_then(Value::as_array) {
-            Some(logins) if !logins.is_empty() => {
-                // The handlers use max for both requests and logins per
-                // request, and would drop the rest.
-                if limit.is_none_or(|limit| logins.len() > limit.max as usize) {
-                    problems.push(format!("a {output} exceeding the per-request login limit"));
-                }
-                for login in logins {
-                    // Exactly as listed: the handlers compare logins so.
-                    if !login.as_str().is_some_and(|login| {
-                        limit
-                            .and_then(|limit| limit.allowed.as_ref())
-                            .is_some_and(|allowed| allowed.iter().any(|allowed| allowed == login))
-                    }) {
-                        problems.push(format!(
-                            "a {output} naming {login}, which the policy does not allow"
-                        ));
-                    }
-                }
-            }
-            _ => problems.push(format!("a {output} requires a nonempty {people} array")),
-        }
-    }
-    // The handler posts the body on the issue, then closes it, so whoever
-    // watches the issue learns why; without one it fails in apply instead.
-    if output == "close_issue"
-        && item
-            .get("body")
-            .and_then(Value::as_str)
-            .is_none_or(|body| body.trim().is_empty())
-    {
-        problems.push("a close_issue requires a body saying why it is closed".to_owned());
-    }
-    // Finished or overtaken: `duplicate` would mark an issue a duplicate
-    // of nothing, as `duplicate_of`, which names another issue, is refused.
-    if output == "close_issue"
-        && item
-            .get("state_reason")
-            .is_some_and(|reason| !matches!(reason.as_str(), Some("completed" | "not_planned")))
-    {
-        problems.push(format!(
-            "a close_issue with state_reason {}, not completed or not_planned",
-            item["state_reason"]
-        ));
-    }
-    if output == CREATE_ISSUE {
-        // gh-aw's handler links the new issue to any issue the request
-        // names; nothing bounds which, so those requests are refused.
-        problems.extend(
-            ISSUE_LINKS
-                .iter()
-                .filter(|key| item.contains_key(**key))
-                .map(|key| format!("a {output} with {key}, which links another issue")),
-        );
-    }
-    problems
-}
-
-/// The field naming the one item an output acts on, for those that must
-/// name it explicitly.
-fn target_key(output: &str) -> Option<&'static str> {
-    match output {
-        "close_issue" | "update_issue" => Some("issue_number"),
-        "add_labels" | "remove_labels" => Some("item_number"),
-        "update_pull_request" | MARK_READY => Some("pull_request_number"),
-        _ => None,
-    }
-}
-
-/// A check run named otherwise than the policy pins, in the agent's own
-/// lines. The handler names the run from its configuration, the bounds'
-/// pin, and gh-aw's collector drops a `name` its rules do not list, so
-/// another name would not be posted; it is refused rather than seem
-/// honoured. The pin, not this, is what keeps the name.
-fn check_run_names(lines: &[u8], policy: &Policy) -> Vec<String> {
-    let pinned = policy
-        .safe_outputs
-        .others
-        .get("create_check_run")
-        .and_then(|limit| limit.name.as_deref());
-    String::from_utf8_lossy(lines)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Map<String, Value>>(line).ok())
-        .filter(|item| item_type(item).replace('-', "_") == "create_check_run")
-        .filter_map(|item| {
-            item.get("name")
-                .filter(|name| name.as_str().is_none() || name.as_str() != pinned)
-                .map(|name| {
-                    format!("a create_check_run with name {name}, which is not the policy's")
-                })
-        })
-        .collect()
+    safe_outputs::check::redirections_to(item, policy, comment, &Apply)
 }
 
 fn is_handback_file(name: &str) -> bool {
@@ -903,7 +281,7 @@ fn is_handback_file(name: &str) -> bool {
         || name == SECONDARY_BASE_FILE
         || name == replacement::REPLACEMENT_FILE
         || name == memory::MEMORY_FILE
-        || PATCH_FILE_RE.is_match(name)
+        || is_patch_file_name(name)
 }
 
 /// The most a file of a hand-back may hold. Which patch is which is
@@ -925,50 +303,6 @@ fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
                 target.max_patch_bytes.max(policy.max_patch_bytes)
             }),
     }
-}
-
-/// The name of the patch for a pull request's branch: gh-aw's
-/// (`sanitizeForFilename` of `git_patch_utils.cjs`), which its handlers
-/// look for.
-pub fn patch_file_name(branch: &str) -> String {
-    format!("aw-{}.patch", for_file_name(branch))
-}
-
-/// The name of the patch for a pull request's branch in the repository
-/// REPO that a request names as its `repo`: the name gh-aw's handlers look
-/// for first (`getPatchPathForBranchInRepo`), so that the secondary pull
-/// request's patch is never taken for the run's own.
-pub fn patch_file_name_in(repo: &str, branch: &str) -> String {
-    format!("aw-{}-{}.patch", for_file_name(repo), for_file_name(branch))
-}
-
-/// Whether NAME is a patch file name `check` takes at all.
-pub fn is_patch_file_name(name: &str) -> bool {
-    PATCH_FILE_RE.is_match(name)
-}
-
-/// How `run` names a run's branch: this, then its identifier.
-pub(crate) const RUN_BRANCH_PREFIX: &str = "agent-run-";
-
-/// Whether BRANCH is a run's own, as `run` names it (`agent-run-ID`).
-pub(crate) fn is_run_branch(branch: &str) -> bool {
-    branch
-        .strip_prefix(RUN_BRANCH_PREFIX)
-        .is_some_and(|id| (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// gh-aw's `sanitizeForFilename`.
-fn for_file_name(value: &str) -> String {
-    static UNSAFE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"[/\\:*?"<>|]"#).expect("a valid pattern"));
-    static DASHES_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new("-{2,}").expect("a valid pattern"));
-
-    let name = UNSAFE_RE.replace_all(value, "-");
-    let name = DASHES_RE.replace_all(&name, "-");
-    let name = name.strip_prefix('-').unwrap_or(&name);
-    let name = name.strip_suffix('-').unwrap_or(name);
-    name.to_lowercase()
 }
 
 /// Checks the hand-back in `dir` (`outputs.jsonl`, `base.json`, one
@@ -1061,355 +395,65 @@ fn verdict_of(
         });
     }
 
-    let mut collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
+    let collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
         format!(
             "{} is not the result of gh-aw's collector",
             collected.display()
         )
     })?;
-    drop_collectors_incomplete(&mut collected.items);
-    // Mending joins nothing to a link's text (`links::repair`), so it
-    // makes no secret-shaped string, URL or mention the collector missed.
-    for item in &mut collected.items {
-        item.values_mut().for_each(links::repair_value);
-    }
-    let items = if contents.contains_key(OUTPUTS_FILE) {
-        errors.extend(collected.errors);
-        collected.items
-    } else {
-        if !collected.items.is_empty() || !collected.errors.is_empty() {
-            errors.push(format!(
-                "the collector's result holds outputs, and there is no {OUTPUTS_FILE}"
-            ));
-        }
-        Vec::new()
+    let handback = safe_outputs::check::Handback {
+        outputs: contents.get(OUTPUTS_FILE).map(Vec::as_slice),
+        base: contents.get(BASE_FILE).map(Vec::as_slice),
+        secondary_base: contents.get(SECONDARY_BASE_FILE).map(Vec::as_slice),
+        replacement: contents
+            .get(replacement::REPLACEMENT_FILE)
+            .map(Vec::as_slice),
+        patches: contents
+            .iter()
+            .filter(|(name, _)| is_patch_file_name(name))
+            .map(|(name, content)| (name.as_str(), content.as_slice()))
+            .collect(),
     };
-
-    // The collector counts each type against the configuration it was
-    // given. Counting again costs nothing and shows a collector that was
-    // given another configuration than this policy's.
-    if items.len() > usize::try_from(policy.max_outputs).unwrap_or(usize::MAX) {
-        errors.push(format!(
-            "{} outputs, over max_outputs {}",
-            items.len(),
-            policy.max_outputs
-        ));
-    }
-    // A pull request in the secondary repository counts against its own
-    // `max`, apart from the run's own: the collector was given their sum.
-    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
-    let mut secondary_count = 0;
-    for item in &items {
-        if secondary_target(item, policy).is_some() {
-            secondary_count += 1;
-        } else {
-            *counts.entry(item_type(item)).or_default() += 1;
-        }
-    }
-    if let Some(target) = &policy.secondary_pull_request
-        && secondary_count > target.max
-    {
-        errors.push(format!(
-            "{secondary_count} outputs of type {CREATE_PULL_REQUEST:?} for {}, over {}",
-            target.repo, target.max
-        ));
-    }
-    for (output, count) in counts {
-        match policy.safe_outputs.max_of(output) {
-            None => errors.push(format!(
-                "an output of type {output:?}, which the policy does not allow"
-            )),
-            Some(max) if count > max => {
-                errors.push(format!("{count} outputs of type {output:?}, over {max}"));
-            }
-            Some(_) => {}
-        }
-    }
-
-    errors.extend(
-        items
-            .iter()
-            .flat_map(|item| redirections_to(item, policy, comment)),
-    );
-    if let Some(lines) = contents.get(OUTPUTS_FILE) {
-        errors.extend(check_run_names(lines, policy));
-    }
-    // What apply's own handlers would refuse after the session, refused here.
-    if !policy.native_handlers.is_empty() {
-        let values: Vec<Value> = items.iter().cloned().map(Value::Object).collect();
-        errors.extend(crate::apply::publish::refusals(
-            &values,
-            &policy.native_handlers,
-        ));
-    }
-    errors.extend(
-        items
-            .iter()
-            .filter(|item| map_holds_marker(item))
-            .map(|item| {
-                format!(
-                    "a {} holding {APPLIED_MARKER}, which apply writes",
-                    item_type(item)
-                )
-            }),
-    );
-
-    let patch_names: Vec<&str> = contents
-        .keys()
-        .map(String::as_str)
-        .filter(|name| PATCH_FILE_RE.is_match(name))
-        .collect();
-    // The output that carries the patch: a pull request to open, or a
-    // push to the open one the run started from, whose head is pinned.
-    let carrier = policy.safe_outputs.patch_carrier().map(|(output, rules)| {
-        let commit_author = policy.commit_author.as_deref();
-        (
-            output,
-            PatchRules {
-                commit_author,
-                ..rules
-            },
-        )
-    });
-    let pinned = policy
-        .safe_outputs
-        .push_to_pull_request_branch
-        .as_ref()
-        .map(|push| push.head.as_str());
-    let request = carrier.and_then(|(output, _)| {
-        items
-            .iter()
-            .find(|item| item_type(item) == output && secondary_target(item, policy).is_none())
-    });
-    // Its branch names its patch, so that is the run's under the prefix,
-    // as `run` writes it: never a name that gh-aw's handler could take for
-    // the run's own pull request's patch (`Secondary::branch`). It is this
-    // run's, not one an agent could take from an earlier run to push over
-    // that run's open pull request, so check must be told which run it is.
-    let secondary = policy.secondary_pull_request.as_ref().and_then(|target| {
-        let item = items
-            .iter()
-            .find(|item| secondary_target(item, policy).is_some())?;
-        let branch = item
-            .get("branch")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if run_id.is_none() {
-            errors.push(format!(
-                "a {CREATE_PULL_REQUEST} for {} without the run's identifier to hold its \
-                 branch to (`check --run-id`)",
-                target.repo
-            ));
-        }
-        let own = request.and_then(|item| item.get("branch").and_then(Value::as_str));
-        let run_branch = branch
-            .strip_prefix(target.branch_prefix.as_str())
-            .filter(|run| {
-                is_run_branch(run)
-                    && own.is_none_or(|own| own == *run)
-                    && run_id.is_some_and(|id| run.strip_prefix(RUN_BRANCH_PREFIX) == Some(id))
-            });
-        if run_branch.is_none() {
-            errors.push(format!(
-                "a {CREATE_PULL_REQUEST} for {} on branch {branch:?}, which is not the run's \
-                 branch under {:?}",
-                target.repo, target.branch_prefix
-            ));
-        }
-        Some((target, patch_file_name_in(&target.repo, branch)))
-    });
-    // The run's own patch is any other: a second one is refused below.
-    let patch_names: Vec<&str> = patch_names
-        .into_iter()
-        .filter(|name| secondary.as_ref().is_none_or(|(_, want)| name != want))
-        .collect();
-    // Read only where it decides something: a policy without
-    // `ready_when_complete` opens every pull request as a draft anyway.
+    // The run's own checks, where the library's order puts them: before
+    // a replacement's, so that memory goes with either.
     let mut checkpoint = None;
-    if let Some(item) = request.filter(|_| policy.safe_outputs.ready_when_complete()) {
-        let output = item_type(item);
-        let key = if output == PUSH_TO_PULL_REQUEST_BRANCH {
-            "message"
-        } else {
-            "body"
-        };
-        match checkpoint::find(item.get(key).and_then(Value::as_str).unwrap_or_default()) {
-            Ok(found) => checkpoint = found,
-            Err(err) => errors.push(format!("the {output}'s {key}: {err:#}")),
-        }
-    }
-    // Before the replacement's early return: memory goes with either.
     let mut memory = None;
-    if let Some(content) = contents.get(memory::MEMORY_FILE) {
-        match &policy.memory {
-            None => errors.push(format!("{} without a [memory] bound", memory::MEMORY_FILE)),
-            Some(rules) => match memory::check(content, rules) {
-                Ok(info) => memory = Some(info),
-                Err(error) => errors.push(format!("memory: {error:#}")),
-            },
-        }
-    }
-    // The secondary pull request's patch: against its own repository and
-    // base, within its own budgets and protected files, by the author the
-    // bounds pin for every commit of the run.
-    let mut secondary_patch = None;
-    match &secondary {
-        Some((target, want)) => {
-            let base = contents
-                .get(SECONDARY_BASE_FILE)
-                .and_then(|content| serde_json::from_slice::<Base>(content).ok())
-                .filter(|base| COMMIT_RE.is_match(&base.commit))
-                .filter(|base| base.repo.eq_ignore_ascii_case(&target.repo))
-                .filter(|base| base.r#ref == target.base);
-            if base.is_none() {
-                errors.push(format!(
-                    "{SECONDARY_BASE_FILE} is not {{repo: {}, ref: {}, commit: SHA}}",
-                    target.repo, target.base
-                ));
-            }
-            match (contents.get(want), base) {
-                (Some(content), Some(base)) => {
-                    if content.len() as u64 > target.max_patch_bytes {
-                        errors.push(format!(
-                            "{want} is {} bytes, over {}",
-                            content.len(),
-                            target.max_patch_bytes
-                        ));
-                    }
-                    let rules = PatchRules {
-                        commit_author: policy.commit_author.as_deref(),
-                        ..target.rules()
-                    };
-                    let text = String::from_utf8_lossy(content);
-                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
-                    errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
-                    secondary_patch = Some(PatchInfo {
-                        file: want.clone(),
-                        bytes: content.len(),
-                        base_commit: base.commit,
-                        files,
-                        commit_files: None,
-                    });
-                }
-                (Some(_), None) => {}
-                (None, _) => errors.push(format!(
-                    "the {CREATE_PULL_REQUEST} for {} needs its patch, {want}",
-                    target.repo
-                )),
-            }
-        }
-        None if contents.contains_key(SECONDARY_BASE_FILE) => errors.push(format!(
-            "{SECONDARY_BASE_FILE} without a {CREATE_PULL_REQUEST} for the policy's secondary \
-             repository"
-        )),
-        None => {}
-    }
-    let mut patch = None;
-    if let Some(content) = contents.get(replacement::REPLACEMENT_FILE) {
-        if request.is_none() || policy.safe_outputs.push_to_pull_request_branch.is_none() {
-            errors.push("a replacement without a push request".into());
-        } else if !patch_names.is_empty()
-            || contents.contains_key(BASE_FILE)
-            || secondary_patch.is_some()
-        {
-            errors.push("a replacement alongside a patch or base.json".into());
-        } else if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
-            match replacement::check(content, push, policy.max_patch_bytes) {
-                Ok(info) => patch = Some(info),
-                Err(error) => errors.push(format!("replacement: {error}")),
-            }
-        }
-        return Ok(Verdict {
-            secondary_patch,
-            checkpoint,
-            warnings,
-            memory,
-            ..Verdict::new(errors, items, patch)
-        });
-    }
-    match (request, carrier) {
-        (Some(request), Some((output, rules))) => {
-            // The patch is read against any commit base.json names, so that
-            // a hand-back refused for its base is told what else is wrong.
-            let base = contents
-                .get(BASE_FILE)
-                .and_then(|content| serde_json::from_slice::<Base>(content).ok())
-                .filter(|base| COMMIT_RE.is_match(&base.commit));
-            let ours = |base: &Base| {
-                base.repo.eq_ignore_ascii_case(&policy.repo)
-                    && base.r#ref == policy.base
-                    && pinned.is_none_or(|head| base.commit == head)
+    let lifecycle = |request: Option<&Map<String, Value>>| {
+        let mut errors = Vec::new();
+        // Read only where it decides something: a policy without
+        // `ready_when_complete` opens every pull request as a draft anyway.
+        if let Some(item) = request.filter(|_| policy.safe_outputs.ready_when_complete()) {
+            let output = item_type(item);
+            let key = if output == PUSH_TO_PULL_REQUEST_BRANCH {
+                "message"
+            } else {
+                "body"
             };
-            if !base.as_ref().is_some_and(ours) {
-                errors.push(match pinned {
-                    // A branch that moved since the run was asked for is
-                    // another's work, which the push would be on top of
-                    // or beside: the run is asked for again instead.
-                    Some(head) => format!(
-                        "{BASE_FILE} is not {{repo: {}, ref: {}, commit: {head}}}: the pull request's head the run was asked for",
-                        policy.repo, policy.base
-                    ),
-                    None => format!(
-                        "{BASE_FILE} is not {{repo: {}, ref: {}, commit: SHA}}",
-                        policy.repo, policy.base
-                    ),
-                });
-            }
-            let branch = request
-                .get("branch")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let want = patch_file_name(branch);
-            match (patch_names.as_slice(), contents.get(&want), base) {
-                ([_], Some(content), Some(base)) => {
-                    // Read within the larger of the two patches' budgets.
-                    if content.len() as u64 > policy.max_patch_bytes {
-                        errors.push(format!(
-                            "{want} is {} bytes, over {}",
-                            content.len(),
-                            policy.max_patch_bytes
-                        ));
-                    }
-                    // What is not UTF-8 in it is in a file's content, where
-                    // the rules look only at the first byte of a line.
-                    let text = String::from_utf8_lossy(content);
-                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
-                    errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
-                    patch = Some(PatchInfo {
-                        file: want,
-                        bytes: content.len(),
-                        base_commit: base.commit,
-                        files,
-                        commit_files: None,
-                    });
-                }
-                ([_], Some(_), None) => {}
-                _ => errors.push(format!(
-                    "{output} needs exactly one patch, {want}; there is {}",
-                    if patch_names.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        patch_names.join(", ")
-                    }
-                )),
+            match checkpoint::find(item.get(key).and_then(Value::as_str).unwrap_or_default()) {
+                Ok(found) => checkpoint = found,
+                Err(err) => errors.push(format!("the {output}'s {key}: {err:#}")),
             }
         }
-        (None, carrier) if !patch_names.is_empty() => {
-            errors.push(format!(
-                "a patch without a {}",
-                carrier.map_or(CREATE_PULL_REQUEST, |(output, _)| output)
-            ));
+        if let Some(content) = contents.get(memory::MEMORY_FILE) {
+            match &policy.memory {
+                None => errors.push(format!("{} without a [memory] bound", memory::MEMORY_FILE)),
+                Some(rules) => match memory::check(content, rules) {
+                    Ok(info) => memory = Some(info),
+                    Err(error) => errors.push(format!("memory: {error:#}")),
+                },
+            }
         }
-        // Without the rules for a patch there is no request to check: the
-        // count above has refused it.
-        _ => {}
-    }
+        errors
+    };
+    let trusted = Trusted { comment, run_id };
+    let checked =
+        safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
     Ok(Verdict {
-        secondary_patch,
+        secondary_patch: checked.secondary_patch,
         checkpoint,
         warnings,
         memory,
-        ..Verdict::new(errors, items, patch)
+        ..Verdict::new(checked.errors, checked.items, checked.patch)
     })
 }
 
@@ -1429,7 +473,11 @@ pub fn run(args: &Args) -> Result<Exit> {
             .iter()
             .any(|item| item_type(item) == crate::policy::CREATE_REVIEW_COMMENT)
     {
-        match crate::apply::inline::checked_target(comment, args.review_head.as_deref(), &policy) {
+        match safe_outputs::check::inline::checked_target(
+            comment,
+            args.review_head.as_deref(),
+            &policy,
+        ) {
             Ok(target) => verdict.inline_target = Some(target),
             Err(err) => {
                 verdict.errors.push(format!("{err:#}"));
@@ -1463,8 +511,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::policy::Forge;
     use crate::policy::tests::policy;
+    use crate::policy::{
+        Forge, HIDE_COMMENT, MARK_READY, REVIEW_THREAD_OUTPUTS, Secondary, update_fields,
+    };
 
     const BASE: &str = "1111111111111111111111111111111111111111";
     const RUN_ID: &str = "7";

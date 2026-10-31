@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::policy::{EXEMPTABLE_DOT_FOLDER, PatchRules, protecting_glob};
+use crate::contract::{EXEMPTABLE_DOT_FOLDER, PatchRules, protecting_glob};
 
 /// The header `run` adds, naming the commit the patch is against (gh-aw's
 /// name for it).
@@ -709,8 +709,8 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::PullRequest;
-    use crate::policy::tests::policy;
+    use crate::check::fixtures::policy;
+    use crate::contract::PullRequest;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
 
@@ -1424,7 +1424,7 @@ mod tests {
             assert_eq!(patch_problems(&patch, &rules, BASE), want, "{patch}");
         }
         // The same for a push, whose rules carry them too.
-        let mut push = crate::policy::tests::push_policy()
+        let mut push = crate::check::fixtures::push_policy()
             .safe_outputs
             .push_to_pull_request_branch
             .unwrap();

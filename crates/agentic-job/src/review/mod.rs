@@ -50,7 +50,7 @@ static SHA: LazyLock<Regex> =
 // `merge = "agent"` or `merge = "person"`, among blank lines and comments;
 // anything else fails the run rather than guess. No file is `person`, which
 // `set` tells apart from the owner's choice. Check refuses a patch to this
-// file, as to CODEOWNERS (src/check/patch.rs), so no agent can propose its
+// file, as to CODEOWNERS (crates/safe-outputs/src/check/patch.rs), so no agent can propose its
 // own merge authority.
 const MERGE_POLICY_FILE: &str = ".github/agentic-job/merge.toml";
 const MAX_MERGE_POLICY_BYTES: u64 = 4096;

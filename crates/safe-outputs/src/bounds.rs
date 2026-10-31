@@ -1,0 +1,773 @@
+//! A caller's bounds file ([`Bounds`]), what it may say
+//! ([`Bounds::validate`]), and how two bounds files' policies of one
+//! request are made one that both admit ([`intersect`]).
+//!
+//! Reading the file, compiling a request against it and admitting the
+//! event that started the run are the caller's: agentic-job's `policy`
+//! and `event`. The `[trigger]` table is event admission's, so this
+//! carries it as the caller's type, unread.
+
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
+
+use crate::contract::{
+    DEFAULT_PROTECTED_FILES, ForgeAdmission, KB, MAX_PROTECTED_GLOBS, MAX_PULL_REQUESTS, Memory,
+    OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, UPDATE_FIELDS,
+    allows_http, check_commit_author, check_native_handlers, check_secondary, dotted, glob,
+    validate_dot_folders, validate_protected,
+};
+use crate::{CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, OUTPUT_TYPES, PUSH_TO_PULL_REQUEST_BRANCH};
+
+/// The domain no bounds file may allow plain HTTP for, nor any host under
+/// it: it serves https, so a plain-HTTP URL for it is a downgrade.
+const NEVER_PLAIN_HTTP: &str = "github.com";
+
+/// The caller's bounds file (`--allow`), in TOML. TRIGGER is the
+/// `[trigger]` table's type, which only the caller reads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bounds<Trigger = toml::Table> {
+    /// Avoid wasted agent setup from overlapping dispatches for one item and kind.
+    #[serde(default)]
+    pub dedupe: bool,
+    /// The hosts a clone URL may name, exactly (`github.com`).
+    pub hosts: Vec<String>,
+    /// Hosts of `hosts` a clone URL may name over plain `http://`, for a
+    /// self-hosted forge on a private network without TLS. Empty by
+    /// default: anyone on the path can read and alter a plain-HTTP clone,
+    /// so the agent's base, and a private repository's read token, are
+    /// only as safe as that network. Never [`NEVER_PLAIN_HTTP`], with
+    /// or without a port or user.
+    #[serde(default)]
+    pub allow_http: Vec<String>,
+    /// Globs of OWNER/NAME; see [`glob`].
+    pub repos: Vec<String>,
+    /// Globs of base branches.
+    pub bases: Vec<String>,
+    /// The most outputs a run may hand back in all.
+    pub max_outputs: u32,
+    /// The largest patch, in bytes.
+    pub max_patch_bytes: u64,
+    /// The most files a patch may touch.
+    pub max_patch_files: u32,
+    /// The output types a run may ask for, and the ceiling of each.
+    pub outputs: BTreeMap<String, OutputLimit>,
+    /// Files exempt from protection.
+    #[serde(default)]
+    pub unprotected_files: Unprotected,
+    /// Globs of paths a patch may never touch, in every repository the
+    /// bounds admit, on top of what is protected anyway: files the
+    /// repository's owner keeps as they are, such as a wiki's raw sources,
+    /// which a run asked to work from them could otherwise rewrite. They
+    /// match as `branches` do, case counting; see
+    /// [`crate::contract::protecting_glob`].
+    #[serde(default)]
+    pub protected: Vec<String>,
+    /// Which events may start a run, and who may start one
+    /// (`agentic-job event`). Absent, none may.
+    #[serde(default = "Option::default")]
+    pub trigger: Option<Trigger>,
+    /// Who the hand-back's commit is by, as `Name <address>`. Without it,
+    /// whatever `run` says, which a compromised agent machine chooses:
+    /// with it, `check` refuses a patch by anyone else, so the run's
+    /// commit cannot be passed off as a maintainer's. A replacement series
+    /// keeps its commits' own authors and is not held to it, so bounds
+    /// that allow one (`replacement_max_commits`) leave that open.
+    /// See [`check_commit_author`].
+    #[serde(default)]
+    pub commit_author: Option<String>,
+    /// The fork (OWNER/NAME) Forgejo's `apply` pushes a pull request's
+    /// branch to, never the target repository: the target's CI then runs
+    /// the agent's code as a fork's. Only the bounds name it, never a
+    /// hand-back; it also lets a private run off GitHub open a pull
+    /// request (docs/safe-outputs.md#publishing-to-forgejo).
+    #[serde(default)]
+    pub push_repo: Option<String>,
+    /// Whether a run may work on a repository that is not public. Off,
+    /// run evidence is published and only public repositories are run;
+    /// on, `policy` keeps such a run's outputs in its own repository and
+    /// `run` requires the egress allowlist and a read token
+    /// (docs/private-repositories.md).
+    #[serde(default)]
+    pub private: bool,
+    /// No longer used, and accepted so that a bounds file naming it still
+    /// reads: links to every public host are kept ([`crate::link_domains`]).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// The agent's notes across runs (#119): `run` hands back `~/memory/`
+    /// as `memory.json` and `check` holds it to these bounds. Absent, no
+    /// memory is handed back, and `check` refuses one.
+    #[serde(default)]
+    pub memory: Option<Memory>,
+    /// Where the outputs are applied; GitHub by default. Another forge
+    /// may list only [`crate::NEUTRAL_OUTPUTS`].
+    #[serde(default)]
+    pub forge: Forge,
+    /// One exact further repository a run may propose a pull request to
+    /// (#1075). Kept apart from `repos`, which admits repositories to work
+    /// on, so that admitting one is no permission to write to it. `check`
+    /// holds it to these bounds, and apply.yml's `secondary-pull-request`
+    /// opens it.
+    #[serde(default)]
+    pub secondary_pull_request: Option<SecondaryPullRequest>,
+    /// The output types apply publishes with agentic-job's own handlers
+    /// rather than gh-aw's, of [`crate::contract::NATIVE_OUTPUTS`] and on
+    /// GitHub. Empty by default: gh-aw's handlers publish every type.
+    #[serde(default)]
+    pub native_handlers: Vec<String>,
+}
+
+/// `[secondary_pull_request]`: its own repository, base, branches and
+/// patch budget, none with a default, and its own exemptions, none
+/// inherited from the primary output's: configuring it must not widen
+/// what a patch to that repository may touch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecondaryPullRequest {
+    /// One exact OWNER/NAME, no glob.
+    pub repo: String,
+    /// One exact branch the pull request targets.
+    pub base: String,
+    /// What the pull request's branch name starts with, ending in `/`.
+    pub branch_prefix: String,
+    /// [`MAX_PULL_REQUESTS`]: one pull request, from one patch.
+    pub max: u32,
+    pub max_patch_bytes: u64,
+    pub max_patch_files: u32,
+    /// Exemptions for `repo` alone; empty by default.
+    #[serde(default)]
+    pub unprotected_files: Unprotected,
+}
+
+impl SecondaryPullRequest {
+    fn validate(&self) -> Result<()> {
+        check_secondary(
+            &self.repo,
+            &self.base,
+            &self.branch_prefix,
+            self.max,
+            self.max_patch_bytes,
+            self.max_patch_files,
+        )?;
+        for repo in &self.unprotected_files.repos {
+            ensure!(
+                repo.eq_ignore_ascii_case(&self.repo),
+                "secondary_pull_request.unprotected_files.repos may name only {:?}, not {repo:?}",
+                self.repo
+            );
+        }
+        validate_dot_folders(
+            &self.unprotected_files.dot_folders,
+            "secondary_pull_request.unprotected_files.dot_folders",
+        )
+    }
+
+    /// Its policy, cloned from HOST: protected files and dot-folders from
+    /// its own exemptions alone, never the primary repository's. The
+    /// bounds' `protected` globs only take away, so they hold here too.
+    pub fn compile(&self, host: &str, protected_paths: &[String]) -> Secondary {
+        Secondary {
+            repo: self.repo.clone(),
+            clone_url: format!("https://{host}/{}", self.repo),
+            base: self.base.clone(),
+            branch_prefix: self.branch_prefix.clone(),
+            max: self.max,
+            max_patch_bytes: self.max_patch_bytes,
+            max_patch_files: self.max_patch_files,
+            protected_files: protected_files(&self.unprotected_files, &self.repo),
+            protect_top_level_dot_folders: true,
+            unprotected_dot_folders: dot_folders(&self.unprotected_files, &self.repo),
+            protected_paths: protected_paths.to_vec(),
+        }
+    }
+}
+
+/// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
+/// repositories named exactly (no globs), only the names listed. So the
+/// rest of the list and everything `check` refuses on its own stay protected.
+/// The top-level `.github` folder, and no other, can also be exempted there.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unprotected {
+    #[serde(default)]
+    pub repos: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub dot_folders: Vec<String>,
+}
+
+impl<Trigger> Bounds<Trigger> {
+    /// A bounds file that bounds nothing, or asks for what cannot be, is
+    /// the caller's mistake and not a request to refuse.
+    pub fn validate(&self) -> Result<()> {
+        for (name, list) in [
+            ("hosts", &self.hosts),
+            ("repos", &self.repos),
+            ("bases", &self.bases),
+        ] {
+            ensure!(!list.is_empty(), "`{name}` is empty, so no run is allowed");
+        }
+        for host in &self.allow_http {
+            ensure!(
+                self.hosts.iter().any(|own| own.eq_ignore_ascii_case(host)),
+                "allow_http names {host:?}, which is not in `hosts`"
+            );
+            ensure!(
+                !under(&host_name(host), NEVER_PLAIN_HTTP),
+                "allow_http may not name {host:?}: {NEVER_PLAIN_HTTP} serves https"
+            );
+        }
+        for pattern in self.repos.iter().chain(&self.bases) {
+            glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
+        }
+        ensure!(!self.outputs.is_empty(), "`outputs` lists no output type");
+        self.forge
+            .check_outputs(self.outputs.keys().map(String::as_str))?;
+        for (output, limit) in &self.outputs {
+            limit.validate(output)?;
+            ensure!(
+                OUTPUT_TYPES.contains(&output.as_str()),
+                "the output type {output:?} is not one of {}",
+                OUTPUT_TYPES.join(", ")
+            );
+            ensure!(limit.max >= 1, "`outputs.{output}.max` must be at least 1");
+            // A hand-back holds one patch, for one pull request.
+            ensure!(
+                !matches!(
+                    output.as_str(),
+                    CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH
+                ) || limit.max == MAX_PULL_REQUESTS,
+                "`outputs.{output}.max` must be {MAX_PULL_REQUESTS}: a run hands back one patch"
+            );
+        }
+        ensure!(self.max_outputs >= 1, "`max_outputs` must be at least 1");
+        if let Some(author) = &self.commit_author {
+            check_commit_author(author)?;
+        }
+        if let Some(push_repo) = &self.push_repo {
+            ensure!(
+                REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
+                "push_repo requires an exact repository name: {push_repo:?}"
+            );
+        }
+        if let Some(memory) = &self.memory {
+            memory.validate()?;
+        }
+        if let Some(secondary) = &self.secondary_pull_request {
+            secondary.validate()?;
+            // Apply off GitHub pushes to `push_repo` alone.
+            ensure!(
+                self.forge == Forge::Github,
+                "secondary_pull_request is only for GitHub"
+            );
+        }
+        check_native_handlers(&self.native_handlers, self.forge, |output| {
+            self.outputs.contains_key(output)
+        })?;
+        for repo in &self.unprotected_files.repos {
+            ensure!(
+                REPO_RE.is_match(repo) && !dotted(repo),
+                "unprotected_files.repos requires exact repository names: {repo:?}"
+            );
+        }
+        validate_dot_folders(
+            &self.unprotected_files.dot_folders,
+            "unprotected_files.dot_folders",
+        )?;
+        validate_protected(&self.protected, "protected")?;
+        ensure!(
+            self.max_patch_files >= 1,
+            "`max_patch_files` must be at least 1"
+        );
+        ensure!(
+            self.max_patch_bytes >= KB,
+            "`max_patch_bytes` must be at least {KB}"
+        );
+        Ok(())
+    }
+
+    /// Why `url` may not be cloned as `repo`, if it may not. The URL must
+    /// name that repository on a host of the bounds and nothing more, so
+    /// that the bounds on the repository are bounds on what is cloned.
+    pub fn clone_url_problem(&self, url: &str, repo: &str) -> Option<String> {
+        let (plain, rest) = match url.strip_prefix("https://") {
+            Some(rest) => (false, Some(rest)),
+            None => (true, url.strip_prefix(PLAIN_HTTP_PREFIX)),
+        };
+        let Some((host, path)) = rest.and_then(|rest| rest.split_once('/')) else {
+            return Some(format!("clone URL {url:?} is not https://HOST/OWNER/NAME"));
+        };
+        if !self
+            .hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+        {
+            return Some(format!(
+                "the host of clone URL {url:?} is not within the bounds ({})",
+                self.hosts.join(", ")
+            ));
+        }
+        if plain && !allows_http(&self.allow_http, host) {
+            return Some(format!(
+                "clone URL {url:?} is plain http://, which the bounds' allow_http does not \
+                 name its host for"
+            ));
+        }
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        (!path.eq_ignore_ascii_case(repo))
+            .then(|| format!("clone URL {url:?} does not name the repository {repo:?}"))
+    }
+}
+
+/// The host name of an HTTP authority (`user@HOST:port`, as `hosts`,
+/// `allow_http` and a clone URL spell one), in lowercase and without its
+/// root dot. The bounds match authorities exactly, port included, but
+/// who answers for `github.com` does not change with a port or a user:
+/// what refuses GitHub by name compares this, so `github.com:80` cannot be
+/// cloned over plain HTTP and `github.com:443` is not off GitHub.
+pub fn host_name(authority: &str) -> String {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    // A bracketed IPv6 literal has colons of its own; cut there, it is no
+    // name at all, which is all the comparisons below ask of it.
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Whether a lowercase host name is `domain` or a host under it.
+pub fn under(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+/// The protected file names for a patch to `repo`, under UNPROTECTED.
+pub fn protected_files(unprotected: &Unprotected, repo: &str) -> Vec<String> {
+    let exempt = unprotected
+        .repos
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(repo));
+    DEFAULT_PROTECTED_FILES
+        .iter()
+        .filter(|name| !(exempt && unprotected.files.iter().any(|file| file.as_str() == **name)))
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+/// The dot-folders UNPROTECTED exempts for a patch to `repo`.
+pub fn dot_folders(unprotected: &Unprotected, repo: &str) -> Vec<String> {
+    if unprotected
+        .repos
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(repo))
+    {
+        unprotected.dot_folders.clone()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Both files' `protected` globs: each only adds protection. Their union
+/// is held to the one file's limit, which `check` holds the policy to.
+fn union(mut own: Vec<String>, other: Vec<String>) -> Result<Vec<String>, Vec<String>> {
+    for pattern in other {
+        if !own.contains(&pattern) {
+            own.push(pattern);
+        }
+    }
+    if own.len() > MAX_PROTECTED_GLOBS {
+        return Err(vec![format!(
+            "the bounds files protect {} globs together, over {MAX_PROTECTED_GLOBS}",
+            own.len()
+        )]);
+    }
+    Ok(own)
+}
+
+/// Intersect compiled policies rather than trying to intersect glob patterns.
+/// Each file independently checks the target and any explicitly requested type.
+pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
+    policy
+        .allow_http
+        .retain(|host| allows_http(&other.allow_http, host));
+    if policy.forge != other.forge {
+        return Err(vec![format!(
+            "the bounds files name different forges: {:?} and {:?}",
+            policy.forge.name(),
+            other.forge.name()
+        )]);
+    }
+    policy.commit_author = match (policy.commit_author, other.commit_author) {
+        (Some(own), Some(other)) if own != other => {
+            return Err(vec![format!(
+                "the bounds files pin different commit authors: {own:?} and {other:?}"
+            )]);
+        }
+        (own, other) => own.or(other),
+    };
+    // A fork to push to only where both files name it: each compile has
+    // already allowed a private pull request on its own file's.
+    policy.push_repo = match (policy.push_repo, other.push_repo) {
+        (Some(own), Some(other)) if !own.eq_ignore_ascii_case(&other) => {
+            return Err(vec![format!(
+                "the bounds files name different push repositories: {own:?} and {other:?}"
+            )]);
+        }
+        (Some(own), Some(_)) => Some(own),
+        _ => None,
+    };
+    // Memory only where both files allow it, within the tighter of each.
+    policy.memory = match (policy.memory, other.memory) {
+        (Some(mut own), Some(bound)) => {
+            own.max_files = own.max_files.min(bound.max_files);
+            own.max_file_bytes = own.max_file_bytes.min(bound.max_file_bytes);
+            own.max_bytes = own.max_bytes.min(bound.max_bytes);
+            own.extensions
+                .retain(|extension| bound.extensions.contains(extension));
+            if own.extensions.is_empty() {
+                return Err(vec![
+                    "memory has no extension allowed by both bounds files".to_owned(),
+                ]);
+            }
+            Some(own)
+        }
+        _ => None,
+    };
+    policy.max_outputs = policy.max_outputs.min(other.max_outputs);
+    policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
+    policy.safe_outputs.others.retain(|name, limit| {
+        if let Some(bound) = other.safe_outputs.others.get(name) {
+            limit.max = limit.max.min(bound.max);
+            limit.allowed = match (&limit.allowed, &bound.allowed) {
+                (Some(own), Some(other)) => Some(
+                    own.iter()
+                        .filter(|label| other.iter().any(|other| other.eq_ignore_ascii_case(label)))
+                        .cloned()
+                        .collect(),
+                ),
+                (None, Some(other)) => Some(other.clone()),
+                (own, None) => own.clone(),
+            };
+            limit.blocked.extend(bound.blocked.iter().cloned());
+            limit
+                .projects
+                .retain(|project| bound.projects.contains(project));
+            limit.fields.retain(|field| bound.fields.contains(field));
+            if limit.name != bound.name {
+                limit.name = None;
+            }
+            if limit.category != bound.category {
+                limit.category = None;
+            }
+            limit
+                .allowed_reasons
+                .retain(|reason| bound.allowed_reasons.contains(reason));
+            true
+        } else {
+            false
+        }
+    });
+    if let Some(output) = PERSON_OUTPUTS.iter().find(|output| {
+        policy
+            .safe_outputs
+            .others
+            .get(**output)
+            .is_some_and(|limit| limit.allowed.as_ref().is_none_or(Vec::is_empty))
+    }) {
+        return Err(vec![format!(
+            "{output} has no login allowed by both bounds files"
+        )]);
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get("update_project")
+        .is_some_and(|limit| limit.projects.is_empty() || limit.fields.is_empty())
+    {
+        return Err(vec![
+            "update_project has no common named projects or fields in both bounds files".to_owned(),
+        ]);
+    }
+    for (output, _) in UPDATE_FIELDS {
+        if policy
+            .safe_outputs
+            .others
+            .get(*output)
+            .is_some_and(|limit| limit.fields.is_empty())
+        {
+            return Err(vec![format!(
+                "{output} has no common fields in both bounds files"
+            )]);
+        }
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get("create_check_run")
+        .is_some_and(|limit| limit.name.is_none())
+    {
+        return Err(vec![
+            "create_check_run has different check run names in the two bounds files".to_owned(),
+        ]);
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get("create_discussion")
+        .is_some_and(|limit| limit.category.is_none())
+    {
+        return Err(vec![
+            "create_discussion has different categories in the two bounds files".to_owned(),
+        ]);
+    }
+    if policy
+        .safe_outputs
+        .others
+        .get(HIDE_COMMENT)
+        .is_some_and(|limit| limit.allowed_reasons.is_empty())
+    {
+        return Err(vec![format!(
+            "{HIDE_COMMENT} has no reason allowed by both bounds files"
+        )]);
+    }
+    policy.safe_outputs.create_pull_request = match (
+        policy.safe_outputs.create_pull_request,
+        other.safe_outputs.create_pull_request,
+    ) {
+        (Some(mut pr), Some(bound)) => {
+            pr.unprotected_dot_folders
+                .retain(|name| bound.unprotected_dot_folders.contains(name));
+            pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
+            pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
+            pr.ready_when_complete &= bound.ready_when_complete;
+            for name in bound.protected_files {
+                if !pr.protected_files.contains(&name) {
+                    pr.protected_files.push(name);
+                }
+            }
+            pr.protected_paths = union(pr.protected_paths, bound.protected_paths)?;
+            Some(pr)
+        }
+        _ => None,
+    };
+    // Both compiled the one request, so the pull request and head are to
+    // agree; a pair that does not pins no single push.
+    policy.safe_outputs.push_to_pull_request_branch = match (
+        policy.safe_outputs.push_to_pull_request_branch,
+        other.safe_outputs.push_to_pull_request_branch,
+    ) {
+        (Some(push), Some(bound)) if (&push.target, &push.head) != (&bound.target, &bound.head) => {
+            return Err(vec![format!(
+                "the bounds files pin different pushes: pull request {} at {}, and {} at {}",
+                push.target, push.head, bound.target, bound.head
+            )]);
+        }
+        (Some(mut push), Some(bound)) => {
+            push.unprotected_dot_folders
+                .retain(|name| bound.unprotected_dot_folders.contains(name));
+            push.replacement_max_commits = push
+                .replacement_max_commits
+                .min(bound.replacement_max_commits);
+            push.ready_when_complete &= bound.ready_when_complete;
+            push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
+            push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
+            for name in bound.protected_files {
+                if !push.protected_files.contains(&name) {
+                    push.protected_files.push(name);
+                }
+            }
+            push.protected_paths = union(push.protected_paths, bound.protected_paths)?;
+            Some(push)
+        }
+        _ => None,
+    };
+    // Only where both files name the one destination alike, within the
+    // tighter of each budget and the exemptions both make.
+    policy.secondary_pull_request =
+        match (policy.secondary_pull_request, other.secondary_pull_request) {
+            (Some(mut own), Some(bound))
+                if (&own.repo, &own.clone_url, &own.base, &own.branch_prefix)
+                    == (
+                        &bound.repo,
+                        &bound.clone_url,
+                        &bound.base,
+                        &bound.branch_prefix,
+                    ) =>
+            {
+                own.max = own.max.min(bound.max);
+                own.max_patch_bytes = own.max_patch_bytes.min(bound.max_patch_bytes);
+                own.max_patch_files = own.max_patch_files.min(bound.max_patch_files);
+                own.unprotected_dot_folders
+                    .retain(|name| bound.unprotected_dot_folders.contains(name));
+                for name in bound.protected_files {
+                    if !own.protected_files.contains(&name) {
+                        own.protected_files.push(name);
+                    }
+                }
+                own.protected_paths = union(own.protected_paths, bound.protected_paths)?;
+                Some(own)
+            }
+            _ => None,
+        }
+        .filter(|_| policy.safe_outputs.create_pull_request.is_some());
+    // gh-aw's handlers unless both files route a type, and the type is
+    // still allowed.
+    policy.native_handlers.retain(|output| {
+        other.native_handlers.contains(output) && policy.safe_outputs.max_of(output).is_some()
+    });
+    if policy.safe_outputs.types().next().is_none() {
+        return Err(vec!["the bounds files allow no common output type".into()]);
+    }
+    Ok(policy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::fixtures::{policy, push_policy};
+
+    const BOUNDS: &str = r#"
+hosts = ["github.com"]
+repos = ["bootc-dev/*"]
+bases = ["main"]
+max_outputs = 5
+max_patch_bytes = 8388608
+max_patch_files = 100
+
+[outputs]
+create_pull_request = { max = 1 }
+noop = { max = 1 }
+
+[trigger]
+events = ["issues"]
+"#;
+
+    #[test]
+    fn bounds_parse_and_carry_the_callers_trigger_unread() {
+        let bounds: Bounds = toml::from_str(BOUNDS).unwrap();
+        bounds.validate().unwrap();
+        let trigger = bounds.trigger.as_ref().unwrap();
+        assert_eq!(trigger["events"][0].as_str(), Some("issues"));
+        assert_eq!(
+            bounds.clone_url_problem("https://github.com/bootc-dev/bootc.git", "bootc-dev/bootc"),
+            None
+        );
+        assert!(
+            bounds
+                .clone_url_problem("http://github.com/bootc-dev/bootc", "bootc-dev/bootc")
+                .is_some()
+        );
+        // A refusal for each: what bounds nothing or cannot be.
+        for (change, want) in [
+            ("hosts = []", "`hosts` is empty"),
+            (
+                "allow_http = [\"github.com\"]",
+                "allow_http may not name \"github.com\"",
+            ),
+            ("max_patch_bytes = 10", "`max_patch_bytes` must be at least"),
+        ] {
+            let key = change.split(' ').next().unwrap();
+            let text: String = BOUNDS
+                .lines()
+                .filter(|line| !line.starts_with(&format!("{key} ")))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>()
+                .replacen('\n', &format!("\n{change}\n"), 1);
+            let bounds: Bounds = toml::from_str(&text).unwrap();
+            let error = format!("{:#}", bounds.validate().unwrap_err());
+            assert!(error.contains(want), "{change}: {error}");
+        }
+        assert!(toml::from_str::<Bounds>(&format!("unknown = 1\n{BOUNDS}")).is_err());
+    }
+
+    /// Two files' `protected` globs together are held to one file's limit.
+    #[test]
+    fn protected_globs_union_within_one_files_limit() {
+        let half: Vec<String> = (0..MAX_PROTECTED_GLOBS)
+            .map(|i| format!("a{i}/**"))
+            .collect();
+        let other: Vec<String> = (0..MAX_PROTECTED_GLOBS)
+            .map(|i| format!("b{i}/**"))
+            .collect();
+        assert!(union(half.clone(), half.clone()).is_ok());
+        assert!(union(half, other).unwrap_err()[0].contains("over 64"));
+    }
+
+    /// What an organization's bounds refuse rather than intersect, and
+    /// what they tighten.
+    #[test]
+    fn organization_bounds_intersect_or_refuse() {
+        let own = policy();
+        let mut tighter = policy();
+        tighter.max_outputs = 1;
+        tighter
+            .safe_outputs
+            .create_pull_request
+            .as_mut()
+            .unwrap()
+            .protected_paths = vec!["raw/**".into()];
+        let both = intersect(own.clone(), tighter).unwrap();
+        assert_eq!(both.max_outputs, 1);
+        assert_eq!(
+            both.safe_outputs
+                .create_pull_request
+                .unwrap()
+                .protected_paths,
+            ["raw/**"]
+        );
+
+        let with = |base: Policy, change: &dyn Fn(&mut Policy)| {
+            let mut changed = base;
+            change(&mut changed);
+            changed
+        };
+        let authored = |author: &str| {
+            with(policy(), &|policy| {
+                policy.commit_author = Some(author.into())
+            })
+        };
+        let moved = with(push_policy(), &|policy| {
+            policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .head = "3333333333333333333333333333333333333333".into();
+        });
+        // The name, the two policies, and the refusal.
+        for (name, own, other, want) in [
+            (
+                "another forge",
+                policy(),
+                with(policy(), &|other| other.forge = Forge::Forgejo),
+                "the bounds files name different forges",
+            ),
+            (
+                "another commit author",
+                authored("Agent <a@example.com>"),
+                authored("Other <o@example.com>"),
+                "the bounds files pin different commit authors",
+            ),
+            (
+                "another push",
+                push_policy(),
+                moved,
+                "the bounds files pin different pushes",
+            ),
+            (
+                "no common output type",
+                policy(),
+                with(policy(), &|other| {
+                    other.safe_outputs.create_pull_request = None;
+                    other.safe_outputs.others.clear();
+                }),
+                "the bounds files allow no common output type",
+            ),
+        ] {
+            let errors = intersect(own, other).unwrap_err();
+            assert!(errors[0].contains(want), "{name}: {errors:?}");
+        }
+    }
+}

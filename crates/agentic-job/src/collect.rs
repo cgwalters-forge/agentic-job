@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use crate::check::{MAX_OUTPUTS_BYTES, OUTPUTS_FILE};
 use crate::exit::Exit;
 use crate::files::{self, ReadError};
-use crate::policy::Policy;
+use crate::policy::{Load, Policy};
 pub use safe_outputs::collect::{Collected, collect, field_guide, markdown, sanitize};
 
 #[derive(Debug, clap::Args)]

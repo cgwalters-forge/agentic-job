@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::exit::Exit;
 use crate::files;
-use crate::policy;
+use crate::policy::{self, Load};
 
 pub use context::write_task;
 
