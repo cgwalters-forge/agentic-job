@@ -111,7 +111,9 @@ jobs:
 ```
 
 `.github/agentic-job/allow.toml`, with your repository in `repos` and
-your default branch in `bases`:
+your default branch in `bases`. If that branch is not `main`, also set
+`base: YOUR_DEFAULT_BRANCH` in the caller's `with:` block: the workflow
+defaults to `main`, not the repository's default branch.
 
 ```toml
 hosts = ["github.com"]

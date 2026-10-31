@@ -97,7 +97,7 @@ jobs:
       agent: fake
       fake-profile: comment
       # Nothing counts model requests without an inference proxy, and a
-      # cap that nothing counts is refused. For claude or opencode, the
+      # cap that nothing counts is refused. For claude, opencode or vibe, the
       # proxy and how the run proves itself, without fake-profile:
       #   agent: claude
       #   inference-url: ${{ vars.INFERENCE_URL }}

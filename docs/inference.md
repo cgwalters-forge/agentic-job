@@ -145,7 +145,9 @@ tailnet name that the proxy would have to reach therefore gets a 502,
 though root on the host reaches it
 ([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810)).
 Give the broker by its tailnet IPv4 address, so that `egress.direct`
-opens it, or pass that address as `inference-address`
+opens it. In a composed caller, a trusted network step can instead resolve
+the name and pass the address to the `prepare` action as `inference-address`;
+this is not an input of `agentic-job.yml`
 ([workflow.md](workflow.md#what-a-caller-provides)).
 
 The host and port of `url`, `anthropic-url` and `openai-url`
