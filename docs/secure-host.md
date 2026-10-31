@@ -48,9 +48,11 @@ forward keeps the old action. At `@main` or a later commit:
   multi-line string, either of which could ask for it in a way the
   forwarder does not read.
 - The forwarder and `site.yml` pin the same commit of the new action;
-  its comment names the image tag that commit runs, and CI's
-  `ci.test.cjs` refuses a pin whose two copies differ or whose tag is
-  newer than the workspace's version.
+  its comment names the image tag that commit runs, and
+  [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)'
+  `the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs`
+  refuses a pin whose two copies differ or whose tag is newer than the
+  workspace's version.
 - The floor is ubuntu-26.04, the runner the new action is written for;
   the pinned image admits exactly Ubuntu 26.04 and RHEL 10
   ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).

@@ -88,10 +88,11 @@ fn steps(doc: &yaml_rust2::Yaml) -> Vec<&yaml_rust2::Yaml> {
     }
 }
 
+/// The one step of `doc` whose name, or else id, is `name`.
 fn named_step<'a>(doc: &'a yaml_rust2::Yaml, name: &str) -> &'a yaml_rust2::Yaml {
     let mut found = steps(doc)
         .into_iter()
-        .filter(|step| step["name"].as_str() == Some(name));
+        .filter(|step| step["name"].as_str().or(step["id"].as_str()) == Some(name));
     let step = found.next().unwrap_or_else(|| panic!("no step {name:?}"));
     assert!(found.next().is_none(), "two steps {name:?}");
     step
@@ -3111,7 +3112,11 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
     (
         "prepare/action.yml",
         "",
-        &[r#"sudo install -m 0755 "\$JOB_DIR/agentic-job" /usr/local/bin/agentic-job"#],
+        &[
+            r#"sudo install -m 0755 "\$JOB_DIR/agentic-job" /usr/local/bin/agentic-job"#,
+            // Beside the binary secure-host is given, which loads it.
+            r#"sudo install -m 0644 "\$JOB_DIR/world_write\.bpf\.o" /usr/local/bin/world_write\.bpf\.o"#,
+        ],
         &[r"secrets\.|SAFE_OUTPUTS_PAT"],
     ),
     (
@@ -3444,6 +3449,309 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         &[r"\n    if: .*inputs.proposals-artifact == ''"],
         &[],
     ),
+    // CI runs the proposed workflow on pull requests and merge groups,
+    // never with a fork's code and the base's secrets; a fork's pull
+    // request without a queue fails the one required check.
+    (
+        "ci.yml",
+        "",
+        &[
+            r"\non:\n  pull_request:\n  merge_group:\n  push:\n    branches: \[main\]\n\n",
+            r"(?m)^      e2e:.*steps\.queue\.outputs\.enabled == 'true' \|\| github\.event\.pull_request\.head\.repo\.full_name != github\.repository.*$",
+            r"(?m)^      fork-e2e:.*steps\.queue\.outputs\.enabled != 'true'.*steps\.paths\.outputs\.e2e != 'false'.*$",
+            r"\n          BRANCH: \$\{\{ github\.event\.pull_request\.base\.ref \}\}\n",
+            r"\n  ci:\n    if: \$\{\{ always\(\) \}\}\n    needs: required-checks\n",
+            r"cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}",
+            "pull_request and merge_group both run the proposed workflow",
+            r"- id: queued\n        if: \$\{\{ github\.event_name == 'push' \}\}\n",
+            r"- id: review\n        if: \$\{\{ github\.event_name == 'pull_request' \}\}\n        env:\n          BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}\n",
+            r"python3 -m unittest discover -s workflow -p 'test_\*\.py' -v\n {8}env:\n {10}ZIZMOR: ",
+        ],
+        &[
+            r"pull_request_target|\bworkflow_run\b|secrets\.",
+            "paths-ignore:|paths:",
+            "run: node workflow/ci-paths",
+        ],
+    ),
+    // Queue detection and the queued-push lookup read with a read-only token.
+    (
+        "ci.yml",
+        "changes",
+        &[r"\n    permissions:\n      contents: read\n      actions: read #[^\n]*\n"],
+        &[r"\n    if:"],
+    ),
+    // A fork's pull request is no reason to pass a skipped job.
+    (
+        "ci.yml",
+        "required-checks",
+        &[r"FILTER: >-\n +\$fork_e2e == .false. and all\("],
+        &[r"\$fork\b"],
+    ),
+    (
+        "ci.yml",
+        "e2e-dispatch",
+        &[
+            r#"profile: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '\["research","review"\]' \|\| '\["research"\]'\) \}\}"#,
+        ],
+        &[],
+    ),
+    // The shared workflow check is off unless a repository variable names
+    // its commit, runs before gh-aw's workflows are in the workspace, and
+    // has no write token or secret.
+    (
+        "ci.yml",
+        "lint",
+        &[
+            r#"- name: Shared workflow check\n {8}if: \$\{\{ vars\.WORKFLOW_LINT != '' \}\}\n {8}env:\n {10}WORKFLOW_LINT: \$\{\{ vars\.WORKFLOW_LINT \}\}\n {8}run: just workflow-lint "\$WORKFLOW_LINT"\n"#,
+        ],
+        &[r": write|secrets\."],
+    ),
+    // The dispatch verifier runs this revision's code with read access
+    // only; the cleanup, which can write, runs none of it.
+    (
+        "ci.yml",
+        "e2e-dispatch-verify",
+        &[
+            "\n    permissions:\n      contents: read\n      issues: read\n      pull-requests: read\n      actions: read # read hosted job durations; no write or cleanup authority\n    [a-z]",
+            r"ref: \$\{\{ github.sha \}\}",
+            "persist-credentials: false",
+            r"\n {8}with:\n {10}name: agentic-job\n",
+            r#""\$RUNNER_TEMP/agentic-job" config --host --from "\$CONFIG" --repo "\$GH_REPO"\)"#,
+            r"\n {10}CONFIG: \.github/agentic-job/hosted\.toml\n",
+            r"GH_TOKEN: \$\{\{ github.token \}\}",
+            r"needs: \[changes, static, e2e-dispatch, e2e-compose, e2e-full\]",
+            r"if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}",
+        ],
+        &[],
+    ),
+    (
+        "ci.yml",
+        "e2e-verify",
+        &[
+            r"needs: \[.*e2e-dispatch-verify\]",
+            r"if: \$\{\{ always\(\) && needs.changes.outputs.e2e == 'true' \}\}",
+            r"- name: Delete the comments\n        if: \$\{\{ always\(\) ",
+            r"- name: Close only the scratch pull request of this run and delete its branch\n        if: \$\{\{ always\(\) ",
+        ],
+        &[r"uses: actions/checkout@|agentic-job config|github.sha|\.dispatch-verifier"],
+    ),
+    // The probe jobs secure their host with this revision's image through
+    // the forwarder, with no passing fallback.
+    (
+        "ci.yml",
+        "confined",
+        &[
+            r"\n    needs: \[changes, static\]\n",
+            r"name: secure-host-image\n",
+            r"uses: \./secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n      - ",
+            r"- name: The JavaScript action main and post steps are confined\n        uses: \./\.github/actions/confine-probe # zizmor: ignore\[self-repository\] ",
+            r"\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n",
+            r#"echo "\$!" > "\$RUNNER_TEMP/confine-orphan\.pid""#,
+            "agentic-job sandbox check --record",
+            r"\n        run: agentic-job sandbox probe confined run-step\n",
+            r"- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions/upload-artifact@",
+        ],
+        &[
+            "uses: cgwalters-forge/agentic-job",
+            "config:|--boolean|deny-runner|unlink-worker|lock-runner",
+            r"binary\.sh|secure-host world-write|sandbox setup|podman run|continue-on-error|\|\| true",
+            "actions/github-script@",
+        ],
+    ),
+    // Confined's orphan was ended by the runner, read as data from its log.
+    (
+        "ci.yml",
+        "confined-cleanup",
+        &[
+            r"\n    needs: \[changes, confined\]\n",
+            r"\n    permissions:\n      actions: read\n    steps:\n",
+            r"PID: \$\{\{ needs\.confined\.outputs\.orphan \}\}\n",
+            r#"\[\[ "\$PID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]"#,
+            r#"grep -qF "Terminate orphan process: pid \(\$PID\) \(sleep\)""#,
+            r#"gh api --allow-escape-sequences "repos/\$REPO/actions/jobs/\$job/logs" > "\$RUNNER_TEMP/confined.log""#,
+        ],
+        &[
+            r"uses:|secrets\.|contents: write",
+            "config:|--boolean|deny-runner|unlink-worker|lock-runner",
+            r"binary\.sh|secure-host world-write|sandbox setup|podman run|continue-on-error|\|\| true",
+        ],
+    ),
+    (
+        "ci.yml",
+        "world-write-runtime",
+        &[
+            r"\n    needs: \[changes, static\]\n",
+            r"\n    runs-on: ubuntu-26\.04\n",
+            r"\n    permissions:\n      contents: read\n    steps:\n",
+            r"name: secure-host-image\n",
+            r"uses: \./secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+            r#""0 666 \$\(stat -c %d /\)""#,
+            r#"grep -qF "cannot create \$probe: Permission denied" "\$RUNNER_TEMP/refused\.txt""#,
+            r#""666 \$\(stat -c %d /\)""#,
+        ],
+        &[r"continue-on-error|\|\| true|lock-runner|filesystem-view|shell:|config:"],
+    ),
+    // The build's archive, never a registry's image, and probes after the
+    // container has exited.
+    (
+        "ci.yml",
+        "secure-host-image",
+        &[
+            r"\n    needs: \[changes, static\]\n",
+            r"\n    runs-on: ubuntu-26\.04\n",
+            r"\n    permissions:\n      contents: read\n    steps:\n",
+            r"name: secure-host-image\n",
+            r"uses: \./secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+        ],
+        &[r"--pull|ghcr\.io|continue-on-error|\|\| true|podman run"],
+    ),
+    (
+        "ci.yml",
+        "secure-host-write-policy",
+        &[
+            r"\n    needs: \[changes, static\]\n",
+            r"\n    runs-on: ubuntu-26\.04\n",
+            r"\n    permissions:\n      contents: read\n    steps:\n",
+            r"printf '\\n\[egress\]\\nwrite-policy = true\\n'",
+            r"uses: \./secure-host # zizmor: ignore\[self-repository\] .*\n        with:\n          config: \$\{\{ runner\.temp \}\}/write-policy\.toml\n          image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+        ],
+        &[r"continue-on-error|\|\| true|\n {6,8}(?:- )?if: |--proxy|-x |_PROXY: "],
+    ),
+    (
+        "secure-host/hosted.toml",
+        "",
+        &[r"(?m)^# The egress proxy and the network rules are on by default: no \[egress\]\.$"],
+        &[r"(?m)^\s*proxy\s*=\s*false"],
+    ),
+    (
+        ".github/actions/egress-probe/action.yml",
+        "",
+        &[r"\n  using: node24\n  main: main\.mjs\n$"],
+        &[],
+    ),
+    // This repository's jobs that secure a host take the forwarder with
+    // this revision's image, and none takes a shell other than the runner's.
+    (
+        "ci.yml",
+        "secure-host-options",
+        &[
+            r"uses: \./secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+        ],
+        &["shell:"],
+    ),
+    (
+        "ci.yml",
+        "secure-host-no-user",
+        &[
+            r"uses: \./secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+        ],
+        &["shell:"],
+    ),
+    (
+        "ci.yml",
+        "world-write-runtime",
+        &[
+            r"uses: \./secure-host # [^\n]*\n {8}with:\n(?: {10}config: [^\n]*\n)? {10}image-archive: \$\{\{ runner\.temp \}\}/image/secure-host\.tar\n",
+        ],
+        &["shell:"],
+    ),
+    (
+        "example-secure-host.yml",
+        "",
+        &[r"uses: \./secure-host # [^\n]*\n {8}with:\n {10}image-archive: "],
+        &[r"shell:|steps\.host\.outputs"],
+    ),
+    (
+        "ci.yml",
+        "secure-host",
+        &[r"\n    needs: \[changes, static\]\n(?s:.)*\n      image-artifact: secure-host-image\n"],
+        &[],
+    ),
+    // main's published action is the forwarder: none of the old outputs.
+    (
+        "ci.yml",
+        "secure-host-published",
+        &["uses: cgwalters-forge/agentic-job/secure-host@main "],
+        &[r"\n {8}with:|steps\.host\.outputs"],
+    ),
+    // The required ingress check reports on every pull request (a paths
+    // filter would leave it pending on others) and vets a merge group with
+    // its base's code, never the queued commit's.
+    (
+        "workflow-ingress.yml",
+        "",
+        &[
+            r"\n  merge_group:\n    types: \[checks_requested\]\n",
+            r"\npermissions:\n  contents: read\n\njobs:\n  vet:\n",
+            r"\n {10}ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.sha \}\}\n",
+            r"BASE: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.event\.merge_group\.base_sha \}\}",
+            r"HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.event\.merge_group\.head_sha \}\}",
+            r"cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}",
+            r"run: cargo build --locked --release -p agentic-job\n",
+            r"timeout-minutes: 30\n",
+            r#"python3 workflow/ingress\.py \. "\$BASE" "\$HEAD" --workflows-binary target/release/agentic-job --exemptions \.github/agentic-job/workflows\.toml\n"#,
+        ],
+        &[r": write|secrets\.|id-token"],
+    ),
+    (
+        "review.yml",
+        "",
+        &[
+            r"cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}",
+            r"group: review-pull-\$\{\{ github\.event\.pull_request\.number \|\| github\.event\.issue\.number \}\}",
+        ],
+        &[],
+    ),
+    (
+        "secure-host/binary.sh",
+        "",
+        &[
+            r"sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 \\\n\s+install ",
+        ],
+        &[],
+    ),
+    // dispatch.yml's caller holds the run to its bounds file, its item and
+    // its target; real dispatches keep one concurrency group per item, and
+    // CI's scripted ones one per run, so that one queue entry's pending
+    // call does not cancel another's (#544).
+    (
+        "dispatch.yml",
+        "",
+        &[
+            r"uses: \./\.github/workflows/agentic-job.yml",
+            "needs: target",
+            r"(?m)^  group: dispatch-\$\{\{ inputs\.kind \}\}-\$\{\{ inputs\.repo \}\}-\$\{\{ inputs\.item-repo \}\}-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$",
+        ],
+        &[
+            r"(?m)^\s+runner:",
+            "secrets: inherit",
+            r"secrets\.INFERENCE_API_KEY",
+        ],
+    ),
+    ("dispatch.yml", "target", &[], &[r"secrets(?:[.:]|\[)"]),
+    (
+        "example-compose.yml",
+        "",
+        &[
+            r"(?m)^  group: compose-\$\{\{ inputs\.item \}\}\$\{\{ inputs\.scripted && format\('-\{0\}', github\.run_id\) \|\| '' \}\}\n  cancel-in-progress: false$",
+        ],
+        &[],
+    ),
+    (
+        ".github/agentic-job/dispatch.toml",
+        "",
+        &[
+            r#"(?m)^repos = \["cgwalters-forge/agentic-job"\]$"#,
+            r"(?m)^max_outputs = 32$",
+            r"(?m)^create_pull_request = \{ max = 1 \}$",
+            r"(?m)^add_comment = \{ max = 1 \}$",
+            r"(?m)^noop = \{ max = 1 \}$",
+            r"(?m)^missing_tool = \{ max = 1 \}$",
+            r"(?m)^missing_data = \{ max = 1 \}$",
+            r"(?m)^close_issue = \{ max = 30 \}$",
+        ],
+        &["create_issue"],
+    ),
 ];
 
 /// Text each file or job holds, in this order, as (file, job or "", texts).
@@ -3558,6 +3866,63 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
         "policy.yml",
         "",
         &["\n      issue: ${{ steps.request.outputs.issue }}\n"],
+    ),
+    // zizmor scans the workspace: gh-aw's workflows are not there yet.
+    (
+        "ci.yml",
+        "lint",
+        &["Shared workflow check", "repository: github/gh-aw"],
+    ),
+    // Confined's orphan is left before every probe, the control included;
+    // the run step and the action's main and post steps run under the lock.
+    (
+        "ci.yml",
+        "confined",
+        &[
+            "      - name: Leave a process running\n        id: orphan\n",
+            "\"$RUNNER_TEMP/agentic-job\" sandbox probe control before",
+            "        uses: ./secure-host # zizmor: ignore[self-repository] ",
+            "sandbox probe confined run-step",
+            "        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] ",
+            "uses: actions/upload-artifact@",
+        ],
+    ),
+    (
+        "ci.yml",
+        "world-write-runtime",
+        &[
+            "        uses: ./secure-host # zizmor: ignore[self-repository] ",
+            "      - name: The runner's user is refused a write to a world-writable file of root\n",
+            "      - name: The runner's user writes its own world-writable file (control)\n",
+        ],
+    ),
+    (
+        "ci.yml",
+        "secure-host-image",
+        &["        uses: ./secure-host # zizmor: ignore[self-repository] ", "if sudo -n true; then"],
+    ),
+    (
+        "ci.yml",
+        "secure-host-image",
+        &["        uses: ./secure-host # zizmor: ignore[self-repository] ", "systemctl is-active --quiet docker.service"],
+    ),
+    (
+        "ci.yml",
+        "secure-host-image",
+        &["        uses: ./secure-host # zizmor: ignore[self-repository] ", "egress-proxy.service"],
+    ),
+    // After the lock, in this order: the run step, the JavaScript action,
+    // the upload.
+    (
+        "ci.yml",
+        "secure-host-write-policy",
+        &[
+            "        uses: ./secure-host # zizmor: ignore[self-repository] ",
+            "curl -fsS -o /dev/null https://example.com/",
+            "grep -qi '^x-egress-denied:'",
+            "uses: ./.github/actions/egress-probe ",
+            "uses: actions/upload-artifact@",
+        ],
     ),
 ];
 
@@ -4126,6 +4491,1893 @@ fn review_thread_types_are_refused_for_an_events_item_elsewhere() {
                     "{kind} {extra:?}: {output:?}"
                 );
             }
+        }
+    }
+}
+
+/// A value of a GitHub Actions expression.
+#[derive(Clone, Debug, PartialEq)]
+enum Expr {
+    Null,
+    Bool(bool),
+    Text(String),
+}
+
+impl Expr {
+    fn text(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+
+    fn truthy(&self) -> bool {
+        match self {
+            Self::Null => false,
+            Self::Bool(value) => *value,
+            Self::Text(text) => !text.is_empty(),
+        }
+    }
+
+    /// The string GitHub makes of it for an output or an input.
+    fn render(&self) -> String {
+        match self {
+            Self::Null => String::new(),
+            Self::Bool(value) => value.to_string(),
+            Self::Text(text) => text.clone(),
+        }
+    }
+}
+
+/// Evaluates `expression`, of literals, context paths, `!`, `==`, `!=`,
+/// `&&`, `||` and parentheses, with each path's value from `context`
+/// (null if it is not there). As GitHub's do, strings compare without
+/// regard to case, and `&&` and `||` yield an operand. Null equals only
+/// null and the empty string, and other values of different types are
+/// unequal: GitHub compares those as numbers, which comes to the same for
+/// the booleans and non-numeric strings compared here.
+fn evaluate(expression: &str, context: &[(&str, Expr)]) -> Expr {
+    let token = Regex::new(r"^\s*('[^']*'|[!=]=|&&|\|\||[!()]|[A-Za-z_][\w.-]*)").unwrap();
+    let mut tokens = Vec::new();
+    let mut rest = expression;
+    while !rest.trim().is_empty() {
+        let found = token
+            .captures(rest)
+            .unwrap_or_else(|| panic!("cannot read {rest:?} of {expression:?}"));
+        tokens.push(found.get(1).unwrap().as_str());
+        rest = &rest[found.get(0).unwrap().end()..];
+    }
+    let mut parser = Parser {
+        tokens,
+        at: 0,
+        context,
+    };
+    let value = parser.or();
+    assert_eq!(parser.at, parser.tokens.len(), "{expression:?}");
+    value
+}
+
+struct Parser<'a> {
+    tokens: Vec<&'a str>,
+    at: usize,
+    context: &'a [(&'a str, Expr)],
+}
+
+impl Parser<'_> {
+    fn eat(&mut self, token: &str) -> bool {
+        let found = self.tokens.get(self.at) == Some(&token);
+        self.at += usize::from(found);
+        found
+    }
+
+    fn or(&mut self) -> Expr {
+        let mut left = self.and();
+        while self.eat("||") {
+            let right = self.and();
+            if !left.truthy() {
+                left = right;
+            }
+        }
+        left
+    }
+
+    fn and(&mut self) -> Expr {
+        let mut left = self.equality();
+        while self.eat("&&") {
+            let right = self.equality();
+            if left.truthy() {
+                left = right;
+            }
+        }
+        left
+    }
+
+    fn equality(&mut self) -> Expr {
+        let mut left = self.not();
+        loop {
+            let equal = if self.eat("==") {
+                true
+            } else if self.eat("!=") {
+                false
+            } else {
+                return left;
+            };
+            let right = self.not();
+            let same = match (&left, &right) {
+                (Expr::Text(a), Expr::Text(b)) => a.eq_ignore_ascii_case(b),
+                (Expr::Null, Expr::Text(text)) | (Expr::Text(text), Expr::Null) => text.is_empty(),
+                (a, b) => a == b,
+            };
+            left = Expr::Bool(same == equal);
+        }
+    }
+
+    fn not(&mut self) -> Expr {
+        if self.eat("!") {
+            Expr::Bool(!self.not().truthy())
+        } else {
+            self.primary()
+        }
+    }
+
+    fn primary(&mut self) -> Expr {
+        let token = *self
+            .tokens
+            .get(self.at)
+            .unwrap_or_else(|| panic!("{:?} ends early", self.tokens));
+        self.at += 1;
+        match token {
+            "(" => {
+                let value = self.or();
+                assert!(self.eat(")"), "unclosed ( in {:?}", self.tokens);
+                value
+            }
+            "true" => Expr::Bool(true),
+            "false" => Expr::Bool(false),
+            "null" => Expr::Null,
+            _ if token.starts_with('\'') => Expr::text(&token[1..token.len() - 1]),
+            _ => {
+                assert!(
+                    token.starts_with(|c: char| c.is_ascii_alphabetic()),
+                    "{token:?} in {:?}",
+                    self.tokens
+                );
+                self.context
+                    .iter()
+                    .find(|(path, _)| *path == token)
+                    .map_or(Expr::Null, |(_, value)| value.clone())
+            }
+        }
+    }
+}
+
+/// The expression of a value that is one `${{ ... }}`.
+fn expression(value: &yaml_rust2::Yaml) -> &str {
+    let text = value.as_str().unwrap();
+    text.strip_prefix("${{ ")
+        .and_then(|text| text.strip_suffix(" }}"))
+        .unwrap_or_else(|| panic!("not one expression: {text:?}"))
+}
+
+/// Runs git in `dir`, without the user's or the system's configuration.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// ci.yml's jobs under each gate of its changes job: `full` is false only
+/// on a push of a commit a merge group passed; `host` and `e2e` also
+/// defer their jobs from a pull request to the queue.
+const GATES: &[(&str, &[&str])] = &[
+    (
+        "full",
+        &[
+            "lint",
+            "javascript",
+            "rust",
+            "vibe",
+            "claude-acp",
+            "corpus",
+            "publication",
+            "static",
+            "confined",
+            "confined-cleanup",
+        ],
+    ),
+    (
+        "host",
+        &[
+            "sandbox",
+            "secure-host",
+            "secure-host-options",
+            "secure-host-no-user",
+            "world-write",
+            "world-write-runtime",
+            "secure-host-image",
+            "secure-host-write-policy",
+        ],
+    ),
+    (
+        "e2e",
+        &[
+            "proposals",
+            "e2e-proposals",
+            "e2e-deterministic",
+            "e2e-scratch",
+            "e2e-full",
+            "e2e-limit",
+            "e2e-write-policy",
+            "e2e-sandbox",
+            "e2e-event",
+            "e2e-analysis",
+            "e2e-analysis-refused",
+            "e2e-secondary",
+            "e2e-secondary-refused",
+            "e2e-people",
+            "e2e-items-scratch",
+            "e2e-items",
+            "e2e-threads-scratch",
+            "e2e-threads",
+            "e2e-check-run",
+            "e2e-review",
+            "e2e-dispatch",
+            "e2e-compose",
+            "e2e-dispatch-verify",
+            "e2e-verify",
+        ],
+    ),
+];
+
+fn gated(gate: &str) -> &'static [&'static str] {
+    GATES.iter().find(|(name, _)| *name == gate).unwrap().1
+}
+
+/// The gates skip what a queue tested and run everything otherwise: a pull
+/// request with a queue defers the host and end-to-end jobs to it, a
+/// fork's without one cannot run the end-to-end jobs and must fail, and a
+/// push skips only what its merge group passed.
+#[test]
+fn ci_gates_skip_what_a_queue_tested_and_run_everything_otherwise() {
+    let doc = definition("ci.yml");
+    let outputs = &doc["jobs"]["changes"]["outputs"];
+    for event in ["pull_request", "merge_group", "push"] {
+        let pull = event == "pull_request";
+        let runs: &[&str] = if event == "push" {
+            &["true", "false"]
+        } else {
+            &[""]
+        };
+        for (queue, fork, paths, passed) in ["true", "false"].into_iter().flat_map(|queue| {
+            [true, false].into_iter().flat_map(move |fork| {
+                ["true", "false"].into_iter().flat_map(move |paths| {
+                    runs.iter().map(move |passed| (queue, fork, paths, *passed))
+                })
+            })
+        }) {
+            let mut context = vec![
+                ("github.event_name", Expr::text(event)),
+                ("github.repository", Expr::text("owner/repo")),
+                ("steps.paths.outputs.e2e", Expr::text(paths)),
+            ];
+            if pull {
+                let head = if fork { "fork/repo" } else { "owner/repo" };
+                context.push((
+                    "github.event.pull_request.head.repo.full_name",
+                    Expr::text(head),
+                ));
+                context.push(("steps.queue.outputs.enabled", Expr::text(queue)));
+            }
+            if !passed.is_empty() {
+                context.push(("steps.queued.outputs.passed", Expr::text(passed)));
+            }
+            let tested = passed == "true";
+            let deferred = pull && queue == "true";
+            let unavailable = pull && fork;
+            let e2e = if tested || deferred || unavailable {
+                "false"
+            } else {
+                paths
+            };
+            let fork_e2e = unavailable && !deferred && paths != "false";
+            for (key, wanted) in [
+                ("full", (!tested).to_string()),
+                ("host", (!tested && !deferred).to_string()),
+                ("e2e", e2e.to_owned()),
+                ("fork-e2e", fork_e2e.to_string()),
+            ] {
+                let value = evaluate(expression(&outputs[key]), &context).render();
+                assert_eq!(
+                    value, wanted,
+                    "{key}: {event} queue={queue} fork={fork} paths={paths} passed={passed:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Every ci.yml job that can write runs only under the end-to-end gate,
+/// which is false for a fork's pull request and with a queue, or only
+/// on a push to main: never with a pull request's code before the queue.
+#[test]
+fn privileged_ci_jobs_run_only_under_the_e2e_gate_or_on_push() {
+    let doc = definition("ci.yml");
+    let gate = Regex::new(
+        r"^\$\{\{ (always\(\) && )?needs\.changes\.outputs\.e2e == 'true'( && [^|\n]*)? \}\}$",
+    )
+    .unwrap();
+    // What a job without permissions of its own gets.
+    let default = doc["permissions"].as_hash().unwrap();
+    assert!(
+        default
+            .values()
+            .all(|access| access.as_str() == Some("read")),
+        "{default:?}"
+    );
+    let mut privileged = 0;
+    for (name, job) in doc["jobs"].as_hash().unwrap() {
+        let permissions = &job["permissions"];
+        let writes = permissions.as_str() == Some("write-all")
+            || permissions.as_hash().is_some_and(|granted| {
+                granted
+                    .values()
+                    .any(|access| access.as_str() == Some("write"))
+            });
+        if !writes {
+            continue;
+        }
+        privileged += 1;
+        let condition = job["if"].as_str().unwrap_or_default();
+        let e2e = gated("e2e").contains(&name.as_str().unwrap()) && gate.is_match(condition);
+        assert!(
+            e2e || condition == "${{ github.event_name == 'push' }}",
+            "{name:?}: {condition}"
+        );
+    }
+    assert!(privileged >= 10, "{privileged}");
+}
+
+/// A job may be skipped only under its own gate, and only when that gate
+/// said "false"; anything else but success fails the aggregate. Every
+/// job but the sentinels, the push-only one and forgejo is aggregated,
+/// under exactly one gate.
+#[test]
+fn the_aggregate_accepts_a_skip_only_under_a_gate_that_said_false() {
+    use serde_json::{Map, Value, json};
+    fn skipped<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<(&'a str, &'a str)> {
+        names.into_iter().map(|name| (name, "skipped")).collect()
+    }
+    let doc = definition("ci.yml");
+    let mut all: Vec<&str> = doc["jobs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap())
+        .filter(|name| {
+            !["required-checks", "ci", "secure-host-published", "forgejo"].contains(name)
+        })
+        .collect();
+    all.sort_unstable();
+    let mut needs: Vec<&str> = doc["jobs"]["required-checks"]["needs"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap())
+        .collect();
+    needs.sort_unstable();
+    assert_eq!(needs, all);
+    let mut under: Vec<&str> = GATES
+        .iter()
+        .flat_map(|(_, jobs)| jobs.iter().copied())
+        .chain(["changes"])
+        .collect();
+    under.sort_unstable();
+    assert_eq!(under, all);
+    for (gate, names) in GATES {
+        let condition = Regex::new(&format!(
+            r"^\$\{{\{{ (always\(\) && )?needs\.changes\.outputs\.{gate} == 'true'( && .*)? \}}\}}$"
+        ))
+        .unwrap();
+        for name in *names {
+            let job = &doc["jobs"][*name];
+            let condition_text = job["if"].as_str().unwrap_or_default();
+            assert!(
+                condition.is_match(condition_text),
+                "{name}: {condition_text}"
+            );
+            let needs = job["needs"]
+                .as_vec()
+                .map_or_else(|| vec![&job["needs"]], |needs| needs.iter().collect());
+            assert!(
+                needs.iter().any(|need| need.as_str() == Some("changes")),
+                "{name}"
+            );
+        }
+    }
+    let filter = named_step(&doc, "Every job succeeded")["env"]["FILTER"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    // Whether the aggregate passes with every job's result success but
+    // those of `results`, under the gates' outputs with `change`.
+    let run = |results: &[(&str, &str)], change: &[(&str, &str)]| {
+        let needs: Map<String, Value> = all
+            .iter()
+            .map(|name| {
+                let result = results
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map_or("success", |(_, result)| *result);
+                ((*name).to_owned(), json!({ "result": result }))
+            })
+            .collect();
+        let needs = Value::Object(needs).to_string();
+        let mut env = vec![
+            ("FULL", "true"),
+            ("HOST", "true"),
+            ("E2E", "true"),
+            ("REVIEW", "true"),
+            ("FORK_E2E", "false"),
+            ("EVENT", "pull_request"),
+            ("FILTER", filter.as_str()),
+            ("NEEDS", needs.as_str()),
+        ];
+        env.extend_from_slice(change);
+        run_step("ci.yml", "Every job succeeded", dir.path(), &env)
+            .status
+            .success()
+    };
+    let push = [
+        ("FULL", "false"),
+        ("HOST", "false"),
+        ("E2E", "false"),
+        ("REVIEW", ""),
+        ("EVENT", "push"),
+    ];
+    let queued_pr = [("HOST", "false"), ("E2E", "false"), ("REVIEW", "false")];
+    let group = ("EVENT", "merge_group");
+    let (full, host, e2e) = (gated("full"), gated("host"), gated("e2e"));
+    // (case, results other than success, gate outputs, whether it passes)
+    type Case<'a> = (
+        &'a str,
+        Vec<(&'a str, &'a str)>,
+        &'a [(&'a str, &'a str)],
+        bool,
+    );
+    let cases: [Case; 14] = [
+        ("everything ran", vec![], &[], true),
+        (
+            "push the queue passed",
+            skipped([full, host, e2e].concat()),
+            &push,
+            true,
+        ),
+        (
+            "PR with a queue",
+            skipped([host, e2e].concat()),
+            &queued_pr,
+            true,
+        ),
+        (
+            "docs-only merge group",
+            skipped(e2e.iter().copied()),
+            &[("E2E", "false"), ("REVIEW", ""), group],
+            true,
+        ),
+        (
+            "merge group skips review",
+            skipped(["e2e-review"]),
+            &[("REVIEW", ""), group],
+            true,
+        ),
+        (
+            "review not installed on base",
+            skipped(["e2e-review"]),
+            &[("REVIEW", "false")],
+            true,
+        ),
+        (
+            "review installed but skipped",
+            skipped(["e2e-review"]),
+            &[],
+            false,
+        ),
+        (
+            "a push skips the check run",
+            skipped(["e2e-check-run"]),
+            &[("EVENT", "push")],
+            true,
+        ),
+        (
+            "a pull request skips the check run",
+            skipped(["e2e-check-run"]),
+            &[],
+            false,
+        ),
+        ("changes skipped", skipped(["changes"]), &push, false),
+        (
+            "host skipped on a merge group",
+            skipped(["sandbox"]),
+            &[("E2E", "false"), group],
+            false,
+        ),
+        (
+            "light job skipped on a PR with a queue",
+            skipped(["rust"]),
+            &queued_pr,
+            false,
+        ),
+        (
+            "e2e skipped with host off",
+            skipped(["e2e-full"]),
+            &[("HOST", "false")],
+            false,
+        ),
+        (
+            "fork without a queue",
+            skipped(e2e.iter().copied()),
+            &[("E2E", "false"), ("FORK_E2E", "true")],
+            false,
+        ),
+    ];
+    for (name, results, change, success) in cases {
+        assert_eq!(run(&results, change), success, "{name}");
+    }
+    // Each job may be skipped under its own gate, and under no other.
+    let off: [(&str, &[(&str, &str)]); 3] = [
+        ("full", &push),
+        ("host", &[("HOST", "false")]),
+        ("e2e", &[("E2E", "false")]),
+    ];
+    for (gate, names) in GATES {
+        for name in *names {
+            for (other, change) in off {
+                if other == *gate {
+                    assert!(run(&skipped([*name]), change), "{name} under {gate}");
+                } else if other != "full" {
+                    assert!(!run(&skipped([*name]), change), "{name} under {other}");
+                }
+            }
+        }
+    }
+    for value in ["true", "", "unknown"] {
+        for (gate, variable) in [("full", "FULL"), ("host", "HOST"), ("e2e", "E2E")] {
+            let results = skipped(gated(gate).iter().copied());
+            assert!(!run(&results, &[(variable, value)]), "{variable}={value:?}");
+        }
+        assert!(!run(&[], &[("FORK_E2E", value)]), "FORK_E2E={value:?}");
+    }
+    for name in &all {
+        for result in ["failure", "cancelled"] {
+            assert!(!run(&[(name, result)], &push), "{name} {result}");
+        }
+    }
+}
+
+/// Runs ci.yml's step `id` with a `gh` that logs its arguments and prints
+/// `answer`, or fails without one: what the step wrote to GITHUB_OUTPUT
+/// and gh's arguments, or None if the step failed.
+fn changes_step(id: &str, env: &[(&str, &str)], answer: Option<&str>) -> Option<(String, String)> {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    executable(
+        &bin.join("gh"),
+        "#!/bin/sh\necho \"$*\" >> \"$0.args\"\n[ -e \"$0.json\" ] && exec cat \"$0.json\"\nexit 1\n",
+    );
+    // No waiting between attempts.
+    executable(&bin.join("sleep"), "#!/bin/sh\n");
+    if let Some(answer) = answer {
+        std::fs::write(bin.join("gh.json"), answer).unwrap();
+    }
+    let output = dir.path().join("output");
+    std::fs::write(&output, "").unwrap();
+    let search = format!("{}:/usr/local/bin:/usr/bin:/bin", path(&bin));
+    let mut all = vec![
+        ("PATH", search.as_str()),
+        ("GITHUB_OUTPUT", path(&output)),
+        ("GITHUB_REPOSITORY", "owner/repo"),
+    ];
+    all.extend_from_slice(env);
+    let result = run_step("ci.yml", id, dir.path(), &all);
+    let args = std::fs::read_to_string(bin.join("gh.args")).unwrap_or_default();
+    result
+        .status
+        .success()
+        .then(|| (std::fs::read_to_string(&output).unwrap(), args))
+}
+
+/// A push skips only a commit whose successful merge group run was built
+/// on the commit main was at; any other answer runs everything, and one
+/// the step cannot read, an API failure included, fails the gate.
+#[test]
+fn a_push_skips_only_a_commit_whose_merge_group_run_passed() {
+    use serde_json::{Value, json};
+    let sha = "a".repeat(40);
+    let before = "c".repeat(40);
+    let group = json!({"head_sha": sha, "event": "merge_group", "conclusion": "success",
+        "head_branch": format!("gh-readonly-queue/main/pr-7-{before}")});
+    let with = |change: Value| {
+        let mut run = group.clone();
+        for (key, value) in change.as_object().unwrap() {
+            run[key] = value.clone();
+        }
+        run
+    };
+    let runs = |runs: Vec<Value>| Some(json!({ "workflow_runs": runs }).to_string());
+    let other = "b".repeat(40);
+    let zeros = "0".repeat(40);
+    let upper = "C".repeat(40);
+    let passed = Some("passed=true\n");
+    let not = Some("passed=false\n");
+    // (the API's answer, the commit before the push, the output or None)
+    let cases: Vec<(Option<String>, &str, Option<&str>)> = vec![
+        (runs(vec![group.clone()]), &before, passed),
+        (
+            runs(vec![with(json!({ "head_sha": other })), group.clone()]),
+            &before,
+            passed,
+        ),
+        // The filters are the API's; what comes back is checked all the same.
+        (runs(vec![with(json!({ "head_sha": other }))]), &before, not),
+        (runs(vec![with(json!({"event": "push"}))]), &before, not),
+        (
+            runs(vec![with(json!({"conclusion": "failure"}))]),
+            &before,
+            not,
+        ),
+        (
+            runs(vec![with(json!({ "conclusion": null }))]),
+            &before,
+            not,
+        ),
+        // A group built on another commit, as when one push lands two groups.
+        (
+            runs(vec![with(
+                json!({"head_branch": format!("gh-readonly-queue/main/pr-7-{}", "d".repeat(40))}),
+            )]),
+            &before,
+            not,
+        ),
+        (
+            runs(vec![with(json!({"head_branch": format!("main-{before}")}))]),
+            &before,
+            not,
+        ),
+        (runs(vec![]), &before, not),
+        (
+            runs(vec![with(json!({ "head_branch": null }))]),
+            &before,
+            None,
+        ),
+        // A new branch's before is all zeros, which no queue branch is built on.
+        (runs(vec![group.clone()]), &zeros, not),
+        (
+            runs(vec![with(
+                json!({"head_branch": format!("gh-readonly-queue/main/pr-7-{upper}")}),
+            )]),
+            &upper,
+            not,
+        ),
+        (
+            runs(vec![with(
+                json!({"head_branch": "gh-readonly-queue/main/pr-7-"}),
+            )]),
+            "",
+            not,
+        ),
+        // An API failure, after its retries, fails the gate.
+        (None, &before, None),
+        (Some("{}".to_owned()), &before, None),
+    ];
+    for (answer, before, wanted) in cases {
+        let result = changes_step(
+            "queued",
+            &[("GITHUB_SHA", &sha), ("BEFORE", before)],
+            answer.as_deref(),
+        );
+        let case = format!("{answer:?} {before:?}");
+        assert_eq!(
+            result.as_ref().map(|(output, _)| output.as_str()),
+            wanted,
+            "{case}"
+        );
+        if let Some((_, args)) = result {
+            assert_eq!(
+                args,
+                format!(
+                    "api repos/owner/repo/actions/workflows/ci.yml/runs?head_sha={sha}&event=merge_group&status=success&per_page=10\n"
+                ),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// Queue detection reads the branch's effective rules, and publishes
+/// nothing it cannot read; the sentinel the ruleset requires passes only
+/// on the aggregate's success.
+#[test]
+fn queue_detection_fails_closed_and_the_sentinel_takes_only_success() {
+    use serde_json::json;
+    for (rules, enabled) in [
+        (json!([]), false),
+        (json!([{"type": "merge_queue"}]), true),
+        (json!([{"type": "required_status_checks"}]), false),
+    ] {
+        let pages = json!([[{"type": "deletion"}], rules]).to_string();
+        let (output, args) = changes_step("queue", &[("BRANCH", "main")], Some(&pages)).unwrap();
+        assert_eq!(
+            args,
+            "api --paginate --slurp repos/owner/repo/rules/branches/main\n"
+        );
+        assert_eq!(output, format!("enabled={enabled}\n"));
+    }
+    let (_, args) = changes_step("queue", &[("BRANCH", "release/1#x")], Some("[[]]")).unwrap();
+    assert_eq!(
+        args,
+        "api --paginate --slurp repos/owner/repo/rules/branches/release%2F1%23x\n"
+    );
+    for answer in [None, Some("\"text\""), Some("[\"text\"]")] {
+        assert_eq!(
+            changes_step("queue", &[("BRANCH", "main")], answer),
+            None,
+            "{answer:?}"
+        );
+    }
+    let doc = definition("ci.yml");
+    let sentinel = doc["jobs"]["ci"]["steps"][0]["run"].as_str().unwrap();
+    for result in ["success", "failure", "cancelled", "skipped", ""] {
+        let status = Command::new("bash")
+            .args(["-c", sentinel])
+            .env("RESULT", result)
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), result == "success", "{result:?}");
+    }
+}
+
+/// A merge group's analysis runs against its branch's name, which the
+/// step takes only from a branch ref.
+#[test]
+fn merge_group_analysis_uses_a_branch_name_not_a_qualified_ref() {
+    let branch = |reference: &str| {
+        changes_step("merge-base", &[("REF", reference)], None).map(|(output, _)| output)
+    };
+    assert_eq!(
+        branch("refs/heads/gh-readonly-queue/main/pr-123-abcd").as_deref(),
+        Some("branch=gh-readonly-queue/main/pr-123-abcd\n")
+    );
+    for reference in ["refs/tags/main", "refs/heads/", "refs/heads/a\nb=c", ""] {
+        assert_eq!(branch(reference), None, "{reference:?}");
+    }
+    let ci = workflow("ci.yml");
+    assert_eq!(
+        ci.matches("base: ${{ github.head_ref || needs.changes.outputs.analysis-base || 'main' }}")
+            .count(),
+        2
+    );
+}
+
+/// The review gate reads the review files from the pull request's base,
+/// whatever its head has, and fails rather than skip the review when the
+/// base is not there.
+#[test]
+fn review_bootstrap_reads_trusted_base_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let files = [
+        "workflow/review.md",
+        "workflow/review.toml",
+        ".github/agentic-job/e2e/review.sh",
+    ];
+    let mut commits = 0;
+    let mut commit = |names: &[&str]| {
+        git(&repo, &["rm", "-rqf", "--ignore-unmatch", "."]);
+        for name in names {
+            let file = repo.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "x").unwrap();
+        }
+        commits += 1;
+        std::fs::write(repo.join("code.rs"), commits.to_string()).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "commit"]);
+        git(&repo, &["rev-parse", "HEAD"])
+    };
+    let output = dir.path().join("output");
+    let review = |base: &str| {
+        std::fs::write(&output, "").unwrap();
+        run_step(
+            "ci.yml",
+            "review",
+            &repo,
+            &[("BASE", base), ("GITHUB_OUTPUT", path(&output))],
+        )
+    };
+    let installed = |base: &str| {
+        let result = review(base);
+        assert!(result.status.success(), "{result:?}");
+        std::fs::read_to_string(&output).unwrap().trim().to_owned()
+    };
+    let base = commit(&files);
+    for missing in files {
+        let rest: Vec<&str> = files.into_iter().filter(|name| *name != missing).collect();
+        assert_eq!(installed(&commit(&rest)), "installed=false", "{missing}");
+    }
+    let nested = commit(&["workflow/review.md/nested", files[1], files[2]]);
+    assert_eq!(installed(&nested), "installed=false");
+    // The base's files, whatever the checked-out head has.
+    commit(&[]);
+    assert_eq!(installed(&base), "installed=true");
+    for missing in ["b".repeat(40), String::new()] {
+        assert!(!review(&missing).status.success(), "{missing:?}");
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "");
+    }
+}
+
+/// The changes job's path classifier, on real Git paths: only README.md
+/// and Markdown under docs/ skip the end-to-end jobs, and a name it cannot
+/// read, a base it cannot use or a rename runs them. It runs nothing of
+/// the pull request's.
+#[test]
+fn the_path_classifier_reads_real_git_paths_without_running_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.rs"), "code").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    let output = dir.path().join("output");
+    let classify = |head: &str, event: &str, before: &str| {
+        std::fs::write(&output, "").unwrap();
+        let result = run_step(
+            "ci.yml",
+            "paths",
+            &repo,
+            &[
+                ("BASE", before),
+                ("HEAD", head),
+                ("GITHUB_EVENT_NAME", event),
+                ("RUNNER_TEMP", path(dir.path())),
+                ("GITHUB_OUTPUT", path(&output)),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        std::fs::read_to_string(&output).unwrap().trim().to_owned()
+    };
+    for (name, e2e) in [
+        ("README.md", false),
+        ("docs/page.md", false),
+        ("docs/nested/page.md", false),
+        ("workflow/ci-paths.cjs", true),
+        ("docs/line\nbreak.md", true),
+        ("docs/file.sh", true),
+    ] {
+        git(&repo, &["reset", "-q", "--hard", &base]);
+        let file = repo.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "e2e=false").unwrap();
+        git(&repo, &["add", name]);
+        git(&repo, &["commit", "-qm", "change"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        for event in ["pull_request", "push", "merge_group"] {
+            assert_eq!(
+                classify(&head, event, &base),
+                format!("e2e={e2e}"),
+                "{name:?} {event}"
+            );
+        }
+    }
+    assert_eq!(classify(&base, "pull_request", &base), "e2e=true");
+    for before in ["0".repeat(40), "--output=bad".to_owned()] {
+        assert_eq!(classify(&base, "push", &before), "e2e=true", "{before}");
+    }
+    git(&repo, &["reset", "-q", "--hard", &base]);
+    std::fs::create_dir(repo.join("docs")).unwrap();
+    git(&repo, &["mv", "code.rs", "docs/code.md"]);
+    git(&repo, &["commit", "-qm", "rename"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(classify(&head, "pull_request", &base), "e2e=true");
+}
+
+/// The shared workflow check runs only on a plain OWNER/REPO@COMMIT, with
+/// a just new enough for the shared Justfile's cache_directory() (1.23).
+#[test]
+fn the_shared_workflow_check_takes_only_a_repository_at_a_commit() {
+    let ci = workflow("ci.yml");
+    let minor: u32 = Regex::new(r"\n {8}if: \$\{\{ vars\.WORKFLOW_LINT != '' \}\}\n {8}uses: taiki-e/install-action@[0-9a-f]{40} # v[\d.]+\n {8}with:\n {10}tool: just@1\.(\d+)\.\d+\n")
+        .unwrap()
+        .captures(job(&ci, "lint"))
+        .unwrap()[1]
+        .parse()
+        .unwrap();
+    assert!(minor >= 23, "just 1.{minor}");
+    // The recipe's first check, run as just runs it, with SOURCE as $1.
+    let justfile = std::fs::read_to_string(root().join("Justfile")).unwrap();
+    let guard = justfile
+        .split("\nworkflow-lint source:\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("[["))
+        .unwrap();
+    let commit = "a".repeat(40);
+    for (source, success) in [
+        (format!("owner/repo@{commit}"), true),
+        (format!("my-org/my.repo_2@{commit}"), true),
+        ("owner/repo@main".to_owned(), false),
+        (format!("owner/repo@{}", &commit[1..]), false),
+        (format!("owner/repo@{}", commit.to_uppercase()), false),
+        (format!("owner@{commit}"), false),
+        (format!("owner/sub/repo@{commit}"), false),
+        (format!("owner/..@{commit}"), false),
+        (format!("--upload-pack=x/y@{commit}"), false),
+        (format!("owner/repo@{commit}\n"), false),
+        (String::new(), false),
+    ] {
+        let status = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", guard, "workflow-lint", &source])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let code = if success { 0 } else { 2 };
+        assert_eq!(status.code(), Some(code), "{source:?}");
+    }
+}
+
+/// PR CI tests the ingress checker with the same verified analyzers the
+/// required ingress check installs; that check has no paths filter, which
+/// would leave it pending on other pull requests.
+#[test]
+fn pr_ci_tests_the_ingress_checker_with_its_analyzers() {
+    const INSTALL: &str = "Install verified static analyzers";
+    let ci = definition("ci.yml");
+    let ingress = definition("workflow-ingress.yml");
+    let run = named_step(&ingress, INSTALL)["run"].as_str().unwrap();
+    assert!(run.contains("sha256sum -c -"), "{run}");
+    assert_eq!(named_step(&ci, INSTALL), named_step(&ingress, INSTALL));
+    assert!(root().join("workflow/test_ingress.py").is_file());
+    for (event, trigger) in ingress["on"].as_hash().unwrap() {
+        assert!(
+            trigger["paths"].is_badvalue() && trigger["paths-ignore"].is_badvalue(),
+            "{event:?}"
+        );
+    }
+}
+
+/// The runner's user is the agent by default, everywhere a caller can
+/// choose; one end-to-end run, and only that one, asks for the sandbox
+/// user, and its verifier insists on its comment.
+#[test]
+fn the_agent_is_the_runners_user_unless_a_caller_asks_for_the_sandbox_user() {
+    for (file, default) in [
+        (
+            "agentic-job.yml",
+            definition("agentic-job.yml")["on"]["workflow_call"]["inputs"]["agent-user"]["default"]
+                .clone(),
+        ),
+        (
+            "agent.yml",
+            definition("agent.yml")["on"]["workflow_call"]["inputs"]["agent-user"]["default"]
+                .clone(),
+        ),
+        (
+            "run/action.yml",
+            definition("run/action.yml")["inputs"]["agent-user"]["default"].clone(),
+        ),
+    ] {
+        assert_eq!(default.as_str(), Some("runner"), "{file}");
+    }
+    let text = workflow("ci.yml");
+    let users: Vec<&str> = Regex::new(r"(?m)^ {6}agent-user: (.*)$")
+        .unwrap()
+        .captures_iter(&text)
+        .map(|user| user.get(1).unwrap().as_str())
+        .collect();
+    assert_eq!(users, ["sandbox"]);
+    assert!(
+        Regex::new(r"\n {6}agent-user: sandbox\n {6}setup: \.github/agentic-job/e2e/sandbox\.sh\n")
+            .unwrap()
+            .is_match(job(&text, "e2e-sandbox"))
+    );
+    let doc = definition("ci.yml");
+    let verify = named_step(&doc, "The sandbox-user run handed back its comment")["run"]
+        .as_str()
+        .unwrap();
+    assert!(
+        verify.contains("test \"$RESULT/$EXIT\" = success/0\n"),
+        "{verify}"
+    );
+    assert!(
+        verify.contains("grep -F 'A comment from the scripted agent of a sandbox-user run.'"),
+        "{verify}"
+    );
+    let setup = std::fs::read_to_string(root().join(".github/agentic-job/e2e/sandbox.sh")).unwrap();
+    assert!(
+        setup
+            .lines()
+            .any(|line| line == "test \"$HOME\" = /home/runner-sandbox")
+    );
+}
+
+/// What the guard leaves out is src/apply/applied.rs's to test; this is
+/// that the harness runs it again with e2e-full's settings.
+#[test]
+fn the_full_run_harness_runs_the_apply_guard_again_as_e2e_full_applied() {
+    let doc = definition("ci.yml");
+    let rerun = named_step(&doc, "Run the full run's apply guard again")["run"]
+        .as_str()
+        .unwrap();
+    let prefix = doc["jobs"]["e2e-full"]["with"]["artifact-prefix"]
+        .as_str()
+        .unwrap();
+    for want in [
+        r#""$RUNNER_TEMP/agentic-job" applied --dir "$RUNNER_TEMP/rerun" "#,
+        " --comment-target 64 ",
+        &format!(" --artifact-prefix {prefix} "),
+    ] {
+        assert!(rerun.contains(want), "{want:?} in {rerun}");
+    }
+    assert!(rerun.ends_with(" --token-is-pat false\n"), "{rerun}");
+}
+
+/// apt runs bounded: after `secure-host apt` has tuned it where a binary
+/// exists, and with its own network waits where none does yet.
+#[test]
+fn ci_apt_runs_are_tuned_and_bounded() {
+    let mut operations = 0;
+    for (file, tuned) in [("ci.yml", true), ("build.yml", false)] {
+        let doc = definition(file);
+        for (name, job) in doc["jobs"].as_hash().unwrap() {
+            let steps = job["steps"].as_vec().map(Vec::as_slice).unwrap_or_default();
+            for (at, step) in steps.iter().enumerate() {
+                let Some(run) = step["run"]
+                    .as_str()
+                    .filter(|run| run.starts_with("sudo apt-get"))
+                else {
+                    continue;
+                };
+                operations += 1;
+                let case = format!("{file} {name:?}: {run}");
+                if tuned {
+                    assert!(
+                        steps[..at].iter().any(|step| step["run"].as_str()
+                            == Some("sudo target/debug/agentic-job secure-host apt")),
+                        "{case}"
+                    );
+                } else {
+                    assert!(
+                        run.contains("-o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 "),
+                        "{case}"
+                    );
+                }
+                assert!(run.contains("-o Acquire::Retries=3"), "{case}");
+                assert_eq!(step["timeout-minutes"].as_i64(), Some(5), "{case}");
+            }
+        }
+    }
+    assert_eq!(operations, 3);
+}
+
+/// CI's world-write job runs the enforcement workflow's steps, which the
+/// required aggregate then takes.
+#[test]
+fn ci_runs_the_world_write_enforcement_steps() {
+    let enforcement = definition("world-write.yml");
+    assert!(!enforcement["on"]["workflow_call"].is_badvalue());
+    let ci = definition("ci.yml");
+    let job = &ci["jobs"]["world-write"];
+    assert_eq!(job["runs-on"].as_str(), Some("ubuntu-26.04"));
+    assert_eq!(job["timeout-minutes"].as_i64(), Some(10));
+    assert_eq!(job["permissions"]["contents"].as_str(), Some("read"));
+    let steps: Vec<&yaml_rust2::Yaml> = enforcement["jobs"]
+        .as_hash()
+        .unwrap()
+        .values()
+        .map(|job| &job["steps"])
+        .collect();
+    assert_eq!(steps, [&job["steps"]]);
+}
+
+/// Confined's only local actions are the forwarder and the probe, each
+/// exempted only from self-repository, and confined-cleanup looks the
+/// job up by confined's own name.
+#[test]
+fn confined_uses_only_its_local_actions_and_cleanup_finds_it() {
+    let text = workflow("ci.yml");
+    let confined = job(&text, "confined");
+    assert_eq!(confined.matches("uses: ./").count(), 2);
+    assert_eq!(confined.matches("zizmor: ignore").count(), 2);
+    let doc = definition("ci.yml");
+    let name = doc["jobs"]["confined-cleanup"]["steps"][0]["env"]["NAME"].as_str();
+    assert!(name.is_some());
+    assert_eq!(name, doc["jobs"]["confined"]["name"].as_str());
+}
+
+/// Every caller, agentic-job's own jobs included, gets the new action's
+/// contract, under which every step after it is the runner's user's: the
+/// public secure-host forwards to the one pinned new action, and refuses
+/// every input of the old one, which asked for another host.
+#[test]
+fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs() {
+    const ACTION: &str = "secure-host/action.yml";
+    const FORWARDED: [&str; 3] = ["config", "check", "image-archive"];
+    let text = workflow(ACTION);
+    let doc = definition(ACTION);
+    let old: Vec<&str> = doc["inputs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap())
+        .filter(|name| !FORWARDED.contains(name))
+        .collect();
+    let mut sorted = old.clone();
+    sorted.sort_unstable();
+    // Each is declared, so that setting one reaches the refusal.
+    assert_eq!(
+        sorted,
+        [
+            "binary",
+            "build",
+            "deny-runner-metadata",
+            "egress",
+            "egress-policy",
+            "lock",
+            "runner-user",
+            "sandbox-user",
+            "script",
+            "stop-services"
+        ]
+    );
+    assert!(doc["outputs"].is_badvalue());
+    // One pin, by commit, whose comment names the image tag that commit
+    // runs. site.yml (plain CI, no forwarder) takes the same one, so this
+    // repository's agent job is never secured by an older image than its
+    // CI. The tag is a release of this repository, at most the workspace's
+    // version: Dependabot moves the commit, and a reviewer reads the comment.
+    let uses: Vec<&str> = steps(&doc)
+        .into_iter()
+        .filter_map(|step| step["uses"].as_str())
+        .collect();
+    assert_eq!(uses.len(), 1, "{uses:?}");
+    let pin = Regex::new(r"(?m)^ {4,6}- uses: cgwalters-forge/actions/secure-host@[0-9a-f]{40} # main, with secure-host:v(\d+)\.(\d+)\.(\d+)$").unwrap();
+    let found = pin.captures(&text).unwrap_or_else(|| panic!("{}", uses[0]));
+    let line = found.get(0).unwrap().as_str();
+    let site = workflow("site.yml");
+    let used: Vec<&str> = pin
+        .find_iter(&site)
+        .map(|used| used.as_str().trim())
+        .collect();
+    assert_eq!(used, [line.trim()]);
+    let version =
+        |found: &regex::Captures| -> [u64; 3] { [1, 2, 3].map(|i| found[i].parse().unwrap()) };
+    let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let workspace = Regex::new(r#"(?m)^version = "(\d+)\.(\d+)\.(\d+)"$"#)
+        .unwrap()
+        .captures(&cargo)
+        .unwrap();
+    assert!(
+        version(&found) <= version(&workspace),
+        "{line} is newer than the workspace's {}",
+        &workspace[0]
+    );
+    // The new action is last, with the selected host config (proxy on),
+    // not its default, which turns it off; its trust-store step runs under
+    // egress: write-policy.
+    let last = [
+        line,
+        "\n      with:\n",
+        "        config: ${{ steps.config.outputs.path }}\n",
+        "        check: ${{ inputs.check }}\n",
+        "        egress: ${{ steps.egress.outputs.mode }}\n",
+        "        image-archive: ${{ inputs.image-archive }}\n",
+    ]
+    .concat();
+    assert!(text.ends_with(&last), "{text}");
+    // The new action overrides the file's egress.write-policy with its
+    // input: a configuration that asks for it, in any key form, gets it.
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let output = dir.path().join("output");
+    let hosted = workflow("secure-host/hosted.toml");
+    let escaped =
+        Regex::new(r"^::error::.* has a backslash outside a comment or a multi-line string")
+            .unwrap();
+    for (toml, wanted) in [
+        ("", Some("off")),
+        (hosted.as_str(), Some("off")),
+        ("[egress]\nwrite-policy = false\n", Some("off")),
+        ("[egress]\n# write-policy = true\n", Some("off")),
+        ("[egress]\nwrite-policy = true\n", Some("write-policy")),
+        ("[egress]\n  write-policy=true # on\n", Some("write-policy")),
+        ("[egress]\n\"write-policy\" = true\n", Some("write-policy")),
+        ("egress.'write-policy' = true\n", Some("write-policy")),
+        (
+            "egress = { proxy = true, write-policy = true }\n",
+            Some("write-policy"),
+        ),
+        (
+            "egress = { policy = \"/etc/p#1.toml\", write-policy = true }\n",
+            Some("write-policy"),
+        ),
+        ("[egress]\n# \"write\\u002dpolicy\" = true\n", Some("off")),
+        // Escapes could spell the key without its characters: refused.
+        ("[egress]\n\"write\\u002dpolicy\" = true\n", None),
+        ("egress.\"\\u0077rite-policy\" = true\n", None),
+        ("[egress]\n  \"write\\x2dpolicy\"=true\n", None),
+        ("[sandbox]\nstop-services = [\"a\\\\b\"]\n", None),
+        // A multi-line string can close on a line that starts with '#'.
+        (
+            "egress = { policy = '''/p\n#''', write-policy = true }\n",
+            None,
+        ),
+        (
+            "egress = { policy = \"\"\"/p\n#\"\"\", \"write\\u002dpolicy\" = true }\n",
+            None,
+        ),
+    ] {
+        std::fs::write(&config, toml).unwrap();
+        std::fs::write(&output, "").unwrap();
+        let result = run_step(
+            ACTION,
+            "Read whether the configuration asks for the write policy",
+            dir.path(),
+            &[("CONFIG", path(&config)), ("GITHUB_OUTPUT", path(&output))],
+        );
+        let written = std::fs::read_to_string(&output).unwrap();
+        match wanted {
+            Some(mode) => {
+                assert!(result.status.success(), "{toml:?}: {result:?}");
+                assert_eq!(written, format!("mode={mode}\n"), "{toml:?}");
+            }
+            None => {
+                assert_eq!(result.status.code(), Some(1), "{toml:?}: {result:?}");
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                assert!(escaped.is_match(&stdout), "{toml:?}: {stdout}");
+                assert_eq!(written, "", "{toml:?}");
+            }
+        }
+    }
+    // The refusal, run with each old input set alone, with all of them
+    // and with none.
+    const REFUSE: &str = "Refuse the old action's inputs";
+    let variables: Vec<(&str, &str)> = named_step(&doc, REFUSE)["env"]
+        .as_hash()
+        .unwrap()
+        .iter()
+        .map(|(key, value)| {
+            let input = value
+                .as_str()
+                .unwrap()
+                .strip_prefix("${{ inputs.")
+                .and_then(|value| value.strip_suffix(" }}"))
+                .unwrap();
+            (input, key.as_str().unwrap())
+        })
+        .collect();
+    let mut named: Vec<&str> = variables.iter().map(|(input, _)| *input).collect();
+    named.sort_unstable();
+    assert_eq!(named, sorted);
+    let refuse = |set: &[&str]| {
+        let env: Vec<(&str, &str)> = variables
+            .iter()
+            .map(|(input, variable)| (*variable, if set.contains(input) { "false" } else { "" }))
+            .collect();
+        run_step(ACTION, REFUSE, dir.path(), &env)
+    };
+    assert!(refuse(&[]).status.success());
+    for name in &old {
+        let result = refuse(&[name]);
+        assert_eq!(result.status.code(), Some(1), "{name}: {result:?}");
+        let refusal = Regex::new(&format!(
+            r"^::error::.*cgwalters-forge/actions/secure-host.* not {}: ",
+            regex::escape(name)
+        ))
+        .unwrap();
+        assert!(
+            refusal.is_match(&String::from_utf8_lossy(&result.stdout)),
+            "{name}: {result:?}"
+        );
+    }
+    let all = refuse(&old);
+    assert!(
+        String::from_utf8_lossy(&all.stdout).contains(&format!(" not {}: ", old.join(" "))),
+        "{all:?}"
+    );
+}
+
+/// `run` refuses to upload a fake agent's run whose redaction replaced
+/// nothing, and the write-capable end-to-end jobs run only in a merge
+/// group when a queue is enabled: a scenario without the secret-shaped
+/// string would fail first there. The whole command, since a shortened
+/// token is not secret-shaped (#641).
+#[test]
+fn every_scripted_e2e_session_prints_the_string_run_must_redact() {
+    const CANARY: &str = "printf 'fake secret: gh%s_%s\\n' p FAKEREDACTIONCANARY0123456789abcdef";
+    let dir = root().join(".github/agentic-job/e2e");
+    let setups: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".sh"))
+        .collect();
+    let ci = workflow("ci.yml");
+    for setup in Regex::new(r"(?m)^      setup: \.github/agentic-job/e2e/([\w-]+\.sh)$")
+        .unwrap()
+        .captures_iter(&ci)
+    {
+        assert!(setups.iter().any(|name| *name == setup[1]), "{}", &setup[1]);
+    }
+    assert!(setups.len() >= 9, "{setups:?}");
+    for file in &setups {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap();
+        let fixture = text
+            .split("<<'JSON'\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\nJSON").next())
+            .unwrap();
+        let steps: Vec<serde_json::Value> = serde_json::from_str(fixture).unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|step| step["execute"]["command"] == CANARY),
+            "{file}"
+        );
+    }
+}
+
+/// e2e-verify's cleanup of the scratch pull request, after the run of
+/// agentic-job#1430's: a cut-short first response failed the step and
+/// left the fixture open. Against a gh whose calls fail by number, before
+/// taking effect ("fail") or after ("lost").
+#[test]
+fn e2e_verify_scratch_cleanup_retries_the_api_and_fails_only_on_a_leak() {
+    const STEP: &str = "Close only the scratch pull request of this run and delete its branch";
+    const BRANCH: &str = "e2e-scratch/39434669318-1";
+    const GH: &str = r#"#!/bin/bash
+cd "$GH_STATE"
+n=$(( $(cat calls) + 1 )); echo "$n" > calls
+echo "$*" >> log
+if grep -qx "$n" fail; then echo 'unexpected end of JSON input' >&2; exit 1; fi
+case "$*" in
+  'api repos/o/r/pulls/1430') printf '{"state":"%s","head":{"ref":"%s","repo":{"full_name":"o/r"}}}' "$(cat pr)" "$(cat head)" ;;
+  'api repos/o/r/pulls/1430 --jq .state') cat pr ;;
+  'api -X PATCH repos/o/r/pulls/1430 -f state=closed') echo closed > pr; echo '{}' ;;
+  'api repos/o/r/git/matching-refs/heads/{branch} --jq .[].ref') if [ -e ref ]; then echo 'refs/heads/{branch}'; fi; echo 'refs/heads/{branch}0' ;;
+  'api -X DELETE repos/o/r/git/refs/heads/{branch}') [ -e ref ] || { echo 'Reference does not exist' >&2; exit 1; }; rm ref ;;
+  *) echo "unexpected call: $*" >&2; exit 2 ;;
+esac
+if grep -qx "$n" lost; then echo 'unexpected end of JSON input' >&2; exit 1; fi
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    executable(&bin.join("gh"), &GH.replace("{branch}", BRANCH));
+    // No waiting between attempts.
+    executable(&bin.join("sleep"), "#!/bin/sh\n");
+    let search = format!("{}:/usr/local/bin:/usr/bin:/bin", path(&bin));
+    // The step's output, the pull request's state, whether the branch is
+    // left and how many calls were made.
+    let run = |name: &str, fail: &[u32], lost: &[u32], head: &str| {
+        let state = dir.path().join(name);
+        std::fs::create_dir(&state).unwrap();
+        let numbers = |list: &[u32]| {
+            list.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for (file, content) in [
+            ("calls", "0".to_owned()),
+            ("fail", numbers(fail)),
+            ("lost", numbers(lost)),
+            ("pr", "open".to_owned()),
+            ("head", head.to_owned()),
+            ("ref", String::new()),
+        ] {
+            std::fs::write(state.join(file), format!("{content}\n")).unwrap();
+        }
+        let output = run_step(
+            "ci.yml",
+            STEP,
+            &state,
+            &[
+                ("PATH", &search),
+                ("GH_STATE", path(&state)),
+                ("GH_REPO", "o/r"),
+                ("GITHUB_RUN_ID", "39434669318"),
+                ("PEOPLE_PR", "1430"),
+                ("PEOPLE_BRANCH", BRANCH),
+            ],
+        );
+        let pr = std::fs::read_to_string(state.join("pr")).unwrap();
+        let calls = std::fs::read_to_string(state.join("log"))
+            .unwrap()
+            .lines()
+            .count();
+        (
+            output,
+            pr.trim().to_owned(),
+            state.join("ref").exists(),
+            calls,
+        )
+    };
+    // (case, calls that fail, calls whose response is lost, whether the
+    // step passes, the pull request's state, whether the branch is left)
+    for (name, fail, lost, success, pr, left) in [
+        // The incident: the first read was cut short.
+        ("first read fails", &[1][..], &[][..], true, "closed", false),
+        (
+            "each call fails once",
+            &[1, 3, 5, 7, 9],
+            &[],
+            true,
+            "closed",
+            false,
+        ),
+        (
+            "close and delete took effect but their responses were lost",
+            &[],
+            &[2, 3],
+            true,
+            "closed",
+            false,
+        ),
+        (
+            "close never succeeds",
+            &[2, 3, 4, 5],
+            &[],
+            false,
+            "open",
+            false,
+        ),
+        (
+            "delete never succeeds",
+            &[3, 4, 5, 6],
+            &[],
+            false,
+            "closed",
+            true,
+        ),
+        (
+            "the final reads never succeed",
+            &[4, 5, 6, 7],
+            &[],
+            false,
+            "closed",
+            false,
+        ),
+        (
+            "the first read never succeeds",
+            &[1, 2, 3, 4],
+            &[],
+            false,
+            "open",
+            true,
+        ),
+    ] {
+        let (output, state, branch, _) = run(&name.replace(' ', "-"), fail, lost, BRANCH);
+        assert_eq!(
+            (output.status.success(), state.as_str(), branch),
+            (success, pr, left),
+            "{name}: {output:?}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("unexpected call"),
+            "{name}: {output:?}"
+        );
+        if pr == "open" && !left {
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("::error::Scratch pull request #1430 is still open"),
+                "{name}: {output:?}"
+            );
+        }
+    }
+    // Another branch's pull request under this number is neither closed
+    // nor its branch deleted.
+    let (output, pr, left, calls) = run("other-head", &[], &[], "feature");
+    assert_eq!(
+        (output.status.success(), pr.as_str(), left, calls),
+        (false, "open", true, 1),
+        "{output:?}"
+    );
+}
+
+/// What a dispatch may choose. status-comment only chooses which of the
+/// status credential's own comments on the item `agentic-job status`
+/// edits (docs/workflow.md says what a wrong id replaces); it grants no
+/// new permission.
+#[test]
+fn dispatch_takes_only_task_repo_item_item_repo_kind_and_status_comment() {
+    let doc = definition("dispatch.yml");
+    let inputs: Vec<&str> = doc["on"]["workflow_dispatch"]["inputs"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|input| input.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        inputs,
+        [
+            "task",
+            "repo",
+            "item",
+            "item-repo",
+            "kind",
+            "status-comment"
+        ]
+    );
+}
+
+/// dispatch.yml's caller fixes each profile's capabilities, routed as the
+/// runner evaluates them, and forwards only the apply token, never to a
+/// scripted run.
+#[test]
+fn the_dispatch_caller_fixes_capabilities_and_token_boundary() {
+    let text = workflow("dispatch.yml");
+    let doc = definition("dispatch.yml");
+    let with = &doc["jobs"]["run"]["with"];
+    let routed = |input: &str, kind: &str, agent: &str| {
+        let context = [
+            ("inputs.kind", Expr::text(kind)),
+            ("inputs.item", Expr::text("42")),
+            ("needs.target.outputs.agent", Expr::text(agent)),
+        ];
+        evaluate(expression(&with[input]), &context).render()
+    };
+    for (kind, run, outputs, max, review, push, fake) in [
+        (
+            "implement",
+            "branch",
+            "create_pull_request,noop,missing_tool,missing_data",
+            "3",
+            "",
+            "",
+            "implement",
+        ),
+        (
+            "fix",
+            "branch",
+            "push_to_pull_request_branch,noop,missing_tool,missing_data",
+            "3",
+            "",
+            "42",
+            "implement",
+        ),
+        (
+            "review",
+            "analysis",
+            "add_comment,noop",
+            "1",
+            "42",
+            "",
+            "review",
+        ),
+        // Up to the bounds' max_outputs: the closes and the comment.
+        (
+            "triage",
+            "analysis",
+            "close_issue,add_comment,noop,missing_tool,missing_data",
+            "max",
+            "",
+            "",
+            "comment",
+        ),
+        (
+            "research",
+            "analysis",
+            "add_comment,noop,missing_tool,missing_data",
+            "3",
+            "",
+            "",
+            "comment",
+        ),
+    ] {
+        let got = [
+            "kind",
+            "outputs",
+            "max-outputs",
+            "review-item",
+            "push-item",
+            "fake-profile",
+        ]
+        .map(|input| routed(input, kind, "fake"));
+        assert_eq!(got, [run, outputs, max, review, push, fake], "{kind}");
+        assert_eq!(routed("fake-profile", kind, "claude"), "", "{kind}");
+    }
+    for line in [
+        "allow: .github/agentic-job/dispatch.toml",
+        "comment-target: ${{ inputs.item }}",
+        "issue: ${{ inputs.item }}",
+        "output-repo: ${{ inputs.repo }}",
+        "item-repo: ${{ inputs.item-repo }}",
+        "apply-environment: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}",
+        "apply-partial: false",
+        "notify: ${{ (inputs.kind == 'review' || inputs.scripted) && 'none' || 'comment' }}",
+        "model: ${{ needs.target.outputs.agent != 'fake' && vars.AGENT_MODEL || '' }}",
+        "inference-url: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_URL || '' }}",
+        "inference-audience: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_AUDIENCE || '' }}",
+        "inference-register: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_REGISTER || 'github-oidc' }}",
+        "inference-provider: ${{ needs.target.outputs.agent != 'fake' && vars.INFERENCE_PROVIDER || '' }}",
+    ] {
+        assert!(text.contains(line), "{line}");
+    }
+    let forwarded: Vec<&str> = doc["jobs"]["run"]["secrets"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap())
+        .collect();
+    assert_eq!(forwarded, ["SAFE_OUTPUTS_PAT"]);
+    // INFERENCE_API_KEY is declared so that callers that pass it still
+    // parse, but not forwarded: agentic-job.yml drops it and refuses
+    // `api-key`.
+    for name in ["SAFE_OUTPUTS_PAT", "INFERENCE_API_KEY"] {
+        let required = &doc["on"]["workflow_call"]["secrets"][name]["required"];
+        assert_eq!(required.as_bool(), Some(false), "{name}");
+    }
+    let token = &doc["jobs"]["run"]["secrets"]["SAFE_OUTPUTS_PAT"];
+    assert_eq!(
+        token.as_str(),
+        Some("${{ !inputs.scripted && secrets.SAFE_OUTPUTS_PAT || '' }}")
+    );
+    for scripted in [false, true] {
+        for value in ["", "test-value"] {
+            let context = [
+                ("inputs.scripted", Expr::Bool(scripted)),
+                ("secrets.SAFE_OUTPUTS_PAT", Expr::text(value)),
+            ];
+            let wanted = if scripted { "" } else { value };
+            assert_eq!(
+                evaluate(expression(token), &context).render(),
+                wanted,
+                "{scripted} {value:?}"
+            );
+        }
+    }
+}
+
+/// The agent configuration variables reach only opencode and vibe.
+#[test]
+fn agent_configuration_variables_reach_only_opencode_and_vibe() {
+    for (file, agent) in [
+        ("dispatch.yml", "needs.target.outputs.agent"),
+        ("review.yml", "vars.AGENT"),
+    ] {
+        let text = workflow(file);
+        for (input, variable) in [
+            ("agent-config-repo", "vars.AGENT_CONFIG_REPO"),
+            ("agent-config-path", "vars.AGENT_CONFIG_PATH"),
+        ] {
+            let found = Regex::new(&format!(r"(?m)^      {input}: \$\{{\{{ (.+) \}}\}}$"))
+                .unwrap()
+                .captures(&text)
+                .unwrap_or_else(|| panic!("{file}: no {input}"));
+            let expression = found.get(1).unwrap().as_str();
+            for name in ["fake", "claude", "opencode", "vibe"] {
+                for config in ["", "operator-config"] {
+                    let context = [(agent, Expr::text(name)), (variable, Expr::text(config))];
+                    let wanted = if ["opencode", "vibe"].contains(&name) {
+                        config
+                    } else {
+                        ""
+                    };
+                    assert_eq!(
+                        evaluate(expression, &context).render(),
+                        wanted,
+                        "{file} {input} {name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The dispatch caller's wiring: `agentic-job dispatch` decides the skills
+/// output (src/dispatch.rs), every input the caller passes exists in the
+/// same commit's reusable workflow, and the URL of what apply made comes
+/// back out through the wrapper.
+#[test]
+fn the_dispatch_callers_inputs_and_outputs_are_wired() {
+    let dispatch = definition("dispatch.yml");
+    let with = &dispatch["jobs"]["run"]["with"];
+    assert_eq!(
+        with["agent-skills"].as_str(),
+        Some("${{ needs.target.outputs.skills == 'true' }}")
+    );
+    let reusable = definition("agentic-job.yml");
+    let inputs = &reusable["on"]["workflow_call"]["inputs"];
+    for input in with.as_hash().unwrap().keys() {
+        assert!(!inputs[input.as_str().unwrap()].is_badvalue(), "{input:?}");
+    }
+    let apply = definition("apply.yml");
+    for (file, doc, value) in [
+        ("dispatch.yml", &dispatch, "jobs.run.outputs.result-url"),
+        (
+            "agentic-job.yml",
+            &reusable,
+            "jobs.apply.outputs.result-url",
+        ),
+        ("apply.yml", &apply, "jobs.apply.outputs.result-url"),
+    ] {
+        let output = &doc["on"]["workflow_call"]["outputs"]["result-url"];
+        assert!(
+            output["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{file}"
+        );
+        assert_eq!(
+            output["value"].as_str(),
+            Some(format!("${{{{ {value} }}}}").as_str()),
+            "{file}"
+        );
+    }
+    assert_eq!(
+        apply["jobs"]["apply"]["outputs"]["result-url"].as_str(),
+        Some("${{ steps.result.outputs.result-url }}")
+    );
+}
+
+/// CI's dispatch and compose calls are scripted, which gives each run a
+/// concurrency group of its own, and the hosted agent job's bound retries
+/// a 5xx in listing the run's jobs rather than failing ci.
+#[test]
+fn ci_calls_dispatch_and_compose_scripted() {
+    let ci = definition("ci.yml");
+    for (job, file) in [
+        ("e2e-dispatch", "dispatch"),
+        ("e2e-compose", "example-compose"),
+    ] {
+        let uses = format!("./.github/workflows/{file}.yml");
+        assert_eq!(
+            ci["jobs"][job]["uses"].as_str(),
+            Some(uses.as_str()),
+            "{job}"
+        );
+        assert_eq!(
+            ci["jobs"][job]["with"]["scripted"].as_bool(),
+            Some(true),
+            "{job}"
+        );
+    }
+    let bound = named_step(&ci, "Bound the hosted end-to-end agent job")["run"]
+        .as_str()
+        .unwrap();
+    assert!(
+        bound.contains(r#"read_api() { local out; for try in 1 2 3; do out=$(gh api "$@") && { printf '%s\n' "$out"; return; }; sleep 5; done; return 1; }"#),
+        "{bound}"
+    );
+    assert_eq!(bound.matches("gh api").count(), 1, "{bound}");
+}
+
+/// The shipped dispatch-*.sh setups, played by the scripted agent in a
+/// session of its own, in a temporary HOME, hand back what each profile
+/// should: a patch, or one comment; the review's names the head it
+/// reviewed and the toolchain it ran, and leaves the checkout clean.
+#[test]
+fn the_shipped_dispatch_setups_hand_back_through_a_fake_agent_session() {
+    use serde_json::Value;
+    let fake = Path::new(env!("CARGO_BIN_EXE_fake-agent"))
+        .parent()
+        .unwrap();
+    // The review session runs cargo on a Rust target, so cargo must be on
+    // PATH; a rustup cargo finds its toolchains from the real home.
+    let search = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+    let rustup = std::env::var_os("RUSTUP_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"),
+        PathBuf::from,
+    );
+    // The verdict line `agentic-job review verdict` reads in check.
+    let verdict = Regex::new(r"^VERDICT: (APPROVE|CHANGES)\n").unwrap();
+    let toolchain = Regex::new(r"\nToolchain: cargo \d").unwrap();
+    for profile in ["implement", "comment", "review"] {
+        let home = tempfile::tempdir().unwrap();
+        let work = home.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(home.path().join("out")).unwrap();
+        let command = |program: &Path, dir: &Path| {
+            let mut command = Command::new(program);
+            command
+                .current_dir(dir)
+                .env("HOME", home.path())
+                .env("RUSTUP_HOME", &rustup)
+                .env("PATH", &search);
+            command
+        };
+        let setup = command(Path::new("sh"), home.path())
+            .arg(root().join(format!("workflow/dispatch-{profile}.sh")))
+            .output()
+            .unwrap();
+        assert!(setup.status.success(), "{profile}: {setup:?}");
+        git(&work, &["init", "-q"]);
+        if profile == "review" {
+            std::fs::create_dir(work.join("src")).unwrap();
+            std::fs::write(work.join("src/lib.rs"), "").unwrap();
+            std::fs::write(
+                work.join("Cargo.toml"),
+                "[package]\nname = \"trial\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .unwrap();
+            std::fs::write(
+                work.join("Cargo.lock"),
+                "version = 4\n\n[[package]]\nname = \"trial\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
+            git(&work, &["add", "."]);
+        }
+        git(&work, &["commit", "--allow-empty", "-qm", "Fixture"]);
+        let drive = |args: &[&str]| {
+            command(Path::new(BIN), &work)
+                .arg("acp-drive")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let started = drive(&["start", "--agent", "fake"]);
+        assert!(started.status.success(), "{profile}: {started:?}");
+        // Stopped before anything is checked, so that no daemon is left.
+        let ended = drive(&["prompt", "Run the dispatch trial."]);
+        let events = drive(&["events"]);
+        let stopped = drive(&["stop"]);
+        for output in [&ended, &events, &stopped] {
+            assert!(output.status.success(), "{profile}: {output:?}");
+        }
+        let ended: Value = serde_json::from_slice(&ended.stdout).unwrap();
+        assert_eq!(ended["stop_reason"], "end_turn", "{profile}");
+        let events: Value = serde_json::from_slice(&events.stdout).unwrap();
+        for event in events["events"].as_array().unwrap() {
+            match event["kind"].as_str() {
+                Some("permission") => assert_eq!(event["decision"], "allow", "{profile}: {event}"),
+                Some("tool_result") => {
+                    assert_eq!(event["status"], "completed", "{profile}: {event}");
+                }
+                _ => {}
+            }
+        }
+        let outcome: Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("out/outcome.json")).unwrap())
+                .unwrap();
+        assert!(outcome["stopped_early"].is_null(), "{profile}: {outcome}");
+        assert!(
+            outcome["summary"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{profile}: {outcome}"
+        );
+        if profile == "implement" {
+            let patch = std::fs::read_to_string(work.join("DISPATCH-TRIAL.md")).unwrap();
+            assert!(patch.contains("No model"), "{patch}");
+            continue;
+        }
+        let line = std::fs::read_to_string(home.path().join("out/safe-outputs.jsonl")).unwrap();
+        let output: Value = serde_json::from_str(&line).unwrap();
+        let mut keys: Vec<&String> = output.as_object().unwrap().keys().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["body", "type"], "{profile}: {output}");
+        assert_eq!(output["type"], "add_comment", "{profile}");
+        if profile == "review" {
+            let body = output["body"].as_str().unwrap();
+            assert!(verdict.is_match(body), "{body}");
+            assert!(body.contains(&git(&work, &["rev-parse", "HEAD"])), "{body}");
+            assert!(toolchain.is_match(body), "{body}");
+            assert_eq!(git(&work, &["status", "--porcelain"]), "");
         }
     }
 }
