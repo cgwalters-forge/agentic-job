@@ -52,6 +52,14 @@ serve at fixed points of setup's order. The image and the
 `secure-host` binary still live in agentic-job's `secure_host/`, and
 the run token's probes in `run/probe.rs`.
 
+`crates/safe-outputs` is gh-aw's safe-output contract as a library: the
+request vocabulary and forge profile (`vocabulary.rs`) and gh-aw's
+collector and sanitizer, ported (`collect/`). It depends on neither
+agentic-job nor secure-host; agentic-job re-exports it at its old paths
+(`policy::Forge`, `check::OUTPUTS_FILE`, `collect::collect`, ...).
+[safe-outputs.md](safe-outputs.md#library-boundary) lists what moved and
+what stays.
+
 Paths below are relative to `crates/agentic-job/src/`.
 
 | Path | Responsibility |
@@ -62,7 +70,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `event/` | Event admission, run guards and fenced task context |
 | `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
 | `check/` | Output policy and strict mail-patch parsing |
-| `collect/` | gh-aw's collector and sanitizer, ported: `handback check`, check.yml and callers off GitHub |
+| `collect.rs` | The `collect` command: the safe-outputs collector on a hand-back and policy, for `handback check`, check.yml and callers off GitHub |
 | `apply/` | Publishing checked outputs behind `Publisher`: Forgejo's, and on GitHub the types the bounds route away from gh-aw's handlers (`publish.rs`) |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |

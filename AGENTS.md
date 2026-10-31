@@ -10,6 +10,7 @@ Start with the [README](README.md) for usage, limitations and topic documentatio
 
 - `crates/agentic-job/`: CLI, policy, event admission, sessions, sandbox, run, check and audit code.
 - `crates/secure-host/`: host setup with nothing agent-specific, which agentic-job depends on; being split out ([layout](docs/layout.md#rust-workspace)).
+- `crates/safe-outputs/`: request vocabulary and gh-aw's collector as a library, with no dependency on the other crates ([boundary](docs/safe-outputs.md#library-boundary)).
 - `crates/agentic-job/src/bin/fake-agent.rs`: scripted agent for protocol and end-to-end tests.
 - `crates/agentic-job/tests/`: CLI integration tests; `data/` fixtures and `corpus/` old/new implementation parity tests.
 - `egress/`: Python filtering proxy policy, tests and hash-pinned dependencies embedded in the binary.

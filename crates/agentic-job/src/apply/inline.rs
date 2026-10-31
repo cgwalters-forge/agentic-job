@@ -46,29 +46,9 @@ pub(crate) fn checked_target(
     })
 }
 
-/// Refuse unmapped fields before collection can drop them, including nulls.
-pub(crate) fn field_names(item: &Map<String, Value>) -> Result<()> {
-    const FIELDS: &[&str] = &[
-        "type",
-        "repo",
-        "pull_request_number",
-        "path",
-        "line",
-        "side",
-        "body",
-    ];
-    for key in item.keys() {
-        ensure!(
-            FIELDS.contains(&key.as_str()),
-            "neutral inline comment field {key} is not representable (multiline ranges are not supported)"
-        );
-    }
-    Ok(())
-}
-
 /// Refuse unsupported fields in check too, before publishing can be attempted.
 pub(crate) fn fields(item: &Map<String, Value>, forge: crate::policy::Forge) -> Result<()> {
-    field_names(item)?;
+    safe_outputs::collect::inline_field_names(item)?;
     ensure!(
         item.get("line")
             .and_then(Value::as_u64)

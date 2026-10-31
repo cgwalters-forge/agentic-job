@@ -181,7 +181,7 @@ code-scanning alerts and custom jobs.
 In agentic-job, the agent writes JSONL to a file, and `check` validates it
 on another machine after the run, with a port of the same pinned collector. There are
 24 types: 21 actions plus `noop`, `missing_tool` and `missing_data`
-([`OUTPUT_TYPES`](../crates/agentic-job/src/policy.rs)). Each one is off
+([`OUTPUT_TYPES`](../crates/safe-outputs/src/vocabulary.rs)). Each one is off
 until the bounds enable it, and the bounds cap the count of each and, for
 most actions, their targets ([safe-outputs.md](safe-outputs.md)).
 

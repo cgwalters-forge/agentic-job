@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::vocabulary::{ITEM_NUMBER, OUTPUT_TYPES};
 
 fn checkout() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -9,7 +10,7 @@ fn checkout() -> PathBuf {
 /// Links as `policy` has them kept: to any host under a top-level domain,
 /// which is what the fixtures were generated with.
 fn keeps_public(host: &str) -> bool {
-    crate::policy::link_domains()
+    crate::link_domains()
         .iter()
         .any(|tld| host == tld || host.ends_with(&format!(".{tld}")))
 }
@@ -57,7 +58,7 @@ fn types_are_gh_aws() {
     let theirs: Vec<&str> = validation.keys().map(String::as_str).collect();
     assert_eq!(ours, theirs, "every type of validation.json, in its order");
     // And so every type a policy may allow.
-    for name in crate::policy::OUTPUT_TYPES {
+    for name in OUTPUT_TYPES {
         assert!(ours.contains(name), "{name}");
     }
 }
@@ -68,7 +69,8 @@ fn types_are_gh_aws() {
 /// no requests but diagnostics, which `check` drops and this leaves out.
 #[test]
 fn matches_gh_aws_collector() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/collect");
+    // Read where agentic-job's tests keep them, rather than copied here.
+    let dir = checkout().join("crates/agentic-job/tests/data/collect");
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -237,80 +239,110 @@ fn parse_int_as_javascript() {
     }
 }
 
-/// The command reads the hand-back's file and the policy's types, and
-/// fails where the collector refused a line, as check.yml's step after
-/// gh-aw's collector does.
+/// The bounded entry point, as a caller with no agent run or CI system
+/// uses it: a file past the cap or not UTF-8 is refused whole, and each
+/// malformed line is refused on its own, the others still collected.
 #[test]
-fn command_writes_the_result() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut policy = crate::policy::tests::policy();
-    policy.safe_outputs.create_pull_request = None;
-    policy.safe_outputs.others.clear();
-    policy.safe_outputs.others.insert(
-        "noop".to_owned(),
-        serde_json::from_value(json!({"max": 1})).unwrap(),
-    );
-    let policy_path = dir.path().join("policy.json");
-    std::fs::write(&policy_path, serde_json::to_string(&policy).unwrap()).unwrap();
-    let outputs = dir.path().join("outputs");
-    std::fs::create_dir(&outputs).unwrap();
-    let collected = dir.path().join("collected.json");
-    let args = Args {
-        policy: policy_path,
-        outputs: outputs.clone(),
-        collected: collected.clone(),
-    };
-    let read = || -> Value {
-        serde_json::from_str(&std::fs::read_to_string(&collected).unwrap()).unwrap()
-    };
-
-    assert_eq!(run(&args).unwrap(), Exit::Success);
-    assert_eq!(read(), json!({"items": [], "errors": []}));
-
-    std::fs::write(
-        outputs.join(OUTPUTS_FILE),
-        "{\"type\":\"noop\",\"message\":\"Done, @someone\"}\n{\"type\":\"add_comment\",\"body\":\"x\"}\n",
-    )
-    .unwrap();
-    assert_eq!(run(&args).unwrap(), Exit::Failure);
-    assert_eq!(
-        read(),
-        json!({
-            "items": [{"type": "noop", "message": "Done, `@someone`"}],
-            "errors": ["Line 2: Unexpected output type 'add_comment'. Expected one of: noop"],
-        })
-    );
-
-    // Not through a link the agent's machine planted, nor past the cap.
-    std::fs::remove_file(outputs.join(OUTPUTS_FILE)).unwrap();
-    std::os::unix::fs::symlink(&args.policy, outputs.join(OUTPUTS_FILE)).unwrap();
-    let err = run(&args).unwrap_err().to_string();
-    assert!(err.ends_with("is not a regular file"), "{err}");
-    std::fs::remove_file(outputs.join(OUTPUTS_FILE)).unwrap();
-    let big = usize::try_from(MAX_OUTPUTS_BYTES).unwrap() + 1;
-    std::fs::write(outputs.join(OUTPUTS_FILE), "\n".repeat(big)).unwrap();
-    let err = run(&args).unwrap_err().to_string();
-    assert!(err.contains("over 1048576"), "{err}");
+fn bounded_input() {
+    let config = object(json!({"noop": {"max": 5}}));
+    let max = usize::try_from(MAX_OUTPUTS_BYTES).unwrap();
+    let noop = r#"{"type":"noop","message":"done"}"#;
+    let at_cap = format!("{noop}\n{}", "\n".repeat(max - noop.len() - 1));
+    let over_cap = format!("{at_cap}\n");
+    // The bytes, and what they are refused with whole.
+    let whole: &[(&[u8], Option<&str>)] = &[
+        (b"", None),
+        (at_cap.as_bytes(), None),
+        (
+            over_cap.as_bytes(),
+            Some("outputs.jsonl is over 1048576 bytes"),
+        ),
+        (
+            b"{\"type\":\"noop\",\"message\":\"\xff\"}",
+            Some("outputs.jsonl is not UTF-8"),
+        ),
+    ];
+    for (bytes, want) in whole {
+        let got = collect_bytes(bytes, &config, Forge::Github, &keeps_public);
+        match want {
+            None => assert!(got.unwrap().errors.is_empty(), "{} bytes", bytes.len()),
+            Some(want) => assert_eq!(got.unwrap_err().to_string(), *want),
+        }
+    }
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    // The line after a `noop` that is taken, and how its refusal starts.
+    let lines = [
+        ("{", "Line 2: Invalid JSON - "),
+        (
+            r#"{"type":"noop","message":"\ud800"}"#,
+            "Line 2: Invalid JSON - ",
+        ),
+        (
+            r#"{"type":"noop","message":"x","n":1e400}"#,
+            "Line 2: Invalid JSON - ",
+        ),
+        (
+            deep.as_str(),
+            "Line 2: Invalid JSON - recursion limit exceeded",
+        ),
+        (r#""noop""#, "Line 2: Missing required 'type' field"),
+        (
+            r#"{"message":"x"}"#,
+            "Line 2: Missing required 'type' field",
+        ),
+        (
+            r#"{"type":"noop"}"#,
+            "Line 2: noop requires a 'message' field",
+        ),
+        (
+            r#"{"type":"noop","message":7}"#,
+            "Line 2: noop requires a 'message' field",
+        ),
+    ];
+    for (line, want) in lines {
+        let text = format!("{noop}\n{line}\n");
+        let got = collect_bytes(text.as_bytes(), &config, Forge::Github, &keeps_public).unwrap();
+        assert_eq!(got.items.len(), 1, "{line}");
+        assert_eq!(got.errors.len(), 1, "{line}");
+        assert!(got.errors[0].starts_with(want), "{line}: {:?}", got.errors);
+    }
 }
 
-/// The collector is told of a secondary pull request in its count.
+/// Every forge profile a policy admits: the guide names a type's fields
+/// for each type the profile holds, never one the forge refuses, and an
+/// inline comment off GitHub keeps only the fields that mean the same
+/// there, where GitHub's collector stays gh-aw's.
 #[test]
-fn the_policy_as_the_collector_takes_it() {
-    let mut policy = crate::policy::tests::policy();
-    let max = |config: &Map<String, Value>| config["create_pull_request"]["max"].clone();
-    assert_eq!(max(&config(&policy).unwrap()), json!(1));
-    policy.secondary_pull_request = Some(crate::policy::Secondary {
-        repo: "o/tool".into(),
-        clone_url: "https://example.invalid/o/tool".into(),
-        base: "main".into(),
-        branch_prefix: "agentic-job/".into(),
-        max: 1,
-        max_patch_bytes: 1 << 20,
-        max_patch_files: 3,
-        protected_files: Vec::new(),
-        protect_top_level_dot_folders: true,
-        unprotected_dot_folders: Vec::new(),
-        protected_paths: Vec::new(),
-    });
-    assert_eq!(max(&config(&policy).unwrap()), json!(2));
+fn every_forge_profile() {
+    let config = object(json!({CREATE_REVIEW_COMMENT: {"max": 1}}));
+    let single = json!({"type": CREATE_REVIEW_COMMENT, "body": "x", "line": 3, "path": "a.rs"});
+    let mut range = single.clone();
+    range["start_line"] = json!(2);
+    let refused = "Line 1: create_pull_request_review_comment: neutral inline comment field \
+        start_line is not representable (multiline ranges are not supported)";
+    for forge in [Forge::Github, Forge::Forgejo, Forge::Gitlab] {
+        let held: Vec<&str> = OUTPUT_TYPES
+            .iter()
+            .copied()
+            .filter(|name| forge.holds(name))
+            .collect();
+        assert!(held.contains(&CREATE_REVIEW_COMMENT), "{forge:?}");
+        for name in held {
+            let guide = field_guide(name, forge).unwrap();
+            let named = guide.contains(&format!("`{ITEM_NUMBER}`"));
+            assert!(
+                !(named && forge.refuses_field(ITEM_NUMBER)),
+                "{forge:?} {name}: {guide}"
+            );
+        }
+        let got = collect(&single.to_string(), &config, forge, &keeps_public);
+        assert_eq!(got.items, [object(single.clone())], "{forge:?}");
+        let got = collect(&range.to_string(), &config, forge, &keeps_public);
+        if forge == Forge::Github {
+            assert_eq!(got.items, [object(range.clone())], "{forge:?}");
+        } else {
+            assert!(got.items.is_empty(), "{forge:?}");
+            assert_eq!(got.errors, [refused], "{forge:?}");
+        }
+    }
 }

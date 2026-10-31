@@ -1,0 +1,25 @@
+[package]
+name = "safe-outputs"
+description = "gh-aw's safe-output request vocabulary and collector: validate and sanitize an outputs.jsonl, bounded, without an agent run or a CI system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Nothing of agentic-job or secure-host: callers read the policy, the
+# hand-back and their credentials, and give this the text and settings.
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+# The collector's results follow the configuration's and the request's
+# key order, as gh-aw's do, and read numbers as JavaScript does: stated
+# here, not left to whatever else the binary links (agent-client-protocol
+# brings `preserve_order` to agentic-job).
+serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
+unicode-normalization.workspace = true
