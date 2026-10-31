@@ -1,0 +1,123 @@
+# A job that runs no agent and still proposes a change through check and
+# apply, as another repository would write one: `cargo fmt --all` on the
+# default branch, handed back as a pull request request with its patch
+# (docs/safe-outputs.md#without-an-agent).
+#
+# The producer secures its host first, as any job can
+# (example-secure-host.yml), and holds no write credential: it uploads
+# the hand-back, and agentic-job.yml's `proposals-artifact` takes it to
+# the same check and apply an agent's goes to, with no agent job. Nothing
+# about the producer is trusted there; check holds what it uploaded to
+# the bounds file like any agent's.
+#
+# CI's `e2e-deterministic` calls it with `apply-staged`, which validates
+# the request and writes nothing.
+name: example-deterministic
+
+on:
+  workflow_call:
+    # Forward only this declared credential, never inherit.
+    secrets:
+      SAFE_OUTPUTS_PAT:
+        required: false
+    inputs:
+      scripted:
+        description: >-
+          CI's call: the tree is formatted already, so one line is left unformatted for the job
+          to format, and there is always a change to propose
+        type: boolean
+        default: false
+      apply-staged:
+        type: boolean
+        default: false
+      apply-environment:
+        type: string
+        default: agent-apply
+  workflow_dispatch:
+    inputs:
+      apply-staged:
+        description: Show what apply would do without writing anything
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  fmt:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # The commit that started the run, which for a pull request on
+      # main is to be on main: run it from main, on a schedule or by hand.
+      # CI's call formats its own revision, which it then does not apply.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Another repository names the action by the commit it has read:
+      #   uses: cgwalters-forge/actions/secure-host@COMMIT
+      - name: Secure the host
+        uses: ./secure-host # zizmor: ignore[self-repository] Exercise the checked-out forwarder under test.
+      - name: Leave one line unformatted (CI)
+        if: ${{ inputs.scripted }}
+        run: |
+          printf 'pub const  SCRIPTED : () = ();\n' >> crates/safe-outputs/src/lib.rs
+      # The hand-back check takes: outputs.jsonl, and for a change
+      # base.json and one commit's `git format-patch` with the base it
+      # starts from in gh-aw's header, on the branch apply requires,
+      # agent-run-RUNID of this run.
+      - name: Format, and hand back the change
+        env:
+          REPO: ${{ github.repository }}
+          BRANCH: agent-run-${{ github.run_id }}
+        run: |
+          mkdir proposals
+          base=$(git rev-parse HEAD)
+          cargo fmt --all
+          if git diff --quiet; then
+            jq -nc '{type: "noop", message: "cargo fmt --all changed nothing."}' > proposals/outputs.jsonl
+            exit 0
+          fi
+          git -c user.name=cargo-fmt -c user.email=cargo-fmt@localhost commit -qam 'style: Format with cargo fmt'
+          git format-patch --stdout --no-signature -1 HEAD | sed "1a X-GH-AW-Base-Commit: $base" > "proposals/aw-$BRANCH.patch"
+          jq -nc --arg repo "$REPO" --arg commit "$base" '{repo: $repo, ref: "main", commit: $commit}' > proposals/base.json
+          jq -nc --arg branch "$BRANCH" --arg base "$base" \
+            '{type: "create_pull_request", title: "style: Format with cargo fmt", body: "`cargo fmt --all` on \($base).", branch: $branch}' > proposals/outputs.jsonl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-fmt-proposals
+          path: proposals/
+          if-no-files-found: error
+
+  # The smallest call that can open a pull request: no task, agent or
+  # configuration; one output and a noop, within the bounds file; and the
+  # environment holding SAFE_OUTPUTS_PAT, as policy refuses
+  # create_pull_request without one. Another repository names it by the
+  # commit it has read:
+  #   uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+  apply:
+    needs: fmt
+    uses: ./.github/workflows/agentic-job.yml # zizmor: ignore[self-repository] Call the reusable workflow from this revision.
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+    # Read only: the pull request is opened from a fork with the
+    # environment's token. GitHub validates the permissions of the jobs
+    # the call skips too, the agent job's reads and the register job's
+    # `id-token`; no job of this call requests an OIDC token.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    with:
+      id: cargo-fmt
+      repo: ${{ github.repository }}
+      allow: .github/agentic-job/allow.toml
+      outputs: create_pull_request,noop
+      max-outputs: "1"
+      proposals-artifact: cargo-fmt-proposals
+      apply-environment: ${{ inputs.apply-environment || 'agent-apply' }}
+      apply-staged: ${{ inputs.apply-staged }}
+      artifact-prefix: cargo-fmt-

@@ -89,7 +89,7 @@ for (const pat of [undefined, '', 'test-pat']) {
   });
 }
 
-for (const filename of ['example', 'example-command', 'example-pull-request', 'example-schedule', 'review']) {
+for (const filename of ['example', 'example-command', 'example-deterministic', 'example-pull-request', 'example-schedule', 'review']) {
   test(`${filename} explicitly forwards the optional safe outputs PAT`, () => {
     const caller = readFileSync(join(__dirname, `../.github/workflows/${filename}.yml`), 'utf8');
     assert.ok(caller.includes('SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}'));
@@ -100,9 +100,9 @@ test('every CI safe-output caller exercises job-token fallback without deploymen
   const ci = readFileSync(join(__dirname, '../.github/workflows/ci.yml'), 'utf8');
   const jobs = [...ci.matchAll(/^  ([-\w]+):\n([\s\S]*?)(?=^  [-\w]+:\n|$(?![\s\S]))/gm)];
   const callers = jobs.filter(([, , job]) =>
-    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose)\.yml/.test(job));
+    /uses: \.\/\.github\/workflows\/(agentic-job|dispatch|example-compose|example-deterministic)\.yml/.test(job));
   assert.deepEqual(callers.map(([, name]) => name), [
-    'e2e-proposals', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event',
+    'e2e-proposals', 'e2e-deterministic', 'e2e-full', 'e2e-limit', 'e2e-write-policy', 'e2e-sandbox', 'e2e-event',
     'e2e-analysis', 'e2e-analysis-refused', 'e2e-secondary', 'e2e-secondary-refused', 'e2e-people', 'e2e-check-run', 'e2e-dispatch', 'e2e-compose', 'e2e-review', 'e2e-items', 'e2e-threads',
   ]);
   for (const [, name, caller] of callers) {

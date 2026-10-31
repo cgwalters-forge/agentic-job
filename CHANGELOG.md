@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `example-deterministic.yml` proposes a pull request with no agent: a
+  job runs secure-host and `cargo fmt --all`, and hands the patch to check
+  and apply through `proposals-artifact`. CI's `e2e-deterministic` runs it
+  staged (docs/safe-outputs.md#without-an-agent).
 - apply's result step, which sets `result-url` and the no-result outputs
   and summary, is policy's binary, `agentic-job result`, in place of a
   github-script step, with the same outputs, summary and sanitized reason.

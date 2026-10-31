@@ -19,6 +19,7 @@
 "example.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
 "example-command.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
 "example-compose.yml" = "Composes this revision's policy, check and apply workflows by local path to test them."
+"example-deterministic.yml" = "Runs this revision's secure-host and reusable workflow by local path; a caller pins both by commit, and tests/workflows.rs checks that copy without exemption."
 "example-pull-request.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
 "example-schedule.yml" = "Calls this revision's reusable workflow by local path; a caller pins it by commit."
 "example-secure-host.yml" = "Runs this revision's secure-host by local path, and probes runner-command injection with deprecated log commands."
