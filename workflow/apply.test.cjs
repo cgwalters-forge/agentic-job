@@ -1374,126 +1374,62 @@ test('a pull request of a caller that passes no issue links nothing, and the run
   }
 });
 
-// gh-aw's sanitizer, as far as these tests go: it neutralizes a mention and cuts at its limit.
-const sanitized = [];
-// It logs through a global `core`, which the step has to set.
-const sanitizeContent = (text, max) => {
-  assert.ok(globalThis.core?.summary, 'gh-aw logs through a global core');
-  sanitized.push(max);
-  return text.replace(/@(\w+)/g, '`@$1`').slice(0, max);
-};
-
 // A plain value of a github-script step's environment.
 function scriptEnv(name, key) {
   const section = workflow.split(`- name: ${name}\n`)[1].split('        with:\n')[0];
   return section.match(new RegExp(`^          ${key}: (.*)$`, 'm'))?.[1];
 }
 
-// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the handlers and
-// the reason keep the links the policy call wrote down, as `collect` does.
+// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the handlers
+// keep the links the policy call wrote down, as `collect` does. The
+// result step's reason is tests/workflows.rs's.
 test('every sanitizer keeps the links the policy keeps', () => {
   const domains = '${{ fromJSON(inputs.policy).allowed-domains }}';
   assert.equal(scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_ALLOWED_DOMAINS'), domains);
-  assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_ALLOWED_DOMAINS'), domains);
   const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
   assert.match(policy, /\n        value: \$\{\{ jobs\.policy\.outputs\.allowed-domains \}\}\n/);
   assert.match(policy, /\n      allowed-domains: \$\{\{ steps\.request\.outputs\.allowed-domains \}\}\n/);
   assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
 });
 
-test('the reason of a run with no result is sanitized as the handlers sanitize a comment', () => {
-  assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_SAFE_OUTPUTS_URLS'), 'allowed-or-code-region');
-  assert.equal(scriptEnv('Say where what the run made is', 'GH_AW_SAFE_OUTPUTS_URLS'),
-    scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_SAFE_OUTPUTS_URLS'));
-});
-
-// Runs the step after upload against a forge holding `posted` on the issue,
-// for a run whose checked outputs, after the guard, are `items`, under
-// bounds allowing the types `bounds`. With `real`, the sanitizer is the
-// pinned gh-aw checkout's at GH_AW_JS, run with the step's environment.
-async function result({ made = [], skipped = [], pr = null, issue = '64', posted = [], poster = 'github-actions[bot]', artifacts = '', items = [], target = '64',
-  bounds = ['add_comment', 'missing_data', 'missing_tool', 'noop'], review = 'false', real = false } = {}) {
+// The result step's outputs, which src/apply/result.rs tests, for a run
+// whose checked outputs, after the guard, are `items`, with `pr` opened.
+function resultOutputs(items, pr = null) {
   const dir = mkdtempSync(join(homedir(), 'result-test-'));
-  const urls = process.env.GH_AW_SAFE_OUTPUTS_URLS;
   try {
-    writeFileSync(join(dir, 'applied.json'), JSON.stringify({ made, already_applied: skipped, pull_request: pr }));
+    mkdirSync(join(dir, 'apply-binary'));
+    copyFileSync(join(__dirname, '../target/debug/agentic-job'), join(dir, 'apply-binary/agentic-job'));
+    writeFileSync(join(dir, 'applied.json'), JSON.stringify({ made: [], already_applied: [], pull_request: pr }));
     writeFileSync(join(dir, 'agent_output.json'), JSON.stringify({ items, errors: [] }));
-    writeFileSync(join(dir, 'config.json'), JSON.stringify(Object.fromEntries(bounds.map(type => [type, { max: 1 }]))));
-    const outputs = {}, summary = [], queries = [], created = [];
-    const core = { info: () => {}, warning: () => {}, setOutput: (key, value) => { outputs[key] = value; },
-      summary: { addHeading: text => { summary.push(text); return core.summary; },
-        addLink: (text, href) => { summary.push(href); return core.summary; },
-        addRaw: text => { summary.push(text); return core.summary; }, write: async () => {} } };
-    const github = {
-      paginate: async (method, params) => method(params),
-      rest: { issues: {
-        listComments: params => { queries.push(params); return posted; },
-        createComment: async params => { created.push(params); },
-      } },
-    };
-    const env = { GH_AW_TMP: dir, OUTPUT_REPO: 'owner/repo', ISSUE: issue, POSTER: poster, ARTIFACT_PREFIX: artifacts,
-      COMMENT_TARGET: target, REVIEW: review, GITHUB_RUN_ID: '7', RUN_URL: 'https://github.com/caller/repo/actions/runs/7', RUNNER_TEMP: '/runner',
-      GH_AW_SAFE_OUTPUTS_URLS: scriptEnv('Say where what the run made is', 'GH_AW_SAFE_OUTPUTS_URLS') };
-    // gh-aw's setup action copies actions/setup/js to the step's directory; the sanitizer reads the real environment.
-    if (real) process.env.GH_AW_SAFE_OUTPUTS_URLS = env.GH_AW_SAFE_OUTPUTS_URLS;
-    const fakeRequire = path => path !== '/runner/gh-aw/actions/sanitize_content.cjs' ? require(path)
-      : real ? require(join(process.env.GH_AW_JS, 'sanitize_content.cjs')) : { sanitizeContent };
-    await new AsyncFunction('require', 'process', 'core', 'github', script('Say where what the run made is'))(
-      fakeRequire, { env }, core, github);
-    return { outputs, summary, queries, created };
+    for (const file of ['output', 'summary']) writeFileSync(join(dir, file), '');
+    const ran = command(dir, 'bash', ['-eo', 'pipefail', '-c', step('Say where what the run made is')],
+      { GH_AW_TMP: dir, RUNNER_TEMP: dir, GITHUB_OUTPUT: join(dir, 'output'), GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+        GH_AW_SAFE_OUTPUTS_URLS: 'allowed-or-code-region', RUN_URL: 'https://github.com/caller/repo/actions/runs/7' });
+    assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+    return Object.fromEntries(readFileSync(join(dir, 'output'), 'utf8').trimEnd().split('\n')
+      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
   } finally {
-    delete globalThis.core;
-    if (urls === undefined) delete process.env.GH_AW_SAFE_OUTPUTS_URLS; else process.env.GH_AW_SAFE_OUTPUTS_URLS = urls;
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const opened = { number: 39, url: 'https://github.com/owner/repo/pull/39' };
-const on = item => ({ type: 'add_comment', url: `https://github.com/owner/repo/issues/${item}#issuecomment-1` });
-
-// The guard and the result notice must agree about a review verdict, even
-// when its URL came from an earlier attempt rather than this one's handler.
-for (const alreadyApplied of [false, true]) {
-  test(`a review verdict ${alreadyApplied ? 'already applied' : 'to apply'} never becomes a no-result notice`, async () => {
-    const body = 'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123';
-    const item = comment(body);
-    const first = await guard([item], [], { target: '454', artifacts: 'dispatch-review-' });
-    const posted = [{ user: actions, body: sent(first.kept[0].body), html_url: on(454).url }];
-    const guarded = alreadyApplied
-      ? await guard([item], posted, { target: '454', artifacts: 'dispatch-review-' }) : first;
-    assert.equal(guarded.kept.length, alreadyApplied ? 0 : 1);
-    if (!alreadyApplied) assert.ok(sent(guarded.kept[0].body).startsWith(`${body}\n\n<!-- agentic-job-applied:`));
-    const notice = await result({ items: guarded.kept, skipped: guarded.skipped,
-      made: alreadyApplied ? [] : [on(454)], issue: '454', target: '454', review: 'true', artifacts: 'dispatch-review-' });
-    assert.equal(notice.outputs['result-url'], on(454).url);
-    assert.equal(notice.outputs['no-result'], undefined);
-    assert.deepEqual(notice.summary, ['What the run made', on(454).url]);
-    assert.deepEqual(notice.created, []);
-  });
-}
-
-test('missing-data alone passes the guard and leaves its reason in the summary', async () => {
+test('missing-data alone passes the guard and fails the job', async () => {
   const item = { type: 'missing_data', data_type: 'workflow', reason: 'needs workflow edits' };
   const guarded = await guard([item]);
   assert.deepEqual(guarded.kept, [item]);
   assert.deepEqual(guarded.skipped, []);
-  const notice = await result({ items: guarded.kept });
-  assert.equal(notice.outputs['no-result'], 'true');
-  assert.equal(notice.outputs['missing-data'], 'true');
-  assert.equal(notice.created.length, 0);
-  assert.match(notice.summary[1], /ended with no result: it handed back only missing_data/);
-  assert.match(notice.summary[1], /> workflow: needs workflow edits/);
+  const outputs = resultOutputs(guarded.kept);
+  assert.equal(outputs['missing-data'], 'true');
   const ended = command(__dirname, 'bash', ['-euo', 'pipefail', '-c', step('Every output was applied')],
-    { PROJECT_REFUSED: '', MISSING_DATA: notice.outputs['missing-data'] });
+    { PROJECT_REFUSED: '', MISSING_DATA: outputs['missing-data'] });
   assert.equal(ended.status, 1, ended.stdout + ended.stderr);
   assert.match(ended.stdout, /required data was missing/);
   // A diagnostic alongside an actual result must not turn success into failure.
-  assert.equal((await result({ items: [item], pr: opened })).outputs['missing-data'], undefined);
-  assert.equal((await result({ items: [item, { type: 'close_issue', item_number: 3 }] })).outputs['missing-data'], undefined);
-  assert.equal((await result({ items: [item, { type: 'noop', message: 'blocked' }] })).outputs['missing-data'], 'true');
+  const opened = { number: 39, url: 'https://github.com/owner/repo/pull/39' };
+  assert.equal(resultOutputs([item], opened)['missing-data'], undefined);
 });
 
-test('the pinned comment handler posts a guarded review verdict, without a no-result notice', { skip: !process.env.GH_AW_JS }, async () => {
+test('the pinned comment handler posts a guarded review verdict', { skip: !process.env.GH_AW_JS }, async () => {
   const body = 'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123';
   const guarded = await guard([comment(body)], [], { target: '454', artifacts: 'dispatch-review-' });
   // Isolate gh-aw's globals and environment from the other workflow tests.
@@ -1532,118 +1468,14 @@ test('the pinned comment handler posts a guarded review verdict, without a no-re
   assert.equal(created.length, 1);
   assert.equal(created[0].issue_number, 454);
   assert.ok(created[0].body.startsWith(`${body}\n\n<!-- agentic-job-applied:`), created[0].body);
-  const notice = await result({ items: guarded.kept, made: [{ type: 'add_comment', url: applied.url }],
-    issue: '454', target: '454', review: 'true' });
-  assert.deepEqual(notice.created, []);
-  assert.equal(notice.outputs['no-result'], undefined);
-  assert.equal(notice.outputs['result-url'], on(454).url);
+  // That the comment is the run's result, not a no-result notice, is src/apply/result.rs's.
+  assert.equal(applied.url, 'https://github.com/owner/repo/issues/454#issuecomment-1');
 });
 
-for (const [name, change, url, linked] of [
-  ['a pull request', { pr: opened }, opened.url, true],
-  ['a pull request an earlier attempt opened', { pr: opened, skipped: [{ type: 'create_pull_request', url: opened.url }] }, opened.url, true],
-  ['a comment on the issue', { made: [on(64)] }, on(64).url, false],
-  ['a comment an earlier attempt posted on the issue', { skipped: [on(64)] }, on(64).url, false],
-  ['a comment on a pull request of that number', { made: [{ type: 'add_comment', url: 'https://github.com/Owner/Repo/pull/64#issuecomment-2' }] },
-    'https://github.com/Owner/Repo/pull/64#issuecomment-2', false],
-  ['a comment elsewhere', { made: [on(12)] }, on(12).url, true],
-  ['a pull request beside a comment on the issue', { pr: opened, made: [on(64)] }, opened.url, true],
-  // An earlier attempt's comment stays the result when this one opens an issue.
-  ['a comment an earlier attempt posted elsewhere, then an issue', { skipped: [on(12)],
-    made: [{ type: 'create_issue', url: 'https://github.com/owner/repo/issues/5' }] }, on(12).url, true],
-  ['a comment on issue 640', { made: [on(640)] }, on(640).url, true],
-  ['an issue', { made: [{ type: 'create_issue', url: 'https://github.com/owner/repo/issues/5' }] }, 'https://github.com/owner/repo/issues/5', true],
-  // A closed issue or a label is seen where it was done, and has no URL.
-  ['a closed issue', { items: [{ type: 'close_issue', item_number: 3 }, { type: 'noop', message: 'm' }] }, '', false],
-  ['a pull request, for no issue', { pr: opened, issue: '' }, opened.url, false],
-]) {
-  test(`the result of ${name} is exported as ${url || 'nothing'}, without a separate notice`, async () => {
-    const { outputs, summary, queries, created } = await result(change);
-    assert.equal(outputs['result-url'], url);
-    assert.deepEqual(summary, url ? ['What the run made', url] : []);
-    assert.equal(created.length, 0);
-    assert.equal(queries.length, 0);
-  });
-}
-
-// A run that handed back only what posts nothing exports the same neutralized,
-// bounded and quoted reason for the summary and conclude's opted-in status.
-const quiet = 'The [run](https://github.com/caller/repo/actions/runs/7) for this ended with no result: it handed back only';
-for (const [name, change, , said] of [
-  ['missing data', { items: [{ type: 'missing_data', data_type: 'workflow', reason: 'needs .github/ edits, ask @maintainer' }] }, 64,
-    `${quiet} missing_data. Its reason:\n\n> workflow: needs .github/ edits, ask \`@maintainer\``],
-  ['a noop and a missing tool', { items: [{ type: 'noop', message: 'nothing\n<b>to</b> do' }, { type: 'missing_tool', tool: 'tla', reason: 'no TLC' }] }, 64,
-    `${quiet} noop, missing_tool. Its reason:\n\n> nothing\n> <b>to</b> do\n> tla: no TLC`],
-  ['nothing at all', { items: [] }, 64, `${quiet} nothing. Its reason:\n\n> none given`],
-  // A lone carriage return, which GitHub takes for a line's end, stays in the quote.
-  ['a reason with carriage returns', { items: [{ type: 'noop', message: 'a\r# b\r\nc' }] }, 64, `${quiet} noop. Its reason:\n\n> a\n> # b\n> c`],
-  ['a long reason', { items: [{ type: 'noop', message: 'x'.repeat(5000) }] }, 64, `${quiet} noop. Its reason:\n\n> ${'x'.repeat(1000)}`],
-  ['a noop on another target', { items: [{ type: 'noop', message: 'm' }], target: '12', issue: '' }, 12, `${quiet} noop. Its reason:\n\n> m`],
-  ['a noop with no comment target', { items: [{ type: 'noop', message: 'm' }], target: '' }, null, `${quiet} noop. Its reason:\n\n> m`],
-  ['a noop with a target of the request', { items: [{ type: 'noop', message: 'm' }], target: '*' }, null, `${quiet} noop. Its reason:\n\n> m`],
-  // What the agent says about what it lacked is said whole.
-  ['a missing tool with alternatives', { items: [{ type: 'missing_tool', tool: 'tla', reason: 'no TLC', alternatives: 'apalache' }] }, 64,
-    `${quiet} missing_tool. Its reason:\n\n> tla: no TLC\n> alternatives: apalache`],
-  ['missing data with context', { items: [{ type: 'missing_data', data_type: 'log', reason: 'gone', context: 'run 5', alternatives: 'rerun' }] }, 64,
-    `${quiet} missing_data. Its reason:\n\n> log: gone\n> context: run 5\n> alternatives: rerun`],
-  // The reason alone, as handback check asks for one (#1102).
-  ['missing data with only a reason', { items: [{ type: 'missing_data', reason: 'the failing log has expired' }] }, 64,
-    `${quiet} missing_data. Its reason:\n\n> the failing log has expired`],
-  // Status is an existing caller opt-in, independent of add_comment bounds.
-  ['a noop under bounds without add_comment', { items: [{ type: 'noop', message: 'ask @maintainer' }], bounds: ['create_pull_request', 'noop'] }, 64,
-    `${quiet} noop. Its reason:\n\n> ask \`@maintainer\``],
-  ['a missing tool under bounds without add_comment', { items: [{ type: 'missing_tool', tool: 'x', reason: 'y' }], bounds: ['missing_tool'] }, 64,
-    `${quiet} missing_tool. Its reason:\n\n> x: y`],
-  // A review's noop is silent on the pull request.
-  ['a noop of a review', { items: [{ type: 'noop', message: 'm' }], review: 'true' }, null, `${quiet} noop. Its reason:\n\n> m`],
-]) {
-  test(`a run that handed back ${name} exports its summary reason without posting`, async () => {
-    sanitized.length = 0;
-    const { outputs, summary, created } = await result(change);
-    assert.equal(outputs['result-url'], '');
-    assert.equal(outputs['no-result'], 'true');
-    assert.equal(outputs['missing-data'], String(change.items.some(item => item.type === 'missing_data')));
-    assert.deepEqual(summary, ['No result', said]);
-    assert.equal(JSON.parse(outputs['no-result-reason']), said.split('Its reason:\n\n')[1]);
-    assert.doesNotMatch(outputs['no-result-reason'], /[\r\n]/);
-    assert.deepEqual(sanitized, [1000]);
-    assert.equal(created.length, 0);
-  });
-}
-
-test('apply leaves all status writes to conclude, including retries', async () => {
+// The result step has no token (tests/workflows.rs), so it cannot post.
+test('apply leaves all status writes to conclude', () => {
   assert.equal(step('Edit the status comment').trim(),
     'chmod +x "$RUNNER_TEMP/conclude-binary/agentic-job"\n"$RUNNER_TEMP/conclude-binary/agentic-job" status');
-  const change = { items: [{ type: 'noop', message: 'm' }] };
-  assert.deepEqual((await result(change)).created, []);
-  assert.deepEqual((await result({ ...change, artifacts: 'dispatch-implement-' })).created, []);
-  // Nor does a handler's comment that failed to make a result: the comment is not a quiet output.
-  assert.equal((await result({ items: [comment()] })).created.length, 0);
-  // A result, made or found made, is linked as before and never called none.
-  assert.deepEqual((await result({ ...change, pr: opened })).summary, ['What the run made', opened.url]);
-  assert.equal((await result({ ...change, skipped: [on(12)] })).outputs['result-url'], on(12).url);
-});
-
-// The pinned sanitizer itself, at the path, signature and global the step
-// uses: CI checks gh-aw out at the setup action's commit for this.
-test('a run with no result quotes its reason through the pinned gh-aw sanitizer', { skip: !process.env.GH_AW_JS }, async () => {
-  const message = 'ask @maintainer and @org/team <!-- hidden --> at https://evil.example/x\n/approve ' + 'y'.repeat(2000);
-  const { outputs, summary, created } = await result({ items: [{ type: 'noop', message }], real: true });
-  assert.equal(outputs['no-result'], 'true');
-  assert.deepEqual(created, []);
-  const said = summary[1];
-  const reason = said.split('Its reason:\n\n')[1];
-  assert.ok(reason.split('\n').every(line => line.startsWith('> ')), reason);
-  assert.match(reason, /`@maintainer`/);
-  assert.match(reason, /`@org\/team`/);
-  assert.doesNotMatch(reason, /hidden|<!--|https:\/\/evil/);
-  assert.match(reason, /\(evil\.example\/redacted\)/);
-  assert.ok(reason.length < 1200, `${reason.length}`);
-  assert.equal(JSON.parse(outputs['no-result-reason']), reason);
-  // Bounds without add_comment still export the sanitized reason for status.
-  const quietly = await result({ items: [{ type: 'noop', message }], real: true, bounds: ['create_pull_request', 'noop'] });
-  assert.deepEqual(quietly.created, []);
-  assert.equal(quietly.outputs['no-result-reason'], outputs['no-result-reason']);
 });
 
 // The handlers log the patch and stream git's output, both the agent's

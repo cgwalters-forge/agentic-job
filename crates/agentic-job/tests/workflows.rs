@@ -2228,6 +2228,62 @@ fn caller_network_credentials_are_spent_before_the_agent() {
     }
 }
 
+/// Apply's result step only reads what the job wrote and writes step
+/// outputs and the summary: it gets no token, keeps the links the handlers
+/// keep, and runs whenever they ran, without failing the job.
+#[test]
+fn the_result_step_passes_no_token() {
+    const NAME: &str = "Say where what the run made is";
+    let apply = definition("apply.yml");
+    let result = named_step(&apply, NAME);
+    let handlers = named_step(&apply, "Apply the outputs with gh-aw's handlers");
+    assert_eq!(result["id"].as_str(), Some("result"));
+    assert_eq!(
+        result["if"].as_str(),
+        Some("${{ !cancelled() && steps.apply.outcome != 'skipped' }}")
+    );
+    assert_eq!(result["continue-on-error"].as_bool(), Some(true));
+    assert!(result["uses"].is_badvalue() && result["with"].is_badvalue());
+    let env: Vec<_> = result["env"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        env,
+        [
+            "GH_AW_SAFE_OUTPUTS_URLS",
+            "GH_AW_ALLOWED_DOMAINS",
+            "RUN_URL"
+        ]
+    );
+    assert_eq!(
+        result["env"]["GH_AW_ALLOWED_DOMAINS"].as_str(),
+        Some("${{ fromJSON(inputs.policy).allowed-domains }}")
+    );
+    for key in ["GH_AW_SAFE_OUTPUTS_URLS", "GH_AW_ALLOWED_DOMAINS"] {
+        assert_eq!(result["env"][key], handlers["env"][key], "{key}");
+    }
+    assert_eq!(
+        result["run"].as_str().unwrap().trim_end().lines().last(),
+        Some(
+            r#""$RUNNER_TEMP/apply-binary/agentic-job" result --dir "$GH_AW_TMP" --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY""#
+        )
+    );
+    let text = workflow("apply.yml");
+    let step = text
+        .split(&format!("- name: {NAME}\n"))
+        .nth(1)
+        .unwrap()
+        .split("\n      - ")
+        .next()
+        .unwrap();
+    for credential in ["secrets.", "token", "TOKEN"] {
+        assert!(!step.contains(credential), "{credential}: {step}");
+    }
+}
+
 #[test]
 fn optional_apply_token_admission_holds_the_pat_in_one_step() {
     let apply = definition("apply.yml");

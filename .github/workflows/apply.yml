@@ -908,49 +908,21 @@ jobs:
       # Export the result for conclude's single status comment. No-result
       # reasons are agent text: sanitize and quote them before exporting.
       # Missing data is an incomplete task, not a successful decline.
+      # Policy's binary (src/apply/result.rs) writes the outputs and the
+      # summary; it makes no forge writes, so the step has no token.
+      # Conclude edits the single opted-in status comment with the result.
       - name: Say where what the run made is
         id: result
         if: ${{ !cancelled() && steps.apply.outcome != 'skipped' }}
         continue-on-error: true
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # As the handlers sanitize text: the collector's policy, in check.yml.
           GH_AW_SAFE_OUTPUTS_URLS: allowed-or-code-region
           GH_AW_ALLOWED_DOMAINS: ${{ fromJSON(inputs.policy).allowed-domains }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          github-token: ${{ secrets.SAFE_OUTPUTS_PAT || github.token }}
-          script: |
-            const fs = require('node:fs');
-            const applied = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/applied.json`, 'utf8'));
-            // A push's URL is the pull request it pushed to.
-            const posted = [...applied.already_applied, ...applied.made]
-              .filter(item => ['add_comment', 'create_issue', 'create_discussion', 'push_to_pull_request_branch'].includes(item.type) && item.url).map(item => item.url);
-            const url = applied.pull_request?.url ?? posted[0] ?? '';
-            core.setOutput('result-url', url);
-            if (!url) {
-              const quiet = ['noop', 'missing_tool', 'missing_data'];
-              const { items } = JSON.parse(fs.readFileSync(`${process.env.GH_AW_TMP}/agent_output.json`, 'utf8'));
-              if (!items.every(item => quiet.includes(item.type))) return;
-              core.setOutput('no-result', 'true');
-              core.setOutput('missing-data', String(items.some(item => item.type === 'missing_data')));
-              // gh-aw's scripts log through a global `core`, as setupGlobals sets it for the handlers.
-              global.core = core;
-              const { sanitizeContent } = require(`${process.env.RUNNER_TEMP}/gh-aw/actions/sanitize_content.cjs`);
-              const said = items.map(item => [[item.tool ?? item.data_type, item.reason ?? item.message].filter(Boolean).join(': '),
-                item.context && `context: ${item.context}`, item.alternatives && `alternatives: ${item.alternatives}`].filter(Boolean).join('\n')).join('\n');
-              const reason = sanitizeContent(said || 'none given', 1000).split(/\r\n|\r|\n/).map(line => `> ${line}`).join('\n');
-              // JSON keeps agent newlines from becoming job-output fields in conclude.
-              core.setOutput('no-result-reason', JSON.stringify(reason));
-              const types = [...new Set(items.map(item => item.type))].join(', ') || 'nothing';
-              const ended = `The [run](${process.env.RUN_URL}) for this ended with no result: it handed back only ${types}.`;
-              const text = `${ended} Its reason:\n\n${reason}`;
-              await core.summary.addHeading('No result', 3).addRaw(text).write();
-              // Conclude edits the single opted-in status comment with the same reason.
-              return;
-            }
-            await core.summary.addHeading('What the run made', 3).addLink(url, url).write();
-            // Result links are reported by conclude, not a separate status comment.
+        run: |
+          chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
+          "$RUNNER_TEMP/apply-binary/agentic-job" result --dir "$GH_AW_TMP" --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
       # gh-aw logs a handler's error inside the apply step, which does not
       # fail the job (continue-on-error), so the job's annotations and the
       # status comment would say only how many outputs failed. Its error
