@@ -2241,8 +2241,9 @@ Version-tagged workflow pins instead select the version's release and
 Only a missing manifest (HTTP 404) falls back to building, with a notice
 that it takes about two minutes. A download or verification failure stops
 the job rather than silently building. A caller can always request a
-source build with `build-binary: true`. Fetching requires Node and `gh`
-with attestation support; GitHub-hosted runners provide them. The bundle
+source build with `build-binary: true`. The Bash bootstrap uses `sha256sum`,
+jq, coreutils' `timeout` and `gh` with attestation support; GitHub-hosted
+runners provide them. The bundle
 is downloaded with the release, so verification needs no forge token.
 
 A build cache was not used, though the plan had one. The reason this
