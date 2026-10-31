@@ -98,6 +98,80 @@ fn named_step<'a>(doc: &'a yaml_rust2::Yaml, name: &str) -> &'a yaml_rust2::Yaml
 }
 
 #[test]
+fn role_and_legacy_workflow_credential_expressions() {
+    let doc = definition("apply.yml");
+    let mut expressions = Vec::new();
+    for step in doc["jobs"]["apply"]["steps"].as_vec().unwrap() {
+        for (section, key, role) in [
+            ("with", "token", "PUSH_TOKEN"),
+            ("with", "github-token", "PUBLICATION_TOKEN"),
+            ("env", "GH_TOKEN", "PUBLICATION_TOKEN"),
+        ] {
+            let Some(expression) = step[section][key].as_str() else {
+                continue;
+            };
+            if !expression.contains("secrets.SAFE_OUTPUTS_PAT") {
+                continue;
+            }
+            let role = if expression.contains("secrets.PUSH_TOKEN") {
+                "PUSH_TOKEN"
+            } else {
+                role
+            };
+            expressions.push((expression.to_owned(), role));
+        }
+    }
+    assert!(expressions.len() >= 4);
+    for file in ["apply.yml", "policy.yml"] {
+        for step in steps(&definition(file)) {
+            if let Some(expression) = step["env"]["STATUS_TOKEN"].as_str() {
+                expressions.push((expression.to_owned(), "STATUS_TOKEN"));
+            }
+        }
+    }
+    for (expression, role) in expressions {
+        for configured in [false, true] {
+            for pat in [None, Some(""), Some("legacy-credential")] {
+                for selected in ["", "role-credential"] {
+                    // Evaluate the actual Actions boolean selection, not a
+                    // second implementation of it. No forge or credentials.
+                    let expression = expression
+                        .strip_prefix("${{ ")
+                        .unwrap()
+                        .strip_suffix(" }}")
+                        .unwrap()
+                        .replace("inputs.role-bindings", "inputs.bindings");
+                    let data = serde_json::json!({
+                        "bindings": if configured { "configured" } else { "" },
+                        "secrets": {"SAFE_OUTPUTS_PAT": pat, role: selected},
+                    });
+                    let script = format!(
+                        "const d=JSON.parse(process.argv[1]); const inputs=d, secrets=d.secrets, github={{token:'job-token'}}; process.stdout.write(JSON.stringify({expression}));"
+                    );
+                    let result = Command::new("node")
+                        .args(["-e", &script, &data.to_string()])
+                        .output()
+                        .unwrap();
+                    assert!(result.status.success(), "{result:?}");
+                    let expected = if configured {
+                        selected
+                    } else if role == "STATUS_TOKEN" {
+                        pat.unwrap_or("")
+                    } else {
+                        pat.filter(|pat| !pat.is_empty()).unwrap_or("job-token")
+                    };
+                    assert_eq!(
+                        serde_json::from_slice::<String>(&result.stdout).unwrap(),
+                        expected,
+                        "{expression}: {data}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn caller_role_credentials_stay_out_of_agent_and_check_jobs() {
     let wrapper = definition("agentic-job.yml");
     for secret in [

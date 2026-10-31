@@ -63,31 +63,14 @@ test('apply uses the optional PAT with fallback, status receives it separately',
   assert.ok(workflow.includes('      SAFE_OUTPUTS_PAT:\n'));
   assert.match(workflow.split('    secrets:\n')[1].split('    outputs:\n')[0], /required: false/);
   assert.ok(!before.includes('secrets.SAFE_OUTPUTS_PAT'));
-  assert.match(after, /STATUS_TOKEN: \$\{\{ secrets.SAFE_OUTPUTS_PAT \}\}/);
+  assert.match(after, /STATUS_TOKEN: \$\{\{ inputs.role-bindings == '' && secrets.SAFE_OUTPUTS_PAT /);
   // The policy call consumes it only in notify, never in its read-only job.
   const wrapperJobs = wrapper.split('\njobs:\n')[1].split(/\n  (?=[-\w]+:\n)/);
   assert.deepEqual(wrapperJobs.filter(job => job.includes('secrets.SAFE_OUTPUTS_PAT')).map(job => job.split(':')[0]), ['policy', 'apply']);
   assert.match(wrapperJobs.find(job => job.startsWith('apply:')), /uses: \.\/\.github\/workflows\/apply\.yml *(?:#[^\n]*)?\n/);
-  const selection = 'secrets.SAFE_OUTPUTS_PAT';
-  for (const key of ['token', 'github-token']) {
-    assert.ok(apply.includes(`${key}: \${{ ${selection} || github.token }}`));
-  }
   assert.ok(apply.includes('environment: ${{ fromJSON(inputs.policy).apply-environment }}'));
   assert.doesNotMatch(apply, /HAS_TOKEN|no passed .* secret/);
 });
-
-for (const pat of [undefined, '', 'test-pat']) {
-  test(`credential expression wiring: PAT ${JSON.stringify(pat)}`, () => {
-    const apply = workflow.split('\n  apply:\n')[1].split('\n  conclude:\n')[0];
-    for (const key of ['token', 'github-token']) {
-      const expression = apply.match(new RegExp(`^          ${key}: \\$\\{\\{ (.+) \\}\\}$`, 'm'))[1];
-      // Evaluate the workflow's simple || selection; not an Actions environment-delivery test.
-      assert.equal(Function('secrets', 'github', `return ${expression}`)(
-        { SAFE_OUTPUTS_PAT: pat }, { token: 'job-token' }), pat || 'job-token');
-      assert.ok(!expression.includes('environment'));
-    }
-  });
-}
 
 for (const filename of ['example', 'example-command', 'example-deterministic', 'example-pull-request', 'example-schedule', 'review']) {
   test(`${filename} explicitly forwards the optional safe outputs PAT`, () => {
@@ -1064,7 +1047,7 @@ test('the guard is policy binary, given the token and the trial, after the parti
   assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
   const guardStep = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
   assert.match(guardStep, /\n {10}"\$RUNNER_TEMP\/apply-binary\/agentic-job" applied --dir "\$GH_AW_TMP" /);
-  assert.match(guardStep, /\n {10}GH_TOKEN: \$\{\{ secrets\.SAFE_OUTPUTS_PAT \|\| github\.token \}\}\n/);
+  assert.match(guardStep, /\n {10}GH_TOKEN: \$\{\{ inputs.role-bindings == '' && \(secrets.SAFE_OUTPUTS_PAT \|\| github.token\) \|\| secrets.PUBLICATION_TOKEN \}\}\n/);
   assert.match(guardStep, /\n {10}TOKEN_IS_PAT: \$\{\{ secrets\.SAFE_OUTPUTS_PAT != '' \}\}\n/);
   assert.match(guardStep, /\n {10}REPLACEMENT_HEAD: \$\{\{ steps\.trial\.outputs\.head \}\}\n/);
   assert.match(step('Apply the patch on its own base, and compare what changed with what was checked'),
