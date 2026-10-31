@@ -46,6 +46,38 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
         .remove(0)
 }
 
+#[test]
+fn ordinary_ubuntu_runners_use_current_image() {
+    // Check owned definitions, not historical checker fixtures. Architecture
+    // suffixes and special runner classes are deliberately outside this rule.
+    let ordinary = Regex::new(r"^ubuntu-(latest|[0-9]+\.[0-9]+)$").unwrap();
+    for entry in std::fs::read_dir(root().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        if !matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_str().unwrap();
+        let doc = definition(file);
+        for (name, job) in doc["jobs"].as_hash().unwrap() {
+            if let Some(label) = job["runs-on"].as_str()
+                && ordinary.is_match(label)
+            {
+                assert_eq!(label, "ubuntu-26.04", "{file}: {name:?}");
+            }
+        }
+    }
+    for file in ["agentic-job.yml", "policy.yml"] {
+        assert_eq!(
+            definition(file)["on"]["workflow_call"]["inputs"]["runner"]["default"].as_str(),
+            Some("\"ubuntu-26.04\""),
+            "{file}: runner default"
+        );
+    }
+}
+
 fn steps(doc: &yaml_rust2::Yaml) -> Vec<&yaml_rust2::Yaml> {
     if let Some(jobs) = doc["jobs"].as_hash() {
         jobs.values()

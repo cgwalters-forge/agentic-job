@@ -40,7 +40,7 @@ jobs:
   # job: it validates each output against its type's rules, enforces the
   # counts of config.json and sanitizes the text.
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -90,7 +90,7 @@ jobs:
   # branch but this file.
   apply:
     needs: check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write # push the pull request's branch

@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   vet:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A cold release build of the base-owned checker needs compilation time.
     timeout-minutes: 30
     # Any fork can trigger this without approval: a new push supersedes the
