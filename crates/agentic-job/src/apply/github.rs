@@ -383,8 +383,9 @@ impl Github {
 
     fn check_identity(&self) -> Result<()> {
         let expected = &self.roles.as_ref().context("no role bindings")?[&self.role].identity;
-        // Installation tokens need not implement GET /user. If viewer is not
-        // available, refuse: never infer identity from caller-supplied login text.
+        // Installation tokens need not implement GET /user. GraphQL's viewer
+        // is a User even for an installation: its typename cannot prove Bot
+        // identity. If viewer is unavailable, fail closed.
         let viewer = self.graphql(
             "query { viewer { databaseId __typename login } }",
             json!({}),
@@ -394,18 +395,22 @@ impl Github {
             "{} has the wrong authenticated actor identity",
             self.role.token_env()
         );
-        ensure!(
-            expected.app_id.is_none() || viewer["viewer"]["__typename"] == "Bot",
-            "configured App roles require an authenticated Bot actor; user App tokens are not supported"
-        );
         if let Some(app_id) = expected.app_id {
             let login = viewer["viewer"]["login"]
                 .as_str()
-                .context("authenticated Bot has no login")?;
-            let slug = login.strip_suffix("[bot]").unwrap_or(login);
+                .context("authenticated viewer has no login")?;
+            let slug = login.strip_suffix("[bot]").context(
+                "configured App roles require an installation bot; user App tokens are not supported",
+            )?;
             ensure!(
                 !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
                 "authenticated Bot has no App slug"
+            );
+            let actor = self.get(&format!("/users/{}", query(login)))?;
+            ensure!(
+                actor["id"].as_u64() == Some(expected.actor_id) && actor["type"] == "Bot",
+                "{} has the wrong App bot identity",
+                self.role.token_env()
             );
             let app = self.get(&format!("/apps/{slug}"))?;
             ensure!(
@@ -974,12 +979,14 @@ pub(super) mod tests {
 
     #[test]
     fn role_credentials_fail_closed_and_check_numeric_identity() {
-        for (id, kind, app, expected_app, accepted) in [
-            (7, "User", None, None, true),
-            (8, "User", None, None, false),
-            (7, "Bot", Some(42), Some(42), true),
-            (7, "Bot", Some(43), Some(42), false),
-            (7, "User", Some(42), Some(42), false),
+        for (id, login, rest_id, kind, app, expected_app, accepted) in [
+            (7, "trusted", 7, "User", None, None, true),
+            (8, "trusted", 8, "User", None, None, false),
+            (7, "trusted[bot]", 7, "Bot", Some(42), Some(42), true),
+            (7, "trusted[bot]", 7, "Bot", Some(43), Some(42), false),
+            (7, "trusted[bot]", 7, "User", Some(42), Some(42), false),
+            (7, "trusted[bot]", 8, "Bot", Some(42), Some(42), false),
+            (7, "trusted", 7, "User", Some(42), Some(42), false),
         ] {
             let routes = [
                 (
@@ -987,10 +994,14 @@ pub(super) mod tests {
                     (
                         200,
                         json!({"data": {"viewer": {
-                    "databaseId": id, "__typename": kind, "login": "trusted[bot]"}}}),
+                    "databaseId": id, "__typename": "User", "login": login}}}),
                     ),
                 ),
                 ("GET /apps/trusted".to_owned(), (200, json!({"id": app}))),
+                (
+                    "GET /users/trusted%5Bbot%5D".to_owned(),
+                    (200, json!({"id": rest_id, "type": kind})),
+                ),
             ];
             let (github, requests) = forge(routes.into_iter().collect());
             let mut github = bound(github);

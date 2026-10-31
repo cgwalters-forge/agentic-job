@@ -637,10 +637,13 @@ impl Guard<'_> {
                 continue;
             }
             let id = item.get("comment_id");
-            let data = self.github.get(&format!(
-                "/repos/{item_repo}/pulls/comments/{}",
-                js_number(js_to_number(id))
-            ))?;
+            let data = self
+                .github
+                .for_role(super::roles::Role::Review)?
+                .get(&format!(
+                    "/repos/{item_repo}/pulls/comments/{}",
+                    js_number(js_to_number(id))
+                ))?;
             ensure!(
                 value_string(data.get("pull_request_url")).to_lowercase() == pull.to_lowercase(),
                 "a reply_to_pull_request_review_comment names comment {}, which is not on pull \
@@ -771,8 +774,8 @@ impl Guard<'_> {
         output: &mut dyn FnMut(&str, &str) -> Result<()>,
     ) -> Result<Option<Value>> {
         let args = self.args;
-        let github = self.github;
         let role = super::roles::Role::output(kind);
+        let github = self.github.for_role(role)?;
         let marked = |found: &&Value| self.marked(found, name, role);
         let found = match kind {
             ADD_COMMENT => {
@@ -1034,6 +1037,8 @@ mod tests {
         issue_data: Vec<(u64, Value)>,
         /// Review comments by id, with their pull request's API URL.
         review_comments: Vec<(u64, &'static str)>,
+        /// Exercise separate review and publication read credentials.
+        roles: bool,
     }
 
     impl Default for Options {
@@ -1055,6 +1060,7 @@ mod tests {
                 open: Vec::new(),
                 issue_data: Vec::new(),
                 review_comments: Vec::new(),
+                roles: false,
             }
         }
     }
@@ -1165,6 +1171,16 @@ mod tests {
             let line = request.line.trim_end_matches(" HTTP/1.1");
             let (method, path) = line.split_once(' ').unwrap();
             let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            if o2.roles {
+                let review_read = path.contains("/comments");
+                let role = if review_read {
+                    "REVIEW_TOKEN"
+                } else {
+                    "PUBLICATION_TOKEN"
+                };
+                let token = ["fake", role, "credential"].join("-");
+                assert_eq!(request.authorization, format!("Bearer {token}"));
+            }
             let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
             let ask = |text: String| seen.lock().unwrap().push(text);
             let open = |n: &str| o2.open.iter().any(|o| o.to_string() == n);
@@ -1263,6 +1279,11 @@ mod tests {
             (200, answer.to_string())
         });
         let github = Github::new(&server, TOKEN.to_owned()).unwrap();
+        let github = if o.roles {
+            super::super::github::tests::bound(github)
+        } else {
+            github
+        };
         *address.lock().unwrap() = github.api_url().to_owned();
         let args = Args {
             dir: dir.path().to_owned(),
@@ -1335,6 +1356,30 @@ mod tests {
 
     fn comment(body: &str) -> Value {
         json!({"type": "add_comment", "body": body})
+    }
+
+    #[test]
+    fn review_ownership_reads_use_review_credentials() {
+        let options = Options {
+            roles: true,
+            ..Options::default()
+        };
+        let item = comment("result");
+        let first = ok(std::slice::from_ref(&item), &[], &options);
+        assert_eq!(first.kept.len(), 1);
+        for (id, accepted) in [(7, true), (8, false)] {
+            let posted = json!({"on": 64, "user": {"id": id},
+                "body": sent(first.kept[0]["body"].as_str().unwrap()),
+                "html_url": "https://github.com/owner/repo/issues/64#issuecomment-1"});
+            let rerun = ok(std::slice::from_ref(&item), &[posted], &options);
+            assert_eq!(rerun.skipped.len(), usize::from(accepted));
+        }
+        let reply = json!({"type": REPLY_TO_REVIEW_COMMENT, "comment_id": 99, "body": "reply"});
+        let options = Options {
+            review_comments: vec![(99, "API/repos/owner/repo/pulls/64")],
+            ..options
+        };
+        assert_eq!(ok(&[reply], &[], &options).kept.len(), 1);
     }
 
     fn pull() -> Value {

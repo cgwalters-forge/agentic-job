@@ -45,15 +45,18 @@ IDs or wrong App IDs refuse; there is no fallback. Apply checks all credentials
 before its first fork/write. Each status job checks only its own credential.
 Roles may deliberately share a credential, but doing so loses separation.
 
-Configured GitHub App roles require an authenticated GraphQL `Bot` viewer with
-the configured numeric `actor_id`; the viewer's App is resolved through
+Configured GitHub App roles require an authenticated GraphQL viewer with the
+configured numeric `actor_id`. GraphQL declares viewer as `User`, not `Bot`;
+REST `GET /users/LOGIN` must independently confirm the same ID and `type: Bot`.
+The authenticated login must end in `[bot]`; its App is resolved through
 `GET /apps/SLUG` and must match `app_id`. Unsupported viewer queries fail closed.
 Rerun/ownership detection requires both the actor ID and REST
 `performed_via_github_app.id`, never login text alone. User App tokens with an
 `app_id` are not supported: `/user` or viewer identifies the user, not which App
 issued that user's token. Fork-push still needs a user's credential and `/user`
 to find its fork. Plain user bindings omit `app_id`; their owned objects must
-have no App provenance.
+have no App provenance. Ownership lookups use the operation's own role token,
+including the review token for comment rerun detection and reply validation.
 
 Role mode requires every writing request to use a supported `native_handlers`
 entry. Legacy-only handlers and replacement-series pushes refuse before the
