@@ -714,6 +714,21 @@ Read this before relying on it.
 
 ## CI runner use
 
+Runner labels are kept current by Renovate, through
+[`.github/renovate.json`](../.github/renovate.json) and the shared
+[runner preset](https://github.com/cgwalters-forge/actions/blob/main/renovate/README.md):
+it proposes moving a literal GitHub-hosted Ubuntu label in `runs-on` to the
+newest one and nothing else; Dependabot keeps the action pins, and nothing
+updates the digest-pinned forgejo image. It does nothing until an
+organization owner installs the Renovate app for this repository, and review
+does not admit `renovate[bot]`, so a person reviews its pull requests.
+Renovate does not read labels from expressions, so these are changed by hand:
+the `AGENT_RUNNER` variable and its fallback in `review.yml`, the `runner` and
+`agent-runner` input defaults of `agentic-job.yml` and `policy.yml`, the
+labels in these docs, and the `ordinary_ubuntu_runners_use_current_image`
+test, which holds every plain Ubuntu label to the current one. A Renovate
+pull request for the next move is a starting point those edits complete.
+
 Workflow and action edits are also vetted by the independent base-defined
 [workflow ingress check](workflow-ingress.md), including fork pull requests.
 It gates a merge only once an administrator requires it in a ruleset, without
