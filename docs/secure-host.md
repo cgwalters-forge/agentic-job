@@ -16,10 +16,10 @@ the host: what setup changes, the lock, the world-write policy, the rule
 against reading another runner process, egress and the probes
 ([where each section went](#where-the-host-documentation-went)). This
 page keeps what concerns agentic-job alone: the forwarder, how the agent
-job uses the action, where the binary and image come from, and runner
-outbound observation. Those documents describe the image the action
-pins, which can lag this repository's main; they cover main's later host
-changes when the pin moves.
+job uses the action, and where the binary and image come from. Those
+documents describe the image the action pins, which can lag this
+repository's main; they cover main's later host changes when the pin
+moves.
 
 ## The public action forwards to cgwalters-forge/actions/secure-host
 
@@ -205,77 +205,6 @@ which curl, git and OpenSSL read, and `NODE_EXTRA_CA_CERTS` and
 otherwise cleared environment. CI's `e2e-write-policy` job runs the
 scripted agent this way: it reads through the proxy with curl and Node,
 is refused a POST, and its hand-back is uploaded and applied.
-
-## Runner outbound observation (opt-in)
-
-The [observation workflow](../.github/workflows/runner-egress.yml) gathers
-outbound destinations on a fresh hosted Ubuntu 26.04 runner, with DNS names
-from observed queries/answers, visible TLS SNI, ports and sampled socket owners.
-Enable the repository-owned Actions variable `RUNNER_EGRESS_TRACE=true` to
-run it on relevant pull requests or by manual dispatch; it is off by default.
-There are no dispatcher-controlled configuration inputs or extra permissions.
-This is measurement, not a security control: it does not stop exfiltration or
-change secure-host rules. It informs the later host-wide egress rules slice,
-whose threat is untrusted steps bypassing the proxy to exfiltrate directly.
-
-tshark observes IP traffic, including DNS replies and background services,
-after an anonymous checkout (public repositories only) and tool installation.
-Only selected metadata fields are written: no raw capture, HTTP headers, URLs,
-tokens, process command lines or environment. It does not perform reverse DNS.
-Capture is capped at 10,000 packets, 480 seconds and 4 MiB of field output;
-each packet is truncated to 4,096 bytes. Socket ownership is sampled with
-`ss` every 500 ms, with a separate 4 MiB cap. Reaching a size cap stops capture;
-the JSON records why collection stopped. Tool failures fail the post step after
-publishing diagnostic JSON, including the failed command, exit status/signal
-and the last 4,096 characters of stderr (JSON-quoted). Successful captures do
-not retain stderr. The job has a ten-minute bound.
-
-Each destination records `address`, `port`, `transport`, `ip_protocol`, `dns_names`,
-`tls_sni` and `processes` (PID and executable name, **not a proven opener**).
-Non-TCP/UDP traffic is retained with a null port and its IP protocol number
-(IPv6 next-header value), rather than silently omitted.
-`dns_queries` on resolver destinations are the names requested, not names of
-the resolver. DNS answers are associated with subsequent destination traffic;
-there is no retroactive guess for earlier traffic. A socket owner matches the
-local/remote address and port and transport within one second of a packet.
-Missing names and missed sockets stay empty, rather than being inferred from
-an IP's current reverse lookup or the currently running step.
-
-The workflow uploads and downloads a fixture, then explicitly saves and
-restores a run-unique cache entry (never restoring another run's data). The
-cache actions use v6.1.0's Node 24 runtime on the hosted runner; `path`,
-`key` and `fail-on-cache-miss` keep their existing meanings. This does not
-grant cache access to the sandbox or change the reusable workflow's policy.
-A local JavaScript action fetches public repository metadata in its main and post
-steps, without credentials. The observer registers first, so its post runs
-last. That post stops collection, writes the versioned JSON report, adds a
-bounded preview to the job summary, and invokes the already downloaded,
-pinned upload action's bundle to publish **runner-egress-observations** with
-one-day retention. The fixture artifact alone is not the trace. No repository
-write token or OIDC permission is added; cache writes remain scoped by Actions.
-
-DNS and SNI are unauthenticated observations, not an allowlist. A shared IP can
-serve several names, and a peer can claim a name in DNS/SNI. Names themselves
-can contain sensitive metadata: run this only on the fresh, secret-free probe
-job, not a workload carrying secrets. Source review and repeated hosted
-observations are needed before designing rules.
-
-Known gaps for the rules slice: startup/checkout precede the
-trace; caps can end it early; cached or encrypted DNS, ECH, truncated or segmented
-TLS handshakes, short-lived sockets and unexercised paths can leave gaps.
-Socket sampling cannot prove which process originally opened a shared or
-inherited connection, and it does not assign a step from timing alone.
-Coverage ends at the final JavaScript post snapshot, before the JSON upload:
-**the runner's completion traffic after the last step is not observed**.
-A green probe is not proof of whole-job coverage.
-The observed list must be added in a fix round after this PR's hosted CI runs;
-no observed endpoints are claimed from local unit tests.
-
-The merge-queue failure during the v6 update was unrelated to cache: both
-analysis policy jobs received HTTP 404 for a published `fake-agent` asset.
-Those CI callers now set `build-binary: true` to test this checkout without relying
-on release completeness. Release downloads still fail closed when a manifest
-exists but an asset is missing; repairing that published release is separate.
 
 ## Inputs and outputs
 
