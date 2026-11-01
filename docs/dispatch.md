@@ -429,6 +429,57 @@ its closing comment, within the bounds' 32 outputs; check refuses one naming
 another repository. A misled run's closes are undone by reopening, and each
 says why on the issue.
 
+## Forgejo Actions caller
+
+[workflow/forgejo/dispatch.yml](../workflow/forgejo/dispatch.yml) is the
+caller agent-board's Forgejo dispatch starts; a caller copies it to
+`.forgejo/workflows/dispatch.yml` in its own repository. It is kept out of
+this repository's `.forgejo/workflows/`, because any file there makes a
+Forgejo mirror of this repository ignore `.github/workflows/`. It is a first slice of
+[#2399](https://github.com/cgwalters-forge/agentic-job/issues/2399): it
+takes the dispatch and refuses an unsuitable runner, then stops with an
+error. No session, check or apply runs yet.
+
+Its `workflow_dispatch` inputs are strings matching agent-board's job plan:
+`task`, `repo` (`OWNER/NAME`), `item`, `kind`, `pool` and `base`. The run is
+named `KIND REPO#ITEM (POOL)`, which agent-board's in-flight listing matches.
+Runs are grouped per kind, repository and item with `cancel-in-progress: false`,
+so a second dispatch for an item waits for the first; no group is shared
+across items.
+
+It reads only the caller's repository variables, and holds no token or secret:
+
+- `AGENT_RUNNER`: the agent job's runner labels as JSON, for example
+  `["agentic-job"]`. There is no default label; unset, the run fails to start.
+- `FORGEJO_URL`: the Forgejo instance's URL, never taken from the event.
+- `AGENT_BOUNDS`: the path of the caller's bounds file.
+
+The agent job refuses first when `FORGEJO_URL` or `AGENT_BOUNDS` is empty,
+and when the runner cannot provide the [sandbox](sandbox.md): it needs
+systemd as the init, passwordless sudo and no container around the job.
+A container runner would run the agent with no sandbox at all, so it is
+refused until [#1347](https://github.com/cgwalters-forge/agentic-job/issues/1347)
+gives container runners one.
+
+It differs from the [GitHub caller](../.github/workflows/dispatch.yml):
+`kind` is a free string rather than a choice, and `pool` and `base` are
+new; there is no `item-repo` or `status-comment`, no `scripted` trial, no
+reusable `workflow_call` and no target job running `agentic-job dispatch`.
+Its configuration is three variables with no hosted default, rather than
+`AGENT_CONFIG` falling back to `hosted.toml`, and the bounds are the
+caller's own rather than `.github/agentic-job/dispatch.toml`.
+
+Still open in #2399:
+
+- The session, its inference registration mode and the transport carrying
+  its hand-back between jobs.
+- The check and apply jobs, with `agentic-job apply --forge forgejo` and its
+  bot PAT reachable only in a protected apply step, and fork pushes kept
+  apart from upstream writes.
+- Lint for that token's placement, and a scripted run against CI's Forgejo
+  container.
+- Running the agent on container runners, with #1347.
+
 ## Verification
 
 `cargo test -p agentic-job dispatch` covers every preflight refusal and each
