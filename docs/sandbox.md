@@ -125,11 +125,15 @@ Past DNS, the egress proxy never connects to the ranges in
 (`crates/secure-host/src/network.rs`): loopback, the private ranges,
 link-local, the tailnet, multicast, some reserved ranges and Azure's
 WireServer. The rules for its uid refuse them whatever a name resolves
-to, so a name that resolves there gets a 502 from the proxy, as an
-in-cluster inference name does
+to. The Rust proxy also checks the resolved addresses and answers 403
+with `X-Egress-Denied: destination is on a private or local network the egress proxy never reaches`
+if any is in those ranges, rather than the unexplained 502 an
+in-cluster inference name previously received
 ([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810)).
 Under an `[egress]` allowlist the policy refuses an address literal
-anyway, unless `--refuse` refuses it first. An inference broker is
+anyway, unless `--refuse` refuses it first; both keep precedence over
+the private-network reason, and a name the policy refuses is not resolved.
+An inference broker is
 reached outside the egress proxy: by the sandbox user at its tailnet
 IPv4 address in `egress.direct`, or, under `inference.front`, by `run`
 as the runner's user at an address neither on loopback nor in

@@ -141,9 +141,11 @@ host's resolver, but the rules for its uid refuse it DNS to any but the
 configured resolvers, and loopback, private, shared (the tailnet) and
 link-local addresses: `PROXY_DENIED_V4` and `PROXY_DENIED_V6` in
 `crates/secure-host/src/network.rs`. A broker named by an in-cluster or
-tailnet name that the proxy would have to reach therefore gets a 502,
-though root on the host reaches it
-([#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810)).
+tailnet name that the proxy would have to reach is therefore refused by
+the Rust proxy with 403 and a private/local-network reason in
+`X-Egress-Denied` (after `--refuse` and the policy), though root on the
+host reaches it. This replaces the unexplained 502 reported in
+[#1810](https://github.com/cgwalters-forge/agentic-job/issues/1810).
 Give the broker by its tailnet IPv4 address, so that `egress.direct`
 opens it. In a composed caller, a trusted network step can instead resolve
 the name and pass the address to the `prepare` action as `inference-address`;

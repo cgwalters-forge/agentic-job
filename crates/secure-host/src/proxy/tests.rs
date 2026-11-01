@@ -208,6 +208,7 @@ impl Fixture {
             Some(File::create(&log).unwrap()),
         )
         .unwrap();
+        proxy.deny_private = false;
         proxy.origins = vec![
             ("allowed.test".to_owned(), plain_port),
             ("refused.test".to_owned(), refused_port),
@@ -672,6 +673,67 @@ paths = ["/**"]
                 .all(|entry| entry["decision"] == "deny" && entry["status"] == 403),
             "{log:?}"
         );
+    }
+}
+
+/// Local origins stand in for otherwise allowed destinations. The new
+/// diagnostic is enabled in production, but not for ordinary fixtures.
+#[tokio::test]
+async fn private_destinations_have_their_own_reason() {
+    for (enabled, allowlisted, refused, reason) in [
+        (true, true, false, Some(PRIVATE_DESTINATION)),
+        (false, true, false, None),
+        (true, false, false, Some(policy::NOT_ALLOWED)),
+        (true, true, true, Some(REFUSED_DESTINATION)),
+    ] {
+        let fixture = Fixture::start_with(|proxy| {
+            proxy.deny_private = enabled;
+            let text = if allowlisted {
+                POLICY.to_owned()
+            } else {
+                POLICY.replace("\"secure.test\", ", "")
+            };
+            proxy.policy = Policy::parse(&text, policy::ECOSYSTEMS).unwrap();
+            if refused {
+                proxy.refused = Refused::parse(&["secure.test:443".to_owned()]).unwrap();
+            }
+        })
+        .await;
+        let want_status = if reason.is_some() { 403 } else { 200 };
+        for method in ["GET", "POST"] {
+            let mut sender = client(TcpStream::connect(fixture.proxy).await.unwrap()).await;
+            let (status, denied, _) = send(
+                &mut sender,
+                request(method, "https://secure.test/upload", "secure.test", ""),
+            )
+            .await;
+            assert_eq!(
+                (status, denied.as_deref()),
+                (want_status, reason),
+                "{method}"
+            );
+        }
+        match fixture.tunnel("secure.test:443").await {
+            Err((status, denied)) => {
+                assert_eq!((status, Some(denied.as_str())), (want_status, reason))
+            }
+            Ok(stream) => {
+                assert!(reason.is_none());
+                let mut sender = client(fixture.tls(stream, "secure.test").await).await;
+                assert_eq!(
+                    send(&mut sender, request("GET", "/upload", "secure.test", ""))
+                        .await
+                        .0,
+                    200
+                );
+            }
+        }
+        let reached = fixture.secure.take();
+        if reason.is_none() {
+            assert_eq!(reached, ["GET /upload", "POST /upload", "GET /upload"]);
+        } else {
+            assert!(reached.is_empty(), "{reached:?}");
+        }
     }
 }
 

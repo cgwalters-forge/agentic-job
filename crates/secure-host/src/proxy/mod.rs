@@ -61,6 +61,10 @@ pub const DENIED_HEADER: &str = "X-Egress-Denied";
 pub const REFUSED_DESTINATION: &str =
     "the destination is one only the runner may reach (inference.front's broker)";
 
+/// Why an address the proxy's uid cannot reach is refused.
+pub const PRIVATE_DESTINATION: &str =
+    "destination is on a private or local network the egress proxy never reaches";
+
 /// Longest path kept in the log, in characters.
 const MAX_LOGGED_PATH: usize = 200;
 
@@ -550,14 +554,16 @@ impl Refused {
     }
 }
 
-/// A connection refused because an address it would go to is one of
-/// [`Refused`]'s.
+/// A connection refused because of an address it would go to.
 #[derive(Debug)]
-struct RefusedAddress(SocketAddr);
+struct RefusedAddress {
+    address: SocketAddr,
+    reason: &'static str,
+}
 
 impl std::fmt::Display for RefusedAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} is a refused destination's address", self.0)
+        write!(f, "{}: {}", self.address, self.reason)
     }
 }
 
@@ -575,6 +581,9 @@ struct Proxy {
     runner_policy: Policy,
     /// `--refuse`: refused to the sandbox user before any policy.
     refused: Refused,
+    /// Explain the firewall's refusal of local/private destinations.
+    /// Tests turn this off because their origins resolve to loopback.
+    deny_private: bool,
     authority: Authority,
     upstream_tls: Arc<ClientConfig>,
     log: Option<Mutex<File>>,
@@ -601,6 +610,7 @@ impl Proxy {
             runner_policy: policy.with_runner_writes()?,
             policy,
             refused: Refused::default(),
+            deny_private: true,
             authority,
             upstream_tls,
             log: log.map(Mutex::new),
@@ -743,8 +753,10 @@ impl Proxy {
             true => Decision::deny(REFUSED_DESTINATION),
             false => self.policy.connect(&host),
         };
-        let decision = if decision.allowed && self.resolves_refused(&host, port).await {
-            Decision::deny(REFUSED_DESTINATION)
+        let decision = if decision.allowed
+            && let Some(reason) = self.resolved_refusal(&host, port).await
+        {
+            Decision::deny(reason)
         } else {
             decision
         };
@@ -1010,11 +1022,13 @@ impl Proxy {
                 });
                 response
             }
-            Err(err) if err.downcast_ref::<RefusedAddress>().is_some() => self.denied(Entry {
-                reason: REFUSED_DESTINATION,
-                ..entry
-            }),
             Err(err) => {
+                if let Some(refused) = err.downcast_ref::<RefusedAddress>() {
+                    return self.denied(Entry {
+                        reason: refused.reason,
+                        ..entry
+                    });
+                }
                 let error = format!("{err:#}");
                 self.record(&Entry {
                     error: Some(&error),
@@ -1123,8 +1137,23 @@ impl Proxy {
                 .iter()
                 .find(|addr| refused.contains(&canonical(**addr)))
             {
-                return Err(RefusedAddress(*addr).into());
+                return Err(RefusedAddress {
+                    address: *addr,
+                    reason: REFUSED_DESTINATION,
+                }
+                .into());
             }
+        }
+        if self.deny_private
+            && let Some(addr) = addrs
+                .iter()
+                .find(|addr| crate::network::proxy_denied(addr.ip()))
+        {
+            return Err(RefusedAddress {
+                address: *addr,
+                reason: PRIVATE_DESTINATION,
+            }
+            .into());
         }
         let mut last = None;
         let mut stream = None;
@@ -1184,18 +1213,27 @@ impl Proxy {
         }
     }
 
-    /// Whether HOST at PORT resolves now to a refused destination's
-    /// address: a tunnel to it is refused at once, as every connection
-    /// through it would be ([`Self::open`] checks again).
-    async fn resolves_refused(&self, host: &str, port: u16) -> bool {
-        if self.refused.destinations.is_empty() {
-            return false;
+    /// Why HOST at PORT is refused at its resolved addresses: a tunnel
+    /// is refused at once, and [`Self::open`] checks again at connection
+    /// time. Called only after the policy allows the name.
+    async fn resolved_refusal(&self, host: &str, port: u16) -> Option<&'static str> {
+        if self.refused.destinations.is_empty() && !self.deny_private {
+            return None;
         }
         let Ok(addrs) = self.resolve(host, port).await else {
-            return false;
+            return None;
         };
-        let refused = self.refused_addresses().await;
-        addrs.iter().any(|addr| refused.contains(&canonical(*addr)))
+        if !self.refused.destinations.is_empty() {
+            let refused = self.refused_addresses().await;
+            if addrs.iter().any(|addr| refused.contains(&canonical(*addr))) {
+                return Some(REFUSED_DESTINATION);
+            }
+        }
+        (self.deny_private
+            && addrs
+                .iter()
+                .any(|addr| crate::network::proxy_denied(addr.ip())))
+        .then_some(PRIVATE_DESTINATION)
     }
 
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -1281,6 +1319,7 @@ pub fn serve_for_tests(text: &str, refuse: &[String]) -> SocketAddr {
     )
     .unwrap();
     proxy.refused = Refused::parse(refuse).unwrap();
+    proxy.deny_private = false;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
