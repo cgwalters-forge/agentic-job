@@ -17,24 +17,23 @@ pub enum Command {
     Resolve(ResolveArgs),
     /// For apply: print the repository a run's commit is pushed to, forking for a new pull request
     Target(TargetArgs),
+    /// For apply: set draft state after a verified continuation, respecting hold labels
+    Finish(super::readiness::Args),
 }
 
 impl Command {
     pub fn run(&self) -> Result<Exit> {
-        let github = match self {
-            Self::Resolve(_) => super::github::from_env(GH_TOKEN_ENV)?,
-            Self::Target(_) => {
-                super::github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?
-            }
-        };
         match self {
             Self::Resolve(args) => {
+                let github = super::github::from_env(GH_TOKEN_ENV)?;
                 let pull = resolve(&github, args)?;
                 println!("branch={}", pull.branch);
                 println!("head={}", pull.head);
                 println!("replacement-base={}", pull.base);
             }
             Self::Target(args) => {
+                let github =
+                    super::github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?;
                 let target = target(&github, args, &super::read_checked)?;
                 if let Some(repo) = target.repo {
                     println!("repo={repo}");
@@ -43,6 +42,7 @@ impl Command {
                     println!("current-base={base}");
                 }
             }
+            Self::Finish(args) => return super::readiness::run(args),
         }
         Ok(Exit::Success)
     }

@@ -21,6 +21,7 @@ pub mod github;
 pub mod issue_reference;
 pub mod publish;
 pub mod push;
+pub mod readiness;
 pub mod replacement;
 pub mod result;
 pub mod secondary;

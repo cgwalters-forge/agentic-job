@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Apply leaves a continued pull request draft under `ready_when_complete` if
+  it has a `hold` label (case-insensitive) or its labels cannot be read,
+  recording why without failing the applied push (#2690).
 - A Forgejo Actions dispatch caller, `workflow/forgejo/dispatch.yml`, for
   callers to copy to `.forgejo/workflows/dispatch.yml`, takes agent-board's inputs and refuses a runner that cannot provide the
   sandbox; its session, check and apply are not wired yet.

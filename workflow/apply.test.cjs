@@ -454,51 +454,6 @@ test('complete work opens ready; a checkpoint or a stopped run opens a draft', (
   }
 });
 
-// A continuation's push is followed by the pull request's draft state:
-// ready once complete, a draft again at a checkpoint, untouched without
-// `ready_when_complete` or a push.
-test('a continuation that completes marks its pull request ready; one at a checkpoint makes it a draft', () => {
-  const step_ = step('Mark a continued pull request ready, or a draft at a checkpoint');
-  for (const [opted, pushed, ready, draft, mutation] of [
-    [true, true, 'true', 'true', 'markPullRequestReadyForReview'],
-    [true, true, 'true', 'false', null],
-    [true, true, 'false', 'false', 'convertPullRequestToDraft'],
-    [true, true, 'false', 'true', null],
-    [false, true, 'true', 'true', null],
-    [true, false, 'true', 'true', null],
-  ]) {
-    const root = mkdtempSync(join(homedir(), 'apply-test-'));
-    try {
-      const bin = join(root, 'bin');
-      mkdirSync(bin);
-      // A stand-in for gh: it logs its arguments and answers the lookup.
-      writeFileSync(join(bin, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${root}/gh.log"\n[ "$2" = graphql ] || echo "PR_node ${draft}"\n`, { mode: 0o755 });
-      writeFileSync(join(root, 'config.json'), JSON.stringify({ push_to_pull_request_branch: { max: 1, target: '42', ...(opted ? { ready_when_complete: true } : {}) } }));
-      writeFileSync(join(root, 'agent_output.json'), JSON.stringify({ items: pushed ? [{ type: 'push_to_pull_request_branch' }] : [{ type: 'noop' }] }));
-      writeFileSync(join(root, 'applied.json'), JSON.stringify({ already_applied: [] }));
-      const result = command(root, 'bash', ['-euo', 'pipefail', '-c', step_], {
-        GH_AW_TMP: root, OUTPUT_REPO: 'owner/repo', READY: ready, PATH: `${bin}:${process.env.PATH}`,
-      });
-      const label = `${opted} ${pushed} ${ready} ${draft}`;
-      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-      let log = '';
-      try { log = readFileSync(join(root, 'gh.log'), 'utf8'); } catch { /* gh not called */ }
-      if (!opted || !pushed) assert.equal(log, '', label);
-      else assert.match(log, /^api repos\/owner\/repo\/pulls\/42 /, label);
-      const calls = log.split('\n').filter(line => line.startsWith('api graphql'));
-      if (mutation) {
-        assert.equal(calls.length, 1, label);
-        assert.match(calls[0], new RegExp(`${mutation}\\(input: \\{pullRequestId: \\$id\\}\\)`), label);
-        assert.match(calls[0], /-f id=PR_node$/, label);
-      } else {
-        assert.deepEqual(calls, [], label);
-      }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-});
-
 // A partial run's push would land on an open pull request with
 // nothing on it to say the work was cut short.
 test("a partial run's push is not applied, whatever else it posts", () => {

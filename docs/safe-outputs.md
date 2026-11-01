@@ -487,6 +487,8 @@ gate. A run stopped at a limit still pushes nothing (RC-020). A run that
 ends with neither complete work nor a checkpoint, nor any output its run
 requires, fails as before.
 
+Immediately before marking a continuation ready, apply reads its current labels: a case-insensitive `hold`, or a failed label read, leaves it draft and records why in `applied.json`'s `readiness.reason`, without undoing or failing the push.
+
 What the checks stop is unfinished work opening ready for review, where a
 reader or a poller would take it for finished: a stopped run cannot claim
 to be complete, and a checkpoint check cannot read is refused, not ignored.
