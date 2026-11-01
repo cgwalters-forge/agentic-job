@@ -127,6 +127,82 @@ PAT for "All repositories" of an account that owns only its forks would
 be narrower, once the permissions it needs to fork, push, turn off the
 fork's Actions and open the pull request are known.
 
+### secure-host as a standalone project
+
+Before secure-host can become its own project
+([#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735)),
+it has gaps against what the OpenSSF expects of a hosted project. They
+are ranked in [#1736](https://github.com/cgwalters-forge/agentic-job/issues/1736#issuecomment-6330752528)
+and listed here in that order, because no run can file them as issues
+(dispatch.toml allows no `create_issue` output). Each item says where it
+lands: in this repository now; with the operator, because it changes
+`.github/`, adds a protected file name that
+[dispatch.toml](../.github/agentic-job/dispatch.toml) does not exempt,
+or needs a repository setting or a decision; or in the repository step 5
+of #1735 creates. Sizes are the comment's.
+
+1. Security policy and private vulnerability reporting (S, operator).
+   No `SECURITY.md` exists here, in `cgwalters-forge/actions` or in
+   `cgwalters-forge/.github`, and private vulnerability reporting is off.
+   Add one with a private reporting route, a 14-day first response and
+   the supported versions, and turn the setting on; the response
+   commitment is the operator's to give.
+2. Human maintainers and review (S for the files; recruiting is ongoing,
+   operator). Commits and approvals here come from bots, which Scorecard's
+   Code-Review check does not count. Name the maintainers in
+   `MAINTAINERS.md` and `CODEOWNERS`, require a human approval in the new
+   repository's ruleset, and recruit a second maintainer.
+3. DCO and an authorship rule for LLM-generated commits (S for the
+   tooling, M for the policy; new repository). Commits carry no
+   `Signed-off-by`. Add a DCO check with sign-off by the human who merges,
+   and a written rule for how LLM-authored changes are certified; the rule
+   is the operator's decision.
+4. Code of conduct, contributing guide and governance (S, operator). The
+   community profile is at 50%. Add `CODE_OF_CONDUCT.md` (the OpenSSF
+   code of conduct), `CONTRIBUTING.md` with the build, the tests and the
+   rule that new behavior comes with tests, and a short `GOVERNANCE.md`.
+5. Cargo and pip dependency scanning and updates (S–M, operator).
+   [dependabot.yml](../.github/dependabot.yml) covers only
+   `github-actions`, [renovate.json](../.github/renovate.json) only runner
+   labels, and no workflow runs cargo-audit, cargo-deny or osv-scanner, so
+   nothing updates `Cargo.lock` or the hash-pinned
+   `egress/requirements.txt`. Add the `cargo` and `pip` ecosystems to
+   Dependabot with the same cooldown, and a `cargo deny check advisories`
+   (or osv-scanner) job.
+6. Release SBOM, Scorecard-visible provenance and a `v*` tag ruleset
+   (S–M, operator). [release.yml](../.github/workflows/release.yml)
+   attests and verifies the manifest and image, but attaches no SBOM, and
+   its bundle `provenance.jsonl` probably does not match Scorecard's
+   Signed-Releases names. Build with `cargo auditable`, attach an attested
+   SPDX or CycloneDX SBOM for the binary and image, name the bundle
+   `*.sigstore.json` or `*.intoto.jsonl`, and add the `v*` tag ruleset that
+   the workflow's comment says alone limits who can tag; the repository
+   has only branch rulesets.
+7. Scorecard and CodeQL workflows (S, operator). No workflow uses
+   `ossf/scorecard-action` or `github/codeql-action`. Add a Scorecard
+   workflow that publishes results and a CodeQL workflow for Rust and
+   actions, both with read-only tokens.
+8. Test coverage (M, operator, since the job is CI's). Coverage is not
+   measured, and the real host behavior is proven only by CI's
+   fresh-runner jobs (`secure-host`, its `-options`, `-no-user`,
+   `-published`, `-image` and `-write-policy` variants, `world-write` and
+   `world-write-runtime`). Once the [crate split](layout.md#rust-workspace)
+   is done, publish a `cargo llvm-cov` report, from the privileged jobs
+   too if practical.
+9. Fuzzing of the config and os-release parsers (M, low priority, this
+   repository now). Add a cargo-fuzz target, in its own workspace since
+   the workspace lints forbid unsafe code, for the `[egress]` and
+   `[sandbox]` tables in `crates/secure-host/src/config.rs` and the
+   `/etc/os-release` check in `crates/secure-host/src/platform.rs`, for
+   Scorecard's Fuzzing check; running it in CI is the operator's.
+10. Naming (S, decision only, operator). Nothing called `secure-host`
+    exists on crates.io, npm or PyPI, but the name is generic and close to
+    the DoD's "Secure Host Baseline". Choose the name for step 5 and
+    reserve the crate.
+11. Documentation license (S, new repository). The OpenSSF charter wants
+    documentation under CC-BY-4.0; today it is all MIT OR Apache-2.0.
+    Settle it at extraction, with the Linux Foundation's due diligence.
+
 ## Interactive sessions
 
 A session run waits for one operator's prompts after its task's turn, over
@@ -137,7 +213,9 @@ the rest of the design.
 ## What needs the operator
 
 Deployment policy, environment tokens, proxy admission and Tailscale SSH
-access belong to the operator. Per-run App tokens are deferred
+access belong to the operator, as do most of
+[secure-host's gaps as a standalone project](#secure-host-as-a-standalone-project).
+Per-run App tokens are deferred
 ([tracker#403](https://github.com/cgwalters-forge/tracker/issues/403)); an
 applier off GitHub is separate work
 ([tracker#427](https://github.com/cgwalters-forge/tracker/issues/427)).
