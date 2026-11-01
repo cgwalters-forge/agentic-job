@@ -4883,9 +4883,11 @@ mod tests {
             // A case routing only some of them (`native`) is gh-aw's in
             // part: tests/publication.rs runs both steps.
             let routed = case["native"].is_null()
-                && case["items"].as_array().unwrap().iter().all(|item| {
-                    NATIVE_OUTPUTS.contains(&item["type"].as_str().unwrap())
-                });
+                && case["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| NATIVE_OUTPUTS.contains(&item["type"].as_str().unwrap()));
             if !routed {
                 continue;
             }

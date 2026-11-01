@@ -111,7 +111,11 @@ fn publish_all(args: &Args) -> Result<bool> {
         workflow: &workflow,
     };
     let mut log = |line: &Annotation| {
-        println!("::{}::{}", line.kind, crate::run::enter::one_line(&line.text));
+        println!(
+            "::{}::{}",
+            line.kind,
+            crate::run::enter::one_line(&line.text)
+        );
     };
     apply(&checked, &run, &publisher, &records, &mut log)
 }

@@ -447,7 +447,7 @@ Enforcement: [policy.rs](../crates/agentic-job/src/policy.rs), tests
 `push_bounds_must_name_branches_and_one_push`, `push_bounds_intersect`,
 `push_folder_exemptions_are_repository_scoped_and_intersected` and
 `what_the_job_token_cannot_apply_is_refused`;
-[push.rs](../crates/agentic-job/src/apply/push.rs), `resolves`, `targets`
+[push.rs](../crates/safe-outputs/src/apply/push.rs), `resolves`, `targets`
 and `refusals`;
 [clone.rs](../crates/agentic-job/src/run/clone.rs), `a_push_starts_from_its_pinned_head`
 and `a_push_head_is_fetched_by_its_commit_onto_the_default_branch`;
@@ -484,7 +484,7 @@ and fixed committer identity MUST make reconstruction deterministic.
 Enforcement: [replacement.rs](../crates/safe-outputs/src/check/replacement.rs),
 `replacement_series_are_individually_bounded` in
 [check/mod.rs](../crates/agentic-job/src/check/mod.rs), and apply's
-[replacement.rs](../crates/agentic-job/src/apply/replacement.rs).
+[replacement.rs](../crates/safe-outputs/src/apply/replacement.rs).
 Run MUST fetch the policy base snapshot into the producer checkout. Check
 MUST validate a full commit ID; apply MUST bind it to one of these trusted
 heads before reconstruction. Live forge application remains unverified locally.

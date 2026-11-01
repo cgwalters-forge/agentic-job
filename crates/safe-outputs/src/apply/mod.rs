@@ -35,7 +35,10 @@ pub mod gitlab;
 pub mod inline;
 pub mod mentions;
 pub mod publish;
+pub mod push;
+pub mod replacement;
 pub mod roles;
+pub mod secondary;
 /// For tests alone, the library's and its callers', which turn on
 /// `test-support` for theirs: a failure there is a test's.
 #[cfg(any(test, feature = "test-support"))]
@@ -1184,7 +1187,7 @@ mod tests {
     const PUSH_REPO: &str = "bot/bootc";
 
     /// The caller's no-follow read, as far as these tests need it.
-    fn read(path: &Path, max: u64) -> Result<Vec<u8>> {
+    pub(super) fn read(path: &Path, max: u64) -> Result<Vec<u8>> {
         let metadata = std::fs::symlink_metadata(path)?;
         anyhow::ensure!(
             metadata.is_file(),
