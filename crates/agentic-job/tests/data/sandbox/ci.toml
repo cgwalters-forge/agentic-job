@@ -36,5 +36,7 @@ allow-sockets = [
 # The egress proxy and the network rules are on by default: no [egress].
 
 [setup]
-packages = ["jq"]
+packages = ["jq", "rustfmt", "rust-clippy"]
 script = "crates/agentic-job/tests/data/sandbox/toolchain.sh"
+# The job installs cargo before setup; tests/sandbox_host.rs then runs
+# `cargo fmt` and `cargo clippy` as the sandbox user.

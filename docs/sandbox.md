@@ -326,7 +326,10 @@ nothing probes for it. CI's `sandbox` job runs setup and the check for
 real on hosted `ubuntu-26.04`, then removes each
 protection in turn and requires that the matching probes fail
 (`tests/sandbox_host.rs`), after showing that setup refuses a machine
-that is not fresh (`tests/sandbox_fresh.rs`). What that runner cannot
+that is not fresh (`tests/sandbox_fresh.rs`). Its configuration lists
+`rustfmt` and `rust-clippy` in `setup.packages`, and the same test first has the sandbox user run
+`cargo fmt --check` and `cargo clippy` on a new crate with no network,
+and requires `cargo fmt --check` to refuse misformatted code. What that runner cannot
 show, and what was tried by hand elsewhere, is in the action's
 [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#where-each-probe-has-been-seen-to-fail).
 

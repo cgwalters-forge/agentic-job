@@ -339,7 +339,11 @@ tests do not exercise host hardening.
 `cargo` (1.93.1, pulling in `rustc` and `gcc` as its linker), which is
 newer than its `rust-version` of 1.88. That is preferred to rustup:
 nothing is fetched by a script, the packages are signed, and the run
-starts with the toolchain installed. A target that pins a newer Rust in
+starts with the toolchain installed. List the distribution's rustfmt and
+clippy packages alongside `cargo` in each Rust target's `repo-packages`
+entry (`rustfmt` and `rust-clippy` on Ubuntu), so runs can pass
+`cargo fmt --check` and `cargo clippy` without fetching another toolchain.
+A target that pins a newer Rust in
 its own `rust-toolchain` file can be given rustup from a caller `setup`
 script instead. rustup then follows the target's file, but as the
 sandbox user: the target picks a toolchain version, not what root

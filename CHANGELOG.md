@@ -13,6 +13,9 @@ says what a caller may rely on across versions.
   running, is cancelled and sent again once, then fails the run as `stall`,
   as opencode's does, rather than holding the job to its limit
   (docs/harness.md).
+- The shipped `hosted.toml` installs the distribution's clippy alongside
+  cargo and rustfmt for this repository, so sandbox runs can pass Rust
+  lint checks without fetching another toolchain.
 - The run action's "Run the agent" step no longer fails now and then with
   exit 141 when it reads where a secret was found, on runners whose `head`
   is uutils (Ubuntu 26.04).

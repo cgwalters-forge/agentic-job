@@ -51,14 +51,14 @@ packages = ["nftables", "podman", "uidmap"]
 # (docs/dispatch.md#giving-runs-a-toolchain).
 [setup.repo-packages]
 # Ubuntu 26.04's Rust 1.93 (this repository needs 1.88), gcc, and
-# rustfmt with cargo-fmt for `[commit] format` below.
+# rustfmt with cargo-fmt for `[commit] format` below, and clippy for checks.
 # No egress rule is added: the proxy lets any GET through, and a
 # `cargo build --locked` only reads, from
 #   index.crates.io   the sparse index
 #   static.crates.io  the crates, checked against Cargo.lock
 #   github.com        git dependencies (git fetch is already allowed)
 # Their build scripts and proc macros run as the sandbox user.
-"cgwalters-forge/agentic-job" = ["cargo", "rustfmt"]
+"cgwalters-forge/agentic-job" = ["cargo", "rustfmt", "rust-clippy"]
 
 [commit]
 # GitHub's own Actions bot, whose noreply address it attributes for any
