@@ -53,6 +53,9 @@ pub struct Forgejo {
     /// The repository published to: the policy's, which it has checked.
     repo: String,
     token: String,
+    /// The fork-push role's token, which git pushes a new pull request's
+    /// branch with when the publication role opens it; else `token`.
+    push_token: Option<String>,
     http: ureq::Agent,
     recover_pushed_commit: Option<String>,
 }
@@ -430,7 +433,7 @@ impl Forgejo {
             http: &self.http,
             url: &self.api,
             authorization: &format!("token {}", self.token),
-            secrets: &[&self.token],
+            secrets: &self.secrets(),
         }
         .request_text(GET, &path, None)?;
         let patch = super::inline::forgejo_patch(&diff, &comment.path)?;
@@ -458,7 +461,7 @@ impl Forgejo {
                 http: &self.http,
                 url: &self.api,
                 authorization: &format!("token {}", self.token),
-                secrets: &[&self.token],
+                secrets: &self.secrets(),
             }
             .request_text_with_headers(GET, &path, None)?;
             let count = headers
@@ -509,6 +512,7 @@ impl Forgejo {
             git: server.to_owned(),
             repo: repo.to_owned(),
             token,
+            push_token: None,
             http: agent(),
             recover_pushed_commit: None,
         })
@@ -520,14 +524,49 @@ impl Forgejo {
         self
     }
 
+    /// Has git push with TOKEN, the caller's fork-push role's, and the API
+    /// keep this publisher's own ([`super::roles::Routed`]).
+    pub fn pushing_with(mut self, token: Option<String>) -> Self {
+        self.push_token = token;
+        self
+    }
+
     /// What git fetches REPO from, or pushes to it at.
     fn remote(&self, repo: &str) -> String {
         format!("{}/{repo}.git", self.git)
     }
 
-    /// TEXT without the token.
+    /// Both tokens, longest first: the forge saw the push token over git
+    /// and could echo it in an API error.
+    fn secrets(&self) -> Vec<&str> {
+        let mut secrets: Vec<&str> = [Some(self.token.as_str()), self.push_token.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets
+    }
+
+    /// TEXT without either token.
     fn scrub(&self, text: &str) -> String {
-        text.replace(&self.token, "[token]")
+        self.secrets()
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .fold(text.to_owned(), |text, secret| {
+                text.replace(secret, "[token]")
+            })
+    }
+
+    /// Git with the push token, scrubbing the API's too, committing as
+    /// COMMITTER.
+    fn git<'a>(&'a self, committer: &'a super::Committer) -> Git<'a> {
+        let token = self.push_token.as_deref().unwrap_or(&self.token);
+        Git {
+            authorization: format!("token {token}"),
+            token,
+            extra_secrets: vec![self.token.clone()],
+            committer: (&committer.name, &committer.email),
+        }
     }
 
     /// Sends a GET, or a POST of BODY, to PATH under the API, and returns
@@ -544,7 +583,7 @@ impl Forgejo {
             http: &self.http,
             url: &self.api,
             authorization: &format!("token {}", self.token),
-            secrets: &[&self.token],
+            secrets: &self.secrets(),
         }
         .request(method, path, body)
     }
@@ -726,13 +765,7 @@ impl Forgejo {
 
     /// Pushes the pull request's branch to its fork: see [`Git::push`].
     fn push(&self, pr: &PullRequest) -> Result<String> {
-        let git = Git {
-            authorization: format!("token {}", self.token),
-            token: &self.token,
-            extra_secrets: Vec::new(),
-            committer: (&pr.committer.name, &pr.committer.email),
-        };
-        git.push(
+        self.git(&pr.committer).push(
             &Push {
                 from: &self.remote(&self.repo),
                 base: &pr.base,
@@ -927,30 +960,25 @@ impl Publisher for Forgejo {
     fn push_to_branch(&self, push: &BranchPush) -> Result<String> {
         let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
         let url = self.push_target(push).with_context(pushing)?;
-        let git = Git {
-            authorization: format!("token {}", self.token),
-            token: &self.token,
-            extra_secrets: Vec::new(),
-            committer: (&push.committer.name, &push.committer.email),
-        };
         let fork = self.remote(&push.push_repo);
-        git.push(
-            &Push {
-                from: &fork,
-                base: &push.branch,
-                base_commit: &push.head,
-                to: &fork,
-                branch: &push.branch,
-                patch: &push.patch,
-                files: &push.files,
-                head: Some(&push.head),
-                committer: None,
-                at_author_date: false,
-                max_changed_kb: None,
-            },
-            None,
-        )
-        .with_context(pushing)?;
+        self.git(&push.committer)
+            .push(
+                &Push {
+                    from: &fork,
+                    base: &push.branch,
+                    base_commit: &push.head,
+                    to: &fork,
+                    branch: &push.branch,
+                    patch: &push.patch,
+                    files: &push.files,
+                    head: Some(&push.head),
+                    committer: None,
+                    at_author_date: false,
+                    max_changed_kb: None,
+                },
+                None,
+            )
+            .with_context(pushing)?;
         Ok(url)
     }
 
@@ -1041,6 +1069,14 @@ impl Publisher for Forgejo {
         self.request(PATCH, &path, Some(&json!({"state": "closed"})))
             .with_context(|| format!("after commenting {}", comment.url))?;
         Ok(item.html_url)
+    }
+
+    /// Forgejo's authenticated user: `GET /user`, which needs the token's
+    /// `read:user` scope.
+    fn actor_id(&self) -> Result<u64> {
+        self.send("/user", None)?["id"]
+            .as_u64()
+            .context("GET /user: the response has no numeric id")
     }
 }
 
@@ -1289,6 +1325,63 @@ mod tests {
             err,
             "pushing agent-run-7 to fork/name: refs/heads/agent-run-7 exists already"
         );
+    }
+
+    /// With role tokens, the publication token reads and opens the pull
+    /// request and git pushes with the fork-push token; an error echoing
+    /// either, or the user read, holds neither.
+    #[test]
+    fn two_role_tokens_open_a_pull_request() {
+        let publication = ["fake", "publication", "credential"].join("-");
+        let push = ["fake", "push", "credential"].join("-");
+        let (root, pr) = repository();
+        let mut answers = vec![ok(&json!({"id": 104, "login": "renamed"}))];
+        answers.extend(public());
+        answers.push((403, format!("bad tokens {publication} {push}")));
+        answers.push((403, format!("{{\"message\": \"{push} {publication}\"}}")));
+        let (server, requests) = mock(answers);
+        let mut forgejo = Forgejo::new(&server, "owner/name", publication.clone(), &[])
+            .unwrap()
+            .pushing_with(Some(push.clone()));
+        forgejo.git = root.path().display().to_string();
+        assert_eq!(forgejo.actor_id().unwrap(), 104);
+        let git = forgejo.git(&pr.committer);
+        assert_eq!(git.authorization, format!("token {push}"));
+        assert!(git.secrets().contains(&publication.as_str()));
+        let err = format!("{:#}", forgejo.open_pull_request(&pr).unwrap_err());
+        assert!(err.contains("--recover-pushed-commit"), "{err}");
+        let err2 = format!("{:#}", forgejo.actor_id().unwrap_err());
+        for err in [err, err2] {
+            assert!(!err.contains(&publication) && !err.contains(&push), "{err}");
+        }
+        let lines: Vec<String> = requests
+            .try_iter()
+            .map(|request| {
+                assert_eq!(request.authorization, format!("token {publication}"));
+                request.line
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v1/user HTTP/1.1",
+                "GET /api/v1/repos/owner/name HTTP/1.1",
+                "GET /api/v1/repos/fork/name HTTP/1.1",
+                "POST /api/v1/repos/owner/name/pulls HTTP/1.1",
+                "GET /api/v1/user HTTP/1.1",
+            ]
+        );
+        // The branch went to the fork before the refused pull request.
+        assert_eq!(
+            sh(
+                &root.path().join("fork/name.git"),
+                &["show", "agent-run-7:src/x"]
+            ),
+            "x"
+        );
+        // A user without a numeric id is no identity.
+        let (server, _requests) = mock(vec![ok(&json!({"id": "104"}))]);
+        assert!(self::forgejo(&server).actor_id().is_err());
     }
 
     /// A push repository that is not the repository's fork, a fork that is

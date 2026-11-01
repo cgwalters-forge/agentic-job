@@ -30,8 +30,15 @@ says what a caller may rely on across versions.
   Explicit mappings fail closed on missing or wrong credentials, separate push
   from publication, and use numeric actor/App provenance for ownership.
   Legacy PAT fallback is unchanged without a mapping. Role mode requires native
-  handlers and excludes replacement pushes; Forgejo/GitLab routing and live App
-  proof remain unfinished (docs/safe-outputs.md#caller-bound-publisher-roles-github).
+  handlers and excludes replacement pushes; live App proof remains unfinished
+  (docs/safe-outputs.md#caller-bound-publisher-roles).
+- `agentic-job apply --forge forgejo|gitlab` routes status, review comments,
+  fork pushes and publication through the same roles when the caller sets
+  `APPLY_ROLE_BINDINGS` and the four role tokens: each token's numeric
+  `/user` id must match its `actor_id` before any write, `app_id` refuses,
+  a new pull request is pushed with `PUSH_TOKEN` and opened with
+  `PUBLICATION_TOKEN`, and a missing role token never falls back to
+  `FORGEJO_TOKEN`/`GITLAB_TOKEN` (docs/safe-outputs.md#forgejo-and-gitlab-roles).
 - apply's result step, which sets `result-url` and the no-result outputs
   and summary, is policy's binary, `agentic-job result`, in place of a
   github-script step, with the same outputs, summary and sanitized reason.
