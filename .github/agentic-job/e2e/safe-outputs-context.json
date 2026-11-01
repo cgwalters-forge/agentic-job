@@ -1,0 +1,8 @@
+{
+  "repo": "cgwalters-forge/agentic-job",
+  "item": 64,
+  "max_outputs": 1,
+  "outputs": {
+    "add_comment": { "max": 1 }
+  }
+}

@@ -19,6 +19,11 @@ says what a caller may rely on across versions.
   `[github]`, and a Forgejo or GitLab fork into its section, when bumping
   the pinned workflow ref; a top-level `push_repo`, which GitHub's apply
   never read, goes. `policy.json` is unchanged (#1393).
+- The extracted `safe-outputs` component provides standalone `check` and `apply`
+  commands for bounded JSONL, with explicit trusted context and a separate apply
+  credential. Native publishing is limited to new GitHub comments; other writing
+  operations refuse before any write. An opt-in deterministic workflow targets
+  the existing e2e issue 64 (docs/safe-outputs.md#standalone-cli).
 - A Claude Code turn with nothing from it for ten minutes, and no tool call
   running, is cancelled and sent again once, then fails the run as `stall`,
   as opencode's does, rather than holding the job to its limit

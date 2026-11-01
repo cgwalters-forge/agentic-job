@@ -11,7 +11,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "safe-outputs"
+path = "src/main.rs"
+required-features = ["clap"]
+
 [features]
+default = ["clap"]
 # `Kind`, and apply's `Forge`, `Kind` and `State`, as command-line
 # values, for a caller that takes them as ones.
 clap = ["dep:clap"]
@@ -32,6 +38,7 @@ regex.workspace = true
 # GitHub's publishing: the temporary IDs and the digests gh-aw's handlers
 # make (apply::publish).
 ring.workspace = true
+rustix.workspace = true
 serde.workspace = true
 # The collector's results follow the configuration's and the request's
 # key order, as gh-aw's do, and read numbers as JavaScript does: stated
