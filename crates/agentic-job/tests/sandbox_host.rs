@@ -547,6 +547,21 @@ fn in_sandbox(entry: &Entry, script: &str) {
     );
 }
 
+/// The sandbox user formats and lints a new crate
+/// with no network, each step bounded, and `cargo fmt --check` refuses
+/// misformatted code, so that it is rustfmt that passed.
+const RUST_LINTS: &str = r#"set -eu
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+cd "$dir"
+cargo new --vcs none --quiet lints
+cd lints
+timeout 300 cargo fmt --check
+timeout 300 cargo clippy --offline --quiet -- -D warnings
+printf 'fn  misformatted(){}\n' >> src/main.rs
+if timeout 300 cargo fmt --check; then exit 1; fi
+"#;
+
 fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) -> Vec<Case> {
     let user = config.sandbox.user.clone();
     let uid = entry.user().uid;
@@ -1273,6 +1288,14 @@ fn each_probe_fails_when_its_protection_is_removed() {
     let none = BTreeSet::new();
 
     assert_eq!(failed(&config, None), none, "before anything is removed");
+    if config
+        .setup
+        .packages
+        .iter()
+        .any(|package| package == "rustfmt")
+    {
+        in_sandbox(&entry, RUST_LINTS);
+    }
     // There is no `sandbox exec` for a job's steps any more: the run0 way
     // in is the `filesystem-view` probe's, and the agent's is this one.
     if config.sandbox.filesystem_view {
