@@ -253,10 +253,10 @@ command = ["opencode", "acp"]
             assert_eq!(spec.steering, steering, "{agent}");
             // Only Claude Code answers a turn it gave up on as done.
             assert_eq!(spec.provider_error.is_some(), agent == "claude", "{agent}");
-            // Only Vibe and opencode are known to stall in a model request.
+            // Every built-in agent with a model request to stall in has one.
             let stall = match agent {
                 "vibe" => Some(120),
-                "opencode" => Some(600),
+                "opencode" | "claude" => Some(600),
                 _ => None,
             };
             assert_eq!(spec.stall_timeout, stall, "{agent}");
