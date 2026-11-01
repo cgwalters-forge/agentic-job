@@ -16,7 +16,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::carry::Carried;
+use super::carry::{Carried, latest_status};
 use super::verdict::{self, Verdict, escape, inline_section, one_line, positive};
 use super::{REVIEW_COMMENT, SHA};
 
@@ -42,6 +42,9 @@ static APPLIED: LazyLock<Regex> = LazyLock::new(|| {
 static HUNK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@").expect("valid pattern")
 });
+// review.yml's record job, under GitHub's 140 characters: the head waits
+// for a dispatched review, and none ran on this event.
+const RECORDED: &str = "Waiting for a dispatched review of this head; no agent ran on this event";
 static RUN_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[1-9][0-9]*$").expect("valid pattern"));
 
@@ -240,8 +243,10 @@ enum Status {
 /// requests at the reviewed head. Success needs a checked APPROVE that was
 /// posted, as the submitted review or else apply's comment, or an approval
 /// the carry job carried, submitted as the review where real reviews are
-/// on. A status belongs to the commit, so it is set only when the
-/// triggering pull request is the one open there (docs/review.md).
+/// on. With RECORD, the record job's: `pending`, no verdict, for a head
+/// left to a dispatched review. A status belongs to the commit, so it is
+/// set only when the triggering pull request is the one open there
+/// (docs/review.md).
 fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Result<Status> {
     if open != [run.pull] {
         let open = open
@@ -266,6 +271,12 @@ fn review_status(env: &dyn Fn(&str) -> String, run: &Run, open: &[u64]) -> Resul
             ("success", carried.status())
         };
         return Ok(Status::Set { state, description });
+    }
+    if env("RECORD") == "true" {
+        return Ok(Status::Set {
+            state: "pending",
+            description: RECORDED.to_owned(),
+        });
     }
     let posted = !env("REVIEW_URL").is_empty()
         || (env("APPLY_RESULT") == "success" && !env("RESULT_URL").is_empty());
@@ -295,7 +306,22 @@ pub fn report_status(env: &dyn Fn(&str) -> String, api: &dyn Api) -> Result<()> 
         .filter(|pull| pull["head"]["sha"] == run.head.as_str())
         .filter_map(|pull| pull["number"].as_u64())
         .collect();
-    match review_status(env, &run, &open)? {
+    let mut status = review_status(env, &run, &open)?;
+    // A record does not replace a status already there: a reopened pull
+    // request's approved head keeps its approval. GitHub has no
+    // compare-and-set, so a status set between this read and the write
+    // below is overwritten; the next review sets it again.
+    if env("RECORD") == "true"
+        && matches!(status, Status::Set { .. })
+        && let Some(existing) = latest_status(api, &run.repo, &run.head)?
+    {
+        status = Status::Skip(format!(
+            "No review status recorded on {}: it has one already, {}",
+            run.head,
+            one_line(existing["state"].as_str().unwrap_or_default(), 20)
+        ));
+    }
+    match status {
         Status::Skip(why) => annotate("notice", &why),
         Status::Set { state, description } => {
             api.post(
@@ -728,6 +754,8 @@ mod tests {
         reviews: RefCell<Vec<Value>>,
         files: Vec<Value>,
         pulls: Vec<Value>,
+        /// The head's statuses, newest first.
+        statuses: Vec<Value>,
         /// What the review submission fails with, and whether it posted.
         refuse: Option<(u16, &'static str, bool)>,
         posted: RefCell<Vec<(String, Value)>>,
@@ -744,6 +772,7 @@ mod tests {
                 "repos/owner/repo/pulls/12/reviews" => json!(*self.reviews.borrow()),
                 "repos/owner/repo/pulls/12/files" => json!(self.files),
                 "repos/owner/repo/pulls" | "repos/o/r/pulls" => json!(self.pulls),
+                p if p == format!("repos/o/r/commits/{HEAD}/statuses") => json!(self.statuses),
                 _ => panic!("unexpected GET {path}"),
             })
         }
@@ -1443,6 +1472,51 @@ mod tests {
         };
         report_status(&env, &fake).unwrap();
         assert!(fake.posted.borrow().is_empty());
+    }
+
+    /// The record job: pending, no verdict, whatever the other jobs left,
+    /// and never over a status the head has already.
+    #[test]
+    fn a_record_is_pending_and_replaces_no_status() {
+        let env: HashMap<&str, &str> = [
+            ("GITHUB_REPOSITORY", "o/r"),
+            ("PULL", "147"),
+            ("HEAD_SHA", HEAD),
+            ("RECORD", "true"),
+            ("RUN_URL", "https://x/run"),
+        ]
+        .into();
+        let env = |key: &str| env.get(key).copied().unwrap_or_default().to_owned();
+        let pull = json!({"number": 147, "head": {"sha": HEAD}});
+        let other = json!({"context": "ci", "state": "success"});
+        let fake = Fake {
+            pulls: vec![pull.clone()],
+            statuses: vec![other.clone()],
+            ..Default::default()
+        };
+        report_status(&env, &fake).unwrap();
+        assert_eq!(
+            *fake.posted.borrow(),
+            [(
+                format!("repos/o/r/statuses/{HEAD}"),
+                json!({"context": "review", "state": "pending",
+                "description": RECORDED, "target_url": "https://x/run"})
+            )]
+        );
+        assert!(RECORDED.len() <= 140);
+        for state in ["success", "failure", "pending"] {
+            let fake = Fake {
+                pulls: vec![pull.clone()],
+                statuses: vec![
+                    other.clone(),
+                    json!({"context": "review", "state": state,
+                    "creator": {"login": BOT}}),
+                ],
+                ..Default::default()
+            };
+            report_status(&env, &fake).unwrap();
+            assert!(fake.posted.borrow().is_empty(), "{state}");
+        }
     }
 
     #[test]

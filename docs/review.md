@@ -438,6 +438,100 @@ findings wherever they are, saying why a blocker in code unchanged since
 the last review was missed. Check holds the verdict to its usual bounds;
 the `Resolved:` lines are text in it, which only the next history reads.
 
+## Dispatched reviews
+
+A review on every push spends whatever model the variables name, out of
+sight of the scheduler that paces every other run by pool: on 28 October
+about 95 reviews took one subscription to 79% of its weekly limit
+([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
+agent-board's pass can start reviews itself instead
+([its `pr.reviewPools`](https://github.com/cgwalters-forge/agent-board/blob/main/docs/pass.md#reviews)),
+by dispatching `review.yml` on the default branch with three string
+inputs:
+
+- `pr`, the pull request's number;
+- `head`, the full 40-hex SHA the pass read as its head;
+- `pool`, the inference pool the pass chose.
+
+The run is named `review OWNER/REPO#PR HEAD (POOL)`, which is how the pass
+finds it; event runs keep GitHub's default name. A caller that is itself
+dispatched passes the same three inputs through `workflow_call`.
+
+The `pool` job maps the pool with the repository variable `REVIEW_POOLS`
+alone, a JSON object such as
+`{"openai": {"agent": "opencode", "model": "praxis/gpt-6.1-sol"}}`, each
+pool with an `agent`, a `model` and optionally `config`, the runner
+configuration in place of `AGENT_CONFIG`; `AGENT_CONFIG_REPO` and
+`AGENT_CONFIG_PATH` go only to an opencode or Vibe pool. A pool the
+variable does not map, or one whose values are not single words, fails
+the run there: it never falls back to `AGENT_MODEL`, which would spend a
+pool the pass did not pace, and no model, endpoint or path is taken from
+the inputs. The policy job then checks the inputs and binds the pull
+request, as an operator's dispatched review does
+(`agentic-job review dispatch-target` and `resolve-dispatch`, with
+`review-head`): `pr` must be a positive number and `head` an exact SHA
+before the pull request is read, and the pull request must be open, not a
+draft, on the configured base and still at `head`. Anything else fails the
+run before inference. The task is
+[`workflow/review.md`](../workflow/review.md) with its merge policy, as for
+an event, then the pull request's number, head, and title and body fenced
+as untrusted text; the bounds are `review.toml`'s. The task file and the
+bounds, like the workflow itself, are the dispatched ref's, the default branch where the pass
+dispatches. A dispatch has no event admission, nor the `if:`'s author
+check: dispatching takes `actions: write`, and a token that holds it, such
+as the pass's bot's, is trusted to spend a review on any open pull
+request, as with an operator's dispatched review.
+
+The review, check, submit and status jobs then run as for an event, on
+`head`. `submit` reads the pull request again before it submits, and
+submits nothing when its head moved; `status` sets the status only while
+the pull request is the one open at `head`. Without
+[real reviews](#real-reviews-and-the-poll-contract), apply's comment names
+the head it reviewed and is posted whatever the current head. The agent
+job's concurrency group is one per pull request for events and dispatches
+alike, and a dispatch, like a push, cancels the review in progress, so a
+superseded head's review stops when the next head's starts; an admitted
+`/review` still waits rather than cancel one, and an unadmitted comment
+never enters the group.
+
+### Record-only pushes
+
+Dispatching reviews saves nothing while each push still starts one. With
+the repository variable `REVIEW_RECORD_ONLY`, a JSON array of user ids
+(unset is off; agent-board's bot, `cgwalters-bot`, is `[17814078]`), a
+`pull_request_target` event for a pull request from a fork by one of those
+authors runs the policy job as before, tries a
+[carried approval](#carried-approvals) on a `synchronize` whether or not
+`REVIEW_CARRY_APPROVAL` is set, and otherwise only records that the head
+needs a review: the `record` job sets the status `review` `pending` where
+the head has no `review` status yet. No register, agent, check, submit,
+apply or status job runs, so there is no inference and no verdict, neither
+approval nor failure. The pass then dispatches the head's review. The
+record job is outside the agent's concurrency group, so it cannot cancel a
+dispatched review of the same head that started first. Other authors'
+pull requests, a pull request from a branch of the repository itself and
+`/review` keep their review on the event.
+
+### Rollout
+
+Turning this on changes who starts reviews, so the pieces move together;
+nothing here enables it:
+
+1. Each followed repository's review entrypoint takes the dispatch inputs
+   and maps pools: this file at a pin with this change, or
+   cgwalters-forge/actions' `cgwalters-review.yml`, which composes
+   `policy.yml` itself and so needs the same `workflow_dispatch` inputs,
+   `run-name`, pool mapping, `review-head`, concurrency and record job.
+   Each repository sets `REVIEW_POOLS`. The bot's token needs `actions:
+   write` there to dispatch.
+2. In one change: tracker's `.github/pass.json` sets `pr.reviewPools`, and
+   each followed repository sets `REVIEW_RECORD_ONLY` to the bot's id.
+   Before it, a head gets a review on both paths; after it without
+   `pr.reviewPools`, none.
+
+Reporting what reviews spend next to dispatches remains
+([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
+
 ## Configuration
 
 `review.yml` has no network or inference setup of its own; the deployment
@@ -489,6 +583,8 @@ It needs these repository or organization variables, and with a broker no secret
 | `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
 | `REVIEW_CARRY_APPROVAL` | optional, `true` carries an approval across a rebase or rustfmt-only push ([above](#carried-approvals)) |
 | `REVIEW_HISTORY` | optional, `true` gives the agent the pull request's earlier reviews ([above](#review-history)) |
+| `REVIEW_POOLS` | for dispatched reviews, a JSON object mapping each pool to its `agent`, `model` and optional `config` ([above](#dispatched-reviews)); unset refuses every dispatch |
+| `REVIEW_RECORD_ONLY` | optional, a JSON array of user ids whose fork pull requests' pushes only record that the head needs a dispatched review ([above](#record-only-pushes)); for them it also carries approvals as `REVIEW_CARRY_APPROVAL` does, whether or not that is set |
 
 `SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
 rather than `github-actions[bot]`; real reviews always use the submit job's
@@ -544,12 +640,29 @@ caller that kept an edited copy sets `AGENT_CONFIG` to its path, or the
 copy is no longer read. The broker entry for it is the
 `called_workflows` form, naming `review.yml` at that commit.
 
+To take [dispatched reviews](#dispatched-reviews), the caller also adds
+`workflow_dispatch` with the string inputs `pr`, `head` and `pool`, lets
+`github.event_name == 'workflow_dispatch'` through its `if:`, passes the
+three inputs in `with:`, and names its dispatched runs, as the called
+file's `run-name` names no caller's run, without renaming its event runs:
+
+```yaml
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('review {0}#{1} {2} ({3})', github.repository, inputs.pr, inputs.head, inputs.pool) || '' }}
+```
+
+A caller whose run is a `workflow_dispatch` for anything else must not
+call `review.yml` from it: without a known `pool` that run fails.
+
 ## Tests
 
 Dispatched reviews use `agentic-job review dispatch-target` before the policy
 job's read-only API call, then `review resolve-dispatch --pull-request FILE`
 to bind the response to the selected open PR, configured repository and base,
-and exact head SHA. Neither command uses the fork's branch name. An event
+and exact head SHA; with `REQUESTED_HEAD` (`review-head`), also a pull request
+that is not a draft and is still at that head, and a pool that resolved to a
+supported agent and a model. Neither command uses the fork's branch name. The
+record job's `review status` with `RECORD=true` sets only a pending status,
+and none over an existing one. An event
 review's admission is narrowed by `review admit`, and its task, with the
 merge policy, written by `review task`. Rust's `review::tests` pins routing
 and admission refusals, the request bounds against `review.yml` and its

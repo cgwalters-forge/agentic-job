@@ -60,6 +60,12 @@ on:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
         default: ""
+      review-head:
+        description: >-
+          With `review-item`, the full commit SHA its pull request must still be at, not a draft;
+          the review's task is then `review-task`, and `agent` and `model` must be set
+        type: string
+        default: ""
       push-item:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
@@ -665,11 +671,19 @@ jobs:
       # Operator dispatch has no event admission; resolve the head here with
       # read-only API access, never from agent text or the caller's task.
       # The binary checks the request before the call and prints only a SHA.
+      # With `review-head` (review.yml's dispatch), the pull request must
+      # still be at that head, and the task is the trusted checkout's
+      # review task, then the pull request's number, head, and title and
+      # body fenced as untrusted text, as for an event review.
       - name: Resolve a dispatched review
         id: dispatch-review
-        if: ${{ inputs.review-item != '' }}
+        if: ${{ inputs.review-item != '' || inputs.review-head != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          REQUESTED_HEAD: ${{ inputs.review-head }}
+          REVIEW_TASK: ${{ inputs.review-task }}
+          AGENT: ${{ inputs.agent }}
+          MODEL: ${{ inputs.model }}
           REVIEW: ${{ inputs.review }}
           EVENT: ${{ inputs.event }}
           KIND: ${{ inputs.kind }}
@@ -687,6 +701,8 @@ jobs:
           gh api "$(jq -r '"repos/\(.owner)/\(.repo)/pulls/\(.pull_number)"' <<< "$target")" > "$RUNNER_TEMP/dispatch-review.json"
           head=$("$JOB_DIR/bin/agentic-job" review resolve-dispatch --pull-request "$RUNNER_TEMP/dispatch-review.json")
           echo "review-head=$head" >> "$GITHUB_OUTPUT"
+          [ -z "$REQUESTED_HEAD" ] ||
+            "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" --pull-request "$RUNNER_TEMP/dispatch-review.json" > "$RUNNER_TEMP/review-task.md"
       # A run that pushes to a pull request starts from its branch at the
       # head read here with the read-only token, never from agent text or
       # the caller's task; the binary checks the branch against the bounds
@@ -884,6 +900,7 @@ jobs:
           PROFILE: ${{ inputs.fake-profile }}
           CONFIG_REPO: ${{ inputs.agent-config-repo }}
           REVIEW_HEAD: ${{ steps.event.outputs.review-head || steps.dispatch-review.outputs.review-head }}
+          REQUESTED_HEAD: ${{ inputs.review-head }}
           ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
           # Checked above: a number, and a repository within the bounds.
@@ -896,6 +913,7 @@ jobs:
             case "$PROFILE" in implement|comment|review) ;; *) echo '::error::unknown fake-profile'; exit 1 ;; esac
           fi
           if [ "$EVENT" = true ]; then [ -s "$JOB_DIR/task.md" ] || { echo "::error::the decision left no task for an event-triggered run"; exit 1; }
+          elif [ -n "$REQUESTED_HEAD" ]; then cp "$RUNNER_TEMP/review-task.md" "$JOB_DIR/task.md"
           elif [ -n "$TASK_ARTIFACT" ]; then cp "$RUNNER_TEMP/task-artifact/task.md" "$JOB_DIR/task.md"
           else printf '%s\n' "$TASK" > "$JOB_DIR/task.md"; fi
           # The issue or pull request the run is for, which `run` watches

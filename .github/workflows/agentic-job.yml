@@ -68,6 +68,12 @@ on:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
         default: ""
+      review-head:
+        description: >-
+          With `review-item`, the full commit SHA its pull request must still be at, not a draft;
+          the review's task is then `review-task`, and `agent` and `model` must be set
+        type: string
+        default: ""
       push-item:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
@@ -443,6 +449,7 @@ jobs:
       review: ${{ inputs.review }}
       review-task: ${{ inputs.review-task }}
       review-item: ${{ inputs.review-item }}
+      review-head: ${{ inputs.review-head }}
       push-item: ${{ inputs.push-item }}
       repo: ${{ inputs.repo }}
       base: ${{ inputs.base }}

@@ -3457,7 +3457,9 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             "notify: none",
             "review-task: workflow/review.md",
         ],
-        &[r"contents: write|secrets: inherit|pull_request.head|refs/pull"],
+        // `pull_request.head` is held out below, but for the one test of
+        // a fork.
+        &[r"contents: write|secrets: inherit|refs/pull"],
     ),
     // The review agent analyses: no project toolchain or build cache.
     (
@@ -3485,7 +3487,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"VERDICT: \$\{\{ needs.check.outputs.verdict \}\}",
             r#""\$RUNNER_TEMP/bin/agentic-job" review status"#,
             r"REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}",
-            r"if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' \}\}",
+            r"if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' \}\}",
             "runs-on: ubuntu-26.04",
             r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
         ],
@@ -3498,7 +3500,87 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "carry",
         &[
             r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
-            r#"(?s)if: >-\n\s+\$\{\{ vars.REVIEW_CARRY_APPROVAL == 'true' && .*agentic-job" review carry --output "\$GITHUB_OUTPUT""#,
+            r#"(?s)if: >-\n\s+\$\{\{ \(vars.REVIEW_CARRY_APPROVAL == 'true' \|\|.*agentic-job" review carry --output "\$GITHUB_OUTPUT""#,
+            // A push the record job would only record tries a carry first.
+            r"\(github.event_name == 'pull_request_target' && startsWith\(vars.REVIEW_RECORD_ONLY, '\['\) &&\s+contains\(fromJSON\(vars.REVIEW_RECORD_ONLY \|\| '\[\]'\), github.event.pull_request.user.id\) &&\s+github.event.pull_request.head.repo.full_name != github.repository\)\) &&\s+github.event_name == 'pull_request_target' &&\s+github.event.action == 'synchronize'",
+        ],
+        &[],
+    ),
+    // Record-only: for the listed authors' fork pull requests, pending and
+    // nothing else; no agent, inference, verdict or concurrency group that
+    // could cancel a dispatched review of the same head.
+    (
+        "review.yml",
+        "record",
+        &[
+            r"needs: \[policy, carry\]",
+            r"\$\{\{ !cancelled\(\) && github.event_name == 'pull_request_target' && startsWith\(vars.REVIEW_RECORD_ONLY, '\['\) &&\s+contains\(fromJSON\(vars.REVIEW_RECORD_ONLY \|\| '\[\]'\), github.event.pull_request.user.id\) &&\s+github.event.pull_request.head.repo.full_name != github.repository &&\s+needs.policy.outputs.admitted == 'true' && needs.policy.outputs.review-head != '' &&\s+needs.policy.outputs.binary-artifact-id != '' && needs.carry.outputs.from == '' \}\}",
+            r"permissions:\n      pull-requests: read\n      statuses: write\n",
+            r"RECORD: 'true'",
+            r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
+            r#""\$RUNNER_TEMP/bin/agentic-job" review status\n"#,
+        ],
+        &[
+            r"concurrency:|id-token: write|needs\.register|agent\.yml|INFERENCE_|VERDICT:|CHECK_RESULT|REVIEW_URL|CARRIED_|pull_request\.head\.sha|secrets\.",
+        ],
+    ),
+    (
+        "review.yml",
+        "register",
+        &[
+            r"needs.carry.outputs.from == '' &&\s+!\(github.event_name == 'pull_request_target' && startsWith\(vars.REVIEW_RECORD_ONLY, '\['\) &&\s+contains\(fromJSON\(vars.REVIEW_RECORD_ONLY \|\| '\[\]'\), github.event.pull_request.user.id\) &&\s+github.event.pull_request.head.repo.full_name != github.repository\) \}\}",
+        ],
+        &[],
+    ),
+    // A dispatch: its inputs reach only the policy call's validated
+    // routing and the run's name; the pool picks agent and model from the
+    // repository's REVIEW_POOLS alone.
+    (
+        "review.yml",
+        "",
+        &[
+            r"\nrun-name: \$\{\{ github.event_name == 'workflow_dispatch' && format\('review \{0\}#\{1\} \{2\} \(\{3\}\)', github.repository, inputs.pr, inputs.head, inputs.pool\) \|\| '' \}\}\n",
+            r"\n  workflow_dispatch:\n    inputs:\n      pr:\n.*\n        type: string\n        required: true\n      head:\n.*\n        type: string\n        required: true\n      pool:\n.*\n        type: string\n        required: true\n",
+            r"\n  workflow_call:\n(?:    #.*\n)*    inputs:\n      pr:\n        type: string\n        default: ''\n      head:\n        type: string\n        default: ''\n      pool:\n        type: string\n        default: ''\n",
+        ],
+        &[r"inputs\.(?:agent|model|config|inference)|\]\.(?:agent|model)\b"],
+    ),
+    (
+        "review.yml",
+        "pool",
+        &[
+            r"if: \$\{\{ github.event_name == 'workflow_dispatch' \}\}\n",
+            r"permissions: \{\}\n",
+            r"POOLS: \$\{\{ vars.REVIEW_POOLS \}\}\n",
+        ],
+        &[r"secrets|GH_TOKEN|uses:"],
+    ),
+    (
+        "review.yml",
+        "policy",
+        &[
+            r"event: \$\{\{ github.event_name != 'workflow_dispatch' \}\}\n",
+            r"review-item: \$\{\{ github.event_name == 'workflow_dispatch' && \(inputs.pr \|\| '0'\) \|\| '' \}\}\n",
+            r"review-head: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.head \|\| '' \}\}\n",
+            r"comment-target: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.pr \|\| '' \}\}\n",
+            r"needs: pool\n",
+            r"agent: \$\{\{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.agent \|\| github.event_name != 'workflow_dispatch' && vars.AGENT \|\| '' \}\}\n",
+            r"model: \$\{\{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.model \|\| github.event_name != 'workflow_dispatch' && vars.AGENT_MODEL \|\| '' \}\}\n",
+            r"config: \$\{\{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.config \|\| vars.AGENT_CONFIG \|\| ",
+            r"inference-url: \$\{\{ vars.INFERENCE_URL \}\}\n",
+        ],
+        &[],
+    ),
+    // The dispatch step checks a requested head and writes the base's
+    // review task, which the task step takes over the caller's.
+    (
+        "policy.yml",
+        "policy",
+        &[
+            r"if: \$\{\{ inputs.review-item != '' \|\| inputs.review-head != '' \}\}\n",
+            r"REQUESTED_HEAD: \$\{\{ inputs.review-head \}\}\n",
+            r#"\[ -z "\$REQUESTED_HEAD" \] \|\|\n\s+"\$JOB_DIR/bin/agentic-job" review task "\$REVIEW_TASK" --pull-request "\$RUNNER_TEMP/dispatch-review.json" > "\$RUNNER_TEMP/review-task.md"\n"#,
+            r#"elif \[ -n "\$REQUESTED_HEAD" \]; then cp "\$RUNNER_TEMP/review-task.md" "\$JOB_DIR/task.md"\n"#,
         ],
         &[],
     ),
@@ -3844,8 +3926,8 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "review.yml",
         "",
         &[
-            r"cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \}\}",
-            r"group: review-pull-\$\{\{ github\.event\.pull_request\.number \|\| github\.event\.issue\.number \}\}",
+            r"cancel-in-progress: \$\{\{ github\.event_name == 'pull_request_target' \|\| github\.event_name == 'workflow_dispatch' \}\}",
+            r"group: review-pull-\$\{\{ github\.event\.pull_request\.number \|\| github\.event\.issue\.number \|\| inputs\.pr \}\}",
         ],
         &[],
     ),
@@ -3965,17 +4047,20 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
     ),
     // Who starts an automatic review: the owner, members and collaborators,
     // and a Bot whose numeric id REVIEW_BOT_IDS lists as a JSON array; a
-    // `/review` comment from anyone, which its bounds hold to write access.
-    // Changing it changes who spends inference.
+    // `/review` comment from anyone, which its bounds hold to write access;
+    // and a dispatch, which takes write access. Changing it changes who
+    // spends inference.
     (
         "review.yml",
         "policy",
         &["    if: >-
+      !cancelled() && needs.pool.result != 'failure' && (
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
         (contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.pull_request.author_association) ||
           (github.event.pull_request.user.type == 'Bot' && startsWith(vars.REVIEW_BOT_IDS, '[') &&
             contains(fromJSON(vars.REVIEW_BOT_IDS || '[]'), github.event.pull_request.user.id)))) ||
-      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')) ||
+      (github.event_name == 'workflow_dispatch' && needs.pool.result == 'success'))
 "],
     ),
     // The policy job reads the bounds at the workflow's commit for
@@ -4001,7 +4086,7 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
     (
         "review.yml",
         "",
-        &["config: ${{ vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
+        &["config: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.config || vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}"],
     ),
     (
         "dispatch.yml",
@@ -4140,10 +4225,12 @@ fn the_review_caller_keeps_token_separation() {
         .keys()
         .map(|name| name.as_str().unwrap())
         .collect();
-    let writes: [(&str, &[&str]); 9] = [
+    let writes: [(&str, &[&str]); 11] = [
+        ("pool", &[]),
         ("policy", &[]),
         ("refusal", &["pull-requests"]),
         ("carry", &[]),
+        ("record", &["statuses"]),
         ("register", &["id-token"]),
         ("agent", &[]),
         ("check", &["id-token"]),
@@ -6396,7 +6483,102 @@ fn agent_configuration_variables_reach_only_opencode_and_vibe() {
                     );
                 }
             }
+            // A dispatched review takes what its pool job decided for the
+            // pool's agent, whatever AGENT is.
+            if file == "review.yml" {
+                let pool = format!("needs.pool.outputs.{}", &input["agent-".len()..]);
+                for decided in ["", "pool-config"] {
+                    let context = [
+                        ("github.event_name", Expr::text("workflow_dispatch")),
+                        (agent, Expr::text("opencode")),
+                        (variable, Expr::text("operator-config")),
+                        (pool.as_str(), Expr::text(decided)),
+                    ];
+                    assert_eq!(evaluate(expression, &context).render(), decided, "{input}");
+                }
+            }
         }
+    }
+}
+
+/// review.yml reads nothing of the pull request's head but whether its
+/// repository is this one, which tells a fork's pull request apart for
+/// the record-only mode: not its commit, branch, label or user.
+#[test]
+fn the_review_caller_reads_only_whether_the_head_is_a_fork() {
+    const FORK: &str = "github.event.pull_request.head.repo.full_name != github.repository";
+    let text = workflow("review.yml");
+    assert!(text.contains(FORK));
+    assert!(!text.replace(FORK, "").contains("pull_request.head"));
+}
+
+/// A dispatched review's pool: the repository's REVIEW_POOLS alone picks
+/// the agent, the model and the configuration repository, and anything
+/// else, an unknown pool included, stops the run with no outputs.
+#[test]
+fn a_dispatched_review_maps_only_a_known_pool() {
+    let review = definition("review.yml");
+    let script = named_step(&review, "Map the pool to its agent and model")["run"]
+        .as_str()
+        .unwrap();
+    let pools = serde_json::json!({
+        "openai": {"agent": "opencode", "model": "praxis/gpt-6.1-sol"},
+        "claude": {"agent": "claude", "model": "claude-opus-5-5", "config": "c.toml"},
+        "spaced": {"agent": "opencode", "model": "m\nconfig=evil"},
+        "newline": {"agent": "opencode", "model": "m\n"},
+        "empty": {"agent": "opencode", "model": ""},
+        "modelless": {"agent": "opencode"},
+        "number": {"agent": 1, "model": "m"},
+    })
+    .to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("output");
+    let run = |pools: &str, pool: &str| {
+        std::fs::write(&output, "").unwrap();
+        let status = Command::new("bash")
+            .args(["-e", "-c", script])
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("POOLS", pools)
+            .env("POOL", pool)
+            .env("CONFIG_REPO", "o/config")
+            .env("CONFIG_PATH", "opencode.json")
+            .env("GITHUB_OUTPUT", &output)
+            .output()
+            .unwrap();
+        (
+            status.status.success(),
+            std::fs::read_to_string(&output).unwrap(),
+        )
+    };
+    assert_eq!(
+        run(&pools, "openai"),
+        (
+            true,
+            "agent=opencode\nmodel=praxis/gpt-6.1-sol\nconfig=\nconfig-repo=o/config\nconfig-path=opencode.json\n".into()
+        )
+    );
+    assert_eq!(
+        run(&pools, "claude"),
+        (
+            true,
+            "agent=claude\nmodel=claude-opus-5-5\nconfig=c.toml\nconfig-repo=\nconfig-path=\n"
+                .into()
+        )
+    );
+    for (pools, pool) in [
+        (pools.as_str(), "unknown"),
+        (pools.as_str(), ""),
+        (pools.as_str(), "spaced"),
+        (pools.as_str(), "newline"),
+        (pools.as_str(), "empty"),
+        (pools.as_str(), "modelless"),
+        (pools.as_str(), "number"),
+        ("", "openai"),
+        ("[]", "openai"),
+        ("not json", "openai"),
+    ] {
+        assert_eq!(run(pools, pool), (false, String::new()), "{pools} {pool}");
     }
 }
 

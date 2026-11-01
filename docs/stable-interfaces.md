@@ -27,7 +27,8 @@ Inputs:
 - the run: `id`, `task`, `task-artifact`, `repo`, `base`, `kind`,
   `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
   `proposals-artifact`;
-- reviews and events: `review`, `review-task`, `review-item`, `event`;
+- reviews and events: `review`, `review-task`, `review-item`,
+  `review-head`, `event`;
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
   `agent-config-path`, `agent-skills`, `agent-user`, `github-reads`,
   `packages`, `npm`, `setup`, `egress-write-policy`, `session`,
@@ -65,6 +66,14 @@ tests; and `inference-provider`, `inference-register: api-key`,
 `INFERENCE_API_KEY` and `MCP_TOKEN`, which the workflow accepts and
 refuses or does not pass on for now
 ([refused for now](inference.md#a-provider-api-key)).
+
+## The review workflow's dispatch
+
+[`.github/workflows/review.yml`](../.github/workflows/review.yml) takes the
+`workflow_dispatch` and `workflow_call` string inputs `pr`, `head` and
+`pool`, and names a dispatched run `review OWNER/REPO#PR HEAD (POOL)`,
+which a scheduler reads back; the repository variables `REVIEW_POOLS` and
+`REVIEW_RECORD_ONLY` configure it ([dispatched reviews](review.md#dispatched-reviews)).
 
 ## Configuration files
 
