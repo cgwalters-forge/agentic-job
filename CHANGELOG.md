@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- The run action's "Run the agent" step no longer fails now and then with
+  exit 141 when it reads where a secret was found, on runners whose `head`
+  is uutils (Ubuntu 26.04).
 - `workflows check` admits literal `egress: write-policy` on standalone
   secure-host and a narrow trusted artifact consumer with a fixed first
   digest check that requires the payload to be the workspace's only entry.
