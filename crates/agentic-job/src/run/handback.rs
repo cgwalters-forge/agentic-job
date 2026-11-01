@@ -1044,7 +1044,7 @@ fn touches_rust(git: &Git<'_>, base: &str, status: &[u8]) -> bool {
 /// Formats the Rust of the checkout DIR with [`FORMAT_SCRIPT`], as RUNNER,
 /// the sandbox user with the agent's confinement. A formatter that is
 /// absent or fails is a warning: the change is then taken as it is.
-fn format_rust(runner: &dyn Runner, dir: &str) {
+fn format_rust(runner: &dyn Runner, dir: &str) -> bool {
     let mut argv = vec!["env"];
     argv.extend(FORMAT_ENV);
     argv.extend([
@@ -1057,16 +1057,79 @@ fn format_rust(runner: &dyn Runner, dir: &str) {
         dir,
     ]);
     match runner.run(&argv, b"", MAX_GIT_OUTPUT) {
-        Ok(out) if out.success() => {}
+        Ok(out) if out.success() => return true,
         Ok(out) if out.status.code() == Some(NO_RUSTFMT_STATUS) => {
             eprintln!("warning: the change is taken unformatted: rustfmt is not installed");
         }
         Ok(out) => eprintln!(
-            "warning: the change is taken as the formatter left it: it failed ({})",
+            "warning: the change is taken unformatted: the formatter failed ({})",
             out.status
         ),
         Err(err) => eprintln!("warning: the change is taken unformatted: {err:#}"),
     }
+    false
+}
+
+/// A workspace formatter may rewrite pre-existing, untouched files (or a
+/// repository recipe may create litter). Snapshot the agent's tree first so
+/// those changes cannot widen its proposal. All reads and restores stay in
+/// the sandbox; `check` still admits the resulting patch independently.
+fn format_changed_rust(git: &Git<'_>, base: &str) -> Result<(), String> {
+    let names = |args: &[&str]| {
+        git.limited(args, MAX_STATUS_BYTES + 1)
+            .filter(|out| out.len() <= MAX_STATUS_BYTES && (out.is_empty() || out.ends_with(&[0])))
+            .ok_or_else(|| "cannot list files for formatting within the size limit".to_owned())
+    };
+    if !git.ok(&["add", "--all"]) {
+        return Err("cannot snapshot the agent's tree before formatting".into());
+    }
+    let tree = git
+        .run(&["write-tree"], b"")
+        .filter(|(status, _)| *status == 0)
+        .map(|(_, out)| String::from_utf8_lossy(&out).trim().to_owned())
+        .ok_or("cannot snapshot the agent's tree before formatting")?;
+    let original = names(&["diff", "--name-only", "--no-renames", "-z", base, &tree])?;
+    let allowed: HashSet<&[u8]> = original.split(|&b| b == 0).collect();
+    let succeeded = format_rust(git.runner, git.dir);
+    if !git.ok(&["add", "--all"]) {
+        return Err("cannot stage the formatter's result".into());
+    }
+    let formatted = names(&[
+        "diff",
+        "--cached",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        &tree,
+    ])?;
+    let mut restore = Vec::new();
+    for path in formatted.split(|&b| b == 0).filter(|path| !path.is_empty()) {
+        if !succeeded || !allowed.contains(path) {
+            restore.extend_from_slice(b":(literal)");
+            restore.extend_from_slice(path);
+            restore.push(0);
+        }
+    }
+    if !restore.is_empty()
+        && !matches!(
+            git.run(
+                &[
+                    "restore",
+                    "--source",
+                    &tree,
+                    "--staged",
+                    "--worktree",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ],
+                &restore,
+            ),
+            Some((0, _))
+        )
+    {
+        return Err("cannot restore files outside the formatter's scope".into());
+    }
+    Ok(())
 }
 
 /// The paths `git status --porcelain=v1 -z` lists.
@@ -1439,16 +1502,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
             MAX_STATUS_BYTES,
         )
     };
-    let mut status = read_status();
-    // Formatted before anything else reads the tree.
-    if request.commit.format
-        && policy.kind == Kind::Branch
-        && let Some(listed) = &status
-        && touches_rust(&git, base, listed)
-    {
-        format_rust(runner, dir);
-        status = read_status();
-    }
+    let status = read_status();
     let files = changed_files(status.as_deref().unwrap_or_default());
     // Commits of its own count as a change too, though it was asked to
     // make none.
@@ -1567,7 +1621,14 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
         return Ok(change);
     }
     let staged = if policy.kind == Kind::Branch && changed && !unreadable {
-        stage_patch(&git, base, status.as_deref().unwrap_or_default())
+        let formatting = if request.commit.format
+            && touches_rust(&git, base, status.as_deref().unwrap_or_default())
+        {
+            format_changed_rust(&git, base)
+        } else {
+            Ok(())
+        };
+        formatting.and_then(|()| stage_patch(&git, base, status.as_deref().unwrap_or_default()))
     } else {
         Ok(Vec::new())
     };
@@ -2938,10 +2999,10 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success());
-        const FORMATTED_BASE: &str = "pub fn g() {}\\n";
-        let misformat = "printf 'pub fn g() {}\\npub fn  f( ){}\\n' > src/lib.rs";
+        const FORMATTED_BASE: &str = "mod untouched;\\npub fn g() {}\\n";
+        let misformat = "printf 'mod untouched;\\npub fn g() {}\\npub fn  f( ){}\\n' > src/lib.rs";
         let by_just = format!(
-            "printf 'fmt:\\n\\tprintf \"pub fn f() {{}}\\\\n\" > src/lib.rs\\n' > Justfile && {misformat}"
+            "printf 'fmt:\\n\\tprintf \"pub fn f() {{}}\\\\n\" > src/lib.rs\\n\\tprintf changed > a.txt\\n\\tprintf litter > litter.txt\\n\\trm removed.txt\\n' > Justfile && {misformat}"
         );
         // (the case, whether it formats, the base's src/lib.rs, what the
         // agent does, what the patch has and has not)
@@ -2961,6 +3022,24 @@ mod tests {
                 misformat.to_owned(),
                 if rustfmt { FORMATTED } else { MISFORMATTED },
                 if rustfmt { MISFORMATTED } else { FORMATTED },
+            ),
+            (
+                "absent formatter",
+                true,
+                FORMATTED_BASE,
+                misformat.to_owned(),
+                MISFORMATTED,
+                FORMATTED,
+            ),
+            (
+                "failed formatter",
+                true,
+                FORMATTED_BASE,
+                format!(
+                    "printf 'fmt:\\n\\tprintf broken > src/lib.rs\\n\\texit 1\\n' > Justfile && {misformat}"
+                ),
+                MISFORMATTED,
+                "+broken",
             ),
             (
                 "on, committed",
@@ -2998,6 +3077,10 @@ mod tests {
         }
         let policy = policy(Kind::Branch, pull_requests());
         for (case, format, base_lib, script, has, has_not) in cases {
+            if case == "failed formatter" && !just {
+                eprintln!("skipped the failed formatter case: just is not installed");
+                continue;
+            }
             let mut home = Home::new();
             let repo = home.checkout.dir.clone();
             let head = sh(
@@ -3005,7 +3088,9 @@ mod tests {
                 &format!(
                     "mkdir src && printf '[package]\\nname = \"fixture\"\\nversion = \"0.1.0\"\\n\
                      edition = \"2021\"\\n\\n[workspace]\\n' > Cargo.toml && \
-                     printf '{base_lib}' > src/lib.rs && git add . && \
+                     printf '{base_lib}' > src/lib.rs && \
+                     printf 'pub fn  untouched( ){{}}\\n' > src/untouched.rs && \
+                     printf keep > removed.txt && git add . && \
                      git -c user.name=t -c user.email=t@example.invalid commit -q -m Crate && \
                      git rev-parse HEAD"
                 ),
@@ -3021,12 +3106,68 @@ mod tests {
                 format,
                 ..config::Commit::default()
             };
-            let change = home.collect(&policy, &commit);
+            // Only the formatter sees a PATH without cargo/rustfmt. Git
+            // collection still uses the ordinary fixture runner.
+            struct WithoutFormatter(std::path::PathBuf);
+            impl Runner for WithoutFormatter {
+                fn run(
+                    &self,
+                    argv: &[&str],
+                    input: &[u8],
+                    max: usize,
+                ) -> Result<super::super::enter::Output> {
+                    let path = format!("PATH={}", self.0.display());
+                    let mut args = argv.to_vec();
+                    if argv.contains(&FORMAT_SCRIPT) {
+                        args.insert(1, &path);
+                    }
+                    Unconfined.run(&args, input, max)
+                }
+            }
+            let bin = home.path("bin");
+            std::fs::create_dir(&bin).unwrap();
+            for tool in ["timeout", "sh"] {
+                std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), bin.join(tool)).unwrap();
+            }
+            let runner = WithoutFormatter(bin);
+            let change = if case == "absent formatter" {
+                collect(&Request {
+                    runner: &runner,
+                    home: home.dir.path(),
+                    checkout: &home.checkout,
+                    policy: &policy,
+                    commit: &commit,
+                    run_id: RUN_ID,
+                    harness: None,
+                    run_dir: &home.path("results"),
+                    safe_outputs: &home.path("safe-outputs"),
+                })
+                .unwrap()
+            } else {
+                home.collect(&policy, &commit)
+            };
             assert_eq!(change.dropped, None, "{case}");
             let patch =
                 std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-42.patch")).unwrap();
             assert!(patch.contains(has), "{case}: {patch}");
             assert!(!patch.contains(has_not), "{case}: {patch}");
+            for untouched in ["a.txt", "src/untouched.rs", "litter.txt", "removed.txt"] {
+                if case != "no Rust changed" || untouched != "a.txt" {
+                    assert!(
+                        !patch.contains(&format!("diff --git a/{untouched}")),
+                        "{case}: {patch}"
+                    );
+                }
+            }
+            assert_eq!(
+                std::fs::read_to_string(repo.join("src/untouched.rs")).unwrap(),
+                "pub fn  untouched( ){}\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.join("removed.txt")).unwrap(),
+                "keep"
+            );
+            assert!(!repo.join("litter.txt").exists());
             let verdict = home.verdict(&policy);
             assert!(verdict.ok, "{case}: {:?}", verdict.errors);
         }

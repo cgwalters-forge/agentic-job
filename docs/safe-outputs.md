@@ -1184,13 +1184,21 @@ and a fix round on `cargo fmt --check`. In a checkout with a
 else `cargo fmt --all`. Like git there, it runs as the sandbox user with
 the agent's confinement, and so can do nothing the agent could not:
 Cargo is kept offline and rustup (1.28.1 or later) may not install a
-toolchain the checkout names, within a five-minute timeout. Formatting changes
-only how the code is laid out, though `cargo fmt --all` also formats
-files the agent did not change. A missing rustfmt or a formatter that
+toolchain the checkout names, within a five-minute timeout. A missing rustfmt or a formatter that
 fails is a warning in the job's log, which gives only the exit status,
 since rustfmt's errors quote the agent's source; the change is then
-taken as it was left. The result is the agent's change like any other,
+taken unformatted. The result is the agent's change like any other,
 and `check` holds it to every bound.
+Before invoking the formatter, `run` snapshots the agent's tree, including
+uncommitted and new files. It restores any formatter changes to paths that
+did not differ from the run's base in that snapshot, including files the
+formatter creates or deletes: a workspace-wide formatter cannot widen the
+agent's patch. On formatter failure it restores all formatter changes and
+takes the original, unformatted change. If the snapshot or restoration
+cannot be completed, the patch is dropped rather than handed back with an
+unknown scope. A repository's `fmt` recipe is still repository code, not a
+trusted guarantee of semantic equivalence; it has only the agent's authority
+and its result passes through the same independent patch checks.
 Only the run's own checkout is formatted, not a
 [secondary pull request](#a-secondary-pull-request)'s.
 
