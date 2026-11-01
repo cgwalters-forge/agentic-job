@@ -3,6 +3,8 @@
 //! `outputs.jsonl`: the `{items, errors}` that `agentic-job collect` writes
 //! for check.yml and for a caller off GitHub, and `check --collected` reads.
 //! [`collect_bytes`] takes the file as read, bounded; [`collect`] its text.
+//! Both frame it with [`decode`](crate::decode)'s functions, then refuse
+//! a malformed line in gh-aw's words and go on to the next.
 //!
 //! The requests it takes are those of [`TYPES`], every type a policy may
 //! allow, each validated and its text sanitized as gh-aw's collector does
@@ -50,12 +52,13 @@ pub mod sanitize;
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use self::sanitize::{is_js_space, js_trim};
+use crate::decode::{self, DecodeError, Malformed, Request};
 use crate::vocabulary::{
     CREATE_REVIEW_COMMENT, Forge, HIDE_COMMENT, HIDE_REASONS, KIND_TARGETS, MARK_READY,
     MAX_OUTPUTS_BYTES, OUTPUTS_FILE, PUSH_TO_PULL_REQUEST_BRANCH, REPLY_TO_REVIEW_COMMENT,
@@ -1600,12 +1603,13 @@ pub fn collect_bytes(
     forge: Forge,
     keeps_link: &dyn Fn(&str) -> bool,
 ) -> Result<Collected> {
-    ensure!(
-        u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_OUTPUTS_BYTES),
-        "{OUTPUTS_FILE} is over {MAX_OUTPUTS_BYTES} bytes"
-    );
-    let text =
-        std::str::from_utf8(bytes).with_context(|| format!("{OUTPUTS_FILE} is not UTF-8"))?;
+    let text = match decode::text(bytes) {
+        Ok(text) => text,
+        Err(DecodeError::NotUtf8(err)) => {
+            return Err(err).with_context(|| format!("{OUTPUTS_FILE} is not UTF-8"));
+        }
+        Err(_) => bail!("{OUTPUTS_FILE} is over {MAX_OUTPUTS_BYTES} bytes"),
+    };
     Ok(collect(text, config, forge, keeps_link))
 }
 
@@ -1628,13 +1632,9 @@ pub fn collect(
         .map(|(name, value)| (name.replace('-', "_"), value.clone()))
         .collect();
     let mut collected = Collected::default();
-    for (index, line) in js_trim(text).split('\n').enumerate() {
-        let line_text = js_trim(line);
-        if line_text.is_empty() {
-            continue;
-        }
+    for (line, line_text) in decode::lines(text) {
         let taken = &collected.items;
-        match request(index + 1, line_text, &config, forge, taken, keeps_link) {
+        match request(line, line_text, &config, forge, taken, keeps_link) {
             Ok(Some(item)) => collected.items.push(item),
             Ok(None) => {}
             Err(error) => collected.errors.push(error),
@@ -1653,19 +1653,17 @@ fn request(
     taken: &[Map<String, Value>],
     keeps_link: &dyn Fn(&str) -> bool,
 ) -> Result<Option<Map<String, Value>>, String> {
-    let item: Map<String, Value> = match serde_json::from_str(text) {
-        Ok(Value::Object(item)) => item,
-        Ok(_) => return Err(format!("Line {line}: Missing required 'type' field")),
-        Err(err) => return Err(format!("Line {line}: Invalid JSON - {err}")),
-    };
-    let kind = match item.get("type") {
-        Some(Value::String(kind)) if !kind.is_empty() => kind.replace('-', "_"),
-        Some(kind) if truthy(kind) => {
+    let missing = || format!("Line {line}: Missing required 'type' field");
+    let (kind, item) = match decode::frame(text) {
+        Ok(Request { kind, object }) if !kind.is_empty() => (kind.replace('-', "_"), object),
+        Ok(_) | Err(Malformed::NotObject | Malformed::MissingType) => return Err(missing()),
+        Err(Malformed::Json(err)) => return Err(format!("Line {line}: Invalid JSON - {err}")),
+        Err(Malformed::TypeNotString(kind)) if truthy(&kind) => {
             return Err(format!(
                 "Line {line}: Invalid JSON - 'type' is not a string"
             ));
         }
-        _ => return Err(format!("Line {line}: Missing required 'type' field")),
+        Err(Malformed::TypeNotString(_)) => return Err(missing()),
     };
     let Some(limits) = config.get(&kind).filter(|limits| truthy(limits)) else {
         let expected: Vec<&str> = config.keys().map(String::as_str).collect();

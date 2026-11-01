@@ -124,6 +124,8 @@ fn refusals_of_its_own() {
         ),
         ("[1]", "Line 1: Missing required 'type' field"),
         ("null", "Line 1: Missing required 'type' field"),
+        (r#"{"type":null}"#, "Line 1: Missing required 'type' field"),
+        (r#"{"type":0}"#, "Line 1: Missing required 'type' field"),
         (
             r#"{"type":7}"#,
             "Line 1: Invalid JSON - 'type' is not a string",
