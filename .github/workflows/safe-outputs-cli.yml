@@ -1,0 +1,110 @@
+# Threat: an accidental dispatch or PR-controlled program using a write token.
+# Opt-in dispatch on this repository's main only; no caller-selected revision,
+# target, code artifact or credential is executed in apply. Issue 64 is the
+# existing e2e-full destination.
+# check runs secure-host; apply is a trusted artifact consumer
+# (docs/workflows-check.md#trusted-artifact-consumers): it builds the CLI from
+# this run's commit outside its workspace and reads the artifact as data. That
+# build's dependencies run beside apply's issue-write job token, so apply holds
+# no other credential.
+name: safe-outputs-cli
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Post one deterministic proof comment on the fixed e2e issue 64
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  check:
+    if: ${{ inputs.publish && github.repository == 'cgwalters-forge/agentic-job' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.pack.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Secure the host
+        uses: cgwalters-forge/actions/secure-host@636b20b87bc94417999062ada22700ef4d6a8836 # main, with secure-host:v0.6.3
+      - name: Build the standalone CLI
+        run: cargo build --locked -p safe-outputs --bin safe-outputs
+      - name: Construct and check a non-agent request without a write credential
+        run: |
+          mkdir proposals
+          jq -nc '{type:"add_comment",repo:"cgwalters-forge/agentic-job",item_number:64,body:"Standalone safe-outputs deterministic CLI proof."}' > proposals/outputs.jsonl
+          target/debug/safe-outputs check --context .github/agentic-job/e2e/safe-outputs-context.json --input proposals/outputs.jsonl --checked proposals/checked.json
+      # A trusted consumer takes exactly one file, `artifact`, bound to
+      # this job's output by its SHA-256.
+      - name: Pack the request and its receipt as one file
+        id: pack
+        run: |
+          mkdir out
+          jq -n --rawfile input proposals/outputs.jsonl --rawfile checked proposals/checked.json '{input: $input, checked: $checked}' > out/artifact
+          printf 'digest=%s\n' "$(sha256sum out/artifact | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: safe-outputs-cli-checked
+          path: out/artifact
+          if-no-files-found: error
+          retention-days: 7
+
+  apply:
+    needs: check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    environment: agent-apply
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: '${{ needs.check.outputs.id }}'
+      - shell: bash
+        env:
+          ARTIFACT_SHA256: '${{ needs.check.outputs.digest }}'
+        run: |
+          shopt -s dotglob nullglob
+          entries=(*)
+          [[ ${#entries[@]} -eq 1 && ${entries[0]} == artifact && -f artifact && ! -L artifact ]]
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  artifact\n' "$ARTIFACT_SHA256" | sha256sum --check --strict -
+      # The trusted source and its caller context, never the artifact's,
+      # from the main commit check ran on.
+      - name: Build trusted source outside the workspace
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          git init -q "$RUNNER_TEMP/src"
+          git -C "$RUNNER_TEMP/src" fetch -q --depth 1 https://github.com/cgwalters-forge/agentic-job "$SHA"
+          git -C "$RUNNER_TEMP/src" checkout -q FETCH_HEAD
+          cargo build --locked --manifest-path "$RUNNER_TEMP/src/Cargo.toml" -p safe-outputs --bin safe-outputs
+      - name: Unpack the request and its receipt as data
+        run: |
+          jq -e 'type == "object" and keys == ["checked", "input"] and (.input | type == "string") and (.checked | type == "string")' artifact > /dev/null
+          mkdir "$RUNNER_TEMP/proposals"
+          jq -j .input artifact > "$RUNNER_TEMP/proposals/outputs.jsonl"
+          jq -j .checked artifact > "$RUNNER_TEMP/proposals/checked.json"
+      - name: Revalidate and publish to the fixed e2e item
+        env:
+          # The job token only, never the environment's PAT: the build
+          # above runs beside it without secure-host.
+          SAFE_OUTPUTS_TOKEN: ${{ github.token }}
+        run: |
+          src="$RUNNER_TEMP/src"
+          "$src/target/debug/safe-outputs" apply --context "$src/.github/agentic-job/e2e/safe-outputs-context.json" \
+            --input "$RUNNER_TEMP/proposals/outputs.jsonl" --checked "$RUNNER_TEMP/proposals/checked.json"
+      - name: Link the successful live proof
+        run: |
+          printf 'Successful standalone CLI comment proof on issue 64: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"

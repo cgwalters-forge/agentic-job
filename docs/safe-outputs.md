@@ -24,6 +24,112 @@ The applying job's `SAFE_OUTPUTS_PAT` is our equivalent of gh-aw's
 See [the token mapping and setup](workflow.md#the-apply-job-and-its-token)
 for repository bounds, job-token limits and default-branch environment storage.
 
+## Standalone CLI
+
+The extracted workspace component also builds a Linux CLI, independent of
+`agentic-job`, secure-host, an agent run, checkpoints, Actions and credential
+brokers:
+
+```sh
+cargo build --locked -p safe-outputs --bin safe-outputs
+target/debug/safe-outputs check --context context.json --input outputs.jsonl --checked checked.json
+# In a separate trusted process/job, after obtaining its credential:
+target/debug/safe-outputs apply --context context.json --input outputs.jsonl --checked checked.json
+```
+
+The threat is a producer redirecting a privileged write, or changing its content
+after check. The caller supplies trusted JSON bounds/context, outside the
+producer's control. All operations are off unless explicitly listed, and total
+and per-type counts are checked. This is a small standalone context, not the
+agentic-job workflow's TOML bounds file. For example:
+
+```json
+{
+  "repo": "cgwalters-forge/agentic-job",
+  "item": 64,
+  "max_outputs": 1,
+  "outputs": { "add_comment": { "max": 1 } }
+}
+```
+
+`repo` is one exact repository and `item` one positive issue/PR number, never a
+producer-selected target. `max_outputs` defaults to zero and cannot exceed 1000;
+`outputs` defaults to empty and uses the library's existing per-type limits.
+Optional trusted `api_url` defaults to `https://api.github.com`; HTTPS is required
+except for loopback HTTP publishers used by tests. It is a credential destination:
+never accept it from the producer. Unknown context keys refuse.
+
+The input is unchanged gh-aw JSONL, for example
+`{"type":"add_comment","repo":"cgwalters-forge/agentic-job","item_number":64,"body":"Deterministic proof."}`.
+Check reads no-follow regular files, caps input at 1 MiB/1000 lines and context at
+64 KiB, runs the existing collector and policy checks, and creates a new receipt
+only on success. It will not overwrite a receipt. It does no network I/O and
+does not obtain credentials. Validation diagnostics omit request text.
+
+Transfer the exact input and receipt through the trusted check job's artifact
+channel. The receipt binds both input and trusted context bytes with SHA-256;
+it is **not a signature** or a replacement for CI artifact provenance. A producer
+who can replace both input and receipt can forge a check. Apply independently
+recollects/revalidates the input under its own trusted context, compares both
+digests, and rejects the entire unsupported batch before acquiring credentials
+or writing. A changed context requires a new check, even if only whitespace
+changed. The receipt is an internal CLI format, not a new safe-output wire format.
+
+### Native operations and the pinned adapter
+
+Standalone apply supports **new GitHub issue/PR comments only** (`add_comment`),
+plus non-writing `noop`, `missing_tool` and `missing_data`. Comments may contain
+only `type`, `body`, `repo`, `item_number`, `pr` and `pr_number`; any supplied
+destination must match the context. Edits, replies, temporary IDs and other
+comment semantics refuse rather than silently becoming a new comment. Mentions
+receive the existing last-mile notification filter. Repeated apply posts again:
+there is no standalone idempotency marker, transaction or rollback; a network
+failure can leave an uncertain or partially published batch. Do not blindly retry.
+
+Check can validate other non-patch operations under explicit output bounds, but
+standalone apply refuses them, including a batch with a supported comment before
+an unsupported operation. Patch operations are not a standalone CLI interface.
+The library and `agentic-job publish` have additional native handlers; that does
+not make them standalone CLI handlers. The existing pinned gh-aw adapter in
+`apply.yml` remains the path for the broader GitHub vocabulary. Neither that
+workflow's nor `check.yml`'s interfaces change. No full native GitHub coverage is
+promised here.
+
+### Other CI systems and deterministic proof
+
+On Jenkins, GitLab CI or another CI system, build/pin this binary from trusted
+source, run the producer without a write credential, and run check in an
+unprivileged job with caller-owned context. Transfer only the JSONL and receipt
+from that job to a separate trusted apply job. Do not execute artifact scripts
+or binaries. Obtain a narrowly scoped token only in apply and expose it as
+`SAFE_OUTPUTS_TOKEN` through the CI secret/environment facility, never command
+arguments, JSONL, receipts or logs; do not enable shell tracing. No ambient
+`GITHUB_TOKEN`, PAT fallback or Actions metadata is read by the CLI. The CI
+operator owns job isolation, artifact provenance and token issuance.
+
+The opt-in [CLI proof workflow](../.github/workflows/safe-outputs-cli.yml) uses
+the existing e2e destination, issue 64 in `cgwalters-forge/agentic-job`, and
+runs apply in the existing `agent-apply` environment. Dispatch on `main`
+with `publish: true` constructs a fixed non-agent comment, checks it after
+secure-host without write permission, and uploads the request and receipt as
+one digest-bound file. Apply, a
+[trusted artifact consumer](workflows-check.md#trusted-artifact-consumers) on a
+separate runner, verifies that digest, builds the CLI and reads the context
+from the run's own `main` commit outside its workspace, and reads the artifact
+only as data. No target or revision input and
+no pull-request event is accepted. Its fixed
+[caller context](../.github/agentic-job/e2e/safe-outputs-context.json) allows only
+one comment. Apply publishes with its issue-write job token and never reads
+`SAFE_OUTPUTS_PAT`: the build's dependencies run beside that token without
+secure-host, so the job holds nothing stronger. It creates no repository and
+uses no new secret. A successful job links its run in the summary.
+
+Live proof requires this trusted workflow on `main`, operator opt-in and an
+accessible issue 64. Offline tests
+do not prove that provisioning. No successful live run is recorded yet; link the
+successful Actions run when an operator performs it, rather than treating this
+example or loopback tests as live evidence.
+
 ## Caller-bound publisher roles
 
 The threat is credential substitution: a comment operation borrowing the

@@ -100,6 +100,12 @@ the next in the same major version.
 
 ## Safe outputs
 
+The extracted component's standalone `safe-outputs check` and `apply` CLI is
+documented in [safe outputs](safe-outputs.md#standalone-cli). It uses the same
+request JSONL, not an agentic-job run/checkpoint. Its context and receipt are
+currently experimental, not stable interfaces. Existing workflow check/apply
+inputs and agentic-job commands are unchanged.
+
 A run hands back requests in gh-aw's
 [safe-output format](https://github.github.com/gh-aw/reference/safe-outputs/):
 one JSON object a line, its `type` and that type's fields. The types and
