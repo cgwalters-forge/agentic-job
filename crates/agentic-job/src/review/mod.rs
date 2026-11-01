@@ -3,6 +3,10 @@
 //! Dispatch has no event admission. Validate its request before the workflow
 //! reads the forge, then bind the returned PR to the requested repository and
 //! base. Only its exact commit may reach the sandbox, not a fork's branch name.
+//! review.yml's own dispatch (`pr`, `head`, `pool`) also names the head the
+//! review is for: the PR must not be a draft and must still be at that head,
+//! and its pool must have resolved, from the caller's configuration alone,
+//! to a supported agent and a model.
 //!
 //! An event review is admitted by `event` first; `admit` narrows that
 //! decision, never widening it, and writes any event decision's outputs for
@@ -63,6 +67,17 @@ static MERGE_BLANK: LazyLock<Regex> =
 const REVIEW_COMMENT: &str = "create_pull_request_review_comment";
 const REVIEW_COMMENTS_MAX: usize = 10;
 const REVIEW_AGENTS: [&str; 4] = ["fake", "claude", "opencode", "vibe"];
+// The verdict alone, `OUTPUTS/MAX_OUTPUTS`, as dispatch.yml's review asks.
+const VERDICT_ONLY: &str = "add_comment,noop/1";
+
+/// The verdict and its inline comments, `OUTPUTS/MAX_OUTPUTS`, as review.yml
+/// asks.
+fn inline_request() -> String {
+    format!(
+        "add_comment,noop,{REVIEW_COMMENT}/{}",
+        1 + REVIEW_COMMENTS_MAX
+    )
+}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
@@ -89,10 +104,14 @@ pub enum Command {
         output: PathBuf,
     },
     /// Check the review request in the environment and print the review task
-    /// from the current directory, followed by its merge policy
+    /// from the current directory, followed by its merge policy, and for a
+    /// dispatch with a requested head the pull request it reviews
     Task {
         /// The task file, relative to the current directory
         file: String,
+        /// A dispatch's pull request, as `resolve-dispatch` read it
+        #[arg(long, value_name = "FILE")]
+        pull_request: Option<PathBuf>,
     },
     /// Check the collected output is one verdict comment on the target, or
     /// a noop, and print the verdict: APPROVE, CHANGES or nothing
@@ -158,22 +177,45 @@ impl Command {
             }
             Self::ResolveDispatch { pull_request } => {
                 let request = Dispatch::from_env()?;
-                let bytes = files::read_regular(pull_request, MAX_PULL_BYTES)
-                    .context("reading dispatched review pull request")?;
-                let pull = serde_json::from_slice(&bytes)
-                    .context("parsing dispatched review pull request")?;
-                println!("{}", request.resolve(&pull)?);
+                println!("{}", request.resolve(&read_pull(pull_request)?)?);
             }
             Self::Admit {
                 decision,
                 base,
                 output,
             } => println!("{}", admit_event(decision, base.as_deref(), output)?),
-            Self::Task { file } => {
-                check_request(|key| std::env::var(key).unwrap_or_default())?;
+            Self::Task { file, pull_request } => {
+                // An event review's request, or review.yml's dispatch, which
+                // the dispatch step checks again the same way, with the pull
+                // request it bound; an event's text follows from `event`.
+                let dispatched = if env("EVENT") == "false" {
+                    let request = Dispatch::read(env)?;
+                    let pull = read_pull(
+                        pull_request
+                            .as_deref()
+                            .context("A dispatched review's task needs --pull-request")?,
+                    )?;
+                    ensure!(
+                        request.head.is_some(),
+                        "A dispatched review's task is for a requested head only"
+                    );
+                    request.resolve(&pull)?;
+                    Some(request.context(&pull))
+                } else {
+                    ensure!(
+                        pull_request.is_none(),
+                        "An event review's pull request comes from its event"
+                    );
+                    check_request(env)?;
+                    None
+                };
                 let root = Path::new(".");
                 let mut task = task_file(root, file)?;
                 task.push_str(&merge_statement(merge_policy(root)?));
+                if let Some(context) = dispatched {
+                    task.push('\n');
+                    task.push_str(&context);
+                }
                 print!("{task}");
             }
             Self::Verdict {
@@ -215,6 +257,13 @@ impl Command {
 
 fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_default()
+}
+
+/// A dispatched review's pull request, as the policy job read it.
+fn read_pull(path: &Path) -> Result<Value> {
+    let bytes = files::read_regular(path, MAX_PULL_BYTES)
+        .context("reading dispatched review pull request")?;
+    serde_json::from_slice(&bytes).context("parsing dispatched review pull request")
 }
 
 /// The collector's or check's output, `{items, errors}`.
@@ -319,14 +368,10 @@ fn admit(mut decision: Value, base: &str) -> Value {
 /// base, so it moves to inline comments only once they are on main.
 fn check_request(env: impl Fn(&str) -> String) -> Result<()> {
     let request = format!("{}/{}", env("OUTPUTS"), env("MAX_OUTPUTS"));
-    let inline = format!(
-        "add_comment,noop,{REVIEW_COMMENT}/{}",
-        1 + REVIEW_COMMENTS_MAX
-    );
     ensure!(
         env("EVENT") == "true"
             && env("KIND") == "analysis"
-            && (request == inline || request == "add_comment,noop/1")
+            && (request == inline_request() || request == VERDICT_ONLY)
             && env("NOTIFY") == "none"
             && env("TARGET").is_empty()
             && env("REPO") == env("GITHUB_REPOSITORY")
@@ -453,11 +498,14 @@ struct Dispatch {
     repo: String,
     base: String,
     item: u64,
+    /// The head review.yml's dispatch names, which the PR must still be at;
+    /// none for dispatch.yml's review, which reviews whatever head it reads.
+    head: Option<String>,
 }
 
 impl Dispatch {
     fn from_env() -> Result<Self> {
-        Self::read(|key| std::env::var(key).unwrap_or_default())
+        Self::read(env)
     }
 
     fn read(env: impl Fn(&str) -> String) -> Result<Self> {
@@ -467,24 +515,41 @@ impl Dispatch {
             .parse::<u64>()
             .ok()
             .filter(|n| *n > 0 && *n <= MAX_SAFE_INTEGER && n.to_string() == item);
+        let head = Some(env("REQUESTED_HEAD")).filter(|head| !head.is_empty());
+        let request = format!("{}/{}", env("OUTPUTS"), env("MAX_OUTPUTS"));
+        // Inline comments only where review.yml asks, which names a head.
+        let outputs = request == VERDICT_ONLY || (head.is_some() && request == inline_request());
         ensure!(
             env("REVIEW") == "true"
                 && env("EVENT") == "false"
                 && env("KIND") == "analysis"
-                && env("OUTPUTS") == "add_comment,noop"
-                && env("MAX_OUTPUTS") == "1"
+                && outputs
                 && env("NOTIFY") == "none"
                 && env("APPLY_PARTIAL") == "false"
                 && (env("OUTPUT_REPO").is_empty() || env("OUTPUT_REPO") == repo)
                 && env("TARGET") == item
                 && number.is_some()
                 && REPO.is_match(&repo),
-            "Dispatch review requires one verdict or noop on the selected PR, analysis only, no event, notifications or partial apply"
+            "Dispatch review requires one verdict or noop (and inline comments, for a requested head) on the selected positive PR number, analysis only, no event, notifications or partial apply"
         );
+        if let Some(head) = &head {
+            ensure!(
+                SHA.is_match(head),
+                "Dispatched review head must be a full 40-hex commit SHA"
+            );
+            // The pool's agent and model, which the workflow looked up in the
+            // caller's configuration: empty where it has no such pool. The
+            // dispatcher names a pool, never a model or an endpoint.
+            ensure!(
+                REVIEW_AGENTS.contains(&env("AGENT").as_str()) && !env("MODEL").is_empty(),
+                "Dispatched review pool is unknown: the caller's pool configuration (review.yml's REVIEW_POOLS) must map it to a supported agent and a model"
+            );
+        }
         Ok(Self {
             repo,
             base: env("BASE"),
             item: number.context("dispatch pull request number")?,
+            head,
         })
     }
 
@@ -498,9 +563,44 @@ impl Dispatch {
                 && SHA.is_match(head),
             "Dispatch review requires an open PR on the configured base with an exact head SHA"
         );
+        if let Some(requested) = &self.head {
+            // As an event review, which waits for ready_for_review.
+            ensure!(
+                pull["draft"] == false,
+                "Dispatched review requires a pull request that is not a draft"
+            );
+            // A push since the dispatch supersedes it: its verdict would be
+            // for a head nobody asked about, and a later dispatch reviews
+            // the new one.
+            ensure!(
+                head == requested,
+                "Dispatched review of {requested} refused: the pull request's head is now {head}"
+            );
+        }
         // A fork (even a deleted one) adds no authority: its repository and
         // author-controlled ref are deliberately not used to select the code.
         Ok(head)
+    }
+
+    /// What an event review's task says of its pull request, for one this
+    /// request bound: its number and head, then its title and body, fenced
+    /// as the forge's text, which ends the task.
+    fn context(&self, pull: &Value) -> String {
+        let head = self.head.as_deref().unwrap_or_default();
+        let mut out = format!(
+            "This review was dispatched for pull request #{} of {}. The pull request's head can be fetched from the repository as refs/pull/{}/head, at commit {head}.\n\n",
+            self.item, self.repo, self.item
+        );
+        out.push_str(crate::event::context::UNTRUSTED);
+        for (name, key) in [
+            ("The pull request's title", "title"),
+            ("The pull request's body", "body"),
+        ] {
+            if let Some(text) = pull[key].as_str() {
+                out.push_str(&crate::event::context::fenced(name, text));
+            }
+        }
+        out
     }
 }
 
@@ -831,6 +931,82 @@ mod tests {
             let mut pull = original.clone();
             *pull.pointer_mut(pointer).unwrap() = replacement;
             assert!(request.resolve(&pull).is_err(), "{pointer}: {pull}");
+        }
+        // Without a requested head, a draft is reviewed as before.
+        let mut draft = original.clone();
+        draft["draft"] = json!(true);
+        assert_eq!(request.resolve(&draft).unwrap(), sha);
+    }
+
+    /// review.yml's dispatch: `pr`, `head` and the pool's agent and model.
+    fn requested() -> Value {
+        merged(
+            &environment(),
+            &json!({"OUTPUTS":"add_comment,noop,create_pull_request_review_comment",
+                "MAX_OUTPUTS":"11", "REQUESTED_HEAD":"a".repeat(40),
+                "AGENT":"opencode", "MODEL":"praxis/gpt-6.1-sol"}),
+        )
+    }
+
+    #[test]
+    fn a_requested_head_needs_an_exact_sha_and_a_known_pool() {
+        let original = requested();
+        assert_eq!(request(&original).unwrap().head, Some("a".repeat(40)));
+        // The verdict alone, too.
+        let verdict = merged(
+            &original,
+            &json!({"OUTPUTS":"add_comment,noop", "MAX_OUTPUTS":"1"}),
+        );
+        assert!(request(&verdict).is_ok());
+        for (changes, want) in [
+            (json!({"REQUESTED_HEAD":"a".repeat(39)}), "40-hex"),
+            (json!({"REQUESTED_HEAD":"A".repeat(40)}), "40-hex"),
+            (json!({"REQUESTED_HEAD":"main"}), "40-hex"),
+            (json!({"REQUESTED_HEAD":"--upload-pack=evil"}), "40-hex"),
+            (
+                json!({"REQUESTED_HEAD":format!("{}\n", "a".repeat(40))}),
+                "40-hex",
+            ),
+            // An unknown pool resolves to nothing; a model alone is no pool.
+            (json!({"AGENT":"", "MODEL":""}), "pool is unknown"),
+            (json!({"AGENT":"opencode", "MODEL":""}), "pool is unknown"),
+            (json!({"AGENT":"unknown"}), "pool is unknown"),
+            (json!({"ITEM":"0", "TARGET":"0"}), "positive PR number"),
+            (json!({"ITEM":"", "TARGET":""}), "positive PR number"),
+            (json!({"ITEM":"-1", "TARGET":"-1"}), "positive PR number"),
+            (json!({"ITEM":"1e3", "TARGET":"1e3"}), "positive PR number"),
+            (json!({"MAX_OUTPUTS":"12"}), "positive PR number"),
+            (json!({"EVENT":"true"}), "positive PR number"),
+        ] {
+            let err = request(&merged(&original, &changes)).err();
+            let err = err.map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains(want), "{changes}: {err}");
+        }
+        // Inline comments are review.yml's, which always names a head.
+        let mut unrequested = original.clone();
+        unrequested["REQUESTED_HEAD"] = json!("");
+        assert!(request(&unrequested).is_err());
+    }
+
+    #[test]
+    fn a_requested_head_binds_an_open_ready_pr_still_at_that_head() {
+        let request = request(&requested()).unwrap();
+        let sha = "a".repeat(40);
+        let original = json!({"number":147, "state":"open", "draft":false,
+            "base":{"ref":"main", "repo":{"full_name":"o/r"}},
+            "head":{"sha":sha}});
+        assert_eq!(request.resolve(&original).unwrap(), sha);
+        for (pointer, replacement, want) in [
+            ("/draft", json!(true), "not a draft"),
+            ("/draft", Value::Null, "not a draft"),
+            ("/head/sha", json!("b".repeat(40)), "head is now"),
+            ("/state", json!("closed"), "open PR"),
+            ("/base/ref", json!("other"), "configured base"),
+        ] {
+            let mut pull = original.clone();
+            *pull.pointer_mut(pointer).unwrap() = replacement;
+            let err = request.resolve(&pull).unwrap_err().to_string();
+            assert!(err.contains(want), "{pointer}: {err}");
         }
     }
 }

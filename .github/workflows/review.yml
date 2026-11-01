@@ -22,13 +22,48 @@
 #
 # Another repository calls this file at a pinned commit from the same
 # events, with its own copies of the bounds and the task.
+#
+# A scheduler that paces reviews (agent-board's pass) dispatches one with
+# `pr`, `head` and `pool` instead (docs/review.md#dispatched-reviews): the
+# pool picks the agent and model from the repository variable REVIEW_POOLS
+# alone, the policy job reviews the pull request only while `head` is its
+# head, and the run is named for the pass to find it. Dispatching takes
+# `actions: write`, a token trusted to spend a review on any open pull
+# request.
 name: review
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('review {0}#{1} {2} ({3})', github.repository, inputs.pr, inputs.head, inputs.pool) || '' }}
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] Base-branch policy and actions only; the PR head is data read inside the credential-free sandbox.
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The pull request to review, a positive number
+        type: string
+        required: true
+      head:
+        description: The full commit SHA the pull request's head must still be
+        type: string
+        required: true
+      pool:
+        description: The inference pool, a name REVIEW_POOLS maps to an agent and a model
+        type: string
+        required: true
   workflow_call:
+    # The dispatch inputs, for a caller that is itself dispatched; empty
+    # for its pull_request_target and issue_comment events.
+    inputs:
+      pr:
+        type: string
+        default: ''
+      head:
+        type: string
+        default: ''
+      pool:
+        type: string
+        default: ''
     # Forward only this declared credential, never inherit.
     secrets:
       SAFE_OUTPUTS_PAT:
@@ -39,7 +74,44 @@ on:
         required: false
 permissions: {}
 jobs:
+  # A dispatch's pool, mapped to its agent, model and runner configuration
+  # by the repository variable REVIEW_POOLS alone, a JSON object the
+  # repository owns, `{"POOL": {"agent": "...", "model": "...", "config":
+  # "optional path"}}`. The dispatcher names a pool and nothing else: no
+  # model or endpoint of theirs reaches the run, and a pool the variable
+  # does not map stops it here rather than fall back to AGENT_MODEL, which
+  # would spend a pool the scheduler did not pace.
+  pool:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      agent: ${{ steps.pool.outputs.agent }}
+      model: ${{ steps.pool.outputs.model }}
+      config: ${{ steps.pool.outputs.config }}
+      config-repo: ${{ steps.pool.outputs.config-repo }}
+      config-path: ${{ steps.pool.outputs.config-path }}
+    steps:
+      - name: Map the pool to its agent and model
+        id: pool
+        env:
+          POOLS: ${{ vars.REVIEW_POOLS }}
+          POOL: ${{ inputs.pool }}
+          CONFIG_REPO: ${{ vars.AGENT_CONFIG_REPO }}
+          CONFIG_PATH: ${{ vars.AGENT_CONFIG_PATH }}
+        # One word a value, so that none can add an output; only opencode
+        # and Vibe get the configuration repository, as below.
+        run: |
+          jq -er --arg pool "$POOL" --arg repo "$CONFIG_REPO" --arg path "$CONFIG_PATH" '.[$pool] | objects
+            | select([.agent, .model, (.config // "-")] | all(type == "string" and length > 0 and (test("\\s") | not)))
+            | (if .agent == "opencode" or .agent == "vibe" then [$repo, $path] else ["", ""] end) as [$r, $p]
+            | "agent=\(.agent)\nmodel=\(.model)\nconfig=\(.config // "")\nconfig-repo=\($r)\nconfig-path=\($p)"' \
+            <<< "${POOLS:-null}" >> "$GITHUB_OUTPUT" ||
+            { echo '::error::The requested pool is not one REVIEW_POOLS maps to an agent and a model'; exit 1; }
+
   policy:
+    needs: pool
     # The event policy checks actors, commands and the pull request.
     # Drafts wait for ready_for_review. Automatic reviews are only for
     # the owner, organization members and collaborators: anyone else,
@@ -54,12 +126,18 @@ jobs:
     # never reassigns it; a user's id there admits nobody, being no Bot.
     # Its bounds must also list the bot's login (review.toml `bots`). Not
     # an array, the value would be searched as text, matching part ids.
+    # A dispatch, by a token with `actions: write`, has no event to admit: the
+    # policy job checks its inputs and binds the pull request instead.
+    # The pool job runs for a dispatch alone; skipped, it does not stop
+    # an event's review.
     if: >-
+      !cancelled() && needs.pool.result != 'failure' && (
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
         (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
           (github.event.pull_request.user.type == 'Bot' && startsWith(vars.REVIEW_BOT_IDS, '[') &&
             contains(fromJSON(vars.REVIEW_BOT_IDS || '[]'), github.event.pull_request.user.id)))) ||
-      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')) ||
+      (github.event_name == 'workflow_dispatch' && needs.pool.result == 'success'))
     uses: ./.github/workflows/policy.yml # zizmor: ignore[self-repository] Call the base revision's reusable workflow.
     # The policy job reads (actions too, to list runs for `dedupe`);
     # activate and notify have nothing to do.
@@ -67,9 +145,17 @@ jobs:
       actions: read
       contents: read
     with:
-      id: review-${{ github.event.pull_request.number || github.event.issue.number }}
+      id: review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
       repo: ${{ github.repository }}
-      event: true
+      event: ${{ github.event_name != 'workflow_dispatch' }}
+      # A dispatch's pull request and head, which `agentic-job review
+      # dispatch-target` checks before the policy job reads the pull
+      # request and `resolve-dispatch` binds it to: open, not a draft, on
+      # the configured base and still at `head`. An empty `pr` is `0`,
+      # refused there rather than taken for an event review.
+      review-item: ${{ github.event_name == 'workflow_dispatch' && (inputs.pr || '0') || '' }}
+      review-head: ${{ github.event_name == 'workflow_dispatch' && inputs.head || '' }}
+      comment-target: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
       review: true
       review-task: workflow/review.md
       task: ''
@@ -87,15 +173,19 @@ jobs:
       # The runner's configuration, as dispatch.yml picks it: the caller's
       # file named by AGENT_CONFIG, else this repository's hosted.toml at
       # the pinned commit, from the policy job's checkout of this source.
-      config: ${{ vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
+      # A dispatched pool's `config` goes first.
+      config: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.config || vars.AGENT_CONFIG || '.agentic-job-source/.github/agentic-job/hosted.toml' }}
       # No fallback: without the variables the run fails in policy, where
-      # a scripted agent would post a verdict nobody made.
-      agent: ${{ vars.AGENT }}
-      model: ${{ vars.AGENT_MODEL }}
+      # a scripted agent would post a verdict nobody made. A dispatch takes
+      # its pool's agent and model, never the variables': empty, the policy
+      # job refuses it.
+      agent: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.agent || github.event_name != 'workflow_dispatch' && vars.AGENT || '' }}
+      model: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.model || github.event_name != 'workflow_dispatch' && vars.AGENT_MODEL || '' }}
       # Only opencode and Vibe read a configuration repository, as in
       # dispatch.yml: passed to Claude, it would demand Claude's file there.
-      agent-config-repo: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
-      agent-config-path: ${{ (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
+      # The pool job decides that for its agent.
+      agent-config-repo: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.config-repo || github.event_name != 'workflow_dispatch' && (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_REPO || '' }}
+      agent-config-path: ${{ github.event_name == 'workflow_dispatch' && needs.pool.outputs.config-path || github.event_name != 'workflow_dispatch' && (vars.AGENT == 'opencode' || vars.AGENT == 'vibe') && vars.AGENT_CONFIG_PATH || '' }}
       inference-url: ${{ vars.INFERENCE_URL }}
       # A broker's `github-oidc` unless the repository says otherwise
       # (`api-key` is refused by the agent job for now). Repository
@@ -151,11 +241,17 @@ jobs:
   # token's bot; the comparison is exact (`agentic-job review carry`,
   # docs/review.md#carried-approvals). git and rustfmt read the heads as
   # data in a scratch directory; nothing of theirs runs. Anything else,
-  # or a failure here, runs the review. A `/review` always runs one.
+  # or a failure here, runs the review. A `/review` always runs one. A
+  # push the record job below would only record tries this first, with or
+  # without the variable: carried, it needs no dispatched review either.
   carry:
     needs: policy
     if: >-
-      ${{ vars.REVIEW_CARRY_APPROVAL == 'true' && github.event_name == 'pull_request_target' &&
+      ${{ (vars.REVIEW_CARRY_APPROVAL == 'true' ||
+          (github.event_name == 'pull_request_target' && startsWith(vars.REVIEW_RECORD_ONLY, '[') &&
+            contains(fromJSON(vars.REVIEW_RECORD_ONLY || '[]'), github.event.pull_request.user.id) &&
+            github.event.pull_request.head.repo.full_name != github.repository)) &&
+          github.event_name == 'pull_request_target' &&
           github.event.action == 'synchronize' && needs.policy.outputs.admitted == 'true' &&
           needs.policy.outputs.binary-artifact-id != '' }}
     runs-on: ubuntu-26.04
@@ -184,15 +280,62 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/agentic-job"
           "$RUNNER_TEMP/bin/agentic-job" review carry --output "$GITHUB_OUTPUT"
 
+  # With the repository variable REVIEW_RECORD_ONLY, a JSON array of user
+  # ids (unset by default), a pull request event for one of those authors'
+  # pull requests from a fork, admitted as before and not carried, only
+  # records that its head needs a review: the status `review` pending, no
+  # agent, no inference, no verdict. Its review is the scheduler's
+  # dispatch of this file, paced by pool, so that a push no longer starts
+  # one out of the scheduler's sight (#2163). The status is set where the
+  # head has none yet, so a reopened, approved head keeps its approval
+  # (unless a review's status lands between its read and its write).
+  # Not in the agent job's concurrency group: it would cancel a dispatched
+  # review of this very head that started first. A dispatch for a newer
+  # head stops the older one instead. Other authors, a pull request from
+  # the repository's own branches and `/review` keep their reviews here.
+  record:
+    needs: [policy, carry]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'pull_request_target' && startsWith(vars.REVIEW_RECORD_ONLY, '[') &&
+          contains(fromJSON(vars.REVIEW_RECORD_ONLY || '[]'), github.event.pull_request.user.id) &&
+          github.event.pull_request.head.repo.full_name != github.repository &&
+          needs.policy.outputs.admitted == 'true' && needs.policy.outputs.review-head != '' &&
+          needs.policy.outputs.binary-artifact-id != '' && needs.carry.outputs.from == '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.policy.outputs.binary-artifact-id }}
+          path: ${{ runner.temp }}/bin
+      - name: Record that the head needs a review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ needs.policy.outputs.review-head }}
+          RECORD: 'true'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/agentic-job"
+          "$RUNNER_TEMP/bin/agentic-job" review status
+
   # As agentic-job.yml's register job: the run's registration at the
   # inference proxy under `github-oidc`, out of the agent's job, which
   # then holds no `id-token`. The agent is the runner's user there, and
   # with that permission could mint identity tokens for any audience.
   # This job also runs the caller's network step, from the base commit,
-  # since it has to reach the proxy too. Not for a carried approval.
+  # since it has to reach the proxy too. Not for a carried approval, nor
+  # for a head the record job leaves to a dispatched review.
   register:
     needs: [policy, carry]
-    if: ${{ !cancelled() && needs.policy.outputs.admitted == 'true' && needs.carry.outputs.from == '' }}
+    if: >-
+      ${{ !cancelled() && needs.policy.outputs.admitted == 'true' && needs.carry.outputs.from == '' &&
+          !(github.event_name == 'pull_request_target' && startsWith(vars.REVIEW_RECORD_ONLY, '[') &&
+            contains(fromJSON(vars.REVIEW_RECORD_ONLY || '[]'), github.event.pull_request.user.id) &&
+            github.event.pull_request.head.repo.full_name != github.repository) }}
     runs-on: ${{ fromJSON(vars.AGENT_RUNNER || '"ubuntu-26.04"') }}
     timeout-minutes: 10
     permissions:
@@ -248,11 +391,13 @@ jobs:
     # A status function, as without one a skipped carry job above register
     # would skip this one too.
     if: ${{ !cancelled() && needs.register.result == 'success' && needs.policy.outputs.admitted == 'true' }}
-    # Only admitted runs enter the group. Only automatic PR events
-    # supersede a review; a comment must not cancel one.
+    # Only admitted runs enter the group, one a pull request whether an
+    # event or a dispatch started them. Only automatic PR events and
+    # dispatches, which name a head, supersede a review; a comment must not
+    # cancel one.
     concurrency:
-      group: review-pull-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+      group: review-pull-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
     permissions:
       contents: read
       issues: read
@@ -270,7 +415,7 @@ jobs:
       # With the variable REVIEW_HISTORY, the agent is given this pull
       # request's earlier reviews by this job, as untrusted data, to settle
       # their findings before raising new ones (docs/review.md#review-history).
-      review-history: ${{ vars.REVIEW_HISTORY == 'true' && format('{0}', github.event.pull_request.number || github.event.issue.number) || '' }}
+      review-history: ${{ vars.REVIEW_HISTORY == 'true' && format('{0}', github.event.pull_request.number || github.event.issue.number || inputs.pr) || '' }}
 
   check:
     needs: [policy, agent]
@@ -331,7 +476,7 @@ jobs:
         id: submit
         env:
           GH_TOKEN: ${{ github.token }}
-          PULL: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PULL: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
           HEAD_SHA: ${{ needs.policy.outputs.review-head }}
           CHECK_RESULT: ${{ needs.check.result }}
           VERDICT: ${{ needs.check.outputs.verdict }}
@@ -385,10 +530,11 @@ jobs:
   # APPROVE. The status is set only when the triggering pull request is the
   # one open pull request at that head. A carried approval is success,
   # once submitted where real reviews are on, and says which head's it was.
+  # Not where the record job ran instead: no review ran to report on.
   status:
-    needs: [policy, carry, agent, check, submit, apply]
+    needs: [policy, carry, record, agent, check, submit, apply]
     # Not without the binary's ID either, which would download every upload.
-    if: ${{ !cancelled() && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' }}
+    if: ${{ !cancelled() && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -402,7 +548,7 @@ jobs:
       - name: Report the verdict as the status `review`
         env:
           GH_TOKEN: ${{ github.token }}
-          PULL: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PULL: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
           HEAD_SHA: ${{ needs.policy.outputs.review-head }}
           CHECK_RESULT: ${{ needs.check.result }}
           VERDICT: ${{ needs.check.outputs.verdict }}

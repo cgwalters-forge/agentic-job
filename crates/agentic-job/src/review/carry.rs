@@ -114,14 +114,19 @@ impl Carried {
     }
 }
 
-/// Whether the review approved COMMIT: its latest `review` status, as the
-/// status job sets it, is `success` by the job token's bot.
-fn approved(api: &dyn Api, repo: &str, commit: &str) -> Result<bool> {
+/// COMMIT's latest `review` status, by anyone.
+pub(super) fn latest_status(api: &dyn Api, repo: &str, commit: &str) -> Result<Option<Value>> {
     // Newest first, as GitHub lists them.
     let statuses = api.list(&format!("repos/{repo}/commits/{commit}/statuses"))?;
     Ok(statuses
-        .iter()
-        .find(|s| s["context"] == STATUS_CONTEXT)
+        .into_iter()
+        .find(|s| s["context"] == STATUS_CONTEXT))
+}
+
+/// Whether the review approved COMMIT: its latest `review` status, as the
+/// status job sets it, is `success` by the job token's bot.
+fn approved(api: &dyn Api, repo: &str, commit: &str) -> Result<bool> {
+    Ok(latest_status(api, repo, commit)?
         .is_some_and(|s| s["state"] == "success" && s["creator"]["login"] == BOT))
 }
 

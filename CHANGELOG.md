@@ -12,6 +12,18 @@ says what a caller may rely on across versions.
 - A Forgejo Actions dispatch caller, `workflow/forgejo/dispatch.yml`, for
   callers to copy to `.forgejo/workflows/dispatch.yml`, takes agent-board's inputs and refuses a runner that cannot provide the
   sandbox; its session, check and apply are not wired yet.
+- `review.yml` takes `workflow_dispatch` (and `workflow_call`) inputs
+  `pr`, `head` and `pool`, named `review OWNER/REPO#PR HEAD (POOL)`, so a
+  scheduler can start reviews paced by pool: the repository variable
+  `REVIEW_POOLS` alone maps the pool to an agent and a model, an unknown
+  pool fails the run, and the pull request must be open, not a draft, on
+  the base and still at `head`. `policy.yml` and `agentic-job.yml` take
+  `review-head` for it. With `REVIEW_RECORD_ONLY`, a JSON array of user
+  ids (unset is off), those authors' fork pull request pushes try a
+  carried approval and otherwise only set `review` pending, running no
+  agent (docs/review.md#dispatched-reviews; part of #2163). A caller
+  whose own run is a `workflow_dispatch` must now pass a known `pool`, or
+  not call `review.yml` from it.
 - Breaking (0.x): a bounds file names its forge with exactly one
   `[github]`, `[forgejo]` or `[gitlab]` section, which holds its
   `outputs`; `[github]` also holds `trigger`, `memory` and
