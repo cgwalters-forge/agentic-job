@@ -9,6 +9,16 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- Breaking (0.x): a bounds file names its forge with exactly one
+  `[github]`, `[forgejo]` or `[gitlab]` section, which holds its
+  `outputs`; `[github]` also holds `trigger`, `memory` and
+  `secondary_pull_request`, and `[forgejo]` and `[gitlab]` hold
+  `push_repo`, which they need to allow `create_pull_request`. The old
+  top-level `outputs`, `trigger`, `memory`, `secondary_pull_request`,
+  `push_repo` and scalar `forge` keys are refused: move GitHub keys under
+  `[github]`, and a Forgejo or GitLab fork into its section, when bumping
+  the pinned workflow ref; a top-level `push_repo`, which GitHub's apply
+  never read, goes. `policy.json` is unchanged (#1393).
 - A Claude Code turn with nothing from it for ten minutes, and no tool call
   running, is cancelled and sent again once, then fails the run as `stall`,
   as opencode's does, rather than holding the job to its limit

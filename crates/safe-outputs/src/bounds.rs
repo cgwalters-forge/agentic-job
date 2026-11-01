@@ -4,12 +4,12 @@
 //!
 //! Reading the file, compiling a request against it and admitting the
 //! event that started the run are the caller's: agentic-job's `policy`
-//! and `event`. The `[trigger]` table is event admission's, so this
-//! carries it as the caller's type, unread.
+//! and `event`. The `[github.trigger]` table is event admission's, so
+//! this carries it as the caller's type, unread.
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::contract::{
@@ -24,8 +24,9 @@ use crate::{CREATE_PULL_REQUEST, Forge, HIDE_COMMENT, OUTPUT_TYPES, PUSH_TO_PULL
 /// it: it serves https, so a plain-HTTP URL for it is a downgrade.
 const NEVER_PLAIN_HTTP: &str = "github.com";
 
-/// The caller's bounds file (`--allow`), in TOML. TRIGGER is the
-/// `[trigger]` table's type, which only the caller reads.
+/// The caller's bounds file (`--allow`), in TOML: the keys every forge
+/// shares at the top level, and one forge section. TRIGGER is the
+/// `[github.trigger]` table's type, which only the caller reads.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bounds<Trigger = toml::Table> {
@@ -52,8 +53,6 @@ pub struct Bounds<Trigger = toml::Table> {
     pub max_patch_bytes: u64,
     /// The most files a patch may touch.
     pub max_patch_files: u32,
-    /// The output types a run may ask for, and the ceiling of each.
-    pub outputs: BTreeMap<String, OutputLimit>,
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
@@ -65,10 +64,6 @@ pub struct Bounds<Trigger = toml::Table> {
     /// [`crate::contract::protecting_glob`].
     #[serde(default)]
     pub protected: Vec<String>,
-    /// Which events may start a run, and who may start one
-    /// (`agentic-job event`). Absent, none may.
-    #[serde(default = "Option::default")]
-    pub trigger: Option<Trigger>,
     /// Who the hand-back's commit is by, as `Name <address>`. Without it,
     /// whatever `run` says, which a compromised agent machine chooses:
     /// with it, `check` refuses a patch by anyone else, so the run's
@@ -78,13 +73,6 @@ pub struct Bounds<Trigger = toml::Table> {
     /// See [`check_commit_author`].
     #[serde(default)]
     pub commit_author: Option<String>,
-    /// The fork (OWNER/NAME) Forgejo's `apply` pushes a pull request's
-    /// branch to, never the target repository: the target's CI then runs
-    /// the agent's code as a fork's. Only the bounds name it, never a
-    /// hand-back; it also lets a private run off GitHub open a pull
-    /// request (docs/safe-outputs.md#publishing-to-forgejo).
-    #[serde(default)]
-    pub push_repo: Option<String>,
     /// Whether a run may work on a repository that is not public. Off,
     /// run evidence is published and only public repositories are run;
     /// on, `policy` keeps such a run's outputs in its own repository and
@@ -96,15 +84,40 @@ pub struct Bounds<Trigger = toml::Table> {
     /// reads: links to every public host are kept ([`crate::link_domains`]).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// The output types apply publishes with agentic-job's own handlers
+    /// rather than gh-aw's, of [`crate::contract::NATIVE_OUTPUTS`] and on
+    /// GitHub. Empty by default: gh-aw's handlers publish every type.
+    #[serde(default)]
+    pub native_handlers: Vec<String>,
+    /// Where the outputs are applied, and what only that forge has
+    /// (#1393): exactly one of this, `forgejo` and `gitlab` is present,
+    /// and [`Bounds::forge`] reads which. The forge comes from the
+    /// caller's file, never from a request or a hand-back.
+    #[serde(default = "Option::default")]
+    pub github: Option<GithubBounds<Trigger>>,
+    #[serde(default)]
+    pub forgejo: Option<NeutralBounds>,
+    #[serde(default)]
+    pub gitlab: Option<NeutralBounds>,
+}
+
+/// `[github]`: every output type, and what only GitHub implements today.
+/// `outputs` has no default, here or in the other sections: a section
+/// that allows nothing is a caller's mistake.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubBounds<Trigger = toml::Table> {
+    /// The output types a run may ask for, and the ceiling of each.
+    pub outputs: BTreeMap<String, OutputLimit>,
+    /// Which events may start a run, and who may start one
+    /// (`agentic-job event`). Absent, none may.
+    #[serde(default = "Option::default")]
+    pub trigger: Option<Trigger>,
     /// The agent's notes across runs (#119): `run` hands back `~/memory/`
     /// as `memory.json` and `check` holds it to these bounds. Absent, no
     /// memory is handed back, and `check` refuses one.
     #[serde(default)]
     pub memory: Option<Memory>,
-    /// Where the outputs are applied; GitHub by default. Another forge
-    /// may list only [`crate::NEUTRAL_OUTPUTS`].
-    #[serde(default)]
-    pub forge: Forge,
     /// One exact further repository a run may propose a pull request to
     /// (#1075). Kept apart from `repos`, which admits repositories to work
     /// on, so that admitting one is no permission to write to it. `check`
@@ -112,14 +125,25 @@ pub struct Bounds<Trigger = toml::Table> {
     /// opens it.
     #[serde(default)]
     pub secondary_pull_request: Option<SecondaryPullRequest>,
-    /// The output types apply publishes with agentic-job's own handlers
-    /// rather than gh-aw's, of [`crate::contract::NATIVE_OUTPUTS`] and on
-    /// GitHub. Empty by default: gh-aw's handlers publish every type.
-    #[serde(default)]
-    pub native_handlers: Vec<String>,
 }
 
-/// `[secondary_pull_request]`: its own repository, base, branches and
+/// `[forgejo]` or `[gitlab]`: output types of [`crate::NEUTRAL_OUTPUTS`]
+/// alone, and the fork a pull request's branch goes to.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NeutralBounds {
+    pub outputs: BTreeMap<String, OutputLimit>,
+    /// The fork (OWNER/NAME) `apply` pushes a pull request's branch to,
+    /// never the target repository: the target's CI then runs the agent's
+    /// code as a fork's. Only the bounds name it, never a hand-back; it
+    /// also lets a private run off GitHub open a pull request
+    /// (docs/safe-outputs.md#publishing-to-forgejo and
+    /// #publishing-to-gitlab).
+    #[serde(default)]
+    pub push_repo: Option<String>,
+}
+
+/// `[github.secondary_pull_request]`: its own repository, base, branches and
 /// patch budget, none with a default, and its own exemptions, none
 /// inherited from the primary output's: configuring it must not widen
 /// what a patch to that repository may touch.
@@ -200,9 +224,91 @@ pub struct Unprotected {
 }
 
 impl<Trigger> Bounds<Trigger> {
+    /// The sections present, by name, in the order the forges are listed.
+    fn sections(&self) -> Vec<&'static str> {
+        [
+            ("github", self.github.is_some()),
+            ("forgejo", self.forgejo.is_some()),
+            ("gitlab", self.gitlab.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+    }
+
+    /// The forge the section present names. GitHub where there is none,
+    /// which [`Self::validate`] refuses, and where [`Self::outputs`] then
+    /// allows nothing.
+    pub fn forge(&self) -> Forge {
+        if self.forgejo.is_some() {
+            Forge::Forgejo
+        } else if self.gitlab.is_some() {
+            Forge::Gitlab
+        } else {
+            Forge::Github
+        }
+    }
+
+    /// The `[forgejo]` or `[gitlab]` section.
+    fn neutral(&self) -> Option<&NeutralBounds> {
+        self.forgejo.as_ref().or(self.gitlab.as_ref())
+    }
+
+    /// The section's output types and the ceiling of each, whichever
+    /// forge it names; none without a section.
+    pub fn outputs(&self) -> &BTreeMap<String, OutputLimit> {
+        static NONE: BTreeMap<String, OutputLimit> = BTreeMap::new();
+        match (&self.github, self.neutral()) {
+            (Some(github), _) => &github.outputs,
+            (None, Some(neutral)) => &neutral.outputs,
+            (None, None) => &NONE,
+        }
+    }
+
+    /// [`Self::outputs`], to change; `None` without a section.
+    pub fn outputs_mut(&mut self) -> Option<&mut BTreeMap<String, OutputLimit>> {
+        if let Some(github) = &mut self.github {
+            return Some(&mut github.outputs);
+        }
+        let neutral = self.forgejo.as_mut().or(self.gitlab.as_mut());
+        neutral.map(|neutral| &mut neutral.outputs)
+    }
+
+    /// `[github.trigger]`.
+    pub fn trigger(&self) -> Option<&Trigger> {
+        self.github.as_ref()?.trigger.as_ref()
+    }
+
+    /// `[github.memory]`.
+    pub fn memory(&self) -> Option<&Memory> {
+        self.github.as_ref()?.memory.as_ref()
+    }
+
+    /// `[github.secondary_pull_request]`.
+    pub fn secondary_pull_request(&self) -> Option<&SecondaryPullRequest> {
+        self.github.as_ref()?.secondary_pull_request.as_ref()
+    }
+
+    /// The `push_repo` of `[forgejo]` or `[gitlab]`.
+    pub fn push_repo(&self) -> Option<&str> {
+        self.neutral()?.push_repo.as_deref()
+    }
+
     /// A bounds file that bounds nothing, or asks for what cannot be, is
     /// the caller's mistake and not a request to refuse.
     pub fn validate(&self) -> Result<()> {
+        // The section names the forge, so exactly one: none cannot say
+        // where outputs are applied, and two disagree.
+        match self.sections()[..] {
+            [] => bail!("no forge section: add [github], [forgejo] or [gitlab]"),
+            [_] => {}
+            [first, second, ..] => bail!(
+                "the sections [{first}] and [{second}] are both present: exactly one forge \
+                 per bounds file"
+            ),
+        }
+        let forge = self.forge();
+        let outputs = self.outputs();
         for (name, list) in [
             ("hosts", &self.hosts),
             ("repos", &self.repos),
@@ -223,10 +329,9 @@ impl<Trigger> Bounds<Trigger> {
         for pattern in self.repos.iter().chain(&self.bases) {
             glob(pattern).with_context(|| format!("the glob {pattern:?}"))?;
         }
-        ensure!(!self.outputs.is_empty(), "`outputs` lists no output type");
-        self.forge
-            .check_outputs(self.outputs.keys().map(String::as_str))?;
-        for (output, limit) in &self.outputs {
+        ensure!(!outputs.is_empty(), "`outputs` lists no output type");
+        forge.check_outputs(outputs.keys().map(String::as_str))?;
+        for (output, limit) in outputs {
             limit.validate(output)?;
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str()),
@@ -247,25 +352,33 @@ impl<Trigger> Bounds<Trigger> {
         if let Some(author) = &self.commit_author {
             check_commit_author(author)?;
         }
-        if let Some(push_repo) = &self.push_repo {
+        if let Some(push_repo) = self.push_repo() {
             ensure!(
                 REPO_RE.is_match(push_repo) && !dotted(push_repo) && !push_repo.ends_with(".git"),
                 "push_repo requires an exact repository name: {push_repo:?}"
             );
         }
-        if let Some(memory) = &self.memory {
+        // Apply off GitHub opens a pull request only from the fork the
+        // bounds name: without one, they would admit a run whose patch
+        // apply then refuses.
+        ensure!(
+            self.neutral().is_none()
+                || self.push_repo().is_some()
+                || !outputs.contains_key(CREATE_PULL_REQUEST),
+            "a [{}] section allowing {CREATE_PULL_REQUEST} must name push_repo: apply \
+             pushes a pull request's branch only to the fork it names",
+            forge.name()
+        );
+        if let Some(memory) = self.memory() {
             memory.validate()?;
         }
-        if let Some(secondary) = &self.secondary_pull_request {
+        // Only `[github]` holds one, so it is GitHub's; apply off GitHub
+        // pushes to `push_repo` alone.
+        if let Some(secondary) = self.secondary_pull_request() {
             secondary.validate()?;
-            // Apply off GitHub pushes to `push_repo` alone.
-            ensure!(
-                self.forge == Forge::Github,
-                "secondary_pull_request is only for GitHub"
-            );
         }
-        check_native_handlers(&self.native_handlers, self.forge, |output| {
-            self.outputs.contains_key(output)
+        check_native_handlers(&self.native_handlers, forge, |output| {
+            outputs.contains_key(output)
         })?;
         for repo in &self.unprotected_files.repos {
             ensure!(
@@ -636,19 +749,31 @@ max_outputs = 5
 max_patch_bytes = 8388608
 max_patch_files = 100
 
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 noop = { max = 1 }
 
-[trigger]
+[github.trigger]
 events = ["issues"]
 "#;
+
+    /// [`BOUNDS`]' top-level keys, without its section.
+    fn neutral() -> String {
+        format!("{}\n", BOUNDS.split("\n[github.").next().unwrap())
+    }
+
+    /// Parsed and validated, or the error of either, as text.
+    fn validated(text: &str) -> Result<Bounds, String> {
+        let bounds: Bounds = toml::from_str(text).map_err(|e| e.to_string())?;
+        bounds.validate().map_err(|e| format!("{e:#}"))?;
+        Ok(bounds)
+    }
 
     #[test]
     fn bounds_parse_and_carry_the_callers_trigger_unread() {
         let bounds: Bounds = toml::from_str(BOUNDS).unwrap();
         bounds.validate().unwrap();
-        let trigger = bounds.trigger.as_ref().unwrap();
+        let trigger = bounds.trigger().unwrap();
         assert_eq!(trigger["events"][0].as_str(), Some("issues"));
         assert_eq!(
             bounds.clone_url_problem("https://github.com/bootc-dev/bootc.git", "bootc-dev/bootc"),
@@ -680,6 +805,190 @@ events = ["issues"]
             assert!(error.contains(want), "{change}: {error}");
         }
         assert!(toml::from_str::<Bounds>(&format!("unknown = 1\n{BOUNDS}")).is_err());
+    }
+
+    /// The one section present selects the forge, and holds its outputs
+    /// and what only that forge has (#1393).
+    #[test]
+    fn each_section_selects_its_forge() {
+        // The section, the forge, its push_repo, and whether it has a
+        // trigger, memory and a secondary pull request.
+        for (section, forge, push_repo, github_only) in [
+            (
+                "[github.outputs]\ncreate_pull_request = { max = 1 }\n\
+                 link_sub_issue = { max = 1 }\n\
+                 [github.trigger]\nevents = [\"issues\"]\n[github.memory]\n\
+                 [github.secondary_pull_request]\nrepo = \"cgwalters-forge/misctool\"\n\
+                 base = \"main\"\nbranch_prefix = \"agentic-job/\"\nmax = 1\n\
+                 max_patch_bytes = 65536\nmax_patch_files = 10\n",
+                Forge::Github,
+                None,
+                true,
+            ),
+            (
+                "[forgejo]\npush_repo = \"bot/bootc\"\n\
+                 [forgejo.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n",
+                Forge::Forgejo,
+                Some("bot/bootc"),
+                false,
+            ),
+            (
+                "[forgejo.outputs]\nadd_comment = { max = 1 }\nnoop = { max = 1 }\n",
+                Forge::Forgejo,
+                None,
+                false,
+            ),
+            (
+                "[gitlab.outputs]\nadd_comment = { max = 1 }\nnoop = { max = 1 }\n",
+                Forge::Gitlab,
+                None,
+                false,
+            ),
+            (
+                "[gitlab]\npush_repo = \"bot/bootc\"\n\
+                 [gitlab.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n",
+                Forge::Gitlab,
+                Some("bot/bootc"),
+                false,
+            ),
+        ] {
+            let bounds = validated(&format!("{}{section}", neutral()))
+                .unwrap_or_else(|e| panic!("{section}: {e}"));
+            assert_eq!(bounds.forge(), forge, "{section}");
+            assert_eq!(bounds.outputs().len(), 2, "{section}");
+            assert_eq!(bounds.push_repo(), push_repo, "{section}");
+            for present in [
+                bounds.trigger().is_some(),
+                bounds.memory().is_some(),
+                bounds.secondary_pull_request().is_some(),
+            ] {
+                assert_eq!(present, github_only, "{section}");
+            }
+        }
+    }
+
+    /// What a bounds file may not say about its forge: each refusal, and
+    /// a part of its message.
+    #[test]
+    fn forge_sections_are_refused() {
+        let neutral = neutral();
+        let noop = "noop = { max = 1 }\n";
+        for (name, text, want) in [
+            ("no section", neutral.clone(), "no forge section"),
+            (
+                "two sections",
+                format!("{neutral}[github.outputs]\n{noop}[forgejo.outputs]\n{noop}"),
+                "the sections [github] and [forgejo] are both present",
+            ),
+            (
+                "three sections",
+                format!(
+                    "{neutral}[github.outputs]\n{noop}[forgejo.outputs]\n{noop}\
+                     [gitlab.outputs]\n{noop}"
+                ),
+                "exactly one forge per bounds file",
+            ),
+            (
+                "a section without outputs",
+                format!("{neutral}[gitlab]\n"),
+                "missing field `outputs`",
+            ),
+            (
+                "a section with empty outputs",
+                format!("{neutral}[gitlab.outputs]\n"),
+                "`outputs` lists no output type",
+            ),
+            (
+                "the old scalar forge",
+                format!("forge = \"forgejo\"\n{BOUNDS}"),
+                "unknown field `forge`",
+            ),
+            (
+                "the old top-level outputs",
+                format!("{neutral}[outputs]\n{noop}"),
+                "unknown field `outputs`",
+            ),
+            (
+                "the old top-level push_repo",
+                format!("push_repo = \"bot/bootc\"\n{BOUNDS}"),
+                "unknown field `push_repo`",
+            ),
+            (
+                "the old top-level trigger",
+                format!("{neutral}[trigger]\nevents = [\"issues\"]\n[github.outputs]\n{noop}"),
+                "unknown field `trigger`",
+            ),
+            (
+                "the old top-level memory",
+                format!("{neutral}[memory]\n[github.outputs]\n{noop}"),
+                "unknown field `memory`",
+            ),
+            (
+                "the old top-level secondary_pull_request",
+                format!(
+                    "{neutral}[secondary_pull_request]\nrepo = \"a/b\"\n[github.outputs]\n{noop}"
+                ),
+                "unknown field `secondary_pull_request`",
+            ),
+            (
+                "an unknown key in [github]",
+                format!("{neutral}[github]\npush_repo = \"bot/bootc\"\n[github.outputs]\n{noop}"),
+                "unknown field `push_repo`",
+            ),
+            (
+                "a trigger in [forgejo]",
+                format!("{neutral}[forgejo.trigger]\n[forgejo.outputs]\n{noop}"),
+                "unknown field `trigger`",
+            ),
+            (
+                "memory in [forgejo]",
+                format!("{neutral}[forgejo.memory]\n[forgejo.outputs]\n{noop}"),
+                "unknown field `memory`",
+            ),
+            (
+                "a secondary pull request in [gitlab]",
+                format!("{neutral}[gitlab.secondary_pull_request]\n[gitlab.outputs]\n{noop}"),
+                "unknown field `secondary_pull_request`",
+            ),
+            (
+                "a GitLab merge request without its fork",
+                format!("{neutral}[gitlab.outputs]\ncreate_pull_request = {{ max = 1 }}\n"),
+                "a [gitlab] section allowing create_pull_request must name push_repo",
+            ),
+            (
+                "a GitHub-only type in [forgejo]",
+                format!("{neutral}[forgejo.outputs]\nlink_sub_issue = {{ max = 1 }}\n"),
+                "GitHub-only",
+            ),
+            (
+                "a GitHub-only type in [gitlab]",
+                format!("{neutral}[gitlab.outputs]\nlink_sub_issue = {{ max = 1 }}\n"),
+                "GitHub-only",
+            ),
+            (
+                "a Forgejo pull request without its fork",
+                format!("{neutral}[forgejo.outputs]\ncreate_pull_request = {{ max = 1 }}\n"),
+                "a [forgejo] section allowing create_pull_request must name push_repo",
+            ),
+            (
+                "a [github] section without outputs",
+                format!("{neutral}[github.trigger]\nevents = [\"issues\"]\n"),
+                "missing field `outputs`",
+            ),
+            (
+                "a [forgejo] section without outputs",
+                format!("{neutral}[forgejo]\npush_repo = \"bot/bootc\"\n"),
+                "missing field `outputs`",
+            ),
+            (
+                "a Forgejo fork that is no exact name",
+                format!("{neutral}[forgejo]\npush_repo = \"bot/..\"\n[forgejo.outputs]\n{noop}"),
+                "push_repo requires an exact repository name",
+            ),
+        ] {
+            let error = validated(&text).map(|_| ()).unwrap_err();
+            assert!(error.contains(want), "{name}: {error}");
+        }
     }
 
     /// Two files' `protected` globs together are held to one file's limit.

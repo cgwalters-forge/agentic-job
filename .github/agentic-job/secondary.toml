@@ -9,11 +9,11 @@ max_outputs = 2
 max_patch_bytes = 65536
 max_patch_files = 2
 
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 noop = { max = 1 }
 
-[secondary_pull_request]
+[github.secondary_pull_request]
 repo = "cgwalters-forge/misctool"
 base = "main"
 branch_prefix = "agentic-job/"

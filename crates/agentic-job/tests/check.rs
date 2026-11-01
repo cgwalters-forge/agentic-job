@@ -16,7 +16,7 @@ fn neutral_inline_comments_record_only_the_trusted_head_and_item() {
     for forge in ["forgejo", "gitlab"] {
         let bounds = dir.path().join("bounds.toml");
         std::fs::write(&bounds, format!(
-            "forge = \"{forge}\"\nhosts = [\"forge.example\"]\nrepos = [\"owner/name\"]\nbases = [\"main\"]\nmax_outputs = 2\nmax_patch_bytes = 4096\nmax_patch_files = 2\n[outputs]\ncreate_pull_request_review_comment = {{ max = 2 }}\n"
+            "hosts = [\"forge.example\"]\nrepos = [\"owner/name\"]\nbases = [\"main\"]\nmax_outputs = 2\nmax_patch_bytes = 4096\nmax_patch_files = 2\n[{forge}.outputs]\ncreate_pull_request_review_comment = {{ max = 2 }}\n"
         )).unwrap();
         let made = Command::new(BIN)
             .args([

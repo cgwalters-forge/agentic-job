@@ -12,7 +12,7 @@ fn timestamp(value: &str) -> Result<DateTime<FixedOffset>> {
 
 pub(super) fn validate(trigger: &Trigger) -> Result<()> {
     if let Some(deadline) = &trigger.stop_after {
-        timestamp(deadline).context("[trigger] stop-after")?;
+        timestamp(deadline).context("[github.trigger] stop-after")?;
     }
     Ok(())
 }

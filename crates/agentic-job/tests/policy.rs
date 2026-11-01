@@ -484,7 +484,7 @@ fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     std::fs::write(
         &allow,
         format!(
-            "{text}\n[secondary_pull_request]\nrepo = \"cgwalters-forge/misctool\"\n\
+            "{text}\n[github.secondary_pull_request]\nrepo = \"cgwalters-forge/misctool\"\n\
              base = \"main\"\nbranch_prefix = \"agentic-job/\"\nmax = 1\n\
              max_patch_bytes = 65536\nmax_patch_files = 10\n"
         ),

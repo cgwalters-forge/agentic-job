@@ -598,7 +598,7 @@ action's own refusals are its documentation's.
 | a caller's dispatch job, before the call | the inputs, the item from the API | `.github/workflows/dispatch.yml` `target` | an unknown profile or agent, a non-numeric item, an issue where a pull request is needed, a task over the size limit | before it |
 | policy / Check the proposals mode | `proposals-artifact`, `event`, `review`, `apply-partial`, `task`, `task-artifact` | `policy.yml` | proposals with an event or review; a non-event, non-review run with an empty task; `task` and `task-artifact` both, or a `task-artifact` without a regular, non-blank `task.md` (a missing artifact fails the download before it) | yes |
 | policy / Check that the repositories are public | `repo`, `agent-config-repo`, `item-repo`, their visibility | `policy.yml` | a target, configuration or item repository that is not public (a private target only as the private calling repository) | yes |
-| policy / Decide whether the event may start a run | the bounds' `[trigger]`, the event, the actor's role | `src/event/` (`event::run`, `decide`, `check_actor`, `guards::check`) | an event, actor, label, command, fork or base the trigger does not admit; a deadline passed (a soft refusal: `admitted=false`) | yes |
+| policy / Decide whether the event may start a run | the bounds' `[github.trigger]`, the event, the actor's role | `src/event/` (`event::run`, `decide`, `check_actor`, `guards::check`) | an event, actor, label, command, fork or base the trigger does not admit; a deadline passed (a soft refusal: `admitted=false`) | yes |
 | policy / Refuse unsupported routing, Resolve a dispatched review, Resolve the pull request a run pushes to | the event, `review`, `base`, `push-item`, the pull request from the API | `src/review/mod.rs` (`admit_event`, `admit`, `Dispatch`), `crates/safe-outputs/src/apply/push.rs` (`resolve`) | a discussion; a review off the configured base or without an exact head; a push whose pull request is not open or whose base is not a commit | yes |
 | policy / Check the request against the caller's bounds | `issue`, `item-repo`, `event`, `review*`, `push-item`, `context`, the bounds, the in-flight runs (with `dedupe`) | `policy.yml`; `src/policy.rs` `Compile::compile`; `crates/safe-outputs` `bounds::intersect`, `contract::check_context`; `src/policy/dispatch.rs` `admission` | a non-numeric `issue`; an item repository with an event, review or push; a repository, base, kind, branch, output, output repository, push or `max-outputs` outside the bounds; a `secondary_pull_request` on the run's own or output repository; a context repository outside the bounds; an overlapping dispatch | yes |
 | policy / Write the configuration | the configuration file and the inputs | `src/config/compose.rs` `compose`, `src/config/checked.rs` `check` | an agent without inference; a `max-requests` nothing counts; Vibe or a child agent without one; `inference.front` and egress conflicts; a provider the agent cannot use; an MCP server the configuration cannot carry | yes |
@@ -1275,7 +1275,7 @@ same-repository or fork PRs on the configured base, pinned to their exact head S
 
 With `event: true` the run is decided from the event that started the
 calling workflow, by `agentic-job event` in the policy job
-([how it decides](events.md)). The caller adds a `[trigger]` table to
+([how it decides](events.md)). The caller adds a `[github.trigger]` table to
 its bounds file (which events, which roles, which bots, whether forks,
 which commands), keys its `concurrency` on the triggering issue or pull
 request, and writes `task` as the standing instruction: the event's text
@@ -1576,7 +1576,7 @@ the network can be its root, or the caller's repository).
 
 A caller whose runs are to propose one pull request to a second, fixed
 repository as well (a shared tool the change needs, say) adds a
-`[secondary_pull_request]` table to its bounds file
+`[github.secondary_pull_request]` table to its bounds file
 ([syntax](safe-outputs.md#a-secondary-pull-request)); there is no input
 for it. It is for a `branch` run that opens its own pull request, on
 GitHub. The agent gets a clone of that repository beside its checkout,
@@ -2171,7 +2171,7 @@ request independently against the caller's bounds and a second trusted
 bounds file. It takes the lower output and patch caps, the common output
 types, and the union of protected file names. Neither file can widen the
 other. Explicit requests outside either file are refused; `all`/`max`
-takes the intersection. This intersects output policies, not `[trigger]`
+takes the intersection. This intersects output policies, not `[github.trigger]`
 tables: organization trigger admission must be checked separately with
 `event`. Fetch organization bounds from a trusted pinned ref before
 policy evaluation. Merely wrapping `policy.yml` and fetching a file does
@@ -2400,7 +2400,7 @@ issue. Where the bounds list `create_issue`, the issue's
 labels can be bounded with `allowed` and `blocked` lists:
 
 ```toml
-[outputs.create_issue]
+[github.outputs.create_issue]
 max = 1
 allowed = ["agent-triage", "documentation"]
 blocked = ["release"]

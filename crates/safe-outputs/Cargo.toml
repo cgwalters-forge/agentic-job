@@ -40,7 +40,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
 # The checkout apply's push is made in (apply::git).
 tempfile.workspace = true
-# A bounds file's `[trigger]` table, carried unread where its caller
+# A bounds file's `[github.trigger]` table, carried unread where its caller
 # gives no type of its own.
 toml.workspace = true
 unicode-normalization.workspace = true

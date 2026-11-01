@@ -6,12 +6,12 @@ max_outputs = 5
 max_patch_bytes = 1048576
 max_patch_files = 50
 
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 add_comment = { max = 1 }
 noop = { max = 1 }
 
-[trigger]
+[github.trigger]
 events = ["issue_comment", "pull_request", "workflow_dispatch"]
 roles = ["admin", "maintain", "write"]
 bots = []

@@ -187,17 +187,18 @@ fn policy(forge: &Forge, dir: &Path, name: &str, outputs: &str) -> PathBuf {
     let authority = forge.server.strip_prefix("http://").unwrap();
     let bounds = format!(
         r#"
-forge = "forgejo"
 hosts = ["{authority}"]
 allow_http = ["{authority}"]
 repos = ["{ADMIN}/{NAME}"]
 bases = ["main"]
-push_repo = "{BOT}/{NAME}"
 max_outputs = 2
 max_patch_bytes = 65536
 max_patch_files = 10
 
-[outputs]
+[forgejo]
+push_repo = "{BOT}/{NAME}"
+
+[forgejo.outputs]
 {outputs}"#
     );
     let allow = dir.join(format!("{name}.toml"));

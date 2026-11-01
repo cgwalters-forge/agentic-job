@@ -48,7 +48,7 @@ const BOUNDS = join(scratch(), "allow.toml");
     'hosts = ["github.com"]',
     `repos = ${list(a.repos)}`, `bases = ${list(a.bases)}`,
     `max_outputs = ${a.max_outputs}`, `max_patch_bytes = ${a.max_patch_bytes}`, `max_patch_files = ${a.max_patch_files}`,
-    "[outputs]", ...Object.entries(a.outputs).map(([type, { max }]) => `${type} = { max = ${max} }`),
+    "[github.outputs]", ...Object.entries(a.outputs).map(([type, { max }]) => `${type} = { max = ${max} }`),
     "[unprotected_files]", `repos = ${list(a.unprotected_files.repos)}`, `files = ${list(a.unprotected_files.files)}`,
   ].join("\n") + "\n");
 }
@@ -388,7 +388,7 @@ test("check: every type, at its ceiling and over it", async () => {
 // with: the new policy, gh-aw's collector and the new check alone.
 test("check: create_issue, through the collector and the check", () => {
   const bounds = join(scratch(), "allow.toml");
-  writeFileSync(bounds, readFileSync(BOUNDS, "utf8").replace("[outputs]\n", "[outputs]\ncreate_issue = { max = 1 }\n"));
+  writeFileSync(bounds, readFileSync(BOUNDS, "utf8").replace("[github.outputs]\n", "[github.outputs]\ncreate_issue = { max = 1 }\n"));
   const r = agenticJob("policy", "--allow", bounds, "--repo", REPO, "--clone-url", `https://github.com/${REPO}`,
     "--base", BASE, "--kind", "analysis", "--outputs", "create_issue,noop", "--max-outputs", "2");
   assert.equal(r.status, 0, r.stderr);
@@ -432,8 +432,8 @@ test("check: create_issue, through the collector and the check", () => {
 
 test("check: bounded issue actions, through the collector and the check", () => {
   const bounds = join(scratch(), 'allow.toml');
-  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[outputs]\n',
-    '[outputs]\nclose_issue = { max = 1 }\nadd_labels = { max = 1, allowed = ["triage", "blocked"], blocked = ["blocked"] }\n'));
+  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[github.outputs]\n',
+    '[github.outputs]\nclose_issue = { max = 1 }\nadd_labels = { max = 1, allowed = ["triage", "blocked"], blocked = ["blocked"] }\n'));
   const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
     '--base', BASE, '--kind', 'analysis', '--outputs', 'close_issue,add_labels', '--max-outputs', '2');
   assert.equal(result.status, 0, result.stderr);
@@ -465,7 +465,7 @@ test("check: bounded issue actions, through the collector and the check", () => 
 test("check: updates change only the fields the bounds list, through the collector and the check", () => {
   const bounds = join(scratch(), 'allow.toml');
   const fields = { update_issue: ['body'], update_pull_request: ['title'] };
-  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[outputs]\n', '[outputs]\n' +
+  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[github.outputs]\n', '[github.outputs]\n' +
     Object.entries(fields).map(([type, list]) => `${type} = { max = 1, fields = ${JSON.stringify(list)} }\n`).join('')));
   const policyFor = (outputs) => {
     const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
@@ -500,7 +500,7 @@ test("check: updates change only the fields the bounds list, through the collect
   const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
     '--base', BASE, '--kind', 'analysis', '--outputs', ready.type, '--max-outputs', '1');
   assert.equal(result.status, 1, result.stdout);
-  writeFileSync(bounds, readFileSync(bounds, 'utf8').replace('[outputs]\n', `[outputs]\n${ready.type} = { max = 1 }\n`));
+  writeFileSync(bounds, readFileSync(bounds, 'utf8').replace('[github.outputs]\n', `[github.outputs]\n${ready.type} = { max = 1 }\n`));
   const readyPolicy = policyFor(ready.type);
   assert.equal(newCheck(handback({ lines: [ready], base: null }), readyPolicy).ok, true);
   assert.equal(newCheck(handback({ lines: [{ ...ready, pull_request_number: undefined }], base: null }), readyPolicy).ok, false);
@@ -509,8 +509,8 @@ test("check: updates change only the fields the bounds list, through the collect
 
 test("check: a check run keeps its pinned name and no success, through the collector and the check", () => {
   const bounds = join(scratch(), 'allow.toml');
-  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[outputs]\n',
-    '[outputs]\ncreate_check_run = { max = 1, name = "agent verdict" }\n'));
+  writeFileSync(bounds, readFileSync(BOUNDS, 'utf8').replace('[github.outputs]\n',
+    '[github.outputs]\ncreate_check_run = { max = 1, name = "agent verdict" }\n'));
   const result = agenticJob('policy', '--allow', bounds, '--repo', REPO, '--clone-url', `https://github.com/${REPO}`,
     '--base', BASE, '--kind', 'analysis', '--outputs', 'create_check_run', '--max-outputs', '1');
   assert.equal(result.status, 0, result.stderr);

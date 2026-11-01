@@ -3,7 +3,7 @@
 //! with these files, so that the two cannot drift apart.
 
 use crate::contract::Policy;
-use crate::link_domains;
+use crate::{Forge, link_domains};
 
 /// A run on `bootc-dev/bootc`'s `main` that may open a pull request.
 const POLICY: &str = include_str!("../../tests/data/policy.json");
@@ -31,11 +31,12 @@ pub(crate) fn push_policy() -> Policy {
 /// The head [`push_policy`] pins.
 pub(crate) const HEAD: &str = "2222222222222222222222222222222222222222";
 
-/// [`push_policy`] from bounds that name FORK for the branch, as
-/// agentic-job's tests compile it.
+/// [`push_policy`] from `[forgejo]` bounds that name FORK for the
+/// branch, as agentic-job's tests compile it.
 pub(crate) fn push_policy_to(fork: &str) -> Policy {
     Policy {
         push_repo: Some(fork.to_owned()),
+        forge: Forge::Forgejo,
         ..push_policy()
     }
 }
