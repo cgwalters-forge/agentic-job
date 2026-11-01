@@ -197,11 +197,11 @@ Activation uses the caller's write permission on its own machine, like
 notification and apply. Policy, agent and check explicitly restrict their
 repository tokens to read permissions. The agent job has no identity-token
 permission; a separate register job has `id-token: write` for inference.
-Discussions are refused at the workflow boundary before routing outputs
-or starting any write job: discussion notification, GraphQL label removal
-and kind-aware output routing remain unimplemented. The parser can still
-describe a discussion decision for another consumer; this is not support
-for running discussions through the reusable workflow.
+Discussions are refused in the policy job before routing outputs or
+starting any write job: discussion notification, GraphQL label removal
+and kind-aware output routing remain unimplemented, so `agentic-job event`
+refuses (exit 1) every discussion, whatever its bounds admit, and no
+consumer of its decision can run one.
 
 ## The task file
 
