@@ -40,8 +40,8 @@ use serde_json::{Value, json};
 use super::forgejo::{self, Api, PUT};
 use super::git::{Git, Push};
 use super::{
-    BranchPush, Close, CommitStatus, Kind, LabelChange, Made, NewIssue, Op, Publisher, PullRequest,
-    STATUS_CONTEXT, State,
+    BranchPush, Close, CommitStatus, Committer, Kind, LabelChange, Made, NewIssue, Op, Publisher,
+    PullRequest, State,
 };
 
 const GET: &str = "GET";
@@ -70,7 +70,7 @@ const DONE: &[&str] = &["closed", "merged"];
 
 const OPENED: &str = "opened";
 
-/// A commit's latest statuses named [`STATUS_CONTEXT`] asked for, one a
+/// A commit's latest statuses of the caller's context asked for, one a
 /// ref: GitLab's most a page.
 const STATUSES_PER_PAGE: usize = 100;
 
@@ -393,10 +393,12 @@ impl Gitlab {
     ) -> Result<Option<Value>> {
         let mut latest: Option<Value> = None;
         let mut ids = std::collections::BTreeSet::new();
+        let context = &status.context;
         for page in 1..=MAX_STATUS_PAGES {
             let path = format!(
-                "/projects/{project}/repository/commits/{}/statuses?name={STATUS_CONTEXT}&ref={}&pipeline_id={pipeline}&all=true&per_page={STATUSES_PER_PAGE}&page={page}",
+                "/projects/{project}/repository/commits/{}/statuses?name={}&ref={}&pipeline_id={pipeline}&all=true&per_page={STATUSES_PER_PAGE}&page={page}",
                 status.sha,
+                encoded(context),
                 encoded(reference)
             );
             let answer = self.request(GET, &path, None)?;
@@ -409,7 +411,7 @@ impl Gitlab {
             );
             for entry in entries {
                 ensure!(
-                    entry["name"] == STATUS_CONTEXT
+                    entry["name"] == context.as_str()
                         && entry["sha"] == status.sha
                         && entry["ref"] == reference,
                     "GitLab status does not match the requested context, SHA and ref"
@@ -422,7 +424,7 @@ impl Gitlab {
                 ensure!(
                     !matches!(entry["status"].as_str(), Some("pending" | "running"))
                         || entry["target_url"] == status.target_url,
-                    "another run has an active {STATUS_CONTEXT} status in pipeline {pipeline}; refusing to take over its identity"
+                    "another run has an active {context} status in pipeline {pipeline}; refusing to take over its identity"
                 );
                 if latest
                     .as_ref()
@@ -690,19 +692,21 @@ impl Gitlab {
         Ok(())
     }
 
-    /// Git with the token, as GitLab takes it over HTTP.
-    fn git(&self) -> Git<'_> {
+    /// Git with the token, as GitLab takes it over HTTP, committing as
+    /// COMMITTER.
+    fn git<'a>(&'a self, committer: &'a Committer) -> Git<'a> {
         let credential = BASE64.encode(format!("{GIT_USER}:{}", self.token));
         Git {
             authorization: format!("Basic {credential}"),
             token: &self.token,
             extra_secrets: Vec::new(),
+            committer: (&committer.name, &committer.email),
         }
     }
 
     /// Pushes the merge request's branch to its fork: see [`Git::push`].
     fn push(&self, pr: &PullRequest) -> Result<String> {
-        self.git().push(
+        self.git(&pr.committer).push(
             &Push {
                 from: &self.remote(&self.repo),
                 base: &pr.base,
@@ -905,7 +909,7 @@ impl Publisher for Gitlab {
         let pushing = || format!("pushing to {} branch {}", push.push_repo, push.branch);
         let url = self.push_target(push).with_context(pushing)?;
         let fork = self.remote(&push.push_repo);
-        self.git()
+        self.git(&push.committer)
             .push(
                 &Push {
                     from: &fork,
@@ -1024,7 +1028,7 @@ impl Publisher for Gitlab {
             &path,
             Some(&json!({
                 "state": state,
-                "name": STATUS_CONTEXT,
+                "name": status.context,
                 "target_url": status.target_url,
                 "description": status.state.description(),
                 "ref": reference,
@@ -1033,12 +1037,13 @@ impl Publisher for Gitlab {
         )?;
         ensure!(
             answer["status"] == state
-                && answer["name"] == STATUS_CONTEXT
+                && answer["name"] == status.context
                 && answer["sha"] == status.sha
                 && answer["ref"] == reference
                 && answer["target_url"] == status.target_url
                 && answer["description"] == status.state.description(),
-            "POST {path}: the response is not a {state} status {STATUS_CONTEXT}"
+            "POST {path}: the response is not a {state} status {}",
+            status.context
         );
         Ok(url)
     }
@@ -1046,8 +1051,10 @@ impl Publisher for Gitlab {
 
 #[cfg(test)]
 mod tests {
-    use super::super::forgejo::tests::{mock, pull_request_branch, repository, serve, sh};
-    use super::super::tests::{checked, policy, target};
+    use super::super::testing::{
+        Request, STATUS_CONTEXT, mock, pull_request_branch, repository, serve, sh,
+    };
+    use super::super::tests::{checked, policy, target, upload};
     use super::super::{Forge, Target, plan};
     use super::*;
 
@@ -1094,20 +1101,20 @@ mod tests {
             "body": "Done. @all @group/team\n/merge\n  /approve"})]);
         let mut policy = policy();
         policy.repo = "owner/name".into();
-        policy.forge = crate::policy::Forge::Gitlab;
+        policy.forge = crate::Forge::Gitlab;
         let target = Target {
             forge: Forge::Gitlab,
             repo: "owner/name",
             ..target(Some(5))
         };
-        let ops = plan(checked.path(), &policy, &target).unwrap();
+        let ops = plan(&upload(checked.path()), &policy, &target).unwrap();
         let [Op::Comment { body, .. }] = &ops[..] else {
             panic!("expected a planned comment: {ops:?}");
         };
         assert_eq!(
             body,
             &format!(
-                "Done. @\u{200b}all @\u{200b}group/team\n\u{200b}/merge\n  \u{200b}/approve\n\n> Generated by [agentic-job]({})",
+                "Done. @\u{200b}all @\u{200b}group/team\n\u{200b}/merge\n  \u{200b}/approve\n\n> Generated by [example-ci]({})",
                 target.run_url
             )
         );
@@ -1202,7 +1209,7 @@ mod tests {
     #[test]
     fn escaped_code_mentions_after_collection() {
         let mut policy = policy();
-        policy.forge = crate::policy::Forge::Gitlab;
+        policy.forge = crate::Forge::Gitlab;
         let target = Target {
             forge: Forge::Gitlab,
             ..target(Some(5))
@@ -1210,14 +1217,14 @@ mod tests {
         for body in [r"\`@all\`", r"\`@group/team\`", "```\n@here\n```"] {
             let collected = crate::collect::collect(
                 &json!({"type": "add_comment", "body": body}).to_string(),
-                &crate::collect::config(&policy).unwrap(),
+                &super::super::tests::collector_config(&policy),
                 policy.forge,
                 &|_| true,
             );
             assert!(collected.errors.is_empty(), "{:?}", collected.errors);
             let items: Vec<Value> = collected.items.into_iter().map(Value::Object).collect();
             let dir = checked(&items);
-            let ops = plan(dir.path(), &policy, &target).unwrap();
+            let ops = plan(&upload(dir.path()), &policy, &target).unwrap();
             let [Op::Comment { body, .. }] = &ops[..] else {
                 panic!("expected a comment: {ops:?}");
             };
@@ -1255,12 +1262,7 @@ mod tests {
 
     /// A loopback forge that remembers every POST, including multiple jobs
     /// for the same context. Unlike a response queue this exercises reruns.
-    fn status_server(
-        mut statuses: Vec<Value>,
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
-    ) {
+    fn status_server(mut statuses: Vec<Value>) -> (String, std::sync::mpsc::Receiver<Request>) {
         let sha = "4".repeat(40);
         serve(128, move |request| {
             let line = route(request);
@@ -1349,6 +1351,7 @@ mod tests {
                         sha: "4".repeat(40),
                         state,
                         target_url: RUN_URL.into(),
+                        context: STATUS_CONTEXT.into(),
                     })
                     .unwrap();
             }
@@ -1392,6 +1395,7 @@ mod tests {
                 sha: "4".repeat(40),
                 state: State::Success,
                 target_url: RUN_URL.into(),
+                context: STATUS_CONTEXT.into(),
             };
             let result = gitlab(&server).status(&status);
             match refusal {
@@ -1420,6 +1424,7 @@ mod tests {
             sha: "4".repeat(40),
             state: State::Success,
             target_url: RUN_URL.into(),
+            context: STATUS_CONTEXT.into(),
         };
         assert!(gitlab(&server).preflight(&Op::Status(status)).is_err());
         assert!(requests.try_iter().all(|r| r.line.starts_with("GET ")));
@@ -1498,6 +1503,7 @@ mod tests {
                     sha: sha.clone(),
                     state: State::Success,
                     target_url: RUN_URL.into(),
+                    context: STATUS_CONTEXT.into(),
                 }),
             ];
             let err = super::super::publish(&ops, &publisher).unwrap_err();
@@ -1533,6 +1539,7 @@ mod tests {
                     sha,
                     state: State::Pending,
                     target_url: RUN_URL.into(),
+                    context: STATUS_CONTEXT.into(),
                 })
                 .unwrap_err();
             let err = format!("{err:#}");
@@ -1596,10 +1603,7 @@ mod tests {
         known: String,
         set: Value,
         failing: &'static [&'static str],
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
-    ) {
+    ) -> (String, std::sync::mpsc::Receiver<Request>) {
         serve(64, move |request| {
             let line = route(request);
             if failing.iter().any(|failing| line.starts_with(failing)) {
@@ -1824,6 +1828,7 @@ mod tests {
                     sha,
                     state: State::Success,
                     target_url: RUN_URL.to_owned(),
+                    context: STATUS_CONTEXT.to_owned(),
                 }),
             ];
             let result = super::super::publish(&ops, &gitlab);
@@ -1921,6 +1926,7 @@ mod tests {
                     sha: sha.clone(),
                     state,
                     target_url: RUN_URL.to_owned(),
+                    context: STATUS_CONTEXT.to_owned(),
                 })
                 .unwrap();
             assert_eq!(url, format!("{COMMIT_URL}{sha}"));
@@ -1931,7 +1937,7 @@ mod tests {
             assert_eq!(route(&write), format!("{STATUSES}{sha}"));
             assert_eq!(
                 write.body,
-                json!({"state": name, "name": "agentic-job", "target_url": RUN_URL,
+                json!({"state": name, "name": STATUS_CONTEXT, "target_url": RUN_URL,
                     "description": description, "ref": "main", "pipeline_id": 7})
             );
         }
@@ -1942,6 +1948,7 @@ mod tests {
             sha: sha.clone(),
             state: State::Error,
             target_url: RUN_URL.to_owned(),
+            context: STATUS_CONTEXT.to_owned(),
         };
         assert_eq!(
             gitlab(&server).status(&status).unwrap(),
@@ -1956,11 +1963,11 @@ mod tests {
                 &json!({"id": 7, "project_id": 1, "sha": sha, "ref": "main", "archived": false, "yaml_errors": null}),
             ),
             ok(&json!([])),
-            ok(&json!({"id": 1, "status": "canceled", "name": "agentic-job"})),
+            ok(&json!({"id": 1, "status": "canceled", "name": STATUS_CONTEXT})),
         ]);
         let err = format!("{:#}", gitlab(&server).status(&status).unwrap_err());
         assert!(
-            err.contains("the response is not a failed status agentic-job"),
+            err.contains("the response is not a failed status example-ci"),
             "{err}"
         );
     }
@@ -1978,7 +1985,7 @@ mod tests {
     const NOTE_MR: &str = "POST /api/v4/projects/1/merge_requests/5/notes";
     const CREATE: &str = "POST /api/v4/projects/1/issues";
 
-    fn route(request: &super::super::forgejo::tests::Request) -> String {
+    fn route(request: &Request) -> String {
         request.line.trim_end_matches(" HTTP/1.1").to_owned()
     }
 
@@ -2004,10 +2011,7 @@ mod tests {
         issue: Value,
         merge_request: Value,
         failing: &'static [&'static str],
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<super::super::forgejo::tests::Request>,
-    ) {
+    ) -> (String, std::sync::mpsc::Receiver<Request>) {
         serve(64, move |request| {
             let line = route(request);
             if failing.contains(&line.as_str()) {
@@ -2347,13 +2351,13 @@ mod tests {
         ]);
         let mut policy = policy();
         policy.repo = NESTED.into();
-        policy.forge = crate::policy::Forge::Gitlab;
+        policy.forge = crate::Forge::Gitlab;
         let target = Target {
             forge: Forge::Gitlab,
             repo: NESTED,
             ..target(None)
         };
-        let ops = plan(dir.path(), &policy, &target).unwrap();
+        let ops = plan(&upload(dir.path()), &policy, &target).unwrap();
         let (server, requests) = gitlab_of(
             nested(Kind::Issue, "opened", &[]),
             nested(Kind::PullRequest, "opened", &[]),
@@ -2370,7 +2374,7 @@ mod tests {
             .map(|request| (route(&request), request.body))
             .collect();
         let body = format!(
-            "Done @\u{200b}all\n\u{200b}/merge\n\n> Generated by [agentic-job]({})",
+            "Done @\u{200b}all\n\u{200b}/merge\n\n> Generated by [example-ci]({})",
             target.run_url
         );
         assert_eq!(

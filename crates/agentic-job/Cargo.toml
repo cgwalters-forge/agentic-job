@@ -40,4 +40,5 @@ yaml-rust2.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+safe-outputs = { path = "../safe-outputs", features = ["clap", "test-support"] }
 secure-host = { path = "../secure-host", features = ["test-support"] }

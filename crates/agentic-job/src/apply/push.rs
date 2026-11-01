@@ -484,9 +484,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::super::forgejo::tests::{repository, sh};
     use super::super::github::tests::{TOKEN, forge};
     use super::*;
+    use safe_outputs::apply::testing::{repository, sh};
 
     const PULL: &str = "GET /repos/o/r/pulls/42";
     const CAROL: &str = "GET /repos/carol/r";

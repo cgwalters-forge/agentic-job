@@ -1330,7 +1330,7 @@ comment limits, the title prefix, the draft setting, and the branch
 pushed to the `head-repo` the fork step chose, committed by the job's
 git identity. A push applies check's patch on the head the run was
 asked for, with git's lease on that head
-([the same push](../crates/agentic-job/src/apply/git.rs) apply makes
+([the same push](../crates/safe-outputs/src/apply/git.rs) apply makes
 off GitHub), to the branch of the pull request the handler's `target`
 names, which has to be from `head-repo`, neither its default branch nor
 protected, and comments on it with the commit. Its commit keeps the
@@ -2000,12 +2000,16 @@ so that another project, or a deterministic CI job, can collect and
 check requests without agentic-job's runner, secure-host or GitHub's
 environment. The first step is `crates/safe-outputs`, a library in this
 workspace that depends on neither agentic-job nor secure-host. It reads
-no file, environment or credential: it is given text and settings.
-Bounds parsing, the check and publication safety belong to the
+no environment or credential of its own: it is given text, settings and
+a token. Bounds parsing, the check and publication safety belong to the
 component, and event admission, run identity, artifacts, checkpoints,
 memory, secret scanning and credential acquisition to its caller. The
-collector, the policy, bounds parsing and the check have moved;
-publication (`apply/`) has not.
+collector, the policy, bounds parsing, the check and publishing to
+Forgejo and GitLab have moved; GitHub's publishing (`apply/publish.rs`,
+`github.rs`), where a run's commit goes on GitHub (`push.rs`), the
+replacement series (`replacement.rs`) and the secondary pull request
+(`secondary.rs`) have not yet, as one hand-back could not hold all of
+the move.
 
 Moved into `crates/safe-outputs`, with no change in behaviour:
 
@@ -2021,6 +2025,24 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | `Bounds` (its `[trigger]` table typed by the caller), `SecondaryPullRequest`, `Unprotected`, `Bounds::validate`, `clone_url_problem`, and `intersect`, which holds a run to the organization's bounds too | `policy.rs` | `bounds.rs` |
 | Counts, targets and redirections (`redirections_to`), patch names, `base.json` and the run's branch, the patch rules, link repair, handler limits and replacement series | `check/` | `check/` |
 | `CheckedTarget`, the trusted head of a neutral inline comment that check writes and apply reads back, and `checked_target` | `apply/inline.rs` | `check/inline.rs` |
+| apply's `plan` and `publish`, `Op`, `Publisher`, `Target`, the footer and the report read back | `apply/mod.rs` | `apply/mod.rs` |
+| The Forgejo and GitLab publishers, their push and its guards, neutral inline comments and their anchors, and the filtering of mentions and quick actions | `apply/` | `apply/` |
+| The inline comment fixtures | `crates/agentic-job/tests/data/inline` | `crates/safe-outputs/tests/data/inline` |
+
+`apply::plan` decides every write before the first, refusing with every
+reason found, and `apply::publish` asks the forge about every op
+(`Publisher::preflight`) before it writes any, as before. It is given
+the check job's upload as `Upload`: its directory and the caller's read
+of a file, which must not follow a link (agentic-job's is secure-host's
+`files::read_regular`). The trusted caller also gives the forge, the
+repository, the fork, the comment target, the run's link and the status
+(`Target`), and how it names itself (`Provenance`): the footer's link
+text, the commit status context and the committer, which agentic-job
+gives as `agentic-job`, `agentic-job` and `agentic-job
+<agentic-job@invalid>`, so what it posts is unchanged. The publishers
+take the server and the token as arguments. `apply::testing` (feature
+`test-support`) holds the mock forge and test repositories, which
+agentic-job's tests of GitHub's publishing use too.
 
 `check::check` is the check's entry point. It is given the hand-back's
 files as its caller read them (`Handback`), the collector's result, the
@@ -2055,8 +2077,11 @@ layout and the report: it reads the directory without following a link,
 holds each file to its size, refuses a private key and warns of other
 secret-shaped strings (`redact.rs`, whose patterns stay here, apart from
 the library and from [#2026](https://github.com/cgwalters-forge/agentic-job/issues/2026)),
-checks `memory.json` and the checkpoint, and writes `Verdict`; `apply/`
-and the credentials it acquires; `handback.rs`, run identity, artifacts
+checks `memory.json` and the checkpoint, and writes `Verdict`; `apply/`'s
+commands, the files they read and the tokens they take from the
+environment, the status comment (`status.rs`), the result
+(`result.rs`), the guard against applying twice (`applied.rs`) and the
+GitHub modules not yet moved; `handback.rs`, run identity, artifacts
 and checkpoints.
 
 The per-forge bounds of [#2107](https://github.com/cgwalters-forge/agentic-job/pull/2107)

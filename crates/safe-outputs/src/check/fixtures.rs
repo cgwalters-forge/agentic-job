@@ -27,3 +27,15 @@ pub(crate) fn policy() -> Policy {
 pub(crate) fn push_policy() -> Policy {
     parsed(PUSH_POLICY)
 }
+
+/// The head [`push_policy`] pins.
+pub(crate) const HEAD: &str = "2222222222222222222222222222222222222222";
+
+/// [`push_policy`] from bounds that name FORK for the branch, as
+/// agentic-job's tests compile it.
+pub(crate) fn push_policy_to(fork: &str) -> Policy {
+    Policy {
+        push_repo: Some(fork.to_owned()),
+        ..push_policy()
+    }
+}

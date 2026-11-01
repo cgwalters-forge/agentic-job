@@ -1578,13 +1578,16 @@ name = "safe-outputs"
 version = "0.6.4"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
  "unicode-normalization",
+ "ureq",
 ]
 
 [[package]]

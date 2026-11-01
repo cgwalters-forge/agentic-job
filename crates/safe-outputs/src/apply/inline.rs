@@ -5,11 +5,11 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
 
 use super::{MAX_BODY_CHARS, Target, mentions, with_footer};
-use crate::policy::Policy;
+use crate::contract::Policy;
 
-// The target check writes and apply reads back is the library's, so that
+// The target check writes and apply reads back is check's, so that
 // neither depends on the other for it.
-pub use safe_outputs::check::inline::{CheckedTarget, checked_target};
+pub use crate::check::inline::{CheckedTarget, checked_target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineComment {
@@ -21,8 +21,8 @@ pub struct InlineComment {
 }
 
 /// Refuse unsupported fields in check too, before publishing can be attempted.
-pub(crate) fn fields(item: &Map<String, Value>, forge: crate::policy::Forge) -> Result<()> {
-    safe_outputs::collect::inline_field_names(item)?;
+pub fn fields(item: &Map<String, Value>, forge: crate::Forge) -> Result<()> {
+    crate::collect::inline_field_names(item)?;
     ensure!(
         item.get("line")
             .and_then(Value::as_u64)
@@ -51,9 +51,9 @@ pub(crate) fn fields(item: &Map<String, Value>, forge: crate::policy::Forge) -> 
     let mut envelope = item.clone();
     envelope.insert("type".into(), Value::String("add_comment".into()));
     let syntax = match forge {
-        crate::policy::Forge::Forgejo => "forgejo",
-        crate::policy::Forge::Gitlab => "gitlab",
-        crate::policy::Forge::Github => {
+        crate::Forge::Forgejo => "forgejo",
+        crate::Forge::Gitlab => "gitlab",
+        crate::Forge::Github => {
             anyhow::bail!("neutral inline comments require a neutral forge")
         }
     };
@@ -68,7 +68,7 @@ pub(crate) fn fields(item: &Map<String, Value>, forge: crate::policy::Forge) -> 
     Ok(())
 }
 
-pub(crate) fn plan(
+pub(super) fn plan(
     item: &Map<String, Value>,
     checked: Option<&CheckedTarget>,
     policy: &Policy,
@@ -90,6 +90,7 @@ pub(crate) fn plan(
             item["body"].as_str().context("missing body")?,
             target.forge.syntax(),
         ),
+        target.provenance.name,
         target.run_url,
     );
     // A caller-supplied run link need not fit in the reserved footer allowance.
@@ -220,9 +221,11 @@ pub(crate) fn forgejo_patch(diff: &str, path: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apply::forgejo::tests::{Request, serve_with_headers};
-    use crate::apply::{Forge, Op, Publisher, forgejo::Forgejo, gitlab::Gitlab};
-    use crate::policy::{CREATE_REVIEW_COMMENT, OutputLimit};
+    use crate::CREATE_REVIEW_COMMENT;
+    use crate::apply::testing::{Request, serve_with_headers};
+    use crate::apply::tests::{collector_config, upload};
+    use crate::apply::{Forge, Neutral, Op, Publisher, forgejo::Forgejo, gitlab::Gitlab};
+    use crate::contract::OutputLimit;
     use serde_json::json;
 
     const HEAD: &str = "2222222222222222222222222222222222222222";
@@ -262,8 +265,8 @@ mod tests {
         let mut policy = crate::apply::tests::policy();
         policy.repo = "owner/name".into();
         policy.forge = match forge {
-            Forge::Forgejo => crate::policy::Forge::Forgejo,
-            Forge::Gitlab => crate::policy::Forge::Gitlab,
+            Forge::Forgejo => crate::Forge::Forgejo,
+            Forge::Gitlab => crate::Forge::Gitlab,
         };
         policy.safe_outputs.others.insert(
             CREATE_REVIEW_COMMENT.into(),
@@ -293,7 +296,7 @@ mod tests {
         let mut report: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         report["inline_target"] = json!(binding);
         std::fs::write(path, report.to_string()).unwrap();
-        super::super::plan(dir.path(), &policy(forge), &target(forge))
+        super::super::plan(&upload(dir.path()), &policy(forge), &target(forge))
     }
 
     #[test]
@@ -335,6 +338,7 @@ mod tests {
                     item.as_object().unwrap(),
                     &policy(forge),
                     Some(("owner/name", 9)),
+                    &Neutral,
                 );
                 assert!(!refusals.is_empty(), "check: {forge:?}: {key}");
             }
@@ -351,7 +355,7 @@ mod tests {
     fn neutral_inline_collection_keeps_refusals_and_bounds_expanded_bodies() {
         for forge in [Forge::Forgejo, Forge::Gitlab] {
             let policy = policy(forge);
-            let config = crate::collect::config(&policy).unwrap();
+            let config = collector_config(&policy);
             for (key, value) in [
                 ("start_line", json!(1)),
                 ("start_side", json!("LEFT")),
@@ -384,6 +388,7 @@ mod tests {
                     &collected.items[0],
                     &policy,
                     Some(("owner/name", 9)),
+                    &Neutral,
                 );
                 assert_eq!(checked.is_empty(), accepted, "{forge:?}: {checked:?}");
                 let requests: Vec<Value> = collected.items.into_iter().map(Value::Object).collect();
@@ -563,13 +568,7 @@ mod tests {
         }
     }
 
-    fn server(
-        forge: Forge,
-        fault: &'static str,
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<crate::apply::forgejo::tests::Request>,
-    ) {
+    fn server(forge: Forge, fault: &'static str) -> (String, std::sync::mpsc::Receiver<Request>) {
         let mut reads = 0;
         let mut writes = 0;
         let mut answer = move |request: &Request| {
