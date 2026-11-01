@@ -1,0 +1,1383 @@
+//! Apply's workflow shape and actual shell steps, without credentials or a forge.
+#![allow(clippy::unwrap_used)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use regex::Regex;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+use yaml_rust2::{Yaml, YamlLoader};
+
+const HANDLERS: &str = "Write the handlers' configuration";
+const PINNED: &str = "The policy call is this workflow's commit";
+const TRIAL: &str =
+    "Apply the patch on its own base, and compare what changed with what was checked";
+const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn workflow(file: &str) -> String {
+    fs::read_to_string(root().join(".github/workflows").join(file)).unwrap()
+}
+
+fn definition(file: &str) -> Yaml {
+    YamlLoader::load_from_str(&workflow(file))
+        .unwrap()
+        .remove(0)
+}
+
+// Some guards are deliberately identical in apply and conclude. Select the
+// job explicitly so their equality can be checked rather than assumed.
+fn step(doc: &Yaml, job: &str, name: &str) -> Yaml {
+    let mut found = doc["jobs"][job]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .filter(|step| step["name"].as_str() == Some(name));
+    let result = found
+        .next()
+        .unwrap_or_else(|| panic!("no step {job}/{name}"));
+    assert!(found.next().is_none(), "duplicate step {job}/{name}");
+    result.clone()
+}
+
+fn job<'a>(text: &'a str, name: &str) -> &'a str {
+    let rest = text.split_once(&format!("\n  {name}:\n")).unwrap().1;
+    let end = Regex::new(r"\n  [\w-]+:\n")
+        .unwrap()
+        .find(rest)
+        .map_or(rest.len(), |m| m.start());
+    &rest[..end]
+}
+
+fn matches(text: &str, pattern: &str) {
+    assert!(
+        Regex::new(pattern).unwrap().is_match(text),
+        "pattern {pattern:?} not found in {text}"
+    );
+}
+
+fn json_file(dir: &Path, name: &str, value: &Value) {
+    fs::write(dir.join(name), serde_json::to_vec(value).unwrap()).unwrap();
+}
+
+fn read_json(dir: &Path, name: &str) -> Value {
+    serde_json::from_slice(&fs::read(dir.join(name)).unwrap()).unwrap()
+}
+
+fn text(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn status(out: &Output, expected: i32) {
+    assert_eq!(out.status.code(), Some(expected), "{}", text(out));
+}
+
+fn bash(cwd: &Path, script: &str, env: &[(&str, &str)]) -> Output {
+    Command::new("bash")
+        .args(["-e", "-o", "pipefail", "-c", script])
+        .current_dir(cwd)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+fn run_step(cwd: &Path, name: &str, env: &[(&str, &str)]) -> Output {
+    let doc = definition("apply.yml");
+    let job = if ["How the run ended", "A reaction that says how it ended"].contains(&name) {
+        "conclude"
+    } else {
+        "apply"
+    };
+    bash(cwd, step(&doc, job, name)["run"].as_str().unwrap(), env)
+}
+
+fn handlers(dir: &Path, config: &Value, overrides: &[(&str, &str)]) -> (Output, Value) {
+    json_file(dir, "config.json", config);
+    let path = dir.to_str().unwrap();
+    let env_file = dir.join("env");
+    let mut env = vec![
+        ("GH_AW_TMP", path),
+        ("GITHUB_ENV", env_file.to_str().unwrap()),
+        ("GITHUB_REPOSITORY", "owner/caller"),
+        ("REPO", "owner/source"),
+        ("OUTPUT_REPO", "owner/output"),
+        ("ITEM_REPO", "owner/item"),
+        ("BASE", "main"),
+        ("BRANCH_PREFIX", ""),
+        ("READY", "false"),
+        ("PARTIAL", ""),
+        ("TITLE_PREFIX", ""),
+        ("COMMENT_TARGET", ""),
+        ("PULL_REQUEST", "{}"),
+        ("PUSH", "{}"),
+        ("FORK", ""),
+    ];
+    // Command::envs keeps the last setting of a repeated key.
+    env.extend_from_slice(overrides);
+    let out = run_step(dir, HANDLERS, &env);
+    let result = if out.status.success() {
+        read_json(dir, "handler-config.json")
+    } else {
+        Value::Null
+    };
+    (out, result)
+}
+
+fn handler_settings() -> (String, String) {
+    let step = step(&definition("apply.yml"), "apply", HANDLERS);
+    (
+        step["env"]["PULL_REQUEST"].as_str().unwrap().to_owned(),
+        step["env"]["PUSH"].as_str().unwrap().to_owned(),
+    )
+}
+
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    status(&out, 0);
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+fn identity(dir: &Path) {
+    git(dir, &["config", "user.name", "Test"]);
+    git(dir, &["config", "user.email", "test@example.invalid"]);
+}
+
+fn commit(dir: &Path, content: &str) -> String {
+    fs::write(dir.join("file.txt"), content).unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-qm", content]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn issue_actions_keep_checked_repository_and_caps() {
+    let dir = TempDir::new().unwrap();
+    let cases = [
+        (
+            "close_issue",
+            json!({"max":2}),
+            json!({"issue_intent":false,"allow_body":true}),
+        ),
+        (
+            "add_labels",
+            json!({"max":3,"allowed":["triage"],"blocked":["release"]}),
+            json!({"issue_intent":false,"create_if_missing":false}),
+        ),
+        (
+            "add_reviewer",
+            json!({"max":1,"allowed":["octocat"]}),
+            json!({}),
+        ),
+        (
+            "assign_to_user",
+            json!({"max":1,"allowed":["octocat"]}),
+            json!({"issue_intent":false,"unassign_first":false}),
+        ),
+        ("close_pull_request", json!({"max":1}), json!({})),
+        ("link_sub_issue", json!({"max":2}), json!({})),
+        (
+            "add_comment",
+            json!({"max":1}),
+            json!({"target-repo":"owner/tracker","target":"99"}),
+        ),
+        (
+            "update_issue",
+            json!({"max":1,"fields":["title"]}),
+            json!({"allow_body":false}),
+        ),
+        (
+            "update_pull_request",
+            json!({"max":1,"fields":["body","draft"]}),
+            json!({"allow_title":false,"allow_body":true,"update_branch":false}),
+        ),
+        (
+            "mark_pull_request_as_ready_for_review",
+            json!({"max":1}),
+            json!({}),
+        ),
+    ];
+    let config = cases
+        .iter()
+        .map(|(name, input, _)| ((*name).to_owned(), input.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let (out, got) = handlers(
+        dir.path(),
+        &Value::Object(config),
+        &[
+            ("OUTPUT_REPO", "owner/other"),
+            ("ITEM_REPO", "owner/tracker"),
+            ("COMMENT_TARGET", "99"),
+            ("READY", ""),
+        ],
+    );
+    status(&out, 0);
+    for (name, mut expected, extra) in cases {
+        expected.as_object_mut().unwrap().extend(
+            json!({"target-repo":"owner/source","target":"*"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        expected
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(got[name], expected, "{name}");
+    }
+}
+
+#[test]
+fn check_run_keeps_pinned_name_and_run_repository() {
+    let dir = TempDir::new().unwrap();
+    for (repo, expected) in [("owner/source", 0), ("owner/caller", 1)] {
+        let (out, config) = handlers(
+            dir.path(),
+            &json!({"create_check_run":{"max":1,"name":"agent verdict"}}),
+            &[
+                ("GITHUB_REPOSITORY", repo),
+                ("REPO", "Owner/Source"),
+                ("OUTPUT_REPO", "owner/source"),
+                ("ITEM_REPO", "owner/source"),
+            ],
+        );
+        status(&out, expected);
+        if expected == 0 {
+            assert_eq!(
+                config["create_check_run"],
+                json!({"max":1,"name":"agent verdict","target":"*"})
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("posts in the calling repository")
+            );
+        }
+    }
+}
+
+#[test]
+fn discussion_goes_to_run_repository_not_an_issue() {
+    let dir = TempDir::new().unwrap();
+    let (out, config) = handlers(
+        dir.path(),
+        &json!({"create_discussion":{"max":1,"category":"Agent reports"}}),
+        &[],
+    );
+    status(&out, 0);
+    assert_eq!(
+        config["create_discussion"],
+        json!({"max":1,"category":"Agent reports","target-repo":"owner/source","fallback_to_issue":false,"close_older_discussions":false})
+    );
+}
+
+#[test]
+fn hide_comment_and_review_threads_are_held_to_triggering_item() {
+    // Each original target case is run separately for hide_comment and for
+    // the three review-thread handlers together.
+    for types in [
+        vec!["hide_comment"],
+        vec![
+            "create_pull_request_review_comment",
+            "reply_to_pull_request_review_comment",
+            "resolve_pull_request_review_thread",
+        ],
+    ] {
+        for target in ["64", "*", "", "0"] {
+            let dir = TempDir::new().unwrap();
+            let input = if types[0] == "hide_comment" {
+                json!({"max":1,"allowed_reasons":["SPAM"]})
+            } else {
+                json!({"max":2})
+            };
+            let config: serde_json::Map<_, _> = types
+                .iter()
+                .map(|name| ((*name).to_owned(), input.clone()))
+                .collect();
+            let (out, got) = handlers(
+                dir.path(),
+                &Value::Object(config),
+                &[("COMMENT_TARGET", target)],
+            );
+            status(&out, 0);
+            for name in &types {
+                if target == "64" {
+                    let mut expected = input.clone();
+                    expected.as_object_mut().unwrap().extend(
+                        json!({"target-repo":"owner/item","target":"64"})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    );
+                    assert_eq!(got[name], expected, "{name} {target}");
+                } else {
+                    assert!(got.get(name).is_none(), "{name} {target}: {got}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn carriers_exempt_at_most_github_of_policy_dot_folders() {
+    let (pr, push) = handler_settings();
+    for carrier in ["create_pull_request", "push_to_pull_request_branch"] {
+        for folders in [
+            None,
+            Some(json!([])),
+            Some(json!([".github"])),
+            Some(json!([".agents"])),
+            Some(json!([".agents", ".github"])),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let mut original = json!({"max":1,"protected_files":["CODEOWNERS"],"protected_files_policy":"blocked","protect_top_level_dot_folders":true,"protected_paths":["raw/**"]});
+            if let Some(folders) = &folders {
+                original["unprotected_dot_folders"] = folders.clone();
+            }
+            let (out, all) = handlers(
+                dir.path(),
+                &json!({carrier:original}),
+                &[
+                    ("REPO", "owner/repo"),
+                    ("OUTPUT_REPO", "owner/repo"),
+                    ("ITEM_REPO", "owner/repo"),
+                    ("READY", ""),
+                    ("PULL_REQUEST", &pr),
+                    ("PUSH", &push),
+                    ("FORK", "bot/repo"),
+                ],
+            );
+            status(&out, 0);
+            let got = &all[carrier];
+            for key in ["unprotected_dot_folders", "protected_paths"] {
+                assert!(got.get(key).is_none(), "{carrier} {folders:?}: {key}");
+            }
+            assert_eq!(got["protect_top_level_dot_folders"], true);
+            let exempt = folders
+                .as_ref()
+                .is_some_and(|f| f.as_array().unwrap().contains(&json!(".github")));
+            assert_eq!(
+                got.get("protected_dot_folder_excludes"),
+                exempt.then_some(&json!([".github"]))
+            );
+            assert_eq!(
+                got.get("allow_workflows"),
+                (exempt && carrier == "push_to_pull_request_branch").then_some(&json!(true))
+            );
+            assert_eq!(got["protected_files_policy"], "blocked");
+            assert_eq!(got["protected_files"], json!(["CODEOWNERS"]));
+            assert_eq!(got["head-repo"], "bot/repo");
+            assert_eq!(got["allowed_repos"], json!(["bot/repo"]));
+            let other = if carrier == "create_pull_request" {
+                "push_to_pull_request_branch"
+            } else {
+                "create_pull_request"
+            };
+            assert!(all.get(other).is_none());
+        }
+    }
+}
+
+#[test]
+fn push_uses_policy_pull_request_and_apply_fork_without_workflows() {
+    let dir = TempDir::new().unwrap();
+    let (pr, push_settings) = handler_settings();
+    let push = json!({"max":1,"target":"42","head":"2".repeat(40),"protected_files":[],"protect_top_level_dot_folders":true,"protected_files_policy":"blocked","max_patch_size":1024,"max_patch_files":100});
+    for fork in ["bot/repo", "carol/repo", "Owner/Repo", ""] {
+        let (out, config) = handlers(
+            dir.path(),
+            &json!({"push_to_pull_request_branch":push}),
+            &[
+                ("REPO", "Owner/Repo"),
+                ("OUTPUT_REPO", "Owner/Repo"),
+                ("ITEM_REPO", "Owner/Repo"),
+                ("BASE", "dispatch/implement/agent-run-12"),
+                ("BRANCH_PREFIX", "dispatch/fix/"),
+                ("READY", ""),
+                ("TITLE_PREFIX", "[bot] "),
+                ("COMMENT_TARGET", "42"),
+                ("PULL_REQUEST", &pr),
+                ("PUSH", &push_settings),
+                ("FORK", fork),
+            ],
+        );
+        status(&out, 0);
+        if fork.is_empty() {
+            assert_eq!(config, json!({}));
+            continue;
+        }
+        let got = &config["push_to_pull_request_branch"];
+        if fork == "bot/repo" {
+            let mut expected = push.clone();
+            expected.as_object_mut().unwrap().extend(json!({"signed_commits":false,"fallback_as_pull_request":false,"if_no_changes":"error","target-repo":"Owner/Repo","head-repo":"bot/repo","allowed_repos":["bot/repo"],"checkout_mapping":{"owner/repo":"."}}).as_object().unwrap().clone());
+            assert_eq!(got, &expected);
+        } else {
+            assert_eq!(got["head-repo"], fork);
+            assert_eq!(got["allowed_repos"], json!([fork]));
+            assert!(got.get("allow_workflows").is_none());
+        }
+    }
+}
+
+#[test]
+fn pushed_branch_is_one_commit_on_pinned_head_with_checked_tree() {
+    for (tip, replacement, expected) in [
+        ("pushed", false, 0),
+        ("other", false, 1),
+        ("moved", false, 1),
+        ("merged", false, 1),
+        ("moved", true, 0),
+        ("pushed", true, 1),
+    ] {
+        for skipped in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path();
+            let fork = root.join("fork.git");
+            let origin = root.join("origin.git");
+            let work = root.join("work");
+            for bare in [&fork, &origin] {
+                git(root, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+            }
+            git(root, &["init", "-q", work.to_str().unwrap()]);
+            identity(&work);
+            git(
+                &work,
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
+            let head = commit(&work, "before\n");
+            let pushed = commit(&work, "after\n");
+            let tree = git(&work, &["rev-parse", "HEAD^{tree}"]);
+            git(&work, &["reset", "-q", "--hard", &head]);
+            let other = commit(&work, "other\n");
+            let moved = commit(&work, "after\n");
+            git(&work, &["reset", "-q", "--hard", &head]);
+            git(&work, &["merge", "-q", "--no-ff", &pushed, "-m", "merge"]);
+            let merged = git(&work, &["rev-parse", "HEAD"]);
+            let selected = match tip {
+                "pushed" => &pushed,
+                "other" => &other,
+                "moved" => &moved,
+                "merged" => &merged,
+                _ => unreachable!(),
+            };
+            git(
+                &work,
+                &[
+                    "push",
+                    "-q",
+                    fork.to_str().unwrap(),
+                    &format!("{selected}:refs/heads/agent-run-12"),
+                ],
+            );
+            git(
+                &work,
+                &[
+                    "push",
+                    "-q",
+                    "origin",
+                    &format!("{pushed}:refs/heads/agent-run-12"),
+                ],
+            );
+            git(&work, &["reset", "-q", "--hard", &head]);
+            let tmp = root.join("tmp");
+            fs::create_dir(&tmp).unwrap();
+            json_file(
+                &tmp,
+                "config.json",
+                &json!({"push_to_pull_request_branch":{"target":"42","head":head}}),
+            );
+            let push = json!({"type":"push_to_pull_request_branch","branch":"agent-run-12"});
+            json_file(
+                &tmp,
+                "agent_output.json",
+                &json!({"items":if skipped {json!([])} else {json!([push])}}),
+            );
+            json_file(
+                &tmp,
+                "applied.json",
+                &json!({"pull_request":null,"refused":false,"already_applied":if skipped {json!([push])} else {json!([])}}),
+            );
+            let out = run_step(
+                &work,
+                "Every output was applied",
+                &[
+                    ("GH_AW_TMP", tmp.to_str().unwrap()),
+                    ("BASE", "agent-run-12"),
+                    ("OUTPUT_REPO", "owner/repo"),
+                    ("TREE", &tree),
+                    ("FORK", "bot/repo"),
+                    ("REPLACEMENT_HEAD", if replacement { &moved } else { "" }),
+                    ("OUTCOME", "success"),
+                    ("FAILED", "0"),
+                    ("PROJECT_REFUSED", "false"),
+                    ("GIT_CONFIG_COUNT", "1"),
+                    (
+                        "GIT_CONFIG_KEY_0",
+                        &format!("url.{}.insteadOf", fork.display()),
+                    ),
+                    ("GIT_CONFIG_VALUE_0", "https://github.com/bot/repo"),
+                ],
+            );
+            status(&out, expected);
+            if expected != 0 {
+                assert!(
+                    text(&out).contains(if replacement {
+                        "replacement head changed"
+                    } else {
+                        "agent-run-12 of bot/repo does not hold the checked change as one commit on"
+                    }),
+                    "{tip} skipped={skipped}: {}",
+                    text(&out)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn complete_work_opens_ready_checkpoint_or_stopped_run_opens_draft() {
+    let (pr_settings, _) = handler_settings();
+    for (exit, reported, opted, checkpoint, draft) in [
+        ("0", None, true, "", false),
+        ("", None, true, "", false),
+        ("0", Some("budget"), true, "budget", true),
+        ("0", Some("incomplete"), true, "incomplete", true),
+        ("124", None, true, "runtime", true),
+        ("3", Some("budget"), true, "cap", true),
+        ("0", None, false, "", true),
+        ("0", Some("budget"), false, "budget", true),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let mut pr = json!({"max":1,"draft":true});
+        if opted {
+            pr["ready_when_complete"] = json!(true);
+        }
+        let config = json!({"create_pull_request":pr});
+        json_file(root, "config.json", &config);
+        let mut report = json!({"ok":true});
+        if let Some(reason) = reported {
+            report["checkpoint"] = json!({"reason":reason});
+        }
+        json_file(root, "report.json", &report);
+        let out = run_step(
+            root,
+            "Decide whether the work is complete",
+            &[
+                ("GH_AW_TMP", root.to_str().unwrap()),
+                ("REPORT", root.join("report.json").to_str().unwrap()),
+                ("GITHUB_OUTPUT", root.join("output").to_str().unwrap()),
+                ("EXIT", exit),
+            ],
+        );
+        status(&out, 0);
+        let ready = (!draft).to_string();
+        let outputs = fs::read_to_string(root.join("output")).unwrap();
+        let outputs: std::collections::BTreeMap<_, _> = outputs
+            .trim()
+            .lines()
+            .map(|line| line.split_once('=').unwrap())
+            .collect();
+        assert_eq!(
+            outputs,
+            std::collections::BTreeMap::from([
+                ("checkpoint", checkpoint),
+                ("ready", ready.as_str())
+            ]),
+            "{exit} {reported:?} {opted}"
+        );
+        let (out, got) = handlers(
+            root,
+            &config,
+            &[
+                ("REPO", "owner/repo"),
+                ("OUTPUT_REPO", "owner/repo"),
+                ("ITEM_REPO", "owner/repo"),
+                ("READY", outputs["ready"]),
+                ("PULL_REQUEST", &pr_settings),
+                ("FORK", "bot/repo"),
+            ],
+        );
+        status(&out, 0);
+        assert_eq!(got["create_pull_request"]["draft"], draft);
+        assert!(
+            got["create_pull_request"]
+                .get("ready_when_complete")
+                .is_none()
+        );
+    }
+    let dir = TempDir::new().unwrap();
+    json_file(dir.path(), "config.json", &json!({}));
+    json_file(
+        dir.path(),
+        "report.json",
+        &json!({"checkpoint":{"reason":"x\nready=true"}}),
+    );
+    status(
+        &run_step(
+            dir.path(),
+            "Decide whether the work is complete",
+            &[
+                ("GH_AW_TMP", dir.path().to_str().unwrap()),
+                ("REPORT", dir.path().join("report.json").to_str().unwrap()),
+                ("GITHUB_OUTPUT", dir.path().join("output").to_str().unwrap()),
+                ("EXIT", "0"),
+            ],
+        ),
+        1,
+    );
+}
+
+#[test]
+fn partial_push_is_not_applied_whatever_else_it_posts() {
+    for (types, expected) in [
+        (vec!["add_comment"], 0),
+        (vec!["close_issue"], 0),
+        (vec!["push_to_pull_request_branch"], 1),
+        (vec!["push_to_pull_request_branch", "add_comment"], 1),
+    ] {
+        let dir = TempDir::new().unwrap();
+        // Make policy's binary available at the workflow's expected path.
+        fs::create_dir(dir.path().join("apply-binary")).unwrap();
+        std::os::unix::fs::symlink(BIN, dir.path().join("apply-binary/agentic-job")).unwrap();
+        let items: Vec<_> = types
+            .iter()
+            .map(|kind| json!({"type":kind,"body":"b"}))
+            .collect();
+        json_file(dir.path(), "agent_output.json", &json!({"items":items}));
+        let out = run_step(
+            dir.path(),
+            "Mark what a partial run opens or posts",
+            &[
+                ("GH_AW_TMP", dir.path().to_str().unwrap()),
+                ("RUNNER_TEMP", dir.path().to_str().unwrap()),
+                ("STOPPED", "its timeout"),
+            ],
+        );
+        status(&out, expected);
+        if expected != 0 {
+            assert!(
+                String::from_utf8_lossy(&out.stdout)
+                    .contains("a partial change is not pushed to a pull request's branch")
+            );
+        } else {
+            matches(
+                read_json(dir.path(), "agent_output.json")["items"][0]["body"]
+                    .as_str()
+                    .unwrap(),
+                r"^\*\*Partial work\.\*\* .*\n\nb$",
+            );
+        }
+    }
+}
+
+#[test]
+fn target_base_fetch_never_advances_output_repository_and_refuses_stale_base() {
+    for (output_repo, push, synced, expected, base) in [
+        ("owner/repo", true, false, 0, Some("fork")),
+        ("Owner/Repo", true, false, 0, Some("fork")),
+        ("owner/fork", true, false, 1, None),
+        ("owner/fork", false, false, 1, Some("target")),
+        ("owner/fork", false, true, 0, Some("target")),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let target = root.join("target");
+        let fork = root.join("fork.git");
+        let work = root.join("work");
+        git(root, &["init", "-q", target.to_str().unwrap()]);
+        identity(&target);
+        let behind = commit(&target, "before\n");
+        git(&target, &["branch", "-M", "main"]);
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                target.to_str().unwrap(),
+                fork.to_str().unwrap(),
+            ],
+        );
+        let ahead = commit(&target, "after\n");
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                fork.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        let kind = if push {
+            "push_to_pull_request_branch"
+        } else {
+            "create_pull_request"
+        };
+        let mut config = if push {
+            json!({kind:{"target":"42"}})
+        } else {
+            json!({kind:{"max":1}})
+        };
+        if synced {
+            config["synced"] = json!(true);
+        }
+        json_file(root, "config.json", &config);
+        json_file(
+            root,
+            "report.json",
+            &json!({"patch":{"base_commit":if synced {&behind} else {&ahead}}}),
+        );
+        json_file(root, "agent_output.json", &json!({"items":[{"type":kind}]}));
+        let out = run_step(
+            &work,
+            "Fetch the target's base branch",
+            &[
+                ("GH_AW_TMP", root.to_str().unwrap()),
+                ("REPORT", root.join("report.json").to_str().unwrap()),
+                ("REPO", "owner/repo"),
+                ("OUTPUT_REPO", output_repo),
+                ("BASE", "main"),
+                ("FORK", "bot/repo"),
+                ("GIT_CONFIG_COUNT", "2"),
+                (
+                    "GIT_CONFIG_KEY_0",
+                    &format!("url.{}.insteadOf", target.display()),
+                ),
+                ("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo"),
+                (
+                    "GIT_CONFIG_KEY_1",
+                    &format!("url.{}.insteadOf", fork.display()),
+                ),
+                ("GIT_CONFIG_VALUE_1", "https://github.com/bot/repo"),
+            ],
+        );
+        status(&out, expected);
+        if expected != 0 {
+            assert!(String::from_utf8_lossy(&out.stdout).contains(if push {
+                "a push goes to a pull request of owner/repo"
+            } else {
+                "sync owner/fork"
+            }));
+        }
+        assert_eq!(git(&fork, &["rev-parse", "main"]), behind);
+        if let Some(base) = base {
+            assert_eq!(
+                git(&work, &["rev-parse", "refs/agentic-job/target-base"]),
+                if base == "fork" { behind } else { ahead }
+            );
+        }
+    }
+}
+
+#[test]
+fn check_and_apply_refuse_policy_from_another_commit_and_empty_checked_id() {
+    let apply = workflow("apply.yml");
+    let checker = workflow("check.yml");
+    let doc = definition("apply.yml");
+    let guard = step(&doc, "apply", PINNED);
+    let first_use =
+        Regex::new(r"uses: actions/(checkout|download-artifact)@|- name: How the run ended")
+            .unwrap();
+    for (name, source) in [("check", &checker), ("apply", &apply), ("conclude", &apply)] {
+        let job_text = job(source, name);
+        assert!(
+            job_text
+                .split_once("    steps:\n")
+                .unwrap()
+                .1
+                .starts_with("      # The pieces must be one commit"),
+            "{name}"
+        );
+        assert!(
+            job_text.find(&format!("- name: {PINNED}\n")).unwrap()
+                < first_use.find(job_text).unwrap().start()
+        );
+        matches(
+            job_text,
+            r"SOURCE_REPOSITORY: \$\{\{ fromJSON\(inputs.policy\).source-repository \}\}\n {10}SOURCE_SHA: \$\{\{ fromJSON\(inputs.policy\).source-sha \}\}\n {10}REPOSITORY: \$\{\{ job.workflow_repository \}\}\n {10}SHA: \$\{\{ job.workflow_sha \}\}\n",
+        );
+        assert_eq!(
+            step(
+                &definition(if name == "check" {
+                    "check.yml"
+                } else {
+                    "apply.yml"
+                }),
+                name,
+                PINNED
+            ),
+            guard
+        );
+    }
+    let sha = "a".repeat(40);
+    let other = "b".repeat(40);
+    for (repository, source, expected) in [
+        ("o/r", sha.as_str(), 0),
+        ("o/other", &sha, 1),
+        ("o/r", &other, 1),
+        ("o/r", "", 1),
+        ("", "", 1),
+    ] {
+        let dir = TempDir::new().unwrap();
+        status(
+            &run_step(
+                dir.path(),
+                PINNED,
+                &[
+                    ("SOURCE_REPOSITORY", repository),
+                    ("SOURCE_SHA", source),
+                    ("REPOSITORY", "o/r"),
+                    ("SHA", if repository.is_empty() { "" } else { &sha }),
+                ],
+            ),
+            expected,
+        );
+    }
+    let apply = job(&apply, "apply");
+    assert!(
+        apply
+            .find("- name: Require the checked outputs' artifact ID\n")
+            .unwrap()
+            < apply.find("uses: actions/download-artifact@").unwrap()
+    );
+    let digest = "c".repeat(64);
+    for (id, expected, hash) in [
+        ("42", 0, digest.clone()),
+        ("", 1, digest.clone()),
+        ("0", 1, digest.clone()),
+        ("01", 1, digest.clone()),
+        ("1,2", 1, digest.clone()),
+        ("1\n2", 1, digest.clone()),
+        ("42", 1, String::new()),
+        ("42", 1, format!("sha256:{digest}")),
+        ("42", 1, "C".repeat(64)),
+        ("42", 1, "c".repeat(63)),
+    ] {
+        let dir = TempDir::new().unwrap();
+        status(
+            &run_step(
+                dir.path(),
+                "Require the checked outputs' artifact ID",
+                &[("CHECKED", id), ("DIGEST", &hash)],
+            ),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn apply_takes_only_this_runs_check_output_whatever_caller_wired() {
+    let workflow = workflow("apply.yml");
+    let apply = job(&workflow, "apply");
+    let verify = "The checked outputs are this run's check's";
+    let position = apply.find(&format!("- name: {verify}\n")).unwrap();
+    assert!(
+        apply
+            .find("- name: Require the checked outputs' artifact ID\n")
+            .unwrap()
+            < position
+    );
+    for action in ["download-artifact", "checkout"] {
+        assert!(position < apply.find(&format!("uses: actions/{action}@")).unwrap());
+    }
+    let checker = self::workflow("check.yml");
+    matches(
+        &checker,
+        r"- id: upload\n {8}if: \$\{\{ success\(\) && [^\n]*\n(?:[^\n]*\n){2} {10}name: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n",
+    );
+    matches(
+        apply,
+        r"NAME: \$\{\{ fromJSON\(inputs.policy\).artifact-prefix \}\}checked-outputs\n",
+    );
+    let digest = "c".repeat(64);
+    let artifact = |name: &str, run: u64, hash: Value| {
+        json!({"id":42,"name":name,"digest":hash,"workflow_run":{"id":run,"head_sha":"a".repeat(40)}}).to_string()
+    };
+    let hash = json!(format!("sha256:{digest}"));
+    for (answer, expected) in [
+        (artifact("p-checked-outputs", 7, hash.clone()), 0),
+        (artifact("p-safe-outputs", 7, hash.clone()), 1),
+        (artifact("checked-outputs", 7, hash.clone()), 1),
+        (artifact("q-checked-outputs", 7, hash.clone()), 1),
+        (artifact("p-checked-outputs", 8, hash.clone()), 1),
+        (artifact("p-checked-outputs", 77, hash), 1),
+        (json!({"name":"p-checked-outputs"}).to_string(), 1),
+        (
+            artifact(
+                "p-checked-outputs",
+                7,
+                json!(format!("sha256:{}", "d".repeat(64))),
+            ),
+            1,
+        ),
+        (artifact("p-checked-outputs", 7, Value::Null), 1),
+        (artifact("p-checked-outputs", 7, json!(digest)), 1),
+        (String::new(), 1),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let script = format!(
+            "gh() {{ [ \"$*\" = \"api repos/o/r/actions/artifacts/42\" ] || return 9; [ -n \"$ANSWER\" ] && printf \"%s\" \"$ANSWER\"; }}\n{}",
+            step(&definition("apply.yml"), "apply", verify)["run"]
+                .as_str()
+                .unwrap()
+        );
+        status(
+            &bash(
+                dir.path(),
+                &script,
+                &[
+                    ("CHECKED", "42"),
+                    ("DIGEST", &digest),
+                    ("NAME", "p-checked-outputs"),
+                    ("GITHUB_REPOSITORY", "o/r"),
+                    ("GITHUB_RUN_ID", "7"),
+                    ("ANSWER", &answer),
+                ],
+            ),
+            expected,
+        );
+    }
+    for pattern in [
+        r"artifact-digest: \$\{\{ steps.upload.outputs.artifact-digest \}\}",
+        r"value: \$\{\{ jobs.detect.outputs.artifact-digest \}\}",
+    ] {
+        matches(&checker, pattern);
+    }
+    matches(
+        apply,
+        r"DIGEST: \$\{\{ fromJSON\(inputs.check\).outputs.artifact-digest \}\}",
+    );
+    matches(
+        apply,
+        r"artifact-ids: \$\{\{ fromJSON\(inputs.check\).outputs.artifact-id \}\}\n {10}path: [^\n]*\n {10}digest-mismatch: error\n",
+    );
+    matches(
+        job(&self::workflow("example-compose.yml"), "apply"),
+        r"(?m)^ {4}permissions:\n(?: {6}[-\w]+: \w+\n)*? {6}actions: read\n",
+    );
+}
+
+#[test]
+fn issue_linking_executes_only_policy_binary_artifacts_from_this_run() {
+    let doc = definition("apply.yml");
+    let require = step(&doc, "apply", "Require policy's binary");
+    for (id, name, run, success) in [
+        ("42", "p-agentic-job-binary", "7", true),
+        ("", "p-agentic-job-binary", "7", false),
+        ("1,2", "p-agentic-job-binary", "7", false),
+        ("0", "p-agentic-job-binary", "7", false),
+        ("42", "p-safe-outputs", "7", false),
+        ("42", "q-agentic-job-binary", "7", false),
+        ("42", "p-agentic-job-binary", "8", false),
+        ("42", "", "7", false),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let script = format!(
+            "gh() {{ [ -n \"$NAME_FROM_API\" ] || return 9; printf '{{\"name\":\"%s\",\"workflow_run\":{{\"id\":%s}}}}' \"$NAME_FROM_API\" \"$RUN_FROM_API\"; }}\n{}",
+            require["run"].as_str().unwrap()
+        );
+        let out = bash(
+            dir.path(),
+            &script,
+            &[
+                ("BINARY", id),
+                ("NAME", "p-agentic-job-binary"),
+                ("GITHUB_REPOSITORY", "o/r"),
+                ("GITHUB_RUN_ID", "7"),
+                ("NAME_FROM_API", name),
+                ("RUN_FROM_API", run),
+            ],
+        );
+        assert_eq!(out.status.success(), success, "{}", text(&out));
+    }
+    let source = workflow("apply.yml");
+    for job_name in ["apply", "conclude"] {
+        matches(
+            job(&source, job_name),
+            &format!(
+                r"artifact-ids: \$\{{\{{ fromJSON\(inputs.policy\).binary-artifact-id \}}\}}\n {{10}}path: \$\{{\{{ runner.temp \}}\}}/{job_name}-binary\n {{10}}digest-mismatch: error"
+            ),
+        );
+    }
+    assert_eq!(
+        step(&doc, "conclude", "Require policy's binary")["run"],
+        require["run"]
+    );
+}
+
+#[test]
+fn notify_failure_never_stops_run_and_conclude_reports_it() {
+    let policy = workflow("policy.yml");
+    let notify = job(&policy, "notify");
+    let agent_end = Regex::new(r"\n    (?:runs-on|permissions):").unwrap();
+    matches(
+        notify.split_once("    steps:\n").unwrap().0,
+        r"(?m)^ {4}continue-on-error: true$",
+    );
+    for (file, source) in [
+        ("agentic-job.yml", workflow("agentic-job.yml")),
+        ("example-compose.yml", workflow("example-compose.yml")),
+        (
+            "workflow.md",
+            fs::read_to_string(root().join("docs/workflow.md")).unwrap(),
+        ),
+    ] {
+        let agent = source.split_once("\n  agent:\n").unwrap().1;
+        let end = agent_end.find(agent).unwrap().start();
+        let needs = if file == "agentic-job.yml" {
+            r"\[policy, register\]"
+        } else {
+            "policy"
+        };
+        matches(
+            &agent[..end],
+            &format!(
+                r"^ {{4}}needs: {needs}\n {{4}}(?:#.*\n {{4}})*if: \$\{{\{{ (?:inputs.proposals-artifact == '' && )?needs.policy.outputs.admitted == 'true' \}}\}}$"
+            ),
+        );
+    }
+    matches(
+        &policy,
+        r"notified:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.result != 'skipped' \}\}",
+    );
+    let doc = definition("policy.yml");
+    for name in [
+        "An eyes reaction on what started the run",
+        "A comment that says the run started",
+    ] {
+        assert_eq!(
+            step(&doc, "notify", name)["continue-on-error"].as_bool(),
+            Some(true)
+        );
+    }
+    assert!(
+        step(&doc, "notify", "What to react to, and where to comment")["continue-on-error"]
+            .is_badvalue()
+    );
+    matches(
+        notify,
+        r"(?m)^ {6}item: \$\{\{ steps.target.outputs.item \}\}$",
+    );
+    matches(
+        &policy,
+        r"notify-item:\n[^\n]*\n {8}value: \$\{\{ jobs.notify.outputs.item \|\| jobs.policy.outputs.item \|\| jobs.policy.outputs.comment-target \}\}",
+    );
+    let source = workflow("apply.yml");
+    let conclude = job(&source, "conclude");
+    matches(
+        conclude,
+        r"- name: Edit the status comment\n {8}if: .*needs\.apply\.outputs\.missing-data == 'true'",
+    );
+    assert!(!conclude.contains("Post the refusal to the comment target"));
+    matches(
+        conclude,
+        r"- name: A reaction that says how it ended\n {8}if: \$\{\{ fromJSON\(inputs.policy\).notify == 'reaction' && fromJSON\(inputs.policy\).notified == 'true' && fromJSON\(inputs.policy\).notify-id != '' \}\}",
+    );
+    for (kind, id, expected, call) in [
+        ("issue", "42", 0, "POST repos/o/r/issues/42/reactions"),
+        (
+            "comment",
+            "42",
+            0,
+            "POST repos/o/r/issues/comments/42/reactions",
+        ),
+        (
+            "review_comment",
+            "42",
+            0,
+            "POST repos/o/r/pulls/comments/42/reactions",
+        ),
+        ("issue", "$(exit 9)", 1, ""),
+        ("issue", "4 2", 1, ""),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let script = format!(
+            "gh() {{ echo \"$3 $4\"; }};\n{}",
+            step(
+                &definition("apply.yml"),
+                "conclude",
+                "A reaction that says how it ended"
+            )["run"]
+                .as_str()
+                .unwrap()
+        );
+        let out = bash(
+            dir.path(),
+            &script,
+            &[
+                ("KIND", kind),
+                ("ID", id),
+                ("REACTION", "rocket"),
+                ("GITHUB_REPOSITORY", "o/r"),
+            ],
+        );
+        status(&out, expected);
+        if expected == 0 {
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), call);
+        }
+    }
+}
+
+#[test]
+fn conclude_says_how_run_ended() {
+    // results, PR, no result, text, URL, over budget, PR repository, staged,
+    // secret location. Locations are not secret material.
+    for (results, pr, none, expected, url, over, pr_repo, staged, secret_at) in [
+        (
+            "success/success/success",
+            "",
+            "",
+            "✅ [w](u) ended well.",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "39",
+            "",
+            "✅ [w](u) ended well and opened pull request #39.",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "39",
+            "",
+            "✅ [w](u) ended well and opened pull request o/r#39.",
+            "",
+            "",
+            "o/r",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "",
+            "true",
+            "✅ [w](u) ended well and handed back no result.",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/skipped/skipped",
+            "",
+            "",
+            "✅ [w](u) ended well and handed back nothing to apply.",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/failure",
+            "",
+            "true",
+            "❌ [w](u) failed (agent, check, apply: success/success/failure; the agent's exit state: 0).",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "",
+            "",
+            "✅ [w](u) ended well. Result: https://github.com/o/r/issues/7#issuecomment-1",
+            "https://github.com/o/r/issues/7#issuecomment-1",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "cancelled/skipped/skipped",
+            "",
+            "",
+            "⏹️ [w](u) was cancelled.",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "",
+            "",
+            "✅ [w](u) ended well. Its last reply took the agent over budget: it spent 565.9 of 500 AIC.",
+            "",
+            "565.9 of 500 AIC",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "",
+            "",
+            "✅ [w](u) ended well.",
+            "",
+            "565.9 of 500 AIC $(exit 9)",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/failure",
+            "",
+            "",
+            "❌ [w](u) failed (agent, check, apply: success/success/failure; the agent's exit state: 0).",
+            "",
+            "565.9 of 500 AIC",
+            "",
+            "",
+            "",
+        ),
+        (
+            "success/success/success",
+            "",
+            "",
+            "✅ [w](u) ended well. Staged: nothing was applied; the apply job's summary shows what would have been.",
+            "",
+            "",
+            "",
+            "true",
+            "",
+        ),
+        (
+            "success/success/failure",
+            "",
+            "",
+            "❌ [w](u) failed (agent, check, apply: success/success/failure; the agent's exit state: 0).",
+            "",
+            "",
+            "",
+            "true",
+            "",
+        ),
+        (
+            "failure/skipped/skipped",
+            "",
+            "",
+            "❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent's exit state: 0). Nothing was uploaded: a secret or a private key is in `safe-outputs/aw-agent-run-1.patch, line 3`.",
+            "",
+            "",
+            "",
+            "",
+            "safe-outputs/aw-agent-run-1.patch, line 3",
+        ),
+        (
+            "failure/skipped/skipped",
+            "",
+            "",
+            "❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent's exit state: 0).",
+            "",
+            "",
+            "",
+            "",
+            "safe-outputs/a`@b`.patch, line 3",
+        ),
+        (
+            "failure/skipped/skipped",
+            "",
+            "",
+            "❌ [w](u) failed (agent, check, apply: failure/skipped/skipped; the agent's exit state: 0).",
+            "",
+            "",
+            "",
+            "",
+            "../x, line 3",
+        ),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        let out = run_step(
+            dir.path(),
+            "How the run ended",
+            &[
+                ("RESULTS", results),
+                ("EXIT", "0"),
+                ("PR", pr),
+                ("PR_REPO", pr_repo),
+                ("NO_RESULT", none),
+                ("REFUSAL", ""),
+                ("RESULT_URL", url),
+                ("OVER_BUDGET", over),
+                ("SECRET_AT", secret_at),
+                ("STAGED", staged),
+                ("WORKFLOW", "w"),
+                ("RUN_URL", "u"),
+                ("GITHUB_OUTPUT", output.to_str().unwrap()),
+            ],
+        );
+        status(&out, 0);
+        assert_eq!(
+            fs::read_to_string(output).unwrap().lines().next().unwrap(),
+            format!("text={expected}")
+        );
+    }
+}
+
+#[test]
+fn comment_only_apply_skips_every_repository_step_including_checkout() {
+    let doc = definition("apply.yml");
+    let gate = "${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}";
+    let checkout = doc["jobs"]["apply"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .unwrap();
+    assert_eq!(checkout["if"].as_str(), Some(gate));
+    for name in ["Configure git", "Fetch the target's base branch", TRIAL] {
+        assert_eq!(
+            step(&doc, "apply", name)["if"].as_str(),
+            Some(gate),
+            "{name}"
+        );
+    }
+    let checker = workflow("check.yml");
+    matches(
+        &checker,
+        r"has-patch: \$\{\{ steps.checked.outputs.has-patch \}\}",
+    );
+    matches(&checker, r"value: \$\{\{ jobs.check.outputs.has-patch \}\}");
+    let dir = TempDir::new().unwrap();
+    json_file(dir.path(), "report.json", &json!({"patch":null}));
+    // No .git and no topic base: a null patch must exit before touching git.
+    status(
+        &run_step(
+            dir.path(),
+            TRIAL,
+            &[("REPORT", dir.path().join("report.json").to_str().unwrap())],
+        ),
+        0,
+    );
+}
