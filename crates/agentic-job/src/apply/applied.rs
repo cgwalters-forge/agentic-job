@@ -948,7 +948,7 @@ fn guard(args: &Args) -> Result<()> {
         DIGITS_RE.is_match(&run),
         "GITHUB_RUN_ID {run:?} is not a run ID"
     );
-    let github = Github::from_env(GH_TOKEN_ENV)?.with_max_response(MAX_PAGE_BYTES);
+    let github = super::github::from_env(GH_TOKEN_ENV)?.with_max_response(MAX_PAGE_BYTES);
     if github.configured() {
         let report = read_js(&args.report)?;
         ensure!(
@@ -997,9 +997,9 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
 
-    use super::super::github::tests::TOKEN;
+    use super::super::PROVENANCE;
     use super::*;
-    use safe_outputs::apply::testing::{Request, serve};
+    use safe_outputs::apply::testing::{Request, TOKEN, bound, serve};
 
     const ACTIONS: &str = JOB_TOKEN_AUTHOR;
     const APP: &str = "unrelated-app[bot]";
@@ -1278,12 +1278,8 @@ mod tests {
             };
             (200, answer.to_string())
         });
-        let github = Github::new(&server, TOKEN.to_owned()).unwrap();
-        let github = if o.roles {
-            super::super::github::tests::bound(github)
-        } else {
-            github
-        };
+        let github = Github::new(&server, TOKEN.to_owned(), PROVENANCE).unwrap();
+        let github = if o.roles { bound(github) } else { github };
         *address.lock().unwrap() = github.api_url().to_owned();
         let args = Args {
             dir: dir.path().to_owned(),
@@ -1788,7 +1784,7 @@ mod tests {
                     json!({"message": "Resource not accessible"}).to_string(),
                 ),
             });
-            let github = Github::new(&server, TOKEN.to_owned()).unwrap();
+            let github = Github::new(&server, TOKEN.to_owned(), PROVENANCE).unwrap();
             assert_eq!(identity(&github, options.pat).as_deref(), poster);
         }
     }

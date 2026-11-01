@@ -1,21 +1,74 @@
 //! A mock forge and test repositories for the publishers' tests, and for
 //! a caller's tests of its own adapters (feature `test-support`).
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::{BranchPush, Committer, PullRequest};
+use super::github::Github;
+use super::roles::{Credential, Identity, Role};
+use super::{BranchPush, Committer, Provenance, PullRequest};
 
 /// The committer of the test pushes: a caller's, not agentic-job's.
 pub const COMMITTER: (&str, &str) = ("example-ci", "ci@example.invalid");
 
 /// The context of the test statuses.
 pub const STATUS_CONTEXT: &str = "example-ci";
+
+/// How the tests' caller names itself.
+pub const PROVENANCE: Provenance<'static> = Provenance {
+    name: "example-ci",
+    status_context: STATUS_CONTEXT,
+    committer: COMMITTER,
+};
+
+/// The token the tests' GitHub client sends.
+pub const TOKEN: &str = "test-token-not-secret";
+
+/// A forge that answers `METHOD PATH` with the status and JSON ROUTES
+/// give it, and 404 for anything else, and a GitHub client of it whose
+/// fork wait and retries take no time.
+pub fn forge(routes: BTreeMap<String, (u16, Value)>) -> (Github, mpsc::Receiver<Request>) {
+    let (server, requests) = serve(usize::MAX, move |request| {
+        let asked = request.line.trim_end_matches(" HTTP/1.1");
+        let (status, body) = routes.get(asked).cloned().unwrap_or((404, json!({})));
+        (status, body.to_string())
+    });
+    let mut github = Github::new(&server, TOKEN.to_owned(), PROVENANCE).unwrap();
+    github.fork_wait = Duration::ZERO;
+    github.retry_wait = Duration::ZERO;
+    (github, requests)
+}
+
+/// GITHUB with a separate credential for each role, all of one identity.
+pub fn bound(github: Github) -> Github {
+    github
+        .with_roles(
+            Role::ALL
+                .into_iter()
+                .map(|role| {
+                    (
+                        role,
+                        Credential {
+                            identity: Identity {
+                                actor_id: 7,
+                                app_id: None,
+                            },
+                            token: ["fake", role.token_env(), "credential"].join("-"),
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .for_role(Role::Publication)
+        .unwrap()
+}
 
 /// [`COMMITTER`], as an op holds it.
 pub fn committer() -> Committer {

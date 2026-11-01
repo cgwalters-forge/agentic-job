@@ -173,8 +173,9 @@ fn drop_collectors_incomplete(items: &mut Vec<Map<String, Value>>) {
 
 /// What the apply job writes, hidden, into each body it posts, so that a
 /// re-run finds what was already applied and skips it. A request holding
-/// it could make a re-run skip another request, so none may.
-const APPLIED_MARKER: &str = "agentic-job-applied";
+/// it could make a re-run skip another request, so none may. GitHub's
+/// publishing hides the line naming it ([`crate::apply::publish`]).
+pub const APPLIED_MARKER: &str = "agentic-job-applied";
 
 fn holds_marker(value: &Value) -> bool {
     match value {

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
-use crate::apply::github::{GH_TOKEN_ENV, Github, is_repo};
+use crate::apply::github::{GH_TOKEN_ENV, is_repo};
 use crate::exit::Exit;
 
 const PROFILES: &[&str] = &["implement", "triage", "research", "review", "fix"];
@@ -145,7 +145,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     let mut github = None;
     let outputs = target(&env, &default_branch, &mut |repo, item| {
         if github.is_none() {
-            github = Some(Github::from_env(GH_TOKEN_ENV)?.with_max_response(MAX_ITEM_RESPONSE));
+            let client = crate::apply::github::from_env(GH_TOKEN_ENV)?;
+            github = Some(client.with_max_response(MAX_ITEM_RESPONSE));
         }
         let github = github.as_ref().context("no GitHub client")?;
         github.get(&format!("/repos/{repo}/issues/{item}"))

@@ -4,7 +4,9 @@
 //! ([`gitlab`]), the push both make ([`git`]), the last-mile filtering
 //! of mentions and quick actions ([`mentions`]) and neutral inline
 //! comments ([`inline`]). For Forgejo the outputs in [`SUPPORTED`], and
-//! for GitLab those in [`GITLAB_SUPPORTED`].
+//! for GitLab those in [`GITLAB_SUPPORTED`]. On GitHub, [`publish`]
+//! publishes the types the bounds route away from gh-aw's handlers, with
+//! GitHub's client and [`Publisher`] ([`github`]).
 //!
 //! The input is the check job's upload: check's `report.json` and the
 //! patch beside it. That upload went through a machine other than the
@@ -28,9 +30,12 @@
 
 pub mod forgejo;
 pub mod git;
+pub mod github;
 pub mod gitlab;
 pub mod inline;
 pub mod mentions;
+pub mod publish;
+pub mod roles;
 /// For tests alone, the library's and its callers', which turn on
 /// `test-support` for theirs: a failure there is a test's.
 #[cfg(any(test, feature = "test-support"))]

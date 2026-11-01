@@ -1301,7 +1301,7 @@ steps for them, then gh-aw's, have to make the recorded writes, in the
 recorded order, and the same `safe-output-items.jsonl` and pushed
 commits. A type is routed only once its cases match. The ordinary
 suite runs those two steps on each case's recorded requests without the
-pinned code, and the unit tests in `apply/publish.rs` hold the rest of
+pinned code, and the unit tests in the library's `apply/publish.rs` hold the rest of
 what gh-aw's handler step records to the corpus: its outputs, summary
 and error report.
 
@@ -1314,7 +1314,7 @@ Bounds that list `add_comment`, `create_pull_request`, `add_labels`,
 `native_handlers` ([the bounds](#the-bounds-and-the-policy)) have apply
 publish those types with `agentic-job publish` instead of gh-aw's
 handlers, in a step of policy's binary before gh-aw's: a port of those
-handlers at the pin, on the GitHub [`Publisher`](../crates/agentic-job/src/apply/github.rs)
+handlers at the pin, on the GitHub [`Publisher`](../crates/safe-outputs/src/apply/github.rs)
 and its client, which hold apply's token. It is off by default; every
 other type stays gh-aw's, and everything before the handlers runs as
 before (the fork step, the patch's trial, the partial note, the issue
@@ -2004,12 +2004,11 @@ no environment or credential of its own: it is given text, settings and
 a token. Bounds parsing, the check and publication safety belong to the
 component, and event admission, run identity, artifacts, checkpoints,
 memory, secret scanning and credential acquisition to its caller. The
-collector, the policy, bounds parsing, the check and publishing to
-Forgejo and GitLab have moved; GitHub's publishing (`apply/publish.rs`,
-`github.rs`), where a run's commit goes on GitHub (`push.rs`), the
-replacement series (`replacement.rs`) and the secondary pull request
-(`secondary.rs`) have not yet, as one hand-back could not hold all of
-the move.
+collector, the policy, bounds parsing, the check, publishing to Forgejo
+and GitLab, and GitHub's client and native publishing have moved; where
+a run's commit goes on GitHub (`push.rs`), the replacement series
+(`replacement.rs`) and the secondary pull request (`secondary.rs`) have
+not yet, as one hand-back could not hold all of the move.
 
 Moved into `crates/safe-outputs`, with no change in behaviour:
 
@@ -2028,6 +2027,9 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | apply's `plan` and `publish`, `Op`, `Publisher`, `Target`, the footer and the report read back | `apply/mod.rs` | `apply/mod.rs` |
 | The Forgejo and GitLab publishers, their push and its guards, neutral inline comments and their anchors, and the filtering of mentions and quick actions | `apply/` | `apply/` |
 | The inline comment fixtures | `crates/agentic-job/tests/data/inline` | `crates/safe-outputs/tests/data/inline` |
+| GitHub's REST API, git and `Publisher` (`Github`, `GithubPublisher`) | `apply/github.rs` | `apply/github.rs` |
+| GitHub's native publishing (`agentic-job publish`): its plan, gh-aw's handler ports and their records | `apply/publish.rs` | `apply/publish.rs` |
+| Caller-bound publisher roles (`Role`, `Identity`, `Credential`, `read`) | `apply/roles.rs` | `apply/roles.rs` |
 
 `apply::plan` decides every write before the first, refusing with every
 reason found, and `apply::publish` asks the forge about every op
@@ -2041,8 +2043,26 @@ text, the commit status context and the committer, which agentic-job
 gives as `agentic-job`, `agentic-job` and `agentic-job
 <agentic-job@invalid>`, so what it posts is unchanged. The publishers
 take the server and the token as arguments. `apply::testing` (feature
-`test-support`) holds the mock forge and test repositories, which
-agentic-job's tests of GitHub's publishing use too.
+`test-support`) holds the mock forge, test repositories and a GitHub
+client of the mock, which agentic-job's tests of its GitHub commands use
+too.
+
+GitHub's client takes the API, the token and the `Provenance` whose name
+it sends as its user agent and whose committer commits a push that names
+none; agentic-job reads `GITHUB_API_URL` and the token's variable for it,
+or the role bindings and their tokens, which it gives `Github::with_roles`.
+`apply::publish::apply` is given the requests, the handlers'
+configuration, the upload and the policy (`Checked`), the run as gh-aw's
+handlers read it from a lookup of variables the caller gives
+(`Run::read`); it hides the line naming an earlier attempt's write as
+apply.yml's hook does, by the marker check refuses in requests
+(`check::APPLIED_MARKER`). `publish::check_server` refuses a git server
+that is not https, before the token goes to it. It writes gh-aw's records where `Records` says, and gives each line of the
+step's log to the caller as an `Annotation` (a workflow command's kind
+and its text), as it gives each retry's warning to `Github::warning_with`:
+the caller writes them escaped, as agentic-job does with secure-host's
+`workflow_commands`, so that nothing the forge or the agent wrote is read
+as a command.
 
 `check::check` is the check's entry point. It is given the hand-back's
 files as its caller read them (`Handback`), the collector's result, the

@@ -1582,6 +1582,7 @@ dependencies = [
  "chrono",
  "clap",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

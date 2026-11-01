@@ -77,8 +77,10 @@ pub enum Command {
 impl Command {
     pub fn run(&self) -> Result<Exit> {
         let github = match self {
-            Self::Resolve(_) => Github::from_env(GH_TOKEN_ENV)?,
-            Self::Target(_) => Github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?,
+            Self::Resolve(_) => super::github::from_env(GH_TOKEN_ENV)?,
+            Self::Target(_) => {
+                super::github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?
+            }
         };
         match self {
             Self::Resolve(args) => {
@@ -484,9 +486,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::super::github::tests::{TOKEN, forge};
     use super::*;
-    use safe_outputs::apply::testing::{repository, sh};
+    use safe_outputs::apply::testing::{TOKEN, forge, repository, sh};
 
     const PULL: &str = "GET /repos/o/r/pulls/42";
     const CAROL: &str = "GET /repos/carol/r";

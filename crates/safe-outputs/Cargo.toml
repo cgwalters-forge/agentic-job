@@ -29,6 +29,9 @@ base64.workspace = true
 chrono.workspace = true
 clap = { workspace = true, optional = true }
 regex.workspace = true
+# GitHub's publishing: the temporary IDs and the digests gh-aw's handlers
+# make (apply::publish).
+ring.workspace = true
 serde.workspace = true
 # The collector's results follow the configuration's and the request's
 # key order, as gh-aw's do, and read numbers as JavaScript does: stated
@@ -41,6 +44,6 @@ tempfile.workspace = true
 # gives no type of its own.
 toml.workspace = true
 unicode-normalization.workspace = true
-# The Forgejo and GitLab APIs (apply::forgejo, apply::gitlab), with the
-# token the caller gives.
+# The Forgejo, GitLab and GitHub APIs (apply::forgejo, apply::gitlab,
+# apply::github), with the token the caller gives.
 ureq.workspace = true

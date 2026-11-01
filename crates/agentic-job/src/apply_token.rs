@@ -70,7 +70,7 @@ pub fn run(args: &Args) -> Result<Exit> {
                 "role credentials require every writing output to use a native handler"
             );
         }
-        crate::apply::github::Github::from_env("GH_TOKEN")?;
+        crate::apply::github::from_env("GH_TOKEN")?;
         return Ok(Exit::Success);
     }
     // A secret the caller did not pass reads as empty in Actions, like an

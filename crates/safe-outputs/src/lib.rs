@@ -3,8 +3,8 @@
 //! `outputs.jsonl` as gh-aw's does ([`collect`]), the policy a run's
 //! outputs are held to ([`contract`]) and the bounds it is compiled within
 //! ([`bounds`]), the check of a hand-back against that policy
-//! ([`check`]), and the publication of what check accepted to Forgejo and
-//! GitLab ([`apply`]).
+//! ([`check`]), and the publication of what check accepted to Forgejo,
+//! GitLab and GitHub ([`apply`]).
 //!
 //! It is given text, settings and a token, and reads no environment or
 //! credential of its own: event admission, compiling a request into a

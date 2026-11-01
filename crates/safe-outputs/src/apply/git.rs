@@ -128,7 +128,7 @@ impl Git<'_> {
     /// What git's errors are scrubbed of, longest first: the whole header
     /// value, its credential (the base64 of a `Basic` one, which a server
     /// error may echo and anyone can decode), and the raw token.
-    pub fn secrets(&self) -> Vec<&str> {
+    pub(super) fn secrets(&self) -> Vec<&str> {
         let credential = self
             .authorization
             .split_once(' ')
