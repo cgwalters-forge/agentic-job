@@ -232,59 +232,57 @@ fn pull_request(
     }
 }
 
-impl Github {
-    /// Forks, pushes the branch to the token's own fork (see
-    /// [`Github::fork`]; the run's own repository is never the one, as
-    /// the secondary makes it no more writable) and opens the draft pull
-    /// request from it. Returns its URL.
-    pub fn open(&self, pr: &PullRequest) -> Result<String> {
-        let server = pr
-            .clone_url
-            .strip_suffix(&format!("/{}", pr.repo))
-            .with_context(|| format!("{} is not where git finds {}", pr.clone_url, pr.repo))?;
-        let push = self.for_role(super::roles::Role::ForkPush)?;
-        let me = push.login()?;
-        let fork = push.fork(&me, &pr.repo, &pr.own_repo, server)?;
-        let pushing = || format!("pushing {} to {fork}", pr.branch);
-        let commit = push
-            .git()
-            .push(
-                &Push {
-                    from: &format!("{server}/{}.git", pr.repo),
-                    base: &pr.base,
-                    base_commit: &pr.base_commit,
-                    to: &format!("{server}/{fork}.git"),
-                    branch: &pr.branch,
-                    patch: &pr.patch,
-                    files: &pr.files,
-                    head: None,
-                    committer: None,
-                    at_author_date: false,
-                    max_changed_kb: None,
-                },
-                None,
+/// Forks with GITHUB, pushes the branch to the token's own fork (see
+/// [`Github::fork`]; the run's own repository is never the one, as the
+/// secondary makes it no more writable) and opens the draft pull request
+/// from it. Returns its URL.
+pub fn open(github: &Github, pr: &PullRequest) -> Result<String> {
+    let server = pr
+        .clone_url
+        .strip_suffix(&format!("/{}", pr.repo))
+        .with_context(|| format!("{} is not where git finds {}", pr.clone_url, pr.repo))?;
+    let push = github.for_role(super::roles::Role::ForkPush)?;
+    let me = push.login()?;
+    let fork = push.fork(&me, &pr.repo, &pr.own_repo, server)?;
+    let pushing = || format!("pushing {} to {fork}", pr.branch);
+    let commit = push
+        .git()
+        .push(
+            &Push {
+                from: &format!("{server}/{}.git", pr.repo),
+                base: &pr.base,
+                base_commit: &pr.base_commit,
+                to: &format!("{server}/{fork}.git"),
+                branch: &pr.branch,
+                patch: &pr.patch,
+                files: &pr.files,
+                head: None,
+                committer: None,
+                at_author_date: false,
+                max_changed_kb: None,
+            },
+            None,
+        )
+        .with_context(pushing)?;
+    let head = format!("{}:{}", owner(&fork), pr.branch);
+    let path = format!("/repos/{}/pulls", pr.repo);
+    let made = github
+        .send(
+            "POST",
+            &path,
+            Some(&json!({"title": pr.title, "body": pr.body, "head": head,
+                "base": pr.base, "draft": true})),
+        )
+        .with_context(|| {
+            format!(
+                "published {commit} to {fork} branch {}; opening its pull request failed",
+                pr.branch
             )
-            .with_context(pushing)?;
-        let head = format!("{}:{}", owner(&fork), pr.branch);
-        let path = format!("/repos/{}/pulls", pr.repo);
-        let made = self
-            .send(
-                "POST",
-                &path,
-                Some(&json!({"title": pr.title, "body": pr.body, "head": head,
-                    "base": pr.base, "draft": true})),
-            )
-            .with_context(|| {
-                format!(
-                    "published {commit} to {fork} branch {}; opening its pull request failed",
-                    pr.branch
-                )
-            })?;
-        made["html_url"]
-            .as_str()
-            .map(str::to_owned)
-            .with_context(|| format!("POST {path}: the response names no html_url"))
-    }
+        })?;
+    made["html_url"]
+        .as_str()
+        .map(str::to_owned)
+        .with_context(|| format!("POST {path}: the response names no html_url"))
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
@@ -302,8 +300,7 @@ pub fn run(args: &Args) -> Result<Exit> {
             return Ok(Exit::Failure);
         }
     };
-    let url = Github::from_env(TOKEN_ENV)?
-        .open(&pr)
+    let url = open(&super::github::from_env(TOKEN_ENV)?, &pr)
         .with_context(|| format!("the secondary pull request in {}", pr.repo))?;
     println!("{url}");
     Ok(Exit::Success)
@@ -313,7 +310,7 @@ pub fn run(args: &Args) -> Result<Exit> {
 mod tests {
     use std::time::Duration;
 
-    use safe_outputs::apply::testing::{mock, repository, sh};
+    use safe_outputs::apply::testing::{bound, mock, repository, sh};
 
     use super::super::REPORT_FILE;
     use super::super::github::FORK_TRIES;
@@ -636,7 +633,7 @@ mod tests {
     }
 
     fn github(server: &str) -> Github {
-        let mut github = Github::new(server, TOKEN.to_owned()).unwrap();
+        let mut github = Github::new(server, TOKEN.to_owned(), PROVENANCE).unwrap();
         github.fork_wait = Duration::ZERO;
         github
     }
@@ -672,8 +669,8 @@ mod tests {
             json!({"html_url": "https://github.com/owner/name/pull/9"}).to_string(),
         ));
         let (server, requests) = mock(answers);
-        let github = super::super::github::tests::bound(github(&server));
-        github.open(&pr).unwrap();
+        let github = bound(github(&server));
+        open(&github, &pr).unwrap();
         let sent: Vec<_> = requests.try_iter().collect();
         assert_eq!(sent.len(), 5);
         for (index, request) in sent.iter().enumerate() {
@@ -700,7 +697,7 @@ mod tests {
             json!({"html_url": "https://github.com/owner/name/pull/9"}).to_string(),
         ));
         let (server, requests) = mock(answers);
-        let url = github(&server).open(&pr).unwrap();
+        let url = open(&github(&server), &pr).unwrap();
         assert_eq!(url, "https://github.com/owner/name/pull/9");
         let sent: Vec<_> = requests.try_iter().collect();
         let lines: Vec<_> = sent.iter().map(|r| r.line.as_str()).collect();
@@ -741,7 +738,7 @@ mod tests {
         let mut answers = forked(fork());
         answers.extend(actions_off());
         let (server, requests) = mock(answers);
-        let err = format!("{:#}", github(&server).open(&pr).unwrap_err());
+        let err = format!("{:#}", open(&github(&server), &pr).unwrap_err());
         assert_eq!(
             err,
             format!("pushing {BRANCH} to fork/name: refs/heads/{BRANCH} exists already")
@@ -795,7 +792,7 @@ mod tests {
         for (answers, want) in cases {
             let (root, pr) = forked_repository();
             let (server, _requests) = mock(answers);
-            let err = format!("{:#}", github(&server).open(&pr).unwrap_err());
+            let err = format!("{:#}", open(&github(&server), &pr).unwrap_err());
             assert!(err.contains(want), "{want}: {err}");
             assert!(!err.contains(TOKEN), "{err}");
             assert_eq!(pushed(root.path()), "");
@@ -808,7 +805,7 @@ mod tests {
             ..pr
         };
         let (server, requests) = mock(forked(fork()));
-        let err = format!("{:#}", github(&server).open(&pr).unwrap_err());
+        let err = format!("{:#}", open(&github(&server), &pr).unwrap_err());
         assert_eq!(
             err,
             "fork's fork of owner/name is Fork/Name, the run's own repository, which this does \
@@ -820,7 +817,7 @@ mod tests {
         let (root, own) = repository();
         let pr = secondary(root.path(), own);
         let (server, _requests) = mock(forked(fork()));
-        let err = format!("{:#}", github(&server).open(&pr).unwrap_err());
+        let err = format!("{:#}", open(&github(&server), &pr).unwrap_err());
         assert_eq!(
             err,
             format!("the fork fork/name is still not there after {FORK_TRIES} tries")

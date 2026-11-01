@@ -280,8 +280,8 @@ pub fn run(_args: &Args) -> Result<Exit> {
     } else {
         GH_TOKEN_ENV
     };
-    let github =
-        Github::from_role_env(super::roles::Role::Status, token)?.with_max_response(MAX_PAGE_BYTES);
+    let github = super::github::from_role_env(super::roles::Role::Status, token)?
+        .with_max_response(MAX_PAGE_BYTES);
     // The credential's identity plus the marker keeps copied markers from
     // redirecting edits.
     let author = if configured {
@@ -304,8 +304,8 @@ pub fn run(_args: &Args) -> Result<Exit> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::super::github::tests::forge;
     use super::*;
+    use safe_outputs::apply::testing::forge;
 
     const LIST: &str = "GET /repos/o/r/issues/7/comments?per_page=100&page=";
     const NAMED: &str = "GET /repos/o/r/issues/comments/5";

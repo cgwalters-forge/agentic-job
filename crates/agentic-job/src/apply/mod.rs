@@ -8,21 +8,20 @@
 //! request after the handlers.
 //!
 //! The plan of every write, the Forgejo and GitLab publishers, their push
-//! and the filtering of what they post are the safe-outputs library's
-//! ([`safe_outputs::apply`]), re-exported here at their old paths. This
-//! is its adapter: it reads the policy, the check job's upload without
-//! following a link, and the token from the environment, and gives the
-//! library agentic-job's footer, commit status context and committer
-//! ([`PROVENANCE`]).
+//! and the filtering of what they post, and GitHub's client and native
+//! publishing, are the safe-outputs library's ([`safe_outputs::apply`]),
+//! re-exported here at their old paths. This is its adapter: it reads the
+//! policy, the check job's upload without following a link, and the token
+//! from the environment, and gives the library agentic-job's footer,
+//! commit status context and committer ([`PROVENANCE`]).
 
 pub mod applied;
-pub(crate) mod github;
+pub mod github;
 pub mod issue_reference;
 pub mod publish;
 pub mod push;
 pub mod replacement;
 pub mod result;
-pub mod roles;
 pub mod secondary;
 pub mod status;
 

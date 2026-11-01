@@ -58,7 +58,8 @@ collector and sanitizer, ported (`collect/`), the policy and its
 validation (`contract.rs`), bounds parsing and the intersection of two
 bounds files' policies (`bounds.rs`), the check of a hand-back with
 its patch, link, handler-limit and replacement rules (`check/`), and
-apply's plan and its Forgejo and GitLab publishers (`apply/`). It
+apply's plan, its Forgejo and GitLab publishers, and GitHub's client and
+native publishing (`apply/`). It
 depends on neither agentic-job nor secure-host; agentic-job re-exports
 it at its old paths (`policy::Policy`, `check::read_patch`,
 `collect::collect`, `apply::plan`, ...).
@@ -76,7 +77,7 @@ Paths below are relative to `crates/agentic-job/src/`.
 | `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
 | `check/` | The `check` command: reading the hand-back, secret scanning, memory, checkpoints and the report, around the library's check |
 | `collect.rs` | The `collect` command: the safe-outputs collector on a hand-back and policy, for `handback check`, check.yml and callers off GitHub |
-| `apply/` | Publishing checked outputs behind `Publisher`: the adapter of the library's Forgejo and GitLab publishers, and on GitHub the types the bounds route away from gh-aw's handlers (`publish.rs`) |
+| `apply/` | Publishing checked outputs behind `Publisher`: the adapter of the library's Forgejo, GitLab and GitHub publishers (`publish.rs` for the types the bounds route away from gh-aw's handlers), and GitHub's push, replacement series and secondary pull request |
 | `audit.rs` | Offline artifact inspection and finding codes |
 | `workflows/` | Workflow job-shape rules and bounded YAML reading |
 | `redact.rs` | Secret redaction |
