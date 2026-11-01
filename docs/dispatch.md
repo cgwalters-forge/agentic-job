@@ -404,13 +404,16 @@ pasted into executable code. Default-branch checks apply to manual dispatch;
 the workflow-call interface lets same-repository CI exercise the exact caller.
 Its caller must be trusted like any other workflow with write permissions.
 
-The reusable policy and check jobs downscope to contents read; the agent job
-has read access and runner-only OIDC registration. The sandbox has neither
-forge nor OIDC credentials. Only apply receives the configured environment
+The reusable policy and check jobs downscope to contents and actions read,
+apart from check's separate detector job, which holds OIDC; the agent job
+has read access only, and a separate register job holds the OIDC permission
+for `github-oidc` inference registration. The sandbox has at most a read-only forge token
+and no OIDC credential. Only apply receives the configured environment
 token; apply and refusal reporting can use the caller's write-capable job
 token, and neither executes agent-produced code. Review resolves
-the open PR's exact head through the read-only policy API, refuses forks and
-wrong bases, and enforces one verdict comment or noop in the clean check job.
+the open PR's exact head through the read-only policy API, accepts heads in
+forks but refuses wrong bases, and enforces one verdict comment or noop in the
+clean check job.
 Real reviewers start in the base checkout with the pinned head beside it.
 Other profiles allow one each of noop, missing_tool and missing_data, three
 outputs total; implement permits one draft PR, fix one push to the dispatched
