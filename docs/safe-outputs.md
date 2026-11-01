@@ -176,7 +176,7 @@ The types a run can be allowed are `create_pull_request`, `create_issue`, `creat
 `update_project` admits exact Projects v2 URLs, exact field names, and a count:
 
 ```toml
-[outputs.update_project]
+[github.outputs.update_project]
 max = 3
 projects = ["https://github.com/orgs/example/projects/1"]
 fields = ["Status", "Turn", "Run", "Result"]
@@ -216,15 +216,15 @@ on GitLab exactly one of `issue_number` and `pull_request_number` instead:
 Temporary IDs, target aliases and duplicate relationships are refused.
 
 ```toml
-[outputs.close_issue]
+[github.outputs.close_issue]
 max = 2
 
-[outputs.add_labels]
+[github.outputs.add_labels]
 max = 3
 allowed = ["triage", "documentation"]
 blocked = ["release"]
 
-[outputs.remove_labels]
+[github.outputs.remove_labels]
 max = 2
 allowed = ["triage", "in-progress"]
 blocked = ["release"]
@@ -269,11 +269,11 @@ cannot be relied on for this: `update_issue` ignores `allow_title` and
 `update_pull_request`'s configuration.
 
 ```toml
-[outputs.update_issue]
+[github.outputs.update_issue]
 max = 1
 fields = ["body"]          # of "title", "body", "status"
 
-[outputs.update_pull_request]
+[github.outputs.update_pull_request]
 max = 1
 fields = ["title", "body"] # of "title", "body", "draft", "update_branch"
 ```
@@ -306,7 +306,7 @@ By default every pull request is a draft, so "draft" says nothing about
 the work. A bounds file can make it mean "a checkpoint, not finished":
 
 ```toml
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1, ready_when_complete = true }
 # and for a continuation of a pull request:
 # push_to_pull_request_branch = { max = 1, branches = ["agent-run-*"], ready_when_complete = true }
@@ -363,11 +363,11 @@ access to the repository. Each is off unless listed in bounds, and then needs
 a nonempty `allowed` list of logins; a bounds file without one is refused.
 
 ```toml
-[outputs.add_reviewer]
+[github.outputs.add_reviewer]
 max = 1
 allowed = ["octocat"]
 
-[outputs.assign_to_user]
+[github.outputs.assign_to_user]
 max = 1
 allowed = ["octocat", "hubot"]
 ```
@@ -395,10 +395,10 @@ could close or link items in another repository the apply token reaches, or
 let the handler pick the pull request or issue the run was started from.
 
 ```toml
-[outputs.close_pull_request]
+[github.outputs.close_pull_request]
 max = 1
 
-[outputs.link_sub_issue]
+[github.outputs.link_sub_issue]
 max = 2
 ```
 
@@ -416,7 +416,7 @@ An agent-chosen `success` could satisfy a required check, so `create_check_run`
 is off unless listed in bounds, and its bounds pin the check run's name:
 
 ```toml
-[outputs.create_check_run]
+[github.outputs.create_check_run]
 max = 1
 name = "agent verdict"
 ```
@@ -444,7 +444,7 @@ calling workflow's name, the handler appends "(Result)" to it.
 category, by name, slug or node ID:
 
 ```toml
-[outputs.create_discussion]
+[github.outputs.create_discussion]
 max = 1
 category = "Agent reports"
 ```
@@ -475,7 +475,7 @@ the item's text could fold the comments that argue with it. It is off
 unless listed in bounds, which pin the reasons it may give:
 
 ```toml
-[outputs.hide_comment]
+[github.outputs.hide_comment]
 max = 3
 allowed_reasons = ["SPAM", "OFF_TOPIC"]
 ```
@@ -510,7 +510,7 @@ the comments go in one review of event `COMMENT`, and
 bounds, with a `max` and nothing else:
 
 ```toml
-[outputs]
+[github.outputs]
 create_pull_request_review_comment = { max = 10 }
 reply_to_pull_request_review_comment = { max = 5 }
 resolve_pull_request_review_thread = { max = 5 }
@@ -547,7 +547,7 @@ behind a later revert. Replacement therefore uses an exact head lease and
 checks every commit's patch, not just the final tree.
 
 Replacement is off by default. The caller may add
-`replacement_max_commits = 10` to `[outputs.push_to_pull_request_branch]`
+`replacement_max_commits = 10` to `[github.outputs.push_to_pull_request_branch]`
 (maximum 50). Organization bounds intersect this ceiling; zero in either
 file forbids replacement. The ordinary one-commit push remains unchanged.
 The same head repository and branch checks apply; no write token
@@ -639,7 +639,7 @@ pull request that lets the target's maintainers edit it is not enough. It is
 off unless a bounds file lists it, with globs of the branches a push may go to:
 
 ```toml
-[outputs.push_to_pull_request_branch]
+[github.outputs.push_to_pull_request_branch]
 max = 1
 branches = ["agent-run-*", "dispatch/**"]
 ```
@@ -711,8 +711,8 @@ does, so a pull request closed before apply runs is not pushed to.
 A caller keeps a bounds file in its repository
 ([this repository's](../.github/agentic-job/allow.toml)): the `hosts` a
 clone URL may name, globs of `repos` and `bases`, `max_outputs`,
-`max_patch_bytes`, `max_patch_files`, and under `[outputs]` each type
-with its ceiling. `agentic-job policy` checks one run's request against
+`max_patch_bytes`, `max_patch_files`, and under its forge section's
+`outputs` each type with its ceiling. `agentic-job policy` checks one run's request against
 it (`--repo`, `--clone-url`, `--base`, `--kind`, `--outputs`,
 `--max-outputs`) and prints `policy.json`, or every reason for refusing.
 `--outputs all` is every type the bounds list, and `--max-outputs max`
@@ -728,13 +728,7 @@ it unencrypted. It may not name `github.com` or a host under it, with or
 without a port or user, and
 `run` lets git use plain HTTP only for a target admitted that way, so no
 other clone can be downgraded by a redirect. With organization bounds,
-both files must name the host. A top-level `push_repo = "OWNER/NAME"`
-names the fork that [Forgejo's apply](#publishing-to-forgejo) pushes a pull
-request's branch to. It may not be of the target's owner, and with organization
-bounds both files must name it. A top-level `forge` (`github` by default,
-`forgejo` or `gitlab`) says where the outputs are applied, and limits
-`[outputs]` to the [neutral profile](#neutral-profile) off GitHub; with
-organization bounds, both files must name the same one. A top-level `allowed_domains` is
+both files must name the host. A top-level `allowed_domains` is
 accepted and ignored:
 links to every public host are kept ([above](#what-is-gh-aws-and-why)).
 A top-level `native_handlers`, empty by default, lists `add_comment`,
@@ -745,13 +739,44 @@ A top-level `native_handlers`, empty by default, lists `add_comment`,
 than gh-aw's; each must be a type the bounds allow, and with
 organization bounds a type is routed only where both files name it.
 
-A `[memory]` table lets a run hand back the agent's notes
+Exactly one forge section says where the outputs are applied
+([#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393)):
+`[github]`, `[forgejo]` or `[gitlab]`. None, or more than one, is
+refused, and with organization bounds both files must name the same
+forge. Each section has its own `outputs` table, which is required and
+off GitHub may list only the [neutral profile](#neutral-profile).
+`[github]` alone also holds what only GitHub implements today:
+`[github.trigger]` ([events](events.md)), `[github.memory]` (below) and
+`[github.secondary_pull_request]` ([below](#a-secondary-pull-request)).
+`[forgejo]` and `[gitlab]` hold `push_repo = "OWNER/NAME"`, the fork that
+[Forgejo's](#publishing-to-forgejo) or [GitLab's](#publishing-to-gitlab)
+apply pushes a pull request's branch to. It may not be of the target's
+owner, a section that allows `create_pull_request` must name it, and
+with organization bounds both files must name it. Every section refuses
+keys it does not know, so a GitHub-only table in another forge's section
+is refused.
+
+```toml
+[forgejo]
+push_repo = "bot/NAME"
+
+[forgejo.outputs]
+create_pull_request = { max = 1 }
+noop = { max = 1 }
+```
+
+The sections replaced the top-level `outputs`, `trigger`, `memory`,
+`secondary_pull_request` and `push_repo` keys and the scalar `forge`,
+which are now refused as unknown: a caller moves its GitHub keys under
+`[github]`. The compiled `policy.json` is unchanged.
+
+A `[github.memory]` table lets a run hand back the agent's notes
 ([below](#what-the-agent-does)); without it none is handed back, and
 `check` refuses one. Its keys, all optional, and their ceilings, which are
 gh-aw's repo-memory defaults:
 
 ```toml
-[memory]
+[github.memory]
 max_files = 20              # at most 100
 max_file_bytes = 16384      # at most 102400 (100 KiB)
 max_bytes = 65536           # all files together; at least max_file_bytes, at most 1 MiB
@@ -884,7 +909,7 @@ is refused rather than sent for review or turned into an issue.
 
 ### A secondary pull request
 
-A `[secondary_pull_request]` table names one further, fixed repository
+A `[github.secondary_pull_request]` table names one further, fixed repository
 that a run may propose one pull request to, without making
 the repositories in `repos` writable
 ([#1075](https://github.com/cgwalters-forge/agentic-job/issues/1075)).
@@ -895,7 +920,7 @@ unaffected. What the caller's `SAFE_OUTPUTS_PAT` needs for it is in
 [the workflow guide](workflow.md#a-secondary-pull-request).
 
 ```toml
-[secondary_pull_request]
+[github.secondary_pull_request]
 repo = "cgwalters-forge/misctool"
 base = "main"
 branch_prefix = "agentic-job/"
@@ -908,11 +933,12 @@ It is one table, not a list. `repo` is one exact OWNER/NAME, `base` one
 exact branch, and `branch_prefix` ends in `/` and forms an unambiguous
 branch name. `max` must be 1, and the patch limits have no defaults
 (at least 1024 bytes and 1 file). Its own
-`[secondary_pull_request.unprotected_files]` takes the same keys as the
+`[github.secondary_pull_request.unprotected_files]` takes the same keys as the
 top-level one but may name only `repo`; nothing is inherited from the
 top-level exemptions, so protected files and `.github` stay protected
 unless exempted here. The top-level `protected` globs, which only take
-away, hold for it too. It is for GitHub only.
+away, hold for it too. It is for GitHub only, which its place in
+`[github]` says.
 
 `policy` adds it to `policy.json` only for a branch run that may open its
 own pull request, and refuses one whose run works on, or applies to, that
@@ -990,7 +1016,7 @@ The smallest call that can open a pull request from it:
 - `id`, `repo`, `allow` and `proposals-artifact`; no task, agent or
   configuration.
 - `outputs: create_pull_request,noop`, within the bounds file's
-  `[outputs]`, `max_patch_bytes` and `max_patch_files`; the example
+  `[github.outputs]`, `max_patch_bytes` and `max_patch_files`; the example
   also narrows `max-outputs` to `"1"`, the one request it makes.
 - `apply-environment` with `SAFE_OUTPUTS_PAT` passed explicitly: policy
   refuses `create_pull_request` without one, as the job token cannot fork.
@@ -1460,7 +1486,8 @@ agentic-job check --policy policy.json --outputs OUT --collected collected.json 
 ```
 
 The type remains off unless bounds list
-`create_pull_request_review_comment = { max = N }` under `[outputs]`.
+`create_pull_request_review_comment = { max = N }` under their forge
+section's `outputs`.
 `check` records `inline_target: {repo, number, head}` in its trusted upload.
 Apply requires that repository and number to match policy and its own
 `--comment-target`; it does not accept a head from the request. This adds
@@ -1577,9 +1604,9 @@ A pull request's branch goes to a fork, never to the target repository.
 `--push-repo` is required for one and must be the `push_repo` the bounds
 name ([above](#the-bounds-and-the-policy)), never one a hand-back names.
 It must be another owner's repository, since Forgejo reads a head of the
-target's own owner as the target's own branch. `policy` cannot tell a
-Forgejo target from another, so bounds without `push_repo` admit a pull
-request that apply then refuses. Before pushing, apply reads both
+target's own owner as the target's own branch. A `[forgejo]` section
+that allows `create_pull_request` without `push_repo` is refused, so
+`policy` admits no pull request that apply would then refuse. Before pushing, apply reads both
 repositories through the API. It refuses a push repository that is not
 a fork of the target, and, unless it is private, one whose target is not
 public: private, internal, under an owner that is not public, or of a
@@ -1780,7 +1807,7 @@ publishes to a GitLab project through its REST API v4, as
 and pre-write checks. The token comes only from `GITLAB_TOKEN` and goes
 only in an `Authorization: Bearer` header (to git as `oauth2` over
 Basic, through its environment). The policy must be for GitLab
-(`forge = "gitlab"`). It publishes the types below, and writes nothing
+(`"forge": "gitlab"`, from a `[gitlab]` bounds section). It publishes the types below, and writes nothing
 for `noop`, `missing_tool` and `missing_data`:
 
 - `add_comment` is a note on the caller's issue or merge request.
@@ -1919,7 +1946,7 @@ names: agents already know them, and nothing on the line changes. What
 differs per forge is which types and fields mean the same thing there.
 That is the *neutral profile*, from the research and plan in
 [#1393](https://github.com/cgwalters-forge/agentic-job/issues/1393#issuecomment-6278826860).
-The bounds' `forge` selects it, and `policy.json` carries it as `forge`
+The bounds' forge section selects it, and `policy.json` carries it as `forge`
 and `contract`. The contract is a number, now 1, that follows the gh-aw
 commit pinned [above](#what-is-gh-aws-and-why) and is raised when a
 type or field changes meaning there. `check` refuses a policy written
@@ -2022,7 +2049,7 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | The collector's type table, validation, `field_guide` and `collect`; the sanitizer and Markdown scanning | `collect/` | `collect/` |
 | The neutral inline comment's field list, which the collector refuses before it could drop a field | `apply/inline.rs` | `collect::inline_field_names` |
 | `Policy` and its parts (`Kind`, `SafeOutputs`, `OutputLimit`, `PullRequest`, `Push`, `PatchRules`, `Memory`, `Secondary`, `ContextRepo`), `Policy::validate`, the protected-file defaults, globs and name patterns, and which clone URLs a policy may name | `policy.rs`, `run/clone.rs` | `contract.rs` |
-| `Bounds` (its `[trigger]` table typed by the caller), `SecondaryPullRequest`, `Unprotected`, `Bounds::validate`, `clone_url_problem`, and `intersect`, which holds a run to the organization's bounds too | `policy.rs` | `bounds.rs` |
+| `Bounds` (its `[github]`, `[forgejo]` and `[gitlab]` sections, and the `[github.trigger]` table typed by the caller), `SecondaryPullRequest`, `Unprotected`, `Bounds::validate`, `clone_url_problem`, and `intersect`, which holds a run to the organization's bounds too | `policy.rs` | `bounds.rs` |
 | Counts, targets and redirections (`redirections_to`), patch names, `base.json` and the run's branch, the patch rules, link repair, handler limits and replacement series | `check/` | `check/` |
 | `CheckedTarget`, the trusted head of a neutral inline comment that check writes and apply reads back, and `checked_target` | `apply/inline.rs` | `check/inline.rs` |
 | apply's `plan` and `publish`, `Op`, `Publisher`, `Target`, the footer and the report read back | `apply/mod.rs` | `apply/mod.rs` |

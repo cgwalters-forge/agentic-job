@@ -8,7 +8,7 @@ max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 1
 
-[outputs]
+[github.outputs]
 close_pull_request = { max = 1 }
 link_sub_issue = { max = 1 }
 hide_comment = { max = 1, allowed_reasons = ["OUTDATED"] }

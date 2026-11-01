@@ -10,5 +10,5 @@ max_outputs = 1
 max_patch_bytes = 1048576
 max_patch_files = 1
 
-[outputs]
+[github.outputs]
 create_check_run = { max = 1, name = "agentic-job e2e check run" }

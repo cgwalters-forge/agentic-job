@@ -37,7 +37,7 @@ fn example(name: &str) -> String {
 }
 
 /// allow.toml for `REPO`, without its opt-in unless `private`, with
-/// `extra` lines added to its `[outputs]`.
+/// `extra` lines added to its `[github.outputs]`.
 fn bounds(dir: &Path, name: &str, private: bool, extra: &str) -> PathBuf {
     let text = example("allow.toml").replace(REPO_PLACEHOLDER, REPO);
     assert!(text.contains(OPT_IN) && text.contains(REPO));

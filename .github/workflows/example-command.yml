@@ -1,6 +1,6 @@
 # A caller started by a slash command: `/agent REQUEST` as a comment on
 # an issue or pull request of this repository starts a run, for whoever
-# holds the write role here. The `[trigger]` table of the bounds file
+# holds the write role here. The `[github.trigger]` table of the bounds file
 # says who may and from which events, and docs/events.md how the
 # decision is made. Copy this file with the bounds and configuration
 # files it names, as example.yml says.

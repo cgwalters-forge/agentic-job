@@ -6,10 +6,10 @@ max_outputs = 5
 max_patch_bytes = 1048576
 max_patch_files = 50
 
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 
-[trigger]
+[github.trigger]
 events = ["pull_request", "issue_comment"]
 roles = ["admin", "maintain", "write", "triage"]
 forks = true

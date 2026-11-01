@@ -80,10 +80,12 @@ private target only if all of these hold, each checked where it is enforced:
   for a private run. It refuses `create_pull_request` and
   `push_to_pull_request_branch`: apply pushes a patch through a fork, which
   it checks without a credential, so a private fork is out of its reach.
-  Off GitHub, every bounds file naming the same `push_repo` admits
+  Off GitHub, every bounds file whose `[forgejo]` or `[gitlab]` section
+  names the same `push_repo` admits
   `create_pull_request` when it is asked for by name (`all` leaves it
-  out). Forgejo's apply pushes only to that fork, and only if the fork is
-  private ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)).
+  out). Forgejo's and GitLab's apply push only to that fork, and only if
+  the fork is private ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo),
+  [to GitLab](safe-outputs.md#publishing-to-gitlab)).
   It refuses `update_project` too: a project's fields are read by the
   project's audience, which nothing confines to the repository's.
   The run action repeats the visibility check before upload.

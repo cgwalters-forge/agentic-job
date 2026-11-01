@@ -5,5 +5,5 @@ max_outputs = 5
 max_patch_bytes = 1048576
 max_patch_files = 50
 
-[outputs]
+[github.outputs]
 noop = { max = 1 }

@@ -106,7 +106,7 @@ const MAX_DISCUSSION_CATEGORY: usize = 64;
 /// gh-aw states a patch's size cap in units of this many bytes.
 pub const KB: u64 = 1024;
 
-/// The ceilings of `[memory]`: gh-aw's repo-memory defaults, 100 files of
+/// The ceilings of `[github.memory]`: gh-aw's repo-memory defaults, 100 files of
 /// 100 KB each (docs/src/content/docs/reference/repo-memory.md in
 /// github/gh-aw), and a total that keeps the hand-back small.
 pub const MAX_MEMORY_FILES: u32 = 100;
@@ -430,7 +430,7 @@ impl Secondary {
     }
 }
 
-/// `[memory]`: how much of the agent's memory directory is handed back,
+/// `[github.memory]`: how much of the agent's memory directory is handed back,
 /// and what its files may be. Each bound has a default and a ceiling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -733,7 +733,7 @@ pub struct Policy {
     /// author `check` lets a patch name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_author: Option<String>,
-    /// The bounds' `push_repo`, where a pull request or a push is asked
+    /// The bounds' `[forgejo]` `push_repo`, where a pull request or a push is asked
     /// for: the only repository Forgejo's `apply` pushes a branch to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_repo: Option<String>,
@@ -746,7 +746,7 @@ pub struct Policy {
     /// [`crate::GH_AW_LINK_DOMAINS`], in a policy written by hand.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_domains: Vec<String>,
-    /// The bounds' `[memory]`, where every bounds file has one.
+    /// The bounds' `[github.memory]`, where every bounds file has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<Memory>,
     /// The bounds' [`Forge`].

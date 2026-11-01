@@ -123,7 +123,7 @@ max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 50
 
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 1 }

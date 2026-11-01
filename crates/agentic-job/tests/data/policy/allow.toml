@@ -13,7 +13,7 @@ max_patch_bytes = 8388608
 max_patch_files = 100
 
 # The output types a run may ask for, and the most of each.
-[outputs]
+[github.outputs]
 create_pull_request = { max = 1 }
 add_comment = { max = 3 }
 noop = { max = 1 }
