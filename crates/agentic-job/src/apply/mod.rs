@@ -11,7 +11,8 @@
 //! and the filtering of what they post, and GitHub's client and native
 //! publishing, are the safe-outputs library's ([`safe_outputs::apply`]),
 //! re-exported here at their old paths. This is its adapter: it reads the
-//! policy, the check job's upload without following a link, and the token
+//! policy, the check job's upload without following a link, and the token,
+//! or the caller's role bindings and their tokens ([`roles::Routed`]),
 //! from the environment, and gives the library agentic-job's footer,
 //! commit status context and committer ([`PROVENANCE`]).
 
@@ -133,27 +134,29 @@ pub fn run(args: &Args) -> Result<Exit> {
             "--recover-pushed-commit requires a full commit SHA"
         );
     }
+    anyhow::ensure!(
+        args.forge == Forge::Gitlab || args.comment_target_kind.is_none(),
+        "--comment-target-kind is GitLab's: Forgejo numbers issues and pull requests together"
+    );
     let policy = Policy::load(&args.policy)?;
-    let token_env = token_env(args.forge);
-    let token = std::env::var(token_env).unwrap_or_default();
-    anyhow::ensure!(!token.is_empty(), "{token_env} is not set");
-    let publisher: Box<dyn Publisher> = match args.forge {
-        Forge::Forgejo => {
-            anyhow::ensure!(
-                args.comment_target_kind.is_none(),
-                "--comment-target-kind is GitLab's: Forgejo numbers issues and pull requests together"
-            );
-            Box::new(
-                forgejo::Forgejo::new(&args.server, &policy.repo, token, &policy.allow_http)?
-                    .recovering(args.recover_pushed_commit.clone()),
-            )
+    // Only the caller's environment binds roles: never a request or the
+    // agent's output. With a mapping, the forge token is not read at all.
+    let publisher: Box<dyn Publisher> = match roles::read(&|key| std::env::var(key).ok())? {
+        None => {
+            let token_env = token_env(args.forge);
+            let token = std::env::var(token_env).unwrap_or_default();
+            anyhow::ensure!(!token.is_empty(), "{token_env} is not set");
+            forge_publisher(args, &policy, token, None, None)?
         }
-        Forge::Gitlab => Box::new(
-            gitlab::Gitlab::new(&args.server, &policy.repo, token, &policy.allow_http)?
-                .recovering(args.recover_pushed_commit.clone())
-                .commenting_on(args.comment_target_kind)
-                .status_context(args.status_ref.clone().zip(args.status_pipeline_id)),
-        ),
+        Some(credentials) => Box::new(roles::Routed::new(&credentials, |_, credential, push| {
+            forge_publisher(
+                args,
+                &policy,
+                credential.token.clone(),
+                push.map(str::to_owned),
+                Some(credential.identity.actor_id),
+            )
+        })?),
     };
     let target = Target {
         forge: args.forge,
@@ -177,6 +180,32 @@ pub fn run(args: &Args) -> Result<Exit> {
         println!("{url}");
     }
     Ok(Exit::Success)
+}
+
+/// The forge's publisher, with TOKEN for its API; PUSH, if given, for git
+/// (see [`roles::Routed`]); and OWNER, the numeric actor TOKEN is bound to.
+fn forge_publisher(
+    args: &Args,
+    policy: &Policy,
+    token: String,
+    push: Option<String>,
+    owner: Option<u64>,
+) -> Result<Box<dyn Publisher>> {
+    Ok(match args.forge {
+        Forge::Forgejo => Box::new(
+            forgejo::Forgejo::new(&args.server, &policy.repo, token, &policy.allow_http)?
+                .recovering(args.recover_pushed_commit.clone())
+                .pushing_with(push),
+        ),
+        Forge::Gitlab => Box::new(
+            gitlab::Gitlab::new(&args.server, &policy.repo, token, &policy.allow_http)?
+                .recovering(args.recover_pushed_commit.clone())
+                .commenting_on(args.comment_target_kind)
+                .status_context(args.status_ref.clone().zip(args.status_pipeline_id))
+                .pushing_with(push)
+                .owned_by(owner),
+        ),
+    })
 }
 
 #[cfg(test)]

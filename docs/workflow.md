@@ -1437,8 +1437,11 @@ handlers and replacement-series pushes are refused in role mode before a fork
 is created. `require-safe-outputs-pat` remains a legacy-only early check; role
 credentials are instead checked at apply's boundary and status's own boundary.
 With an empty mapping all existing PAT/job-token behavior, including status's
-PAT fallback, remains unchanged. See the [fixed table and provenance limits](safe-outputs.md#caller-bound-publisher-roles-github).
-Forgejo/GitLab role routing and live App proof are not implemented here.
+PAT fallback, remains unchanged. See the [fixed table and provenance limits](safe-outputs.md#caller-bound-publisher-roles).
+Off GitHub, a caller's own apply job sets `APPLY_ROLE_BINDINGS` and the four
+tokens for `agentic-job apply --forge`, with the same JSON minus `app_id`,
+which refuses there ([Forgejo and GitLab roles](safe-outputs.md#forgejo-and-gitlab-roles)).
+Live App proof is not established here.
 
 ### The apply job and its token
 

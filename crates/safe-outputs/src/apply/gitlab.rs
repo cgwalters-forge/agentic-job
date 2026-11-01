@@ -96,6 +96,11 @@ pub struct Gitlab {
     /// The project published to: the policy's, which it has checked.
     repo: String,
     token: String,
+    /// As Forgejo's: the fork-push role's token for git, else `token`.
+    push_token: Option<String>,
+    /// In role mode, the numeric actor the caller bound this token to:
+    /// a status a rerun takes as already set must be that actor's.
+    owner: Option<u64>,
     http: ureq::Agent,
     recover_pushed_commit: Option<String>,
     /// What the caller's comment target is.
@@ -312,6 +317,8 @@ impl Gitlab {
             git: server.to_owned(),
             repo: repo.to_owned(),
             token,
+            push_token: None,
+            owner: None,
             http: forgejo::agent(),
             recover_pushed_commit: None,
             comment_kind: None,
@@ -323,6 +330,37 @@ impl Gitlab {
     pub fn recovering(mut self, recover: Option<String>) -> Self {
         self.recover_pushed_commit = recover;
         self
+    }
+
+    /// As [`forgejo::Forgejo::pushing_with`].
+    pub fn pushing_with(mut self, token: Option<String>) -> Self {
+        self.push_token = token;
+        self
+    }
+
+    /// The caller's numeric actor for this token, in role mode: a status
+    /// another account set is not this run's, whatever it says.
+    pub fn owned_by(mut self, actor: Option<u64>) -> Self {
+        self.owner = actor;
+        self
+    }
+
+    /// Every form of either token an error could hold: as sent to the API,
+    /// URL-encoded, and as git's Basic credential.
+    fn secrets(&self) -> Vec<String> {
+        let mut secrets = Vec::new();
+        for token in [Some(&self.token), self.push_token.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|token| !token.is_empty())
+        {
+            secrets.push(BASE64.encode(format!("{GIT_USER}:{token}")));
+            secrets.push(encoded(token));
+            secrets.push(token.clone());
+        }
+        // Longest first, so a token is not cut out of a longer form.
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets
     }
 
     /// What the caller's `--comment-target` numbers: without it, no note
@@ -443,27 +481,16 @@ impl Gitlab {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+        let secrets = self.secrets();
+        let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
         Api {
             http: &self.http,
             url: &self.api,
             authorization: &format!("Bearer {}", self.token),
-            secrets: &[
-                &BASE64.encode(format!("{GIT_USER}:{}", self.token)),
-                &encoded(&self.token),
-                &self.token,
-            ],
+            secrets: &secrets,
         }
         .request(method, path, body)
-        .map_err(|err| {
-            anyhow::anyhow!(super::git::shown(
-                &[
-                    &self.token,
-                    &encoded(&self.token),
-                    &BASE64.encode(format!("{GIT_USER}:{}", self.token))
-                ],
-                &format!("{err:#}")
-            ))
-        })
+        .map_err(|err| anyhow::anyhow!(super::git::shown(&secrets, &format!("{err:#}"))))
     }
 
     /// What git fetches PROJECT from, or pushes to it at.
@@ -695,11 +722,12 @@ impl Gitlab {
     /// Git with the token, as GitLab takes it over HTTP, committing as
     /// COMMITTER.
     fn git<'a>(&'a self, committer: &'a Committer) -> Git<'a> {
-        let credential = BASE64.encode(format!("{GIT_USER}:{}", self.token));
+        let token = self.push_token.as_deref().unwrap_or(&self.token);
+        let credential = BASE64.encode(format!("{GIT_USER}:{token}"));
         Git {
             authorization: format!("Basic {credential}"),
-            token: &self.token,
-            extra_secrets: Vec::new(),
+            token,
+            extra_secrets: self.secrets(),
             committer: (&committer.name, &committer.email),
         }
     }
@@ -895,11 +923,13 @@ impl Publisher for Gitlab {
             })
         };
         opened().with_context(|| {
-            format!(
+            let text = format!(
                 "published {commit} to {} branch {}; merge request creation failed; retry the same checked input with --recover-pushed-commit {commit} (no branch overwrite)",
                 pr.push_repo, pr.branch
-            )
-            .replace(&self.token, "[token]")
+            );
+            self.secrets()
+                .iter()
+                .fold(text, |text, secret| text.replace(secret, "[token]"))
         })
     }
 
@@ -1019,6 +1049,9 @@ impl Publisher for Gitlab {
             set["status"] == state
                 && set["target_url"] == status.target_url.as_str()
                 && set["description"] == status.state.description()
+                && self
+                    .owner
+                    .is_none_or(|owner| set["author"]["id"].as_u64() == Some(owner))
         }) {
             return Ok(url);
         }
@@ -1046,6 +1079,14 @@ impl Publisher for Gitlab {
             status.context
         );
         Ok(url)
+    }
+
+    /// GitLab's authenticated user, `GET /user`: for a project or group
+    /// access token, its bot user.
+    fn actor_id(&self) -> Result<u64> {
+        self.request(GET, "/user", None)?["id"]
+            .as_u64()
+            .context("GET /user: the response has no numeric id")
     }
 }
 
@@ -1362,6 +1403,40 @@ mod tests {
                     .count(),
                 writes
             );
+        }
+    }
+
+    /// In role mode a rerun takes an identical status as set only when
+    /// its numeric author is the status role's actor, never by name.
+    #[test]
+    fn a_rerun_owns_only_its_actors_status() {
+        let set = |author: Value| {
+            let mut entry = status_entry(1, State::Success, RUN_URL);
+            entry["author"] = author;
+            entry
+        };
+        for (author, owner, writes) in [
+            (json!({"id": 7, "username": "bot"}), None, 0),
+            (json!({"id": 7, "username": "bot"}), Some(7), 0),
+            (json!({"id": 8, "username": "bot"}), Some(7), 1),
+            (json!({"id": "7", "username": "bot"}), Some(7), 1),
+            (Value::Null, Some(7), 1),
+        ] {
+            let (server, requests) = status_server(vec![set(author.clone())]);
+            gitlab(&server)
+                .owned_by(owner)
+                .status(&CommitStatus {
+                    sha: "4".repeat(40),
+                    state: State::Success,
+                    target_url: RUN_URL.into(),
+                    context: STATUS_CONTEXT.into(),
+                })
+                .unwrap();
+            let posts = requests
+                .try_iter()
+                .filter(|r| r.line.starts_with("POST "))
+                .count();
+            assert_eq!(posts, writes, "{author} owned by {owner:?}");
         }
     }
 
@@ -2433,6 +2508,69 @@ mod tests {
                 &["for-each-ref", "--format=%(refname)"]
             ),
             "refs/heads/main"
+        );
+        let fork = root.path().join("fork/name.git");
+        assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);
+    }
+
+    /// As Forgejo's: publication reads and opens, git pushes with the
+    /// fork-push token, and no form of either token is in an error.
+    #[test]
+    fn two_role_tokens_open_a_merge_request() {
+        let publication = ["fake", "publication", "credential"].join("-");
+        let push = ["fake", "push", "credential"].join("-");
+        let echo: Vec<String> = [&publication, &push]
+            .into_iter()
+            .flat_map(|token| {
+                [
+                    token.clone(),
+                    encoded(token),
+                    BASE64.encode(format!("{GIT_USER}:{token}")),
+                ]
+            })
+            .collect();
+        let (root, pr) = repository();
+        let (server, requests) = mock(vec![
+            ok(&json!({"id": 104, "username": "renamed"})),
+            ok(&repo()),
+            ok(&project(2, "fork/name", "public", Some(1))),
+            (403, format!("{{\"message\": \"{}\"}}", echo.join(" "))),
+            (401, echo.join(" ")),
+        ]);
+        let mut gitlab = Gitlab::new(&server, "owner/name", publication.clone(), &[])
+            .unwrap()
+            .pushing_with(Some(push.clone()));
+        gitlab.git = root.path().display().to_string();
+        assert_eq!(gitlab.actor_id().unwrap(), 104);
+        let git = gitlab.git(&pr.committer);
+        assert_eq!(
+            git.authorization,
+            format!("Basic {}", BASE64.encode(format!("{GIT_USER}:{push}")))
+        );
+        let err = format!("{:#}", gitlab.open_pull_request(&pr).unwrap_err());
+        assert!(err.contains("--recover-pushed-commit"), "{err}");
+        let err2 = format!("{:#}", gitlab.actor_id().unwrap_err());
+        for err in [err, err2] {
+            for secret in &echo {
+                assert!(!err.contains(secret.as_str()), "{err}");
+            }
+        }
+        let lines: Vec<String> = requests
+            .try_iter()
+            .map(|request| {
+                assert_eq!(request.authorization, format!("Bearer {publication}"));
+                request.line
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v4/user HTTP/1.1",
+                "GET /api/v4/projects/owner%2Fname HTTP/1.1",
+                "GET /api/v4/projects/fork%2Fname HTTP/1.1",
+                "POST /api/v4/projects/2/merge_requests HTTP/1.1",
+                "GET /api/v4/user HTTP/1.1",
+            ]
         );
         let fork = root.path().join("fork/name.git");
         assert_eq!(sh(&fork, &["rev-parse", "agent-run-7~"]), pr.base_commit);

@@ -156,6 +156,15 @@ GitLab, `agentic-job collect` takes those two fields for the label types
 and refuses an `issue_number` or `pull_request_number` a type does not
 take there, rather than drop it.
 
+Both read their token from `FORGEJO_TOKEN` or `GITLAB_TOKEN` unless
+`APPLY_ROLE_BINDINGS` is nonempty. Then it takes the workflow's JSON
+of four positive `actor_id`s, with no `app_id`, and `STATUS_TOKEN`,
+`REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN`, each of which must
+authenticate as its actor; there is no fallback in that mode. Within
+that mode, an identical GitLab status suppresses a write only if the
+status role's actor set it
+([Forgejo and GitLab roles](safe-outputs.md#forgejo-and-gitlab-roles)).
+
 Both non-GitHub publishers also accept `create_pull_request_review_comment`
 when listed with a `max` in bounds. Check requires the trusted caller's
 `--comment-repo`, `--comment-target` and `--review-head` and records

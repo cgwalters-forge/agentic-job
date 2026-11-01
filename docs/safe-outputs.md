@@ -24,11 +24,13 @@ The applying job's `SAFE_OUTPUTS_PAT` is our equivalent of gh-aw's
 See [the token mapping and setup](workflow.md#the-apply-job-and-its-token)
 for repository bounds, job-token limits and default-branch environment storage.
 
-## Caller-bound publisher roles (GitHub)
+## Caller-bound publisher roles
 
 The threat is credential substitution: a comment operation borrowing the
 fork-push credential, or a missing role secret falling back to a stronger PAT.
-The optional trusted workflow input `role-bindings` prevents that. Neither
+The optional trusted workflow input `role-bindings` prevents that on GitHub,
+and the same `APPLY_ROLE_BINDINGS` environment variable does so for
+`agentic-job apply --forge` ([below](#forgejo-and-gitlab-roles)). Neither
 requests nor agent output can set a role, token name, actor ID or App ID.
 
 | Operation | Fixed role | Secret |
@@ -60,10 +62,37 @@ including the review token for comment rerun detection and reply validation.
 
 Role mode requires every writing request to use a supported `native_handlers`
 entry. Legacy-only handlers and replacement-series pushes refuse before the
-first write. Forgejo and GitLab role routing is unfinished and is not enabled by
-this GitHub workflow input. No App, key storage, minting or refresh is added.
+first write. No App, key storage, minting or refresh is added.
 Live installation-token viewer behavior and App provenance proof await operator
 provisioning; offline tests do not establish them.
+
+### Forgejo and GitLab roles
+
+`agentic-job apply --forge forgejo|gitlab` reads the same JSON from
+`APPLY_ROLE_BINDINGS` and the same four `*_TOKEN` variables, set by the
+caller's apply job only. Without a mapping it uses `FORGEJO_TOKEN` or
+`GITLAB_TOKEN` as before; with one, it never reads that token, and a
+missing role token refuses rather than falling back. Each op goes to a fixed
+role by its kind, as in the table above: the caller's commit status to
+`status`; `add_comment` and inline review comments to `review`;
+`push_to_pull_request_branch`, including its reads of the pull request and
+fork, to `fork_push`; and issues, labels, closing and new pull requests to
+`publication`. A new pull request is pushed to `--push-repo` over git with
+`PUSH_TOKEN` and opened through the API with `PUBLICATION_TOKEN`, so the
+upstream identity never holds a credential that can push. The publication
+identity must still be able to read the fork, and on GitLab, which opens a
+merge request on its source project, to open one there.
+
+Before the first write, apply reads each token's authenticated user (Forgejo
+`GET /api/v1/user`, which needs the `read:user` scope; GitLab `GET /api/v4/user`,
+a project or group access token's bot user) and refuses unless its numeric `id`
+is the bound `actor_id`. An `app_id` refuses: these forges have no Apps, so it
+could only claim a provenance nothing checks. The only rerun detection these
+publishers have is GitLab's commit status read-back, which in role mode takes an
+identical status as already set only when its numeric `author.id` is the status
+role's `actor_id`, never by username. Each publisher scrubs every form of the
+tokens it holds from its errors, and apply also removes every role's raw token,
+should a forge echo one role's token in another's answer.
 
 ## What is gh-aw's, and why
 
@@ -1535,6 +1564,7 @@ publishes what `check` accepted to a Forgejo (or Gitea) repository,
 from a job of its own that holds the write token, as the apply job does
 on GitHub. `DIR` is what the check job uploads: check's `report.json`
 and the patch it accepted. The token comes only from `FORGEJO_TOKEN`,
+or the [role tokens](#forgejo-and-gitlab-roles) when the caller binds roles,
 goes only in an `Authorization` header (to git through its
 environment), and is taken out of any error. Nothing names a host:
 `--server` and `--run-url` are the caller's.
@@ -1777,7 +1807,8 @@ GITLAB_TOKEN=... agentic-job apply --forge gitlab --server URL --repo GROUP/PROJ
 
 publishes to a GitLab project through its REST API v4, as
 [Forgejo's](#publishing-to-forgejo) does, with the same server, token
-and pre-write checks. The token comes only from `GITLAB_TOKEN` and goes
+and pre-write checks. The token comes only from `GITLAB_TOKEN`, or the
+[role tokens](#forgejo-and-gitlab-roles), and goes
 only in an `Authorization: Bearer` header (to git as `oauth2` over
 Basic, through its environment). The policy must be for GitLab
 (`forge = "gitlab"`). It publishes the types below, and writes nothing
@@ -1985,7 +2016,8 @@ maps to a credential; a request never chooses one. Only apply holds it:
 Pushing and opening a change can be separate roles, as in
 [service-gator](https://github.com/LobsterTrap/service-gator/tree/b69814b140bf7c8385014560857760fe8fb71f03):
 a fork identity that may push, and an upstream one that may only open
-pull requests. On Forgejo and GitLab those can be two tokens.
+pull requests. On Forgejo and GitLab those are the `fork_push` and
+`publication` [role tokens](#forgejo-and-gitlab-roles).
 
 The Forgejo publisher above implements only its listed subset of this
 contract, and the [GitLab one](#publishing-to-gitlab) all of it but
@@ -2030,7 +2062,7 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | The inline comment fixtures | `crates/agentic-job/tests/data/inline` | `crates/safe-outputs/tests/data/inline` |
 | GitHub's REST API, git and `Publisher` (`Github`, `GithubPublisher`) | `apply/github.rs` | `apply/github.rs` |
 | GitHub's native publishing (`agentic-job publish`): its plan, gh-aw's handler ports and their records | `apply/publish.rs` | `apply/publish.rs` |
-| Caller-bound publisher roles (`Role`, `Identity`, `Credential`, `read`) | `apply/roles.rs` | `apply/roles.rs` |
+| Caller-bound publisher roles (`Role`, `Identity`, `Credential`, `read`, `Routed`) | `apply/roles.rs` | `apply/roles.rs` |
 | Where a run's commit goes on GitHub (`agentic-job push`): `resolve`, `target` and the owner-branches opt-in | `apply/push.rs` | `apply/push.rs` |
 | The replacement series' trial and leased push (`agentic-job replacement`) | `apply/replacement.rs` | `apply/replacement.rs` |
 | The secondary pull request's plan and opening (`agentic-job secondary-pull-request`) | `apply/secondary.rs` | `apply/secondary.rs` |
@@ -2055,6 +2087,8 @@ GitHub's client takes the API, the token and the `Provenance` whose name
 it sends as its user agent and whose committer commits a push that names
 none; agentic-job reads `GITHUB_API_URL` and the token's variable for it,
 or the role bindings and their tokens, which it gives `Github::with_roles`.
+For Forgejo and GitLab it builds one publisher per role from those tokens
+and gives them to `roles::Routed`, which checks each identity first.
 `apply::publish::apply` is given the requests, the handlers'
 configuration, the upload and the policy (`Checked`), the run as gh-aw's
 handlers read it from a lookup of variables the caller gives

@@ -433,6 +433,12 @@ pub trait Publisher {
     /// Comments and closes; an item closed already gets neither.
     fn close(&self, close: &Close) -> Result<String>;
     fn status(&self, status: &CommitStatus) -> Result<String>;
+
+    /// The numeric ID of the account the credential authenticates as, as
+    /// the forge answers, for [`roles::Routed`] to hold to its binding.
+    fn actor_id(&self) -> Result<u64> {
+        anyhow::bail!("this publisher cannot report its authenticated actor")
+    }
 }
 
 /// Where the trusted caller has apply publish.
