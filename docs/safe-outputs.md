@@ -2005,10 +2005,11 @@ a token. Bounds parsing, the check and publication safety belong to the
 component, and event admission, run identity, artifacts, checkpoints,
 memory, secret scanning and credential acquisition to its caller. The
 collector, the policy, bounds parsing, the check, publishing to Forgejo
-and GitLab, and GitHub's client and native publishing have moved; where
-a run's commit goes on GitHub (`push.rs`), the replacement series
-(`replacement.rs`) and the secondary pull request (`secondary.rs`) have
-not yet, as one hand-back could not hold all of the move.
+and GitLab, GitHub's client and native publishing, where a run's commit
+goes on GitHub, the replacement series and the secondary pull request
+have moved. agentic-job keeps their commands: reading the environment,
+its no-follow file reads, step outputs, and escaping what the library
+hands back before it reaches a log.
 
 Moved into `crates/safe-outputs`, with no change in behaviour:
 
@@ -2030,6 +2031,9 @@ Moved into `crates/safe-outputs`, with no change in behaviour:
 | GitHub's REST API, git and `Publisher` (`Github`, `GithubPublisher`) | `apply/github.rs` | `apply/github.rs` |
 | GitHub's native publishing (`agentic-job publish`): its plan, gh-aw's handler ports and their records | `apply/publish.rs` | `apply/publish.rs` |
 | Caller-bound publisher roles (`Role`, `Identity`, `Credential`, `read`) | `apply/roles.rs` | `apply/roles.rs` |
+| Where a run's commit goes on GitHub (`agentic-job push`): `resolve`, `target` and the owner-branches opt-in | `apply/push.rs` | `apply/push.rs` |
+| The replacement series' trial and leased push (`agentic-job replacement`) | `apply/replacement.rs` | `apply/replacement.rs` |
+| The secondary pull request's plan and opening (`agentic-job secondary-pull-request`) | `apply/secondary.rs` | `apply/secondary.rs` |
 
 `apply::plan` decides every write before the first, refusing with every
 reason found, and `apply::publish` asks the forge about every op
@@ -2063,6 +2067,14 @@ and its text), as it gives each retry's warning to `Github::warning_with`:
 the caller writes them escaped, as agentic-job does with secure-host's
 `workflow_commands`, so that nothing the forge or the agent wrote is read
 as a command.
+
+`apply::push::target` and `apply::replacement::trial` take the caller's
+no-follow read as `Upload` does, and `apply::secondary::plan` the upload
+and the `Provenance` whose name its footer gives. `replacement`'s errors
+hold git's messages, with the agent's text, as git wrote them: agentic-job
+escapes the whole message before it reaches the step's log.
+`GithubPublisher` is made only by `publish::publisher`, so its server
+check cannot be skipped.
 
 `check::check` is the check's entry point. It is given the hand-back's
 files as its caller read them (`Handback`), the collector's result, the

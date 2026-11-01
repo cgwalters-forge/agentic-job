@@ -771,13 +771,7 @@ impl Github {
     /// CI would run the agent's code with the repository's secrets. Nor
     /// is OWN_REPO, the run's own, should it be ME's fork of REPO: its
     /// Actions are its own CI.
-    pub fn fork(
-        &self,
-        me: &str,
-        repo: &str,
-        own_repo: &str,
-        server: &str,
-    ) -> Result<String> {
+    pub fn fork(&self, me: &str, repo: &str, own_repo: &str, server: &str) -> Result<String> {
         ensure!(
             !me.eq_ignore_ascii_case(owner(repo)),
             "{me} owns {repo} and has no fork of it to push to"
@@ -842,14 +836,17 @@ pub const ACTIONS_COMMITTER: (&str, &str) = (
 /// from its branch, pushed to the head repository apply.yml's fork step
 /// chose (the token's fork with Actions off, or the repository itself
 /// only where it says so). Nothing here chooses where a branch goes.
+///
+/// Callers make one with [`super::publish::publisher`], which refuses a
+/// git server that is not https.
 pub struct GithubPublisher {
-    pub github: Github,
+    pub(super) github: Github,
     /// Where git finds `OWNER/NAME.git`.
-    pub git: String,
+    pub(super) git: String,
     /// The repository comments go to: the run's item's.
-    pub item_repo: String,
+    pub(super) item_repo: String,
     /// The repository a pull request is opened in: the output repository.
-    pub repo: String,
+    pub(super) repo: String,
 }
 
 /// What GitHub leaves to gh-aw's handlers: refused before any write.

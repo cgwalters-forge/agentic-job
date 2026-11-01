@@ -267,7 +267,8 @@ fn redirections(item: &Map<String, Value>, policy: &Policy) -> Vec<String> {
     redirections_to(item, policy, None)
 }
 
-pub(crate) fn redirections_to(
+#[cfg(test)]
+fn redirections_to(
     item: &Map<String, Value>,
     policy: &Policy,
     comment: Option<(&str, u64)>,
