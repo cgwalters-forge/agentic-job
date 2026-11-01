@@ -405,10 +405,11 @@ so that pacing charges the pool the run went on with.
 Nor is a task's turn that stalls left to the timeout. Vibe has no read
 timeout on its model requests, and one waited six minutes on idle
 connections before going on (#983), and an opencode review sent nothing
-for 70 minutes after its last tool call (#2149). An agent entry with
-`stall-timeout` (seconds; Vibe's is 120, opencode's 600, no other has
-one) has a turn in which nothing comes from the agent for that long,
-with no tool call running, cancelled and the task sent again once on the same session,
+for 70 minutes after its last tool call (#2149), and a hung claude run
+holds its board slot until the job's limit (tracker#369). An agent entry
+with `stall-timeout` (seconds; Vibe's is 120, opencode's and Claude
+Code's 600, the fake agent has none) has a turn in which nothing comes
+from the agent for that long, with no tool call running, cancelled and the task sent again once on the same session,
 labelled `stalled`, behind a note that the last turn stalled; a cancel
 answered with `end_turn`, as opencode answers one, is still a stall. A second
 stall, or a cancel the agent does not answer, fails the run with a

@@ -1903,6 +1903,7 @@ fn a_turn_that_ends_without_the_required_output() {
 /// stall.
 #[test]
 fn a_stalled_turn_is_sent_again_once() {
+    // Answers the cancel with cancelled, as Claude Code's adapter does.
     const STALL: &str = r#"[{"say": "Working."}, {"sleep": 60}]"#;
     const DONE: &str = r#"[{"say": "Done."}]"#;
     const QUIET_TOOL: &str =

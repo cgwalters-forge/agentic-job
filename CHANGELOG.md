@@ -9,6 +9,10 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- A Claude Code turn with nothing from it for ten minutes, and no tool call
+  running, is cancelled and sent again once, then fails the run as `stall`,
+  as opencode's does, rather than holding the job to its limit
+  (docs/harness.md).
 - The run action's "Run the agent" step no longer fails now and then with
   exit 141 when it reads where a secret was found, on runners whose `head`
   is uutils (Ubuntu 26.04).

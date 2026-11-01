@@ -21,11 +21,22 @@
 # answer the turn with an error whose message starts the same way; the
 # words are classified either way (provider.rs), and a turn that ended
 # on a failure a wait may clear is sent again (driver.rs).
+#
+# A turn that hangs holds the run, and its board slot, until the job's
+# limit, with nothing outside the run watching it (tracker#369). Ten
+# minutes, as opencode's: Claude Code streams its thinking, a tool call
+# running is not taken for a stall, and its tools have timeouts of their
+# own; a turn held open only for quiet background subagents could still
+# be taken for one. The adapter answers the cancel with `cancelled` once
+# Claude Code's interrupt aborts the request. Where Claude Code does not
+# yield to it, the adapter forces that answer only after 30s, as long as
+# the run waits (driver.rs), and the run fails at the first stall.
 [claude]
 command = ["claude-agent-acp"]
 model-env = "ANTHROPIC_MODEL"
 provider-error = "API Error:"
 steering = true
+stall-timeout = 600
 env = { ANTHROPIC_MODEL = "opus" }
 
 # opencode speaks ACP natively; its model is a session config option. A
