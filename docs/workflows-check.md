@@ -20,19 +20,20 @@ installing a trusted check; nothing is enabled in their repositories by default.
 
 ## What each job must be
 
-Every job must do one of three things. It can call the reusable workflow
+Every job must do one of four things. It can call the reusable workflow
 `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml` at a
 40-hex commit, which holds the agent, check and apply jobs. It can
 have steps that include secure-host, named as
 `cgwalters-forge/agentic-job/secure-host` or by its standalone path
 `cgwalters-forge/actions/secure-host`, to which the first now forwards.
-Or it can be a [deploy-only Pages job](#deploy-only-pages-jobs). Each
+Or it can be a [deploy-only Pages job](#deploy-only-pages-jobs) or a
+[trusted artifact consumer](#trusted-artifact-consumers). Each
 refusal below names the file, the job and the step (by number, with its
 name, action or first script line), and says what to write instead.
 
 | Refused | The threat it stops |
 | --- | --- |
-| A job that neither runs secure-host nor calls the reusable workflow, and is not a deploy-only Pages job | Untrusted steps on a host whose runner's user still has root, and whose other users' files are open |
+| A job that neither runs secure-host nor calls the reusable workflow, and is neither deploy-only Pages nor a trusted artifact consumer | Untrusted steps on a host whose runner's user still has root, and whose other users' files are open |
 | A secure-host step with `if:` or `continue-on-error:`, or inputs outside the closed allowlist below | A job that goes on without hardening, or redirects hardening so the runner's user keeps root |
 | A post-hardening condition with a status function other than standalone `success()`, or `continue-on-error` other than literal false on the job or a pre-hardening step | Later steps running after an earlier failure skipped hardening, or a hardening failure being silently ignored |
 | A `uses:` before secure-host other than GitHub's `checkout`, `cache`, `cache/restore`, `download-artifact` and `setup-{dotnet,go,java,node,python}`, including a local `./` action | An action running with root before hardening, which can leave a root process or sudo rule behind that secure-host does not undo |
@@ -80,6 +81,73 @@ resolves fork-network commits under the upstream repository name. The
 check does not judge `runs-on:`: a reused self-hosted runner could hold
 a process an earlier job left behind.
 
+### Trusted artifact consumers
+
+The concrete threat is build-produced code running beside a deployment secret.
+A trusted consumer may hold secrets and an environment, but does no checkout
+and uses only the reviewed `actions/download-artifact` v8.0.2 commit below,
+followed by a fixed first script checking one payload file named `artifact`.
+That script requires the workspace to contain exactly that one regular,
+non-symlink file, including when counting hidden entries, so tools cannot load
+unchecked producer files beside the payload.
+Subsequent steps are trusted `run:` scripts that validate and consume that file
+as data, never execute it. The checker certifies this shape, not those scripts'
+semantics: review must establish that they treat the payload as data. A digest
+from the producer binds the file to its output, not to an independent approval.
+No consumer exception is enabled by default; a job must fit the whole shape.
+
+| Refused in a trusted consumer | The threat it stops |
+| --- | --- |
+| Missing or empty `needs:`, or any dependency without secure-host | Data selected from a job outside the hardening boundary; reusable workflow calls are not secure-host producer jobs |
+| Anything but one initial download with exactly `artifact-ids: '${{ needs.<job>.outputs.<id> }}'` | Artifact substitution by name, expression operators, other repositories or runs; `path:` can extract over trusted files and `merge-multiple` can overlay artifacts |
+| A downloader commit other than `9000827ccba6bdab643e8b6fd33ac0654aef8333` | Unreviewed code holding the consumer's credentials |
+| A checkout, any other action, or downloads after the check | Producer code running with credentials, or unchecked files replacing verified data |
+| A first `run:` other than the exact check below with `shell: bash` and only `ARTIFACT_SHA256` from the same producer's output | Output text becoming shell code or checksum filenames; checking the wrong producer's digest |
+| Conditions, failure suppression or extra fields on the download/check; a later condition that can bypass success | Consumption after a skipped or failed verification |
+| Workflow or job `env:`/`defaults:`, extra check env keys, `container:`, `services:` or job `continue-on-error:` | Loading code into the downloader or shell, changing how verification runs, or hiding failure |
+
+For the [secure-host README contract](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
+replace the placeholder `verify-digest` with the following consumer. The build
+job uploads exactly one file, `artifact`, exports its SHA-256 as `digest`, and
+exports upload-artifact's `artifact-id` as `id`. Compute the file's digest with
+`sha256sum artifact`; **do not** use upload-artifact's `artifact-digest`, which
+hashes the ZIP, not the extracted file. Substitute your trusted data validator
+for `validate`; it must be available without a checkout or another action.
+
+```yaml
+publish:
+  needs: build
+  runs-on: ubuntu-26.04
+  permissions: {contents: read, actions: read}
+  environment: release
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with: {artifact-ids: '${{ needs.build.outputs.id }}'}
+    - shell: bash
+      env: {ARTIFACT_SHA256: '${{ needs.build.outputs.digest }}'}
+      run: |
+        shopt -s dotglob nullglob
+        entries=(*)
+        [[ ${#entries[@]} -eq 1 && ${entries[0]} == artifact && -f artifact && ! -L artifact ]]
+        [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        printf '%s  artifact\n' "$ARTIFACT_SHA256" | sha256sum --check --strict -
+    - run: validate artifact
+      env: {TOKEN: '${{ secrets.DEPLOY }}'}
+```
+
+The first two steps admit only the shown keys plus `name:`. Later scripts use
+the ordinary execution-expression and step-key rules (without matrix execution
+expressions), may receive secrets through step env, and must retain success
+guards. Producers are checked independently: merely naming secure-host does
+not hide a weakening input, missing pin or secret in the producer. As with
+Pages, use fresh runners; the checker does not certify `runs-on:` or processes
+left by a previous job.
+
+Later steps' env values are not checked for code loading. Review them together
+with the scripts: for example, `BASH_ENV: artifact` would execute the payload
+with the step's credentials despite a successful digest check. Never set shell
+or runtime loader variables to producer-controlled files.
+
 ### Execution surfaces
 
 The table-driven rule covers these fields from
@@ -90,11 +158,18 @@ Container shorthand strings are images. Container and Docker fields are
 checked even though secure-host jobs also refuse containers outright.
 
 The hardening boundary must use one of the two secure-host paths at a
-40-hex commit; a local action is not certified. Its only admitted input is
-`check` set to literal `true` (a YAML boolean or string), the one input that
-means the same to the forwarder and to the old action at a commit before the
-forward. Omitting inputs keeps the action's defaults. All other inputs are
-refused: the forwarder fails on the old action's `lock`, `egress`,
+40-hex commit; a local action is not certified. The closed input table is:
+
+| Path | Admitted input | Value |
+| --- | --- | --- |
+| Either secure-host path | `check` | Literal `true` (YAML boolean or string) |
+| Only `cgwalters-forge/actions/secure-host` | `egress` | Literal `write-policy` |
+
+`check: true` means the same to the forwarder and the old action before the
+forward. The standalone action's write policy opts into restricting HTTP writes
+to allowed destinations; egress is otherwise off by default. It is not complete
+exfiltration prevention. Omitting inputs keeps the action's defaults. All other
+inputs are refused: the forwarder fails on the old action's `lock`, `egress`,
 `deny-runner-metadata` and `build`, and at an old commit their admitted values
 only restated its defaults or chose how to get the binary; `image-archive`
 runs an unverified image; `runner-user`
@@ -102,6 +177,9 @@ and the old action's other user redirect identities; `stop-services` replaces th
 list; `binary` replaces trusted code; `egress-policy` and `script` select
 unchecked files. `config` is also refused, even with `lock: true`: this checker
 does not validate configuration files, which can redirect the runner lock.
+Literal repository paths do not make either `config` or `egress-policy` safe:
+the checker does not read them, so it cannot detect a redirected lock or a
+policy that opens arbitrary writes.
 Unknown inputs, expressions and other values fail closed.
 
 The checker is not told which repository it checks, so even the repository

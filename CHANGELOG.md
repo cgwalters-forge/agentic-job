@@ -9,6 +9,11 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- `workflows check` admits literal `egress: write-policy` on standalone
+  secure-host and a narrow trusted artifact consumer with a fixed first
+  digest check that requires the payload to be the workspace's only entry.
+  `config` and `egress-policy` remain refused because their
+  contents are not validated (docs/workflows-check.md).
 - `example-deterministic.yml` proposes a pull request with no agent: a
   job runs secure-host and `cargo fmt --all`, and hands the patch to check
   and apply through `proposals-artifact`. CI's `e2e-deterministic` runs it

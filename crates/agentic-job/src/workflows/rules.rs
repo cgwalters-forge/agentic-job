@@ -11,8 +11,8 @@
 //! others wrote is not spliced into a script, checkout leaves no token on
 //! disk, and no agent runs outside the sandbox.
 //!
-//! One job shape needs no secure-host: a deploy-only job that runs only
-//! GitHub's pinned Pages actions on an artifact a hardened job built.
+//! Jobs consuming a hardened job's artifacts need no secure-host when they
+//! either deploy Pages only or use the fixed trusted-consumer shape below.
 //!
 //! Script expressions use a closed allowlist of direct property references;
 //! unknown contexts and expression syntax are refused rather than interpreted.
@@ -28,9 +28,11 @@ pub const REUSABLE_WORKFLOW: &str = "cgwalters-forge/agentic-job/.github/workflo
 /// The action that hardens a job's host, at its old path and at its
 /// standalone path in cgwalters-forge/actions (tracker#674); both take the
 /// same inputs.
+const STANDALONE_SECURE_HOST: &str = "cgwalters-forge/actions/secure-host";
+
 const SECURE_HOST_ACTIONS: &[&str] = &[
     "cgwalters-forge/agentic-job/secure-host",
-    "cgwalters-forge/actions/secure-host",
+    STANDALONE_SECURE_HOST,
 ];
 
 /// Actions that may run before secure-host, while the runner's user still
@@ -57,6 +59,23 @@ const BEFORE_SECURE_HOST: &[&str] = &[
 /// download-artifact is admitted: its `path:` could extract the artifact
 /// over the action's own code, and its `repository:` fetch someone else's.
 const DEPLOY_PAGES: &str = "actions/deploy-pages";
+
+const DOWNLOAD_ARTIFACT: &str = "actions/download-artifact";
+// The same reviewed upstream v8.0.2 used by this repository's workflows.
+const CONSUMER_DOWNLOAD: &str =
+    "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
+
+/// Check one payload file, not upload-artifact's ZIP digest. Never splice a
+/// producer output into shell code or allow it to supply checksum filenames.
+/// Reject all other workspace entries, including hidden files: otherwise a
+/// later trusted tool could load producer code beside the verified payload.
+const CONSUMER_DIGEST_CHECK: &str = r#"shopt -s dotglob nullglob
+entries=(*)
+[[ ${#entries[@]} -eq 1 && ${entries[0]} == artifact && -f artifact && ! -L artifact ]]
+[[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+printf '%s  artifact\n' "$ARTIFACT_SHA256" | sha256sum --check --strict -"#;
+
+const CONSUMER_INSTEAD: &str = "need only secure-host jobs; download one artifact by needs.<job>.outputs.<id> with no other inputs, then use the fixed bash digest check documented in docs/workflows-check.md before any other run; no checkout or other actions";
 
 // Upstream v5.0.1 and v4.0.5. Review additions as credential-bearing code:
 // GitHub resolves fork-network commits under the upstream name too, so a
@@ -111,6 +130,7 @@ const KEYS: &[&str] = &[
     "if",
     "jobs",
     "name",
+    "needs",
     "permissions",
     "run",
     "services",
@@ -338,6 +358,111 @@ fn deploy_problems(
     problems
 }
 
+/// A credential-bearing consumer may receive data, never executable setup
+/// from a producer. Keep extraction in the default workspace, forbid env
+/// injection into the downloader/check, and make the check unskippable. This
+/// certifies shape, not the safety of the trusted scripts after verification.
+fn trusted_consumer(
+    workflow: &Value,
+    jobs: &Map<String, Value>,
+    job: &Map<String, Value>,
+    steps: &[Value],
+) -> bool {
+    let needs: Vec<&str> = match job.get("needs") {
+        Some(Value::String(s)) => vec![s],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => return false,
+    };
+    if needs.is_empty()
+        || job
+            .get("needs")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.len() != needs.len())
+        || needs.iter().any(|name| {
+            !jobs
+                .get(*name)
+                .and_then(|j| j.get("steps"))
+                .and_then(Value::as_array)
+                .is_some_and(|s| s.iter().any(is_secure_host))
+        })
+        || ["env", "defaults"]
+            .iter()
+            .any(|key| workflow.get(key).is_some())
+        || [
+            "env",
+            "defaults",
+            "container",
+            "services",
+            "continue-on-error",
+        ]
+        .iter()
+        .any(|key| job.contains_key(*key))
+        || steps.len() < 2
+    {
+        return false;
+    }
+    let output_job = |value: Option<&Value>| -> Option<String> {
+        static OUTPUT: LazyLock<Regex> = LazyLock::new(|| {
+            re(
+                r"^\$\{\{\s*needs\.([a-zA-Z_][a-zA-Z0-9_-]*)\.outputs\.[a-zA-Z_][a-zA-Z0-9_-]*\s*\}\}$",
+            )
+        });
+        let captures = OUTPUT.captures(value?.as_str()?)?;
+        let name = captures.get(1)?.as_str();
+        needs.contains(&name).then(|| name.to_owned())
+    };
+    let Some(download) = steps[0].as_object() else {
+        return false;
+    };
+    let Some(inputs) = download.get("with").and_then(Value::as_object) else {
+        return false;
+    };
+    let producer = output_job(inputs.get("artifact-ids"));
+    if download.get("uses").and_then(Value::as_str) != Some(CONSUMER_DOWNLOAD)
+        || producer.is_none()
+        || inputs.len() != 1
+        || download
+            .keys()
+            .any(|k| !["name", "uses", "with"].contains(&k.as_str()))
+    {
+        return false;
+    }
+    let Some(check) = steps[1].as_object() else {
+        return false;
+    };
+    let Some(env) = check.get("env").and_then(Value::as_object) else {
+        return false;
+    };
+    if check.get("run").and_then(Value::as_str).map(str::trim) != Some(CONSUMER_DIGEST_CHECK)
+        || check.get("shell").and_then(Value::as_str) != Some("bash")
+        || env.len() != 1
+        || output_job(env.get("ARTIFACT_SHA256")) != producer
+        || check
+            .keys()
+            .any(|k| !["name", "run", "shell", "env"].contains(&k.as_str()))
+    {
+        return false;
+    }
+    steps[2..].iter().all(|step| {
+        let Some(map) = step.as_object() else {
+            return false;
+        };
+        map.contains_key("run")
+            && !map.contains_key("uses")
+            && miscased(map).is_none()
+            && !map.get("if").is_some_and(may_run_without_success)
+            && execution_problems(step, "step", false).is_empty()
+            && !map
+                .get("run")
+                .and_then(Value::as_str)
+                .is_some_and(|s| AGENT_COMMAND.is_match(s))
+            && map
+                .get("env")
+                .and_then(Value::as_object)
+                .is_none_or(|e| folded_duplicate(e).is_none())
+    })
+}
+
 /// Whether `v` reads the `secrets` context in any expression, including an
 /// `if:`, which is an expression without `${{ }}`. A word `secrets` inside
 /// a string literal of an expression is refused too, rather than parsed,
@@ -465,8 +590,16 @@ fn weakened(step: &Map<String, Value>) -> Option<String> {
     let Some(inputs) = with.as_object() else {
         return Some("has non-map `with:` inputs that cannot be checked".into());
     };
+    let standalone = step
+        .get("uses")
+        .and_then(Value::as_str)
+        .is_some_and(|u| action_of(u) == STANDALONE_SECURE_HOST);
     for (key, value) in inputs {
-        if !safe_hardening_input(key, value) {
+        if !(safe_hardening_input(key, value)
+            || (standalone
+                && key.eq_ignore_ascii_case("egress")
+                && value.as_str() == Some("write-policy")))
+        {
             return Some(format!(
                 "sets `{key}` outside the closed hardening-input allowlist"
             ));
@@ -714,6 +847,21 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                 }
                 continue;
             }
+            if steps.iter().any(|s| {
+                s.get("uses")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| action_of(u) == DOWNLOAD_ARTIFACT)
+            }) {
+                if !trusted_consumer(workflow, jobs, job, steps) {
+                    add(
+                        job_name,
+                        None,
+                        "does not fit the trusted artifact consumer shape".into(),
+                        CONSUMER_INSTEAD,
+                    );
+                }
+                continue;
+            }
             add(
                 job_name,
                 None,
@@ -851,7 +999,15 @@ pub fn check_workflow(workflow: &Value) -> Vec<Problem> {
                     job_name,
                     at,
                     format!("runs secure-host but {why}"),
-                    "run it unconditionally; omit inputs, or set only `check: true`",
+                    if step
+                        .get("uses")
+                        .and_then(Value::as_str)
+                        .is_some_and(|u| action_of(u) == STANDALONE_SECURE_HOST)
+                    {
+                        "run it unconditionally; omit inputs, or set only `check: true` and/or literal `egress: write-policy`"
+                    } else {
+                        "run it unconditionally; omit inputs, or set only `check: true`"
+                    },
                 );
             }
             if after_checkout && !checkout {
@@ -950,6 +1106,254 @@ mod tests {
 
     const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
     const SECURE_HOST: &str = "cgwalters-forge/agentic-job/secure-host";
+
+    // The external secure-host README contract, adapted to a real payload
+    // checksum and a standalone first check instead of `verify-digest`.
+    const CONSUMER_EXAMPLE: &str = r#"
+on: pull_request
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    permissions: {contents: read}
+    outputs:
+      id: ${{ steps.up.outputs.artifact-id }}
+      digest: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@PIN
+        with: {persist-credentials: false}
+      - uses: cgwalters-forge/actions/secure-host@PIN
+        with: {egress: write-policy}
+      - run: make test
+      - id: digest
+        run: printf 'sha256=%s\n' "$(sha256sum artifact | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - id: up
+        uses: actions/upload-artifact@PIN
+        with: {name: out, path: artifact}
+  publish:
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions: {contents: read, actions: read}
+    environment: release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {artifact-ids: '${{ needs.build.outputs.id }}'}
+      - shell: bash
+        env: {ARTIFACT_SHA256: '${{ needs.build.outputs.digest }}'}
+        run: |
+          shopt -s dotglob nullglob
+          entries=(*)
+          [[ ${#entries[@]} -eq 1 && ${entries[0]} == artifact && -f artifact && ! -L artifact ]]
+          [[ "$ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  artifact\n' "$ARTIFACT_SHA256" | sha256sum --check --strict -
+      - run: validate artifact
+        env: {TOKEN: '${{ secrets.DEPLOY }}'}
+"#;
+
+    #[test]
+    fn consumer_digest_check_workspace() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        for (case, allowed) in [
+            ("payload only", true),
+            ("extra file", false),
+            ("hidden file", false),
+            ("extra directory", false),
+            ("payload directory", false),
+            ("payload symlink", false),
+            ("missing payload", false),
+            ("wrong digest", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = tempfile::NamedTempFile::new().unwrap();
+            let artifact = dir.path().join("artifact");
+            fs::write(&artifact, b"payload").unwrap();
+            let checksum = Command::new("sha256sum").arg(&artifact).output().unwrap();
+            assert!(checksum.status.success());
+            let checksum = String::from_utf8(checksum.stdout).unwrap();
+            let digest = if case == "wrong digest" {
+                "0".repeat(64)
+            } else {
+                checksum[..64].to_owned()
+            };
+            match case {
+                "extra file" => fs::write(dir.path().join("json.py"), b"code").unwrap(),
+                "hidden file" => fs::write(dir.path().join(".env"), b"code").unwrap(),
+                "extra directory" => fs::create_dir(dir.path().join("node_modules")).unwrap(),
+                "payload directory" => {
+                    fs::remove_file(&artifact).unwrap();
+                    fs::create_dir(&artifact).unwrap();
+                }
+                "payload symlink" => {
+                    fs::write(target.path(), b"payload").unwrap();
+                    fs::remove_file(&artifact).unwrap();
+                    symlink(target.path(), &artifact).unwrap();
+                }
+                "missing payload" => fs::remove_file(&artifact).unwrap(),
+                _ => {}
+            }
+            let output = Command::new("bash")
+                .args([
+                    "--noprofile",
+                    "--norc",
+                    "-e",
+                    "-o",
+                    "pipefail",
+                    "-c",
+                    CONSUMER_DIGEST_CHECK,
+                ])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("ARTIFACT_SHA256", digest)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), allowed, "{case}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn trusted_consumer_case_table() {
+        for (from, to, allowed) in [
+            ("needs: build", "needs: build", true),
+            ("needs: build", "needs: [build]", true),
+            (
+                "cgwalters-forge/actions/secure-host@PIN",
+                "cgwalters-forge/agentic-job/secure-host@PIN",
+                false,
+            ),
+            (
+                "          shopt -s dotglob nullglob\n          entries=(*)\n          [[ ${#entries[@]} -eq 1 && ${entries[0]} == artifact && -f artifact && ! -L artifact ]]\n",
+                "",
+                false,
+            ),
+            (
+                "      - run: validate artifact",
+                "      - uses: actions/checkout@PIN\n        with: {persist-credentials: false}\n      - run: validate artifact",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "name: out",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "artifact-ids: '${{ needs.build.outputs.id }}', path: out",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "artifact-ids: '${{ needs.build.outputs.id }}', merge-multiple: false",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "artifact-ids: '${{ needs.other.outputs.id }}'",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "artifact-ids: '1,2'",
+                false,
+            ),
+            (
+                "artifact-ids: '${{ needs.build.outputs.id }}'",
+                "artifact-ids: '${{ needs.build.outputs.id || 1 }}'",
+                false,
+            ),
+            ("needs: build", "needs: [build, other]", false),
+            ("needs: build", "needs: []", false),
+            ("needs: build", "Needs: build", false),
+            (
+                "egress: write-policy",
+                "egress: '${{ inputs.egress }}'",
+                false,
+            ),
+            ("egress: write-policy", "egress: off", false),
+            ("egress: write-policy", "config: host.toml", false),
+            ("egress: write-policy", "egress-policy: policy.toml", false),
+            (
+                "9000827ccba6bdab643e8b6fd33ac0654aef8333",
+                "0123456789abcdef0123456789abcdef01234567",
+                false,
+            ),
+            (
+                "      - shell: bash",
+                "      - run: echo before\n      - shell: bash",
+                false,
+            ),
+            (
+                "      - shell: bash",
+                "      - if: false\n        shell: bash",
+                false,
+            ),
+            (
+                "      - shell: bash",
+                "      - continue-on-error: true\n        shell: bash",
+                false,
+            ),
+            (
+                "      - shell: bash",
+                "      - working-directory: out\n        shell: bash",
+                false,
+            ),
+            ("      - shell: bash", "      - shell: sh", false),
+            (
+                "| sha256sum --check --strict -",
+                "| sha256sum --check --strict - || true",
+                false,
+            ),
+            (
+                "ARTIFACT_SHA256:",
+                "LD_PRELOAD: evil, ARTIFACT_SHA256:",
+                false,
+            ),
+            (
+                "      - run: validate artifact",
+                "      - if: always()\n        run: validate artifact",
+                false,
+            ),
+            (
+                "      - run: validate artifact",
+                "      - run: echo ${{ needs.build.outputs.digest }}",
+                false,
+            ),
+            (
+                "      - run: validate artifact",
+                "      - run: agentic-job run",
+                false,
+            ),
+            (
+                "    environment: release",
+                "    environment: release\n    env: {BASH_ENV: artifact}",
+                false,
+            ),
+            (
+                "permissions: {}",
+                "permissions: {}\nenv: {NODE_OPTIONS: artifact}",
+                false,
+            ),
+            (
+                "    environment: release",
+                "    environment: release\n    defaults: {run: {shell: sh}}",
+                false,
+            ),
+        ] {
+            let text = CONSUMER_EXAMPLE
+                .replace(from, to)
+                .replace("@PIN", &format!("@{PIN}"));
+            let mut fixture = yaml::parse(&text).unwrap();
+            fixture["jobs"]["other"] = serde_json::json!({
+                "permissions": {},
+                "uses": format!("{REUSABLE_WORKFLOW}@{PIN}")
+            });
+            let problems = check_workflow(&fixture);
+            assert_eq!(problems.is_empty(), allowed, "{from} -> {to}: {problems:?}");
+        }
+    }
 
     #[test]
     fn secure_host_inputs_fail_closed() {
