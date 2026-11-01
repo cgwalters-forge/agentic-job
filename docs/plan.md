@@ -27,6 +27,17 @@ That is a test fixture pin, not a claim that the old deployment is unchanged.
 
 ## Open work
 
+The secure-host image holds the secure-host binary and no agent code
+([#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070)),
+but only CI runs such an image yet. After the next release publishes
+one: move cgwalters-forge/actions/secure-host's pin to it and the
+forwarder's with it; then have `agent.yml` and `example-compose.yml`
+run `sandbox prepare` and write `[sandbox.prepared]` whatever the image
+(such an image refuses a job's file without it), call the binary
+`secure-host` in the examples and the run action, and drop its
+`agentic-job` names in the image and on the host. `setup.tools` still
+needs `sandbox setup`, which such an image does not run.
+
 With a merge queue, restore hosted admission coverage for the event caller,
 the review verdict and dispatch's review profile: PRs skip E2E and merge groups
 exercise only the event caller's policy refusal instead. Use a trusted, human-approved execution path

@@ -169,6 +169,7 @@ mod tests {
             "2",
         ],
         &["sandbox", "setup", "--config", "c.toml"],
+        &["sandbox", "prepare", "--config", "c.toml"],
         &["sandbox", "check"],
         &["check-key", "--config", "c.toml"],
         &["register", "--config", "c.toml", "--output", "out"],
@@ -342,7 +343,6 @@ mod tests {
                 "--deny-runner-reads",
             ],
             &["inference", "/tmp/secure-host/config.toml"],
-            &["image", "/tmp/secure-host/config.toml"],
         ];
         for args in lines {
             Cli::try_parse_from(["agentic-job", "secure-host"].iter().chain(*args))
@@ -352,7 +352,8 @@ mod tests {
             &["secure-host"][..],
             &["secure-host", "world-write"],
             &["secure-host", "inference"],
-            &["secure-host", "image"],
+            // The image's entrypoint is the secure-host binary's.
+            &["secure-host", "image", "/tmp/secure-host/config.toml"],
             &["secure-host", "supported", "/etc/os-release"],
         ] {
             assert!(
