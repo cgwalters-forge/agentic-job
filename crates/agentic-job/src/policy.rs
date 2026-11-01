@@ -776,18 +776,25 @@ files = ["CONTRIBUTING.md", "AGENTS.md"]
     }
 
     /// The safe-outputs library's tests check against these policies, as
-    /// files: they are what `policy` compiles, less the domain list.
+    /// files: they are what `policy` compiles, less the domain list, and
+    /// a push to a fork's is the push policy with its `push_repo`.
     #[test]
     fn library_fixtures_are_what_policy_compiles() {
         let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../safe-outputs/tests/data");
-        for (file, compiled) in [
-            ("policy.json", policy()),
-            ("push-policy.json", push_policy()),
+        for (file, push_repo, compiled) in [
+            ("policy.json", None, policy()),
+            ("push-policy.json", None, push_policy()),
+            (
+                "push-policy.json",
+                Some("bot/bootc"),
+                push_policy_to("bot/bootc"),
+            ),
         ] {
             let text = std::fs::read_to_string(data.join(file)).unwrap();
             let mut fixture: Policy = serde_json::from_str(&text).unwrap();
             fixture.allowed_domains = link_domains().to_vec();
-            assert_eq!(fixture, compiled, "{file}");
+            fixture.push_repo = push_repo.map(str::to_owned);
+            assert_eq!(fixture, compiled, "{file} {push_repo:?}");
         }
     }
 

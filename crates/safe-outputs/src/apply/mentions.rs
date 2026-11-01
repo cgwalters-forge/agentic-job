@@ -55,7 +55,9 @@ static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid notification pattern")
 });
 
-pub(super) fn filter(body: &str, forge: &str) -> String {
+/// BODY with no mention, reference or (on GitLab) quick action left
+/// that would notify or act: FORGE is `github`, `forgejo` or `gitlab`.
+pub fn filter(body: &str, forge: &str) -> String {
     let syntax = SYNTAX
         .iter()
         .find(|syntax| syntax.forge == forge)

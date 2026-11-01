@@ -20,13 +20,12 @@ use serde_json::{Value, json};
 use super::git::{self, Git, Push};
 use super::{
     BranchPush, Close, CommitStatus, Kind, LabelChange, Made, NewIssue, Op, Publisher, PullRequest,
-    STATUS_CONTEXT,
 };
 
 /// The most of a response read: what a comment or pull request returns.
-pub(super) const MAX_RESPONSE: u64 = 1 << 20;
+pub const MAX_RESPONSE: u64 = 1 << 20;
 
-pub(super) const TIMEOUT: Duration = Duration::from_secs(60);
+pub const TIMEOUT: Duration = Duration::from_secs(60);
 
 const GET: &str = "GET";
 const POST: &str = "POST";
@@ -281,7 +280,7 @@ pub(super) fn server<'a>(server: &'a str, allow_http: &[String]) -> Result<&'a s
                 .parse::<std::net::SocketAddr>()
                 .is_ok_and(|address| address.ip().is_loopback());
         ensure!(
-            loopback || crate::policy::allows_http(allow_http, authority),
+            loopback || crate::contract::allows_http(allow_http, authority),
             "--server requires HTTPS except for literal loopback addresses or a host named in the bounds' allow_http"
         );
     }
@@ -731,6 +730,7 @@ impl Forgejo {
             authorization: format!("token {}", self.token),
             token: &self.token,
             extra_secrets: Vec::new(),
+            committer: (&pr.committer.name, &pr.committer.email),
         };
         git.push(
             &Push {
@@ -931,6 +931,7 @@ impl Publisher for Forgejo {
             authorization: format!("token {}", self.token),
             token: &self.token,
             extra_secrets: Vec::new(),
+            committer: (&push.committer.name, &push.committer.email),
         };
         let fork = self.remote(&push.push_repo);
         git.push(
@@ -962,7 +963,7 @@ impl Publisher for Forgejo {
                 "state": status.state.name(),
                 "target_url": status.target_url,
                 "description": status.state.description(),
-                "context": STATUS_CONTEXT,
+                "context": status.context,
             })),
         )?;
         answer["url"]
@@ -1044,102 +1045,18 @@ impl Publisher for Forgejo {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
+mod tests {
     use std::path::Path;
-    use std::process::Command;
     use std::sync::mpsc;
 
     use super::super::git::SHOWN_CHARS;
+    use super::super::testing::{
+        Request, STATUS_CONTEXT, git_out, mock, pull_request_branch, repository, repository_with,
+        serve, sh,
+    };
     use super::*;
 
     const TOKEN: &str = "test-token-not-secret";
-
-    /// What the mock forge was sent: the request line, the authorization
-    /// header and the body.
-    #[derive(Debug)]
-    pub(in crate::apply) struct Request {
-        pub line: String,
-        pub authorization: String,
-        /// `X-GitHub-Api-Version`, empty without one.
-        pub api_version: String,
-        pub body: Value,
-    }
-
-    /// A forge that answers each request with STATUS and BODY in turn.
-    pub(in crate::apply) fn mock(answers: Vec<(u16, String)>) -> (String, mpsc::Receiver<Request>) {
-        let mut answers = answers.into_iter();
-        serve(answers.len(), move |_| answers.next().unwrap())
-    }
-
-    /// A forge that answers COUNT requests, each with the status and body
-    /// ANSWER gives for it.
-    pub(in crate::apply) fn serve(
-        count: usize,
-        mut answer: impl FnMut(&Request) -> (u16, String) + Send + 'static,
-    ) -> (String, mpsc::Receiver<Request>) {
-        serve_with_headers(count, move |request| {
-            let (status, body) = answer(request);
-            (status, String::new(), body)
-        })
-    }
-
-    pub(in crate::apply) fn serve_with_headers(
-        count: usize,
-        mut answer: impl FnMut(&Request) -> (u16, String, String) + Send + 'static,
-    ) -> (String, mpsc::Receiver<Request>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let server = format!("http://{}", listener.local_addr().unwrap());
-        let (sent, received) = mpsc::channel();
-        std::thread::spawn(move || {
-            for _ in 0..count {
-                let (stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let (mut authorization, mut api_version, mut length) =
-                    (String::new(), String::new(), 0);
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header == "\r\n" {
-                        break;
-                    }
-                    let (name, value) = header.split_once(':').unwrap();
-                    match name.to_ascii_lowercase().as_str() {
-                        "authorization" => authorization = value.trim().to_owned(),
-                        "x-github-api-version" => api_version = value.trim().to_owned(),
-                        "content-length" => length = value.trim().parse().unwrap(),
-                        _ => {}
-                    }
-                }
-                let mut request = vec![0; length];
-                reader.read_exact(&mut request).unwrap();
-                let request = Request {
-                    line: line.trim().to_owned(),
-                    authorization,
-                    api_version,
-                    body: if request.is_empty() {
-                        Value::Null
-                    } else {
-                        serde_json::from_slice(&request).unwrap()
-                    },
-                };
-                let (status, headers, body) = answer(&request);
-                // A test that stopped listening has its answer already.
-                let _ = sent.send(request);
-                let mut stream = stream;
-                write!(
-                    stream,
-                    "HTTP/1.1 {status} X\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
-            }
-        });
-        (server, received)
-    }
 
     fn forgejo(server: &str) -> Forgejo {
         Forgejo::new(&format!("{server}/"), "owner/name", TOKEN.to_owned(), &[]).unwrap()
@@ -1188,7 +1105,8 @@ pub(super) mod tests {
             repo: "owner/name",
             ..super::super::tests::target(Some(5))
         };
-        let ops = super::super::plan(checked.path(), &policy, &target).unwrap();
+        let upload = super::super::tests::upload(checked.path());
+        let ops = super::super::plan(&upload, &policy, &target).unwrap();
         let super::super::Op::Comment { body, .. } = &ops[0] else {
             panic!("expected a planned comment");
         };
@@ -1205,7 +1123,7 @@ pub(super) mod tests {
         assert_eq!(request.authorization, format!("token {TOKEN}"));
         assert_eq!(
             request.body,
-            json!({"body": format!("Done. @\u{200b}user @\u{200b}org/team !\u{200b}12\n\n> Generated by [agentic-job]({})", target.run_url)})
+            json!({"body": format!("Done. @\u{200b}user @\u{200b}org/team !\u{200b}12\n\n> Generated by [example-ci]({})", target.run_url)})
         );
     }
 
@@ -1312,90 +1230,6 @@ pub(super) mod tests {
         }
     }
 
-    /// The message of the patch's commit, with trailers a merger reads.
-    const MESSAGE: &str = "Change things\n\nWhy, at  length.\n\n\
-        Generated-by: https://github.com/cgwalters/#llms\nCloses #5\n";
-
-    pub(in crate::apply) fn sh(dir: &Path, args: &[&str]) -> String {
-        String::from_utf8(git_out(dir, args))
-            .unwrap()
-            .trim()
-            .to_owned()
-    }
-
-    fn git_out(dir: &Path, args: &[&str]) -> Vec<u8> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@example.org",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output.stdout
-    }
-
-    /// A bare repository with one commit on main, an empty bare fork of
-    /// it, and the pull request of a patch on it adding `src/x` and a
-    /// line to the README. Every line ends with EOL.
-    fn repository_with(eol: &str) -> (tempfile::TempDir, PullRequest) {
-        let root = tempfile::tempdir().unwrap();
-        let work = root.path().join("work");
-        std::fs::create_dir(&work).unwrap();
-        sh(&work, &["init", "-q"]);
-        std::fs::write(work.join("README"), format!("hi{eol}")).unwrap();
-        sh(&work, &["add", "README"]);
-        sh(&work, &["commit", "-q", "-m", "Start"]);
-        let base = sh(&work, &["rev-parse", "HEAD"]);
-        std::fs::write(work.join("README"), format!("hi{eol}more{eol}")).unwrap();
-        std::fs::create_dir(work.join("src")).unwrap();
-        std::fs::write(work.join("src/x"), format!("x{eol}")).unwrap();
-        sh(&work, &["add", "README", "src/x"]);
-        let message = root.path().join("message");
-        std::fs::write(&message, MESSAGE).unwrap();
-        sh(&work, &["commit", "-q", "-F", message.to_str().unwrap()]);
-        let patch = sh(&work, &["format-patch", "-1", "--stdout"]) + "\n";
-        sh(&work, &["reset", "-q", "--hard", "HEAD~"]);
-        let bare = root.path().join("owner/name.git");
-        std::fs::create_dir_all(&bare).unwrap();
-        sh(&bare, &["init", "-q", "--bare"]);
-        sh(
-            &work,
-            &["push", "-q", bare.to_str().unwrap(), "HEAD:refs/heads/main"],
-        );
-        let fork = root.path().join("fork/name.git");
-        std::fs::create_dir_all(&fork).unwrap();
-        sh(&fork, &["init", "-q", "--bare"]);
-        let pr = PullRequest {
-            base: "main".into(),
-            base_commit: base,
-            push_repo: "fork/name".into(),
-            private: false,
-            branch: "agent-run-7".into(),
-            title: "WIP: Fix it".into(),
-            body: "Why.".into(),
-            draft: true,
-            patch: patch.into_bytes(),
-            files: vec!["README".into(), "src/x".into()],
-        };
-        (root, pr)
-    }
-
-    pub(in crate::apply) fn repository() -> (tempfile::TempDir, PullRequest) {
-        repository_with("\n")
-    }
-
     #[test]
     fn opens_a_pull_request_from_a_fork() {
         let (root, pr) = repository();
@@ -1441,13 +1275,13 @@ pub(super) mod tests {
         assert_eq!(sh(&bare, &["show", "agent-run-7:src/x"]), "x");
         assert_eq!(
             sh(&bare, &["log", "-1", "--format=%an %cn", "agent-run-7"]),
-            "t agentic-job"
+            "t example-ci"
         );
         // The commit's message is the patch's, byte for byte: the bytes
         // of the commit object after its headers.
         let commit = git_out(&bare, &["cat-file", "commit", "agent-run-7"]);
         let at = commit.windows(2).position(|w| w == b"\n\n").unwrap();
-        assert_eq!(&commit[at + 2..], MESSAGE.as_bytes());
+        assert_eq!(&commit[at + 2..], super::super::testing::MESSAGE.as_bytes());
 
         // A second attempt finds the branch there, and opens nothing.
         let err = format!("{:#}", forgejo.open_pull_request(&pr).unwrap_err());
@@ -1839,7 +1673,8 @@ pub(super) mod tests {
                 repo: "owner/name",
                 ..super::super::tests::target(None)
             };
-            let result = super::super::plan(checked.path(), &policy, &target)
+            let upload = super::super::tests::upload(checked.path());
+            let result = super::super::plan(&upload, &policy, &target)
                 .map_err(|errors| anyhow::anyhow!("{errors:?}"))
                 .and_then(|ops| super::super::publish(&ops, &forgejo(&server)));
             assert_eq!(result.is_ok(), case == "authorized", "{case}: {result:?}");
@@ -1912,7 +1747,8 @@ pub(super) mod tests {
                 repo: "owner/name",
                 ..super::super::tests::target(None)
             };
-            let ops = super::super::plan(checked.path(), &policy, &target).unwrap();
+            let upload = super::super::tests::upload(checked.path());
+            let ops = super::super::plan(&upload, &policy, &target).unwrap();
             let result = super::super::publish(&ops, &forgejo(&server));
             let allowed = count <= 1000 && count / page_size < MAX_LABEL_PAGES + 1;
             assert_eq!(result.is_ok(), allowed, "{count}/{page_size}: {result:?}");
@@ -2258,33 +2094,6 @@ pub(super) mod tests {
         })
     }
 
-    /// The repository of [`repository`], whose fork holds pull request 9's
-    /// branch `agent-run-7` at the patch's base, and the push of the patch
-    /// on it.
-    pub(in crate::apply) fn pull_request_branch() -> (tempfile::TempDir, BranchPush) {
-        let (root, pr) = repository();
-        let fork = root.path().join("fork/name.git");
-        sh(
-            &root.path().join("owner/name.git"),
-            &[
-                "push",
-                "-q",
-                fork.to_str().unwrap(),
-                "main:refs/heads/agent-run-7",
-            ],
-        );
-        let push = BranchPush {
-            number: 9,
-            push_repo: pr.push_repo,
-            private: false,
-            branch: pr.branch,
-            head: pr.base_commit,
-            patch: pr.patch,
-            files: pr.files,
-        };
-        (root, push)
-    }
-
     /// A public repository, its public fork and pull request 9, PULL. It
     /// knows only the commit KNOWN, takes every write, and fails each of
     /// FAILING with the token in its answer.
@@ -2480,6 +2289,7 @@ pub(super) mod tests {
                     sha: sha.clone(),
                     state: super::super::State::Success,
                     target_url: RUN_URL.to_owned(),
+                    context: STATUS_CONTEXT.to_owned(),
                 }),
             ];
             let result = super::super::publish(&ops, &forgejo);
@@ -2512,7 +2322,7 @@ pub(super) mod tests {
                     assert_eq!(sh(&bare, &["show", "agent-run-7:src/x"]), "x", "{what}");
                     assert_eq!(
                         sh(&bare, &["log", "-1", "--format=%an %cn", "agent-run-7"]),
-                        "t agentic-job",
+                        "t example-ci",
                         "{what}"
                     );
                 }
@@ -2558,6 +2368,7 @@ pub(super) mod tests {
                     sha: sha.clone(),
                     state,
                     target_url: RUN_URL.to_owned(),
+                    context: STATUS_CONTEXT.to_owned(),
                 })
                 .unwrap();
             assert_eq!(url, STATUS_URL);
@@ -2569,7 +2380,7 @@ pub(super) mod tests {
             assert_eq!(
                 request.body,
                 json!({"state": name, "target_url": RUN_URL, "description": description,
-                    "context": "agentic-job"})
+                    "context": STATUS_CONTEXT})
             );
         }
     }

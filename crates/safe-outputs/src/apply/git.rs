@@ -12,12 +12,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 
 /// How much of a refusal's text an error shows.
-pub(super) const SHOWN_CHARS: usize = 300;
-
-/// The committer of the pushed commit. The patch keeps its author, which
-/// check holds to the bounds' `commit_author`; the committer names the
-/// tool, at an address that cannot receive mail (RFC 2606).
-const COMMITTER: (&str, &str) = ("agentic-job", "agentic-job@invalid");
+pub const SHOWN_CHARS: usize = 300;
 
 /// Git's environment, which this sets afresh for each command, the
 /// variables that could point it at another repository or configuration,
@@ -38,7 +33,7 @@ const GIT_ENV_REMOVED: &[&str] = &[
 /// TEXT as an error shows it: without any of SECRETS, replaced in their
 /// order, then cut, so that no part of a secret is left where the cut
 /// falls in it.
-pub(super) fn shown(secrets: &[&str], text: &str) -> String {
+pub fn shown(secrets: &[&str], text: &str) -> String {
     secrets
         .iter()
         .filter(|secret| !secret.is_empty())
@@ -51,16 +46,19 @@ pub(super) fn shown(secrets: &[&str], text: &str) -> String {
 }
 
 /// Git with a token.
-pub(super) struct Git<'a> {
+pub struct Git<'a> {
     /// The `Authorization` header git sends: the forge's own scheme.
     pub authorization: String,
     /// Scrubbed from whatever git says.
     pub token: &'a str,
     pub extra_secrets: Vec<String>,
+    /// Who commits, by name and email, unless a push says otherwise: the
+    /// caller's ([`super::Provenance::committer`]).
+    pub committer: (&'a str, &'a str),
 }
 
 /// One push of a checked patch.
-pub(super) struct Push<'a> {
+pub struct Push<'a> {
     /// What git fetches `base` from: the repository, never the fork, for
     /// a new branch; the fork, for its own branch.
     pub from: &'a str,
@@ -76,7 +74,7 @@ pub(super) struct Push<'a> {
     /// What `branch` must hold in `to`, `base_commit` too: None for a new
     /// branch, which must not exist.
     pub head: Option<&'a str>,
-    /// Who commits it, now; by default [`COMMITTER`] at the patch's
+    /// Who commits it, now; by default [`Git::committer`] at the patch's
     /// author date, so that a retry makes the very same commit.
     pub committer: Option<(&'a str, &'a str)>,
     /// Commits as `committer` at the patch's author date too.
@@ -89,7 +87,7 @@ pub(super) struct Push<'a> {
 /// The branch a push is for is no longer at its head: someone pushed to
 /// it since, and nothing is pushed over that.
 #[derive(Debug)]
-pub(super) struct Moved {
+pub struct Moved {
     target: String,
     head: String,
 }
@@ -109,7 +107,7 @@ impl std::error::Error for Moved {}
 /// The files a patch changes hold more than [`Push::max_changed_kb`] once
 /// applied, in gh-aw's words.
 #[derive(Debug)]
-pub(super) struct TooLarge {
+pub struct TooLarge {
     kb: u64,
     max_kb: u64,
 }
@@ -130,7 +128,7 @@ impl Git<'_> {
     /// What git's errors are scrubbed of, longest first: the whole header
     /// value, its credential (the base64 of a `Basic` one, which a server
     /// error may echo and anyone can decode), and the raw token.
-    pub(super) fn secrets(&self) -> Vec<&str> {
+    pub fn secrets(&self) -> Vec<&str> {
         let credential = self
             .authorization
             .split_once(' ')
@@ -144,7 +142,7 @@ impl Git<'_> {
     /// Runs git in DIR with only the configuration given here: not the
     /// job's (a credential helper, a URL rewrite), no hooks, no redirect.
     pub fn run(&self, dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
-        self.run_as(dir, args, input, COMMITTER)
+        self.run_as(dir, args, input, self.committer)
     }
 
     /// [`Git::run`], committing as COMMITTER.
@@ -370,6 +368,7 @@ mod tests {
                 authorization: authorization.clone(),
                 token: &token,
                 extra_secrets: Vec::new(),
+                committer: ("ci", "ci@example.invalid"),
             };
             let echoes = [
                 format!("Authorization: {authorization}"),

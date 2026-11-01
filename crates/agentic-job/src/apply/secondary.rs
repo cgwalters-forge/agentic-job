@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 
 use super::git::Push;
 pub use super::github::Github;
-use super::{COMMIT_RE, Report, footer, mentions, owner, read_report, with_footer};
+use super::{COMMIT_RE, PROVENANCE, Report, footer, mentions, owner, read_report, with_footer};
 use crate::check::{self, PatchReading, handler_limits};
 use crate::exit::Exit;
 use crate::files;
@@ -80,7 +80,7 @@ pub fn plan(
     run_url: &str,
 ) -> Result<Option<PullRequest>, Vec<String>> {
     let refuse = |error: String| Err(vec![error]);
-    let report = match read_report(checked) {
+    let report = match read_report(&super::upload(checked)) {
         Ok(report) => report,
         Err(err) => return refuse(format!("{err:#}")),
     };
@@ -133,7 +133,7 @@ fn pull_request(
     if policy.forge != Forge::Github {
         errors.push("a secondary pull request off GitHub".to_owned());
     }
-    if let Err(err) = footer(run_url) {
+    if let Err(err) = footer(PROVENANCE.name, run_url) {
         errors.push(format!("{err:#}"));
     }
     // The base and the draft flag, which only the policy decides.
@@ -220,7 +220,7 @@ fn pull_request(
                 base_commit,
                 branch,
                 title: title.to_owned(),
-                body: with_footer(&mentions::filter(body, "github"), run_url),
+                body: with_footer(&mentions::filter(body, "github"), PROVENANCE.name, run_url),
                 patch,
                 files,
             })
@@ -313,7 +313,9 @@ pub fn run(args: &Args) -> Result<Exit> {
 mod tests {
     use std::time::Duration;
 
-    use super::super::forgejo::tests::{mock, repository, sh};
+    use safe_outputs::apply::testing::{mock, repository, sh};
+
+    use super::super::REPORT_FILE;
     use super::super::github::FORK_TRIES;
     use super::*;
     use crate::check::BASE_COMMIT_HEADER;
@@ -326,7 +328,7 @@ mod tests {
     const TOKEN: &str = "test-token-not-secret";
 
     fn policy() -> Policy {
-        let mut policy = super::super::tests::policy();
+        let mut policy = crate::policy::tests::policy();
         policy.secondary_pull_request = Some(Secondary {
             repo: "o/tool".into(),
             clone_url: "https://github.com/o/tool".into(),
@@ -364,10 +366,18 @@ mod tests {
             "body": "Why. @user", "branch": BRANCH, "draft": true})
     }
 
-    /// The run's own pull request's upload, as apply's test fakes make
-    /// it, with the secondary request and its patch beside.
+    /// An upload check accepted, of ITEMS: the run's own patch is not
+    /// read here.
+    fn accepted(items: &[Value]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let report = json!({"ok": true, "errors": [], "items": items});
+        std::fs::write(dir.path().join(REPORT_FILE), report.to_string()).unwrap();
+        dir
+    }
+
+    /// The upload of ITEMS, with the secondary request's patch beside.
     fn checked(items: &[Value]) -> tempfile::TempDir {
-        let dir = super::super::tests::checked(items);
+        let dir = accepted(items);
         let patch = patch();
         std::fs::create_dir(dir.path().join(PATCH_DIR)).unwrap();
         std::fs::write(dir.path().join(PATCH_DIR).join(PATCH_NAME), &patch).unwrap();
@@ -408,7 +418,7 @@ mod tests {
         );
         // Nothing to open without a secondary request, a policy that
         // names one or not.
-        let dir = super::super::tests::checked(&[json!({"type": "add_comment", "body": "x"})]);
+        let dir = accepted(&[json!({"type": "add_comment", "body": "x"})]);
         assert_eq!(plan(dir.path(), &policy(), RUN_ID, RUN), Ok(None));
         let mut without = policy();
         without.secondary_pull_request = None;

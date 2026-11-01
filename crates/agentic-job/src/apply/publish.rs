@@ -46,9 +46,9 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use super::git::{Moved, Push, TooLarge};
-use super::github::{Github, GithubPublisher, Refused};
+use super::github::{ACTIONS_COMMITTER, Github, GithubPublisher, Refused};
 use super::{
-    ADD_COMMENT, ADD_LABELS, CLOSE_ISSUE, CLOSE_PULL_REQUEST, CREATE_ISSUE, Close,
+    ADD_COMMENT, ADD_LABELS, CLOSE_ISSUE, CLOSE_PULL_REQUEST, CREATE_ISSUE, Close, Committer,
     Kind as ItemKind, Made, Publisher, PullRequest, REMOVE_LABELS, Report, read_report,
 };
 use crate::check::{self, handler_limits::LINK_RE};
@@ -1440,7 +1440,7 @@ fn plan(
                 });
             }
             if report.is_none() {
-                report = Some(read_report(checked)?);
+                report = Some(read_report(&super::upload(checked))?);
             }
             let report = report.as_ref().context("check's report")?;
             if output == PUSH_TO_PULL_REQUEST_BRANCH {
@@ -1616,6 +1616,11 @@ fn pull_request(
             draft,
             patch: bytes,
             files: patch.files.clone(),
+            // What the GitHub publisher commits as: the job's identity.
+            committer: Committer {
+                name: ACTIONS_COMMITTER.0.to_owned(),
+                email: ACTIONS_COMMITTER.1.to_owned(),
+            },
         },
         failure,
     ))
@@ -3114,7 +3119,7 @@ fn push_outcome(
             patch: &push.patch,
             files: &push.files,
             head: Some(&push.head),
-            committer: Some(super::github::ACTIONS_COMMITTER),
+            committer: Some(ACTIONS_COMMITTER),
             // So that the commit is the same whenever it is made.
             at_author_date: true,
             max_changed_kb: Some(push.max_kb),
@@ -4510,9 +4515,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::super::REPORT_FILE;
-    use super::super::forgejo::tests::{Request, serve, sh};
     use super::*;
     use crate::check::BASE_COMMIT_HEADER;
+    use safe_outputs::apply::testing::{Request, serve, sh};
 
     const SERVER: &str = "https://github.com";
     const REPO: &str = "owner/repo";

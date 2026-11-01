@@ -2,17 +2,21 @@
 //! ([`vocabulary`]), the collector that validates and sanitizes an
 //! `outputs.jsonl` as gh-aw's does ([`collect`]), the policy a run's
 //! outputs are held to ([`contract`]) and the bounds it is compiled within
-//! ([`bounds`]), and the check of a hand-back against that policy
-//! ([`check`]).
+//! ([`bounds`]), the check of a hand-back against that policy
+//! ([`check`]), and the publication of what check accepted to Forgejo and
+//! GitLab ([`apply`]).
 //!
-//! It is given text and settings, and reads no file, environment or
-//! credential: event admission, compiling a request into a policy, run
-//! identity, artifacts, checkpoints, memory, secret scanning and
-//! credential acquisition belong to its caller (agentic-job's `policy`,
-//! `event`, `collect`, `check` and `handback check`).
+//! It is given text, settings and a token, and reads no environment or
+//! credential of its own: event admission, compiling a request into a
+//! policy, run identity, artifacts, checkpoints, memory, secret scanning,
+//! reading the hand-back and credential acquisition belong to its caller
+//! (agentic-job's `policy`, `event`, `collect`, `check`, `apply` and
+//! `handback check`). Only [`apply`] reaches out, to the forge it is given
+//! and with git in a checkout of its own.
 //! docs/safe-outputs.md#library-boundary lists what moved here and what
 //! stays.
 
+pub mod apply;
 pub mod bounds;
 pub mod check;
 pub mod collect;

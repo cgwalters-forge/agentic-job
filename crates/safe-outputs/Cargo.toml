@@ -12,13 +12,19 @@ publish.workspace = true
 workspace = true
 
 [features]
-# `Kind` as a command-line value, for a caller that takes it as one.
+# `Kind`, and apply's `Forge`, `Kind` and `State`, as command-line
+# values, for a caller that takes them as ones.
 clap = ["dep:clap"]
+# apply's mock forge and test repositories (`apply::testing`), for a
+# caller's tests of its own adapters.
+test-support = []
 
 # Nothing of agentic-job or secure-host: callers read the policy, the
 # hand-back and their credentials, and give this the text and settings.
 [dependencies]
 anyhow.workspace = true
+# GitLab's git credential (apply::gitlab).
+base64.workspace = true
 # A replacement commit's Date header (check::replacement).
 chrono.workspace = true
 clap = { workspace = true, optional = true }
@@ -29,7 +35,12 @@ serde.workspace = true
 # here, not left to whatever else the binary links (agent-client-protocol
 # brings `preserve_order` to agentic-job).
 serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
+# The checkout apply's push is made in (apply::git).
+tempfile.workspace = true
 # A bounds file's `[trigger]` table, carried unread where its caller
 # gives no type of its own.
 toml.workspace = true
 unicode-normalization.workspace = true
+# The Forgejo and GitLab APIs (apply::forgejo, apply::gitlab), with the
+# token the caller gives.
+ureq.workspace = true

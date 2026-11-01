@@ -997,9 +997,9 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
 
-    use super::super::forgejo::tests::{Request, serve};
     use super::super::github::tests::TOKEN;
     use super::*;
+    use safe_outputs::apply::testing::{Request, serve};
 
     const ACTIONS: &str = JOB_TOKEN_AUTHOR;
     const APP: &str = "unrelated-app[bot]";

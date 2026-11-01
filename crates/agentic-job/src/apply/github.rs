@@ -693,6 +693,7 @@ impl Github {
             authorization: format!("Basic {basic}"),
             token: &self.token,
             extra_secrets: self.secrets(),
+            committer: super::PROVENANCE.committer,
         }
     }
 
@@ -951,8 +952,8 @@ pub(super) mod tests {
     use std::collections::BTreeMap;
     use std::sync::mpsc;
 
-    use super::super::forgejo::tests::{Request, serve};
     use super::*;
+    use safe_outputs::apply::testing::{Request, serve};
 
     pub(in crate::apply) const TOKEN: &str = "test-token-not-secret";
 
@@ -1104,7 +1105,7 @@ pub(super) mod tests {
     fn pages_follow_the_link_header() {
         use std::sync::{Arc, Mutex};
 
-        use super::super::forgejo::tests::serve_with_headers;
+        use safe_outputs::apply::testing::serve_with_headers;
 
         for (next, want) in [
             ("{API}/l?per_page=100&page=2", Ok(vec![1, 2])),
