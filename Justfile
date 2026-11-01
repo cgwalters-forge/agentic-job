@@ -67,12 +67,6 @@ publication-corpus:
     AGENTIC_JOB_TEST_GH_AW="$scratch/gh-aw" AGENTIC_JOB_TEST_GITHUB_SCRIPT="$scratch/github-script" AGENTIC_JOB_BLESS_PUBLICATION=1 \
         cargo test --locked -p agentic-job --test publication -- --ignored
 
-runner-egress-test:
-    node --test workflow/runner-egress/parse.test.mjs
-
-runner-egress-fixture:
-    node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP + "/runner-egress-fixture.txt", "Outbound observation fixture\n")'
-
 # Privileged integration proof: only on a fresh disposable supported host.
 # The checkout's binary loads the policy, as secure-host has it do.
 world-write-evidence out:
