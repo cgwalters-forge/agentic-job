@@ -34,6 +34,9 @@ says what a caller may rely on across versions.
 - The shipped `hosted.toml` installs the distribution's clippy alongside
   cargo and rustfmt for this repository, so sandbox runs can pass Rust
   lint checks without fetching another toolchain.
+- The Rust egress proxy explains destinations in its firewall's denied
+  ranges with 403 and a private/local-network reason in `X-Egress-Denied`,
+  instead of an unexplained 502; `--refuse` and policy denials keep precedence.
 - The run action's "Run the agent" step no longer fails now and then with
   exit 141 when it reads where a secret was found, on runners whose `head`
   is uutils (Ubuntu 26.04).

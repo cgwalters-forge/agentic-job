@@ -112,9 +112,16 @@ fn world_write_failures(view: bool) -> &'static [&'static str] {
     }
 }
 
-/// The cases a layer can mask, which the host without the view runs too.
+/// The case that frees the egress proxy's own user from the network rules.
+const PROXY_USER_CASE: &str = "the rules on the proxy's own user";
+
+/// The cases a layer can mask, which the host without the view runs too,
+/// and the one only mitmproxy, the baseline's proxy, makes observable.
 fn baseline_case(name: &str) -> bool {
-    matches!(name, "cron" | "at" | "the world-write policy")
+    matches!(
+        name,
+        "cron" | "at" | "the world-write policy" | PROXY_USER_CASE
+    )
 }
 
 fn removal_case_enabled(name: &str, view: bool) -> bool {
@@ -140,6 +147,7 @@ fn layered_removal_cases_are_observable() {
         ("cron", true, true),
         ("at", true, true),
         ("the world-write policy", true, true),
+        (PROXY_USER_CASE, true, true),
         ("the runner's home open", false, true),
         ("the user manager's filesystem view", false, true),
     ] {
@@ -1015,8 +1023,17 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
     // same table, and none of the rules below name those uids: the runner
     // reaches the metadata service again (IPv4 only on CI's hosted runner).
     let deny_runner_metadata = config.sandbox.deny_runner_metadata();
+    // The Rust proxy refuses the metadata service's address itself before
+    // connecting, so freeing its uid from the rules is not observable
+    // through it. The baseline host runs mitmproxy, which has no such
+    // check, so it runs PROXY_USER_CASE to prove those rules; removing
+    // mitmproxy (#919) needs a probe that goes around the proxy as its user.
+    let rust_proxy = config.egress.rust_proxy;
     let network_expect = |name: &str, default: &'static [&'static str]| {
         let mut expect = network_case(name, default);
+        if rust_proxy {
+            expect.retain(|id| *id != "egress-proxy-metadata");
+        }
         if deny_runner_metadata {
             expect.push("runner-metadata");
         }
@@ -1048,11 +1065,11 @@ fn cases(config: &Config, runner: &User, entry: &Entry, fixture: &TokenFixture) 
                 },
             ));
         }
-        {
+        if !rust_proxy {
             // Rules that name another uid as the proxy's: the proxy
             // itself is then free to go where the sandbox may not.
             cases.push(Case::new(
-                "the rules on the proxy's own user",
+                PROXY_USER_CASE,
                 &network_expect("PROXY_UNRESTRICTED", PROXY_UNRESTRICTED),
                 move || {
                     let other = Some(proxy_uid + 1);

@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -90,6 +91,48 @@ const PROXY_DENIED_V6: &[&str] = &[
     "fe80::/10",
     "ff00::/8",
 ];
+
+/// Whether an address is in the ranges refused to the egress proxy's uid.
+/// Share the firewall's lists so the proxy can explain a refusal before
+/// trying a connection; this does not replace the firewall rules.
+pub fn proxy_denied(ip: IpAddr) -> bool {
+    static RANGES: LazyLock<Vec<(IpAddr, IpAddr)>> = LazyLock::new(|| {
+        PROXY_DENIED_V4
+            .iter()
+            .chain(PROXY_DENIED_V6)
+            .map(|range| {
+                let (address, prefix) = range.split_once('/').unwrap_or((range, ""));
+                let first: IpAddr = address.parse().expect("valid proxy-denied address");
+                let last = match first {
+                    IpAddr::V4(ip) => {
+                        let prefix = if prefix.is_empty() {
+                            32
+                        } else {
+                            prefix.parse().expect("valid IPv4 prefix")
+                        };
+                        IpAddr::V4(
+                            (ip.to_bits() | u32::MAX.checked_shr(prefix).unwrap_or(0)).into(),
+                        )
+                    }
+                    IpAddr::V6(ip) => {
+                        let prefix = if prefix.is_empty() {
+                            128
+                        } else {
+                            prefix.parse().expect("valid IPv6 prefix")
+                        };
+                        IpAddr::V6(
+                            (ip.to_bits() | u128::MAX.checked_shr(prefix).unwrap_or(0)).into(),
+                        )
+                    }
+                };
+                (first, last)
+            })
+            .collect()
+    });
+    RANGES
+        .iter()
+        .any(|&(first, last)| first <= ip && ip <= last)
+}
 
 /// An endpoint the sandbox user reaches directly, never through the
 /// egress proxy: the inference proxy, so that the run token does not
@@ -462,6 +505,17 @@ pub fn proxy_environment(direct: &[Direct]) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_denied_ranges() {
+        for range in PROXY_DENIED_V4.iter().chain(PROXY_DENIED_V6) {
+            let address = range.split('/').next().unwrap().parse().unwrap();
+            assert!(proxy_denied(address), "{range}");
+        }
+        for address in ["8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(!proxy_denied(address.parse().unwrap()), "{address}");
+        }
+    }
 
     fn direct_of(url: &str) -> Direct {
         Direct::parse(url).unwrap()

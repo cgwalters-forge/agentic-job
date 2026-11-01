@@ -1069,8 +1069,8 @@ pub(crate) fn metadata_request() -> Vec<&'static str> {
     direct(&["-H", "Metadata:true", METADATA_URL])
 }
 
-/// Through it, failing on an error status: the proxy answers 502 when it
-/// cannot connect.
+/// Through it, failing on an error status: the Rust proxy answers 403 for
+/// a private/local destination, or 502 when an allowed connection fails.
 fn proxied<'a>(args: &[&'a str]) -> Vec<&'a str> {
     [CURL, &["--fail"], args].concat()
 }
