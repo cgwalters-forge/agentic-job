@@ -259,7 +259,9 @@ runs:
         # Nothing of such a run is uploaded, its summary included: the
         # place alone, which the log has already, says where to look.
         at=
-        [ ! -e "$JOB_DIR/out/secret-at" ] || at=$(head -c 200 "$JOB_DIR/out/secret-at" | head -n 1)
+        # sed reads to the end: `head -n 1` exiting early can kill the
+        # first head with SIGPIPE (uutils head splices), failing the step.
+        [ ! -e "$JOB_DIR/out/secret-at" ] || at=$(head -c 200 "$JOB_DIR/out/secret-at" | sed -n 1p)
         if [[ "$at" =~ ^(run|transcript|safe-outputs)/[A-Za-z0-9_.+@=,-]+,\ line\ [0-9]+$ ]]; then
           echo "Nothing of this run was uploaded: a secret or a private key is in $at." >> "$GITHUB_STEP_SUMMARY"
           echo "secret-at=$at" >> "$GITHUB_OUTPUT"
