@@ -2098,6 +2098,26 @@ the caller; agentic-job's `collect` reads it with secure-host's
 and the collector at their old paths, so `policy.json`, the wire format,
 the sanitizer's results and every refusal are unchanged.
 
+`decode::decode` is the framing alone, read-only, for a caller that
+admits requests by rules of its own (agent-board's supervisor hand-back,
+[agent-board#507](https://github.com/cgwalters-forge/agent-board/issues/507)).
+Given the bytes of an `outputs.jsonl`, it refuses them past
+`MAX_OUTPUTS_BYTES` before parsing anything, then requires UTF-8, skips
+blank lines and returns each other line in order as its `type` and its
+JSON object as parsed, unchanged and in key order (a key given twice
+keeps its last value, as in JavaScript). A line that is not JSON,
+not an object, or without a string `type` refuses the whole input. It
+sanitizes nothing and knows no type, limit or forge; its errors
+(`DecodeError`) name the line and the kind of failure and quote nothing,
+since the input may hold a credential. Lines are numbered as gh-aw's
+collector numbers them, after JavaScript's whitespace is trimmed from
+both ends of the input; each line is trimmed the same way, so CRLF is
+taken.
+`collect` and `collect_bytes` frame with the same functions, then refuse
+a malformed line in gh-aw's words and go on to the next, so the two
+cannot drift apart: the collector is `decode`'s framing plus gh-aw's
+per-type validation and sanitizing.
+
 Staying in agentic-job: the `collect` command's arguments, exit state and
 printing, and the configuration it builds from `policy.json` (a
 secondary pull request's `max` added to `create_pull_request`'s)
