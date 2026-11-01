@@ -6172,6 +6172,70 @@ fn dispatch_takes_only_task_repo_item_item_repo_kind_and_status_comment() {
     );
 }
 
+const FORGEJO_DISPATCH: &str = "workflow/forgejo/dispatch.yml";
+
+/// The Forgejo caller takes agent-board's job plan as strings, names runs
+/// as its in-flight listing matches them, never cancels or shares a
+/// concurrency group across items, and takes runners and configuration
+/// only from the caller's variables, with no credential.
+#[test]
+fn forgejo_dispatch_takes_agent_boards_plan() {
+    let text = workflow(FORGEJO_DISPATCH);
+    let doc = definition(FORGEJO_DISPATCH);
+    let inputs = doc["on"]["workflow_dispatch"]["inputs"].as_hash().unwrap();
+    let names: Vec<&str> = inputs.keys().map(|k| k.as_str().unwrap()).collect();
+    assert_eq!(names, ["task", "repo", "item", "kind", "pool", "base"]);
+    for (name, input) in inputs {
+        assert_eq!(input["type"].as_str(), Some("string"), "{name:?}");
+    }
+    assert_eq!(
+        doc["run-name"].as_str(),
+        Some("${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }} (${{ inputs.pool }})")
+    );
+    let concurrency = &doc["concurrency"];
+    assert_eq!(concurrency["cancel-in-progress"].as_bool(), Some(false));
+    let group = concurrency["group"].as_str().unwrap();
+    for part in ["inputs.kind", "inputs.repo", "inputs.item"] {
+        assert!(group.contains(part), "{group}");
+    }
+    let jobs = doc["jobs"].as_hash().unwrap();
+    for (name, job) in jobs {
+        assert!(job["concurrency"].is_badvalue(), "{name:?}: own group");
+        assert_eq!(
+            job["runs-on"].as_str(),
+            Some("${{ fromJSON(vars.AGENT_RUNNER) }}"),
+            "{name:?}"
+        );
+    }
+    for credential in ["secrets.", ".token", "TOKEN"] {
+        assert!(!text.contains(credential), "{credential}");
+    }
+}
+
+/// The agent job refuses first: without the caller's configuration, and
+/// on a runner that cannot provide the sandbox, naming #1347.
+#[test]
+fn forgejo_dispatch_refuses_before_anything_runs() {
+    let doc = definition(FORGEJO_DISPATCH);
+    let first = &doc["jobs"]["agent"]["steps"][0];
+    let script = first["run"].as_str().unwrap();
+    assert!(script.contains("#1347"), "{script}");
+    for (url, bounds, missing) in [
+        ("", "", "FORGEJO_URL"),
+        ("https://forgejo.example", "", "AGENT_BOUNDS"),
+    ] {
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .env("FORGEJO_URL", url)
+            .env("AGENT_BOUNDS", bounds)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!output.status.success(), "{missing}: {output:?}");
+        assert!(stdout.contains(missing), "{stdout}");
+    }
+}
+
 /// dispatch.yml's caller fixes each profile's capabilities, routed as the
 /// runner evaluates them, and forwards only the apply token, never to a
 /// scripted run.

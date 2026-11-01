@@ -1,0 +1,82 @@
+# A Forgejo Actions caller that agent-board's Forgejo dispatch starts
+# (#2399). A caller copies it to .forgejo/workflows/dispatch.yml in its own
+# repository; it lives here rather than in this repository's
+# .forgejo/workflows/ so that a Forgejo mirror of this repository keeps
+# running .github/workflows/. This first slice only takes the dispatch and
+# refuses an unsuitable runner: no session, check or apply is wired yet,
+# and the job stops before anything runs.
+# docs/dispatch.md#forgejo-actions-caller says what it needs and what is
+# still open.
+#
+# It holds no token or secret. The instance URL, bounds and runner labels
+# come only from the caller's variables.
+name: dispatch
+# agent-board's in-flight listing matches runs on this name.
+run-name: "${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }} (${{ inputs.pool }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Public task for the agent
+        type: string
+        required: true
+      repo:
+        description: Target repository, OWNER/NAME, allowed by the bounds
+        type: string
+        required: true
+      item:
+        description: Positive issue or pull request number in the target repository
+        type: string
+        required: true
+      kind:
+        description: Profile agent-board chose (implement, triage, research, review or fix)
+        type: string
+        required: true
+      pool:
+        description: agent-board's runner pool for the run, shown in the run name
+        type: string
+        required: true
+      base:
+        description: Base branch of the target for the run
+        type: string
+        required: true
+
+permissions: {}
+# One run at a time per kind and item; a second dispatch for the same item
+# waits rather than cancelling the first. No group is shared across items.
+concurrency:
+  group: dispatch-${{ inputs.kind }}-${{ inputs.repo }}-${{ inputs.item }}
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    # A JSON label or array of labels, never a default: the agent's
+    # session needs a host runner (below), which only the caller knows.
+    runs-on: ${{ fromJSON(vars.AGENT_RUNNER) }}
+    steps:
+      # The sandbox is a login session on a hardened host (docs/sandbox.md):
+      # it needs systemd as the init, passwordless sudo to set it up, and
+      # no container around the job. A container runner would run the
+      # agent with no sandbox at all, so it is refused until #1347.
+      # systemd-detect-virt exits 1 outside a container; any other status,
+      # a missing tool included, refuses.
+      - name: Refuse without caller configuration or a sandbox-capable runner
+        shell: bash
+        env:
+          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
+          AGENT_BOUNDS: ${{ vars.AGENT_BOUNDS }}
+        run: |
+          for name in FORGEJO_URL AGENT_BOUNDS; do
+            [ -n "${!name}" ] || { echo "::error::Set the caller variable $name (docs/dispatch.md#forgejo-actions-caller)"; exit 1; }
+          done
+          virt=0
+          systemd-detect-virt --quiet --container || virt=$?
+          if [ ! -d /run/systemd/system ] || [ "$virt" -ne 1 ] || ! sudo -n true; then
+            echo "::error::The agent job needs a host runner able to provide the sandbox (systemd, passwordless sudo, no container); container runners wait for #1347"
+            exit 1
+          fi
+      - name: Stop before the unwired session
+        run: |
+          echo "::error::The Forgejo caller's session, check and apply are not wired yet (#2399)"
+          exit 1

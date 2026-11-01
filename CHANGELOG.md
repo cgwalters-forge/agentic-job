@@ -9,6 +9,9 @@ says what a caller may rely on across versions.
 
 ## Unreleased
 
+- A Forgejo Actions dispatch caller, `workflow/forgejo/dispatch.yml`, for
+  callers to copy to `.forgejo/workflows/dispatch.yml`, takes agent-board's inputs and refuses a runner that cannot provide the
+  sandbox; its session, check and apply are not wired yet.
 - Breaking (0.x): a bounds file names its forge with exactly one
   `[github]`, `[forgejo]` or `[gitlab]` section, which holds its
   `outputs`; `[github]` also holds `trigger`, `memory` and
