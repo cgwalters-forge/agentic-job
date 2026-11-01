@@ -2581,7 +2581,7 @@ fn agent_configuration_provenance_and_step_gates_are_preserved() {
     for (file, expected) in [
         (
             "agent.yml",
-            "[ \"$AGENT_USER\" = sandbox ] || set -- --no-script\nagentic-job config --host \"$@\" --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
+            "[ \"$AGENT_USER\" = sandbox ] || set -- --no-script\n[ -z \"$IMAGE_ARTIFACT\" ] || set -- \"$@\" --prepared\nagentic-job config --host \"$@\" --from .agentic-job/config.toml > \"$RUNNER_TEMP/agentic-job-host.toml\"\n",
         ),
         (
             "example-compose.yml",
@@ -2610,6 +2610,34 @@ fn agent_configuration_provenance_and_step_gates_are_preserved() {
             Some("${{ runner.temp }}/agentic-job-host.toml")
         );
     }
+    // With an image of this source, which holds no agent code,
+    // agentic-job's part of setup comes first, as root, on the file the
+    // image then reads.
+    let doc = definition("agent.yml");
+    let steps = steps(&doc);
+    let at = |name: &str| {
+        steps
+            .iter()
+            .position(|s| s["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let prepare = steps[at("agentic-job's part of the host's setup")];
+    assert_eq!(
+        prepare["if"].as_str(),
+        Some("${{ inputs.secure-host-image-artifact-id != '' }}")
+    );
+    assert_eq!(
+        prepare["run"].as_str(),
+        Some(
+            "sudo /usr/local/bin/agentic-job sandbox prepare --config \"$RUNNER_TEMP/agentic-job-host.toml\""
+        )
+    );
+    let secured = steps
+        .iter()
+        .position(|s| s["uses"].as_str() == Some("./.agentic-job-source/secure-host"))
+        .unwrap();
+    assert!(at("The host's configuration") < at("agentic-job's part of the host's setup"));
+    assert!(at("agentic-job's part of the host's setup") < secured);
     for (file, name) in [
         ("policy.yml", "Check that the repositories are public"),
         (
@@ -3694,8 +3722,8 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"- name: The JavaScript action main and post steps are confined\n        uses: \./\.github/actions/confine-probe # zizmor: ignore\[self-repository\] ",
             r"\n    outputs:\n      orphan: \$\{\{ steps\.orphan\.outputs\.pid \}\}\n",
             r#"echo "\$!" > "\$RUNNER_TEMP/confine-orphan\.pid""#,
-            "agentic-job sandbox check --record",
-            r"\n        run: agentic-job sandbox probe confined run-step\n",
+            "secure-host check --record",
+            r"\n        run: secure-host probe confined run-step\n",
             r"- if: \$\{\{ !cancelled\(\) \}\}\n        uses: actions/upload-artifact@",
         ],
         &[
@@ -4027,9 +4055,9 @@ const TEXTS: &[(&str, &str, &[&str])] = &[
         "confined",
         &[
             "      - name: Leave a process running\n        id: orphan\n",
-            "\"$RUNNER_TEMP/agentic-job\" sandbox probe control before",
+            "\"$RUNNER_TEMP/secure-host\" probe control before",
             "        uses: ./secure-host # zizmor: ignore[self-repository] ",
-            "sandbox probe confined run-step",
+            "secure-host probe confined run-step",
             "        uses: ./.github/actions/confine-probe # zizmor: ignore[self-repository] ",
             "uses: actions/upload-artifact@",
         ],
