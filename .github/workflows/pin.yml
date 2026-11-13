@@ -85,7 +85,7 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --latest=false --title "$TAG" --notes "Built from $GITHUB_SHA; checksums are in the attested manifest." dist/*
           fi
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1
+      - uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
         with:
           version: 1.3.0
           url: https://github.com/oras-project/oras/releases/download/v1.3.0/oras_1.3.0_linux_amd64.tar.gz
