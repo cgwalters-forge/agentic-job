@@ -66,6 +66,14 @@ Next independent slices are the detector/staged-apply contract assertions and
 the remaining local shell-step tests; keep actual upstream JavaScript execution
 coverage and the fixture-deletion prerequisite above intact.
 
+Apply's final success/refusal and handler-error shell tests also run in
+`tests/apply_workflow.rs`. They execute the shipped steps, preserving missing-PR,
+handler-failure, refused-project and missing-data/blocked cases, plus exact
+annotation and output escaping. Native publisher failure is covered both alone
+and beside a blocked result, which must not hide a publication failure. This
+test-only migration leaves upstream handler execution in Node and changes no
+runtime control or caller setting.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
