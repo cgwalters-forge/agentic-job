@@ -97,6 +97,13 @@ an unexpected directory and symlinked outputs. The size test also accepts exactl
 the key-bearing fixture, old-tree CI setup and upstream parity drivers remain
 subject to the disposition above. No runtime control or caller setting changes.
 
+The check-run admission corpus now runs independently in `tests/check_run.rs`,
+through the Rust policy, collector and checker. Its seven cases retain the pinned
+check name, refusal of success conclusions, explicit pull-request target and
+per-type ceiling. Only the replaced JavaScript test is removed; upstream handler
+parity and the key-bearing legacy fixture remain. No runtime or caller settings
+change. Next slices include issue-creation and bounded-update corpus coverage.
+
 ## Deployment
 
 ## Runner-only hardening inventory (2026-11-05)
