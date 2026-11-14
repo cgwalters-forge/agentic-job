@@ -169,6 +169,17 @@ A body-only comment therefore uses the caller's digest issue, even when the
 raw output included discarded aliases naming other items. This is routing
 coverage, not proof of private-run admission or live publication.
 
+Body-size coverage runs the same path with a public policy. Collection keeps
+up to 65,000 UTF-16 code units (not bytes or Unicode scalar values), appending
+`[Content truncated due to length]` on overflow. A cut through a non-BMP
+character omits that character rather than emitting an invalid surrogate.
+Check accepts these truncated comments: its publication limits do not validate
+the digest's structured content. Keep structured digests below the collector
+limit and validate the collected body before publication; validation of only
+the raw Markdown cannot prove its trailing JSON block survives collection.
+The regression pins below/at/above cases for ASCII and non-BMP text, including
+the truncation notice, without changing the upstream-compatible collector.
+
 The host-configuration step resolves the egress policy against the caller
 checkout before handing it to the host image, which reads it from `/`.
 Container and subordinate-UID probes remain enabled even though the digest
