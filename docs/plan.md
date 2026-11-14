@@ -121,6 +121,13 @@ publication. Empty and valid-request controls are accepted. Only those three
 legacy cases are removed; key-bearing fixtures and upstream parity remain.
 This test-only port adds no runtime control or caller setting.
 
+The same CLI matrix also covers output-type admission: null requests, empty or
+falsey types, truthy non-string types, unknown operations and a known operation
+not granted by policy. Each must fail collection and downstream check, both alone
+and after a valid publication, with the correct line-numbered diagnostic. These
+regressions supplement the legacy corpus without changing its fixtures or CI
+dependencies. No new control or caller setting is introduced.
+
 The omitted-mode attack also has deterministic Rust coverage in
 `tests/patch_git.rs`: real Git applies edits to a plain file, executable and
 symlink without an index-header mode, inheriting their types, while the reader
@@ -136,6 +143,14 @@ bound. Accepted cases assert the sanitized items as well as the exit/verdict;
 refusals assert their diagnostics. Only the replaced new-check JavaScript test is
 removed; old-tree comparisons, upstream drivers and gated fixtures remain.
 This adds no runtime control or caller setting.
+
+The three-way rename attack also has deterministic Rust coverage in
+`tests/patch_git.rs`: a patch naming an innocuous missing file can redirect an
+edit to a protected file through its blob ID when Git rename detection is on.
+The test proves that discrepancy and refusal with the existing apply settings
+(`merge.renames=false`). Text admission alone cannot discover the redirected
+path. The legacy corpus comparison remains intact pending the disposition
+above; this adds no runtime control or caller setting.
 
 ## Deployment
 

@@ -553,6 +553,79 @@ fn collected_digest_comments_cannot_override_the_fixed_destination() {
     }
 }
 
+/// Collection can cut a structured digest's tail before check sees it.
+/// Pin the UTF-16 boundary and notice, including a cut through a surrogate
+/// pair; check admits the result, not the raw body's original length.
+#[test]
+fn collected_digest_body_limits_count_utf16_and_preserve_truncation_notices() {
+    const LIMIT: usize = 65_000;
+    const TRUNCATED: &str = "\n[Content truncated due to length]";
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let (output, _) = policy_step(dir, FILLED, false);
+    assert!(output.status.success(), "{output:?}");
+    let policy = dir.join("job/policy.json");
+    let out = dir.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let collected = dir.join("collected.json");
+    for (name, body, expected) in [
+        ("ASCII below", "a".repeat(LIMIT - 1), "a".repeat(LIMIT - 1)),
+        ("ASCII at", "a".repeat(LIMIT), "a".repeat(LIMIT)),
+        (
+            "ASCII above",
+            "a".repeat(LIMIT + 1),
+            format!("{}{TRUNCATED}", "a".repeat(LIMIT)),
+        ),
+        (
+            "Unicode below",
+            format!("{}a", "😀".repeat(LIMIT / 2 - 1)),
+            format!("{}a", "😀".repeat(LIMIT / 2 - 1)),
+        ),
+        ("Unicode at", "😀".repeat(LIMIT / 2), "😀".repeat(LIMIT / 2)),
+        (
+            "Unicode above",
+            format!("{}a", "😀".repeat(LIMIT / 2)),
+            format!("{}{TRUNCATED}", "😀".repeat(LIMIT / 2)),
+        ),
+        (
+            "split pair",
+            format!("{}😀", "a".repeat(LIMIT - 1)),
+            format!("{}{TRUNCATED}", "a".repeat(LIMIT - 1)),
+        ),
+    ] {
+        std::fs::write(
+            out.join("outputs.jsonl"),
+            json!({"type": "add_comment", "body": body}).to_string(),
+        )
+        .unwrap();
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert!(ingest.status.success(), "{name}: {ingest:?}");
+        let document: Value = serde_json::from_slice(&std::fs::read(&collected).unwrap()).unwrap();
+        assert_eq!(document["errors"], json!([]), "{name}");
+        assert_eq!(document["items"].as_array().unwrap().len(), 1, "{name}");
+        assert_eq!(document["items"][0]["body"], expected, "{name}");
+        let checked = Command::new(BIN)
+            .args(["check", "--policy"])
+            .arg(&policy)
+            .arg("--outputs")
+            .arg(&out)
+            .arg("--collected")
+            .arg(&collected)
+            .args(["--comment-repo", REPO, "--comment-target", ITEM])
+            .output()
+            .unwrap();
+        assert!(checked.status.success(), "{name}: {checked:?}");
+    }
+}
+
 /// The configuration turns on the proxy and names the example's egress
 /// policy, which `run` admits for a private run where the shipped policy
 /// or one without the allowlist is refused. Run the actual host handoff

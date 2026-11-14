@@ -110,6 +110,13 @@ break, while inline/fenced code and email addresses stay intact. This pins the
 last-mile filter against producer-selected notifications from quoted upstream
 text; it does not test GitHub's live notification behavior or caller deployment.
 
+Standalone GitHub CLI loopback tests pin that failure boundary: redirects,
+authorization/rate-limit errors and server errors stop the batch at the failed
+POST, without automatic retry or a request to the redirect destination. Earlier
+successful comments are not rolled back. Diagnostics omit the server response,
+which may reflect credentials or submitted prose. These tests cover first and
+later POST failures, not live-service delivery or recovery after a lost response.
+
 Check can validate other non-patch operations under explicit output bounds, but
 standalone GitHub apply refuses them, including a batch with a supported comment before
 an unsupported operation. Patch operations are not a standalone GitHub CLI interface.
@@ -253,6 +260,11 @@ complete the listing. A nonempty page 20 refuses the entire batch without
 requesting page 21, even when the requested label was already found. This
 preserves the existing bounded scan rather than trusting an incomplete label
 inventory that could conceal label side effects.
+Revalidation cases change live labels after successful batch preflight: a
+deleted project label or newly conflicting scoped label refuses publication
+without a write, while an already completed addition or removal returns the
+typed item's URL without another mutation. This check narrows the race window;
+it is not an atomic guarantee against changes after the final read.
 These are loopback CLI-to-publisher tests, not live GitLab or CI isolation proof;
 they introduce no new permission or caller setting.
 
