@@ -121,7 +121,10 @@ impl Actions for Fixture {
 
     fn get(&mut self, path: &str) -> Result<Value> {
         Ok(match path.split_once('?').map_or(path, |(path, _)| path) {
-            "/projects/11/pipelines/5001/jobs" => json!(self.caller_jobs),
+            "/projects/11/pipelines/5001/jobs" => {
+                ensure!(path.contains("include_retried=true"), "retries not listed");
+                json!(self.caller_jobs)
+            }
             "/projects/12" => self.project.clone(),
             "/projects/12/pipelines/5002" => self.pipeline.clone(),
             "/projects/12/pipelines/5002/variables" => json!(self.variables),
@@ -426,7 +429,7 @@ fn caller_dispatch_job_must_be_in_its_pipeline_and_not_retried() {
     let record = record();
     let changes: [(&str, Change); 4] = [
         (
-            "retried dispatch",
+            "dispatch job was retried",
             Box::new(|f| {
                 let mut retry = f.caller_jobs[1].clone();
                 retry["id"] = 90002.into();
@@ -434,23 +437,34 @@ fn caller_dispatch_job_must_be_in_its_pipeline_and_not_retried() {
             }),
         ),
         (
-            "missing dispatch",
+            "dispatch job is not in the caller pipeline",
             Box::new(|f| f.caller_jobs[1]["id"] = 90009.into()),
         ),
         (
-            "dispatch in another pipeline",
+            "dispatch job is not in the caller pipeline",
             Box::new(|f| f.caller_jobs[1]["pipeline"]["id"] = 5009.into()),
         ),
         (
-            "dispatch without a name",
+            "dispatch job was retried",
             Box::new(|f| f.caller_jobs[1]["name"] = Value::Null),
         ),
     ];
-    for (what, change) in changes {
+    for (expected, change) in changes {
         let mut fixture = Fixture::new(&record, archive(&[]));
         change(&mut fixture);
-        assert!(fetch(&mut fixture, &record).is_err(), "{what}");
-        assert!(fixture.downloads.is_empty(), "{what} downloaded");
+        assert_eq!(
+            fetch(&mut fixture, &record).unwrap_err().to_string(),
+            expected
+        );
+        assert!(fixture.downloads.is_empty());
+
+        let mut fixture = Fixture::new(&record, archive(&[]));
+        fixture.at_release = Some(change);
+        assert_eq!(
+            fetch(&mut fixture, &record).unwrap_err().to_string(),
+            expected
+        );
+        assert_eq!(fixture.downloads.len(), 1);
     }
 }
 

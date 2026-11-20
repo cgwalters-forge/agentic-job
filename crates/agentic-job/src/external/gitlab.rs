@@ -455,6 +455,8 @@ fn fetch(api: &mut impl Actions, record: &Record) -> Result<(Receipt, Vec<u8>)> 
         pipeline(api, record)? == SUCCESS && jobs(api, record)? == found,
         "producer pipeline or jobs changed at release"
     );
+    // The caller can retry dispatch without changing the first producer.
+    caller(api, record)?;
     record.timely(api.now())?;
     let computed = digest(&SHA256, &bytes)
         .as_ref()
