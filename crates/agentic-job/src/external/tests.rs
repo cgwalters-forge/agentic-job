@@ -228,6 +228,7 @@ fn actions_http_transport_fetches_raw_by_id() {
         root,
         token: "read-only-fixture".into(),
         deadline: record.deadline,
+        accept: GITHUB_ACCEPT,
     };
     let (receipt, fetched) = fetch(&mut api, &record).unwrap();
     assert_eq!(receipt.raw.id, 11);
@@ -380,6 +381,7 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
         run_id: receipt.run_id,
         base_commit: record.base_commit.clone(),
         raw_digest: receipt.raw.digest,
+        gitlab: None,
     });
     policy.validate().unwrap();
     record.policy(&policy).unwrap();
