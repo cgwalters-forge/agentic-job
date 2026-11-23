@@ -222,6 +222,52 @@ fn a_pull_request_with_its_patch_is_accepted() {
 }
 
 #[test]
+fn commit_body_is_checked_in_the_mail_not_the_change() {
+    let pr = "Description.";
+    for (body, problem) in [
+        ("Description.", Some("equals the pull request body")),
+        (
+            "Description.\n\nRefs: example",
+            Some("equals the pull request body"),
+        ),
+        (
+            "Description.\n\nHere's why: this is additional prose.",
+            None,
+        ),
+        (
+            "Why.\n\n  ## Verification",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "Verification\n============",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "<https://example.com> results\n====",
+            Some("contains a Markdown heading"),
+        ),
+        ("> ## A nested heading", Some("contains a Markdown heading")),
+        ("Why.\n\n```sh\n# Example comment\n```", None),
+        ("", None),
+    ] {
+        let mut case = Case::pull_request("src/lib.rs");
+        case.items[0]["body"] = json!(pr);
+        case.patches[0].1 = case.patches[0]
+            .1
+            .replace("Why it changes.", body)
+            .replace("+fn main() { 1 }", "+## A heading in the changed file");
+        let checked = case.check(&policy());
+        match problem {
+            Some(problem) => assert!(
+                checked.errors.iter().any(|e| e.contains(problem)),
+                "{checked:?}"
+            ),
+            None => assert!(checked.errors.is_empty(), "{checked:?}"),
+        }
+    }
+}
+
+#[test]
 fn stack_base_pins_the_patch_even_when_handback_and_mail_agree() {
     let case = Case::pull_request("src/lib.rs");
     let mut policy = policy();

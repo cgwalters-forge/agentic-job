@@ -46,6 +46,9 @@ use crate::session::{Outcome, RunResult};
 /// account of the run.
 pub const AGENT_OUTPUTS: &str = "out/safe-outputs.jsonl";
 pub const AGENT_OUTCOME: &str = "out/outcome.json";
+
+/// Producer-only field on a create_pull_request request; never sent to gh-aw.
+pub const PR_COMMIT_MESSAGE: &str = "commit_message";
 /// Under the sandbox user's home: a whole series of commits that replaces
 /// a pull request's branch.
 pub(crate) const REPLACEMENT_PATH: &str = "out/replacement.json";
@@ -467,12 +470,11 @@ pub struct Outputs {
     pub text: String,
     /// Whether a patch is to go with it.
     pub wants_patch: bool,
-    /// The title and body of the pull request, the agent's own or the
-    /// one made up: the message of the commit.
-    pub message: Option<(String, String)>,
-    /// Those of the agent's request for the policy's secondary pull
+    /// The commit's subject and body, or why the producer's message is invalid.
+    pub message: Option<Result<(String, String), &'static str>>,
+    /// The same for the agent's request for the policy's secondary pull
     /// request, which is never made up: the agent names its `repo`.
-    pub secondary: Option<(String, String)>,
+    pub secondary: Option<Result<(String, String), &'static str>>,
 }
 
 /// The type of request that carries a run's change, and the branch it
@@ -497,7 +499,7 @@ pub fn secondary_patch_name(target: &crate::policy::Secondary, run_id: &str) -> 
     patch_file_name_in(&target.repo, &target.branch(&run_branch(run_id)))
 }
 
-/// A push's `message` as the title and body of its commit.
+/// An explicit commit message as a subject and body.
 fn split_message(message: &str) -> (String, String) {
     let message = message.trim();
     let (title, body) = message.split_once('\n').unwrap_or((message, ""));
@@ -505,6 +507,58 @@ fn split_message(message: &str) -> (String, String) {
         title.trim().to_owned(),
         body.trim_start_matches('\n').to_owned(),
     )
+}
+
+fn patch_message(
+    item: &Object,
+    push: bool,
+    fallback: &PullRequest,
+    run_id: &str,
+) -> Result<(String, String), &'static str> {
+    let field = if push { "message" } else { PR_COMMIT_MESSAGE };
+    let fallback_message = || {
+        let title = (!push)
+            .then(|| item.text("title"))
+            .flatten()
+            .filter(|title| !title.trim().is_empty());
+        let title = title.unwrap_or(&fallback.title);
+        Ok((
+            title.trim().lines().next().unwrap_or_default().to_owned(),
+            String::new(),
+        ))
+    };
+    let Some(value) = item.get(field) else {
+        return fallback_message();
+    };
+    let Some(value) = value.as_str().filter(|text| !text.trim().is_empty()) else {
+        // The existing push request goes to the collector unchanged.
+        return if push {
+            fallback_message()
+        } else {
+            Err("`commit_message` must be a nonempty string")
+        };
+    };
+    let value = if push {
+        checkpoint::without_trailing(value).unwrap_or(value)
+    } else {
+        value
+    };
+    if value.trim().is_empty() {
+        return fallback_message();
+    }
+    let (subject, body) = split_message(value);
+    let pr_body = if push { None } else { item.text("body") };
+    // Keep mail quoting from hiding a copied description or a Markdown heading.
+    if let Some(problem) = safe_outputs::check::commit_body_problem(&body, pr_body) {
+        return Err(problem);
+    }
+    // Formatting may remove a repeated subject or normalize whitespace.
+    // Check what will actually become the prose, before adding trailers.
+    let (_, formatted) = format_commit_parts(&subject, &body, run_id);
+    if let Some(problem) = safe_outputs::check::commit_body_problem(&formatted, pr_body) {
+        return Err(problem);
+    }
+    Ok((subject, body))
 }
 
 /// The agent's lines, its request for the change given the change's
@@ -522,9 +576,12 @@ pub fn build_outputs(
     let (kind, branch) = carrier(policy, run_id);
     let push = kind == PUSH_TO_PULL_REQUEST_BRANCH;
     let mut fallback = default_pull_request(outcome, run_id);
-    if policy.safe_outputs.ready_when_complete()
-        && let Some(checkpoint) = fallback_checkpoint(outcome)
-    {
+    let fallback_checkpoint = policy
+        .safe_outputs
+        .ready_when_complete()
+        .then(|| fallback_checkpoint(outcome))
+        .flatten();
+    if !push && let Some(checkpoint) = &fallback_checkpoint {
         fallback.body = format!("{}\n\n{}", fallback.body, checkpoint.markdown());
     }
     let mut message = None;
@@ -544,15 +601,8 @@ pub fn build_outputs(
                 && let Some(target) = &policy.secondary_pull_request
                 && item.text("repo").is_some_and(|repo| target.names(repo))
             {
-                let text = |key: &str, default: &str| {
-                    item.text(key)
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or(default)
-                        .to_owned()
-                };
-                secondary.get_or_insert_with(|| {
-                    (text("title", &fallback.title), text("body", &fallback.body))
-                });
+                secondary.get_or_insert_with(|| patch_message(&item, false, &fallback, run_id));
+                item.0.retain(|(key, _)| key != PR_COMMIT_MESSAGE);
                 item.set("repo", json!(target.repo));
                 item.set("branch", json!(target.branch(&run_branch(run_id))));
                 return serde_json::to_string(&item).unwrap_or_else(|_| line.to_owned());
@@ -560,13 +610,15 @@ pub fn build_outputs(
             if own_kind.as_deref() != Some(kind) {
                 return line.to_owned();
             }
-            // Keep the request consistent with the fallback commit message.
+            // Select the commit message before adding lifecycle metadata.
+            message.get_or_insert_with(|| patch_message(&item, push, &fallback, run_id));
+            // Keep the push request consistent with the fallback subject.
             // Explicit invalid values stay for gh-aw's collector to refuse.
-            if push && item.get("message").is_none() {
-                item.set(
-                    "message",
-                    json!(format!("{}\n\n{}", fallback.title, fallback.body)),
-                );
+            let missing_push_message = push && item.get("message").is_none();
+            if missing_push_message {
+                item.set("message", json!(fallback.title));
+            } else if !push {
+                item.0.retain(|(key, _)| key != PR_COMMIT_MESSAGE);
             }
             // The agent's own words without a checkpoint, while its outcome
             // says the work is not done or the run stopped early, would
@@ -574,25 +626,17 @@ pub fn build_outputs(
             // already, or a malformed one, is left for the check to read.
             let field = if push { "message" } else { "body" };
             if policy.safe_outputs.ready_when_complete()
-                && let Some(open) = partial_checkpoint(outcome)
+                && let Some(open) = if missing_push_message {
+                    fallback_checkpoint.clone()
+                } else {
+                    partial_checkpoint(outcome)
+                }
                 && let Some(words) = item.text(field)
                 && matches!(checkpoint::find(words), Ok(None))
             {
                 let words = format!("{}\n\n{}", words.trim_end(), open.markdown());
                 item.set(field, json!(words));
             }
-            let text = |key: &str, default: &str| {
-                item.text(key)
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or(default)
-                    .to_owned()
-            };
-            // Of several, which the check refuses, the first.
-            message.get_or_insert_with(|| match item.text("message") {
-                Some(text) if push && !text.trim().is_empty() => split_message(text),
-                _ if push => (fallback.title.clone(), fallback.body.clone()),
-                _ => (text("title", &fallback.title), text("body", &fallback.body)),
-            });
             item.set("branch", json!(branch));
             serde_json::to_string(&item).unwrap_or_else(|_| line.to_owned())
         })
@@ -600,8 +644,11 @@ pub fn build_outputs(
     let allowed = push || policy.safe_outputs.create_pull_request.is_some();
     if has_changes && message.is_none() && allowed {
         let request = if push {
-            let PullRequest { title, body, .. } = &fallback;
-            json!({"type": kind, "message": format!("{title}\n\n{body}"), "branch": branch})
+            let words = fallback_checkpoint.map_or_else(
+                || fallback.title.clone(),
+                |open| format!("{}\n\n{}", fallback.title, open.markdown()),
+            );
+            json!({"type": kind, "message": words, "branch": branch})
         } else {
             json!(PullRequest {
                 branch: Some(branch),
@@ -610,7 +657,7 @@ pub fn build_outputs(
         };
         if let Ok(line) = serde_json::to_string(&request) {
             lines.push(line);
-            message = Some((fallback.title, fallback.body));
+            message = Some(Ok((fallback.title, String::new())));
         }
     }
     Outputs {
@@ -665,9 +712,7 @@ fn needs_quoting(line: &str) -> bool {
         || line.trim_start().starts_with(IN_BODY_SUBJECT)
 }
 
-/// The message of the hand-back's commit: the pull request's title as
-/// its subject, its body, and the configured trailers.
-pub fn commit_message(title: &str, body: &str, trailers: &[String], run_id: &str) -> String {
+fn format_commit_parts(title: &str, body: &str, run_id: &str) -> (String, String) {
     let plain = |text: &str| -> String {
         text.chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -690,14 +735,18 @@ pub fn commit_message(title: &str, body: &str, trailers: &[String], run_id: &str
             }
         })
         .collect();
-    // A body made from the same summary as the title starts by saying
-    // the subject again.
+    // Do not repeat the subject in the body.
     let repeats = body
         .iter()
         .position(|line| !line.is_empty())
         .filter(|&first| body[first] == subject);
     let body = body[repeats.map_or(0, |first| first + 1)..].join("\n");
-    let mut message = subject;
+    (subject, body)
+}
+
+/// Format the hand-back's commit subject, body and configured trailers.
+pub fn commit_message(title: &str, body: &str, trailers: &[String], run_id: &str) -> String {
+    let (mut message, body) = format_commit_parts(title, body, run_id);
     for part in [body.trim_matches('\n'), &trailers.join("\n")] {
         if !part.is_empty() {
             message.push_str("\n\n");
@@ -738,13 +787,8 @@ fn parse_author(author: &str) -> Result<(String, String)> {
 /// value`, as git reads one.
 pub fn check_trailers(trailers: &[String]) -> Result<()> {
     for trailer in trailers {
-        let ok = trailer.split_once(": ").is_some_and(|(key, value)| {
-            !key.is_empty()
-                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && !value.trim().is_empty()
-        }) && !trailer.contains(|c: char| c.is_control());
         anyhow::ensure!(
-            ok,
+            safe_outputs::check::is_commit_trailer(trailer),
             "commit.trailers: {trailer:?} is not one line of `Key: value`"
         );
     }
@@ -1970,7 +2014,14 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     // Made before anything is written: a hand-back either holds every
     // patch its requests need, or, as in the old tree, none of its files.
     let mut patches = Vec::new();
-    if let (true, Some((title, body))) = (outputs.wants_patch, &outputs.message) {
+    if let (true, Some(message)) = (outputs.wants_patch, &outputs.message) {
+        let (title, body) = match message {
+            Ok(parts) => parts,
+            Err(why) => {
+                change.drop_patch(base, (*why).to_owned());
+                return Ok(change);
+            }
+        };
         let message = commit_message(title, body, &request.commit.trailers, run_id);
         let max = usize::try_from(policy.patch_read_limit()).unwrap_or(usize::MAX - 1);
         match staged.and_then(|_| build_patch(&git, base, &message, max)) {
@@ -2082,14 +2133,14 @@ enum SecondaryChange {
 
 /// The change of TREE, the clone of the secondary pull request's
 /// repository, as a patch of its own, made as the run's own is, by AUTHOR,
-/// with the title and body of the agent's request for it (MESSAGE) and
+/// with the commit message selected for the agent's request (MESSAGE) and
 /// within the secondary's own byte budget. `Err` is why it cannot be
 /// handed back.
 fn secondary_patch(
     request: &Request<'_>,
     tree: &Checkout,
     author: &(String, String),
-    message: Option<&(String, String)>,
+    message: Option<&Result<(String, String), &'static str>>,
 ) -> Result<SecondaryChange, String> {
     let Some(target) = &request.policy.secondary_pull_request else {
         return Ok(SecondaryChange::Unchanged);
@@ -2124,9 +2175,10 @@ fn secondary_patch(
     if git.ok(&["diff", "--cached", "--quiet"]) {
         return Ok(SecondaryChange::Unchanged);
     }
-    let Some((title, body)) = message else {
+    let Some(message) = message else {
         return Ok(SecondaryChange::Unasked);
     };
+    let (title, body) = message.as_ref().map_err(|why| (*why).to_owned())?;
     let message = commit_message(title, body, &request.commit.trailers, request.run_id);
     let max = usize::try_from(target.max_patch_bytes).unwrap_or(usize::MAX - 1);
     Ok(match build_patch(&git, base, &message, max)? {
@@ -2309,8 +2361,7 @@ mod tests {
             assert_eq!(got.text, *text, "{name}");
             assert_eq!(got.wants_patch, *wants_patch, "{name}");
         }
-        // The message is the request's own text, and the outcome's where
-        // it has none.
+        // The pull request body is independent of the fallback subject.
         let own = build_outputs(
             "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":7}",
             &policy,
@@ -2318,13 +2369,7 @@ mod tests {
             &outcome,
             RUN_ID,
         );
-        assert_eq!(
-            own.message,
-            Some((
-                "T".into(),
-                "Fix the parser.\nIt dropped the last line.".into()
-            ))
-        );
+        assert_eq!(own.message, Some(Ok(("T".into(), String::new()))));
         // Not allowed: no pull request is made up for the change.
         let noop_only = self::policy(Kind::Branch, json!({"noop": {"max": 1}}));
         let got = build_outputs("", &noop_only, true, &outcome, RUN_ID);
@@ -2385,10 +2430,10 @@ mod tests {
         ];
         for (outcome, policy, left) in cases {
             let got = build_outputs("", policy, true, &object(outcome.clone()), RUN_ID);
-            let (_, body) = got.message.unwrap();
+            let (_, body) = got.message.unwrap().unwrap();
+            assert!(body.is_empty());
             let request: Value = serde_json::from_str(got.text.trim()).unwrap();
-            assert_eq!(request["body"], body.as_str(), "{outcome}");
-            let found = crate::check::checkpoint::find(&body).unwrap();
+            let found = crate::check::checkpoint::find(request["body"].as_str().unwrap()).unwrap();
             assert_eq!(found.as_ref().map(|c| c.left.as_str()), left, "{outcome}");
             assert!(found.is_none_or(|c| c.reason == "incomplete"));
         }
@@ -2396,10 +2441,11 @@ mod tests {
         let long = "\u{1}".repeat(MAX_OUTCOME_BYTES);
         let outcome = object(json!({"summary": "Half.", "checkpoint": {
             "complete": false, "done": long, "left": long, "next": long}}));
-        let (_, body) = build_outputs("", &ready, true, &outcome, RUN_ID)
-            .message
+        let got = build_outputs("", &ready, true, &outcome, RUN_ID);
+        let request: Value = serde_json::from_str(got.text.trim()).unwrap();
+        let found = crate::check::checkpoint::find(request["body"].as_str().unwrap())
+            .unwrap()
             .unwrap();
-        let found = crate::check::checkpoint::find(&body).unwrap().unwrap();
         assert_eq!(found.left.chars().count(), MAX_CHECKPOINT_CHARS);
     }
 
@@ -2448,12 +2494,20 @@ mod tests {
             ("stopped", pr("B"), &ready, &stopped, "body", Some("lost")),
             ("off", pr("B"), &off, &open, "body", None),
             (
-                "a push",
+                "a push with an automatic checkpoint",
                 json!({"type": "push_to_pull_request_branch", "message": "T\n\nB"}),
                 &push,
                 &open,
                 "message",
                 Some("the tests"),
+            ),
+            (
+                "a push with its own checkpoint",
+                json!({"type": "push_to_pull_request_branch", "message": format!("T\n\n{with_own}")}),
+                &push,
+                &open,
+                "message",
+                Some("mine"),
             ),
         ];
         for (case, request, policy, outcome, field, left) in cases {
@@ -2466,8 +2520,18 @@ mod tests {
                 words.starts_with(if field == "body" { "B" } else { "T\n\nB" }),
                 "{case}"
             );
-            let (_, body) = got.message.unwrap();
-            assert!(field == "message" || body == words, "{case}");
+            let (_, body) = got.message.unwrap().unwrap();
+            assert_eq!(body, if field == "message" { "B" } else { "" }, "{case}");
+        }
+        let missing = Object::default();
+        for request in ["", r#"{"type":"push_to_pull_request_branch"}"#] {
+            let got = build_outputs(request, &push, true, &missing, RUN_ID);
+            let item: Value = serde_json::from_str(got.text.trim()).unwrap();
+            let found = checkpoint::find(item["message"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.left, NO_SUMMARY);
+            assert!(got.message.unwrap().unwrap().1.is_empty());
         }
     }
 
@@ -2527,11 +2591,8 @@ mod tests {
             (
                 "made up from the outcome",
                 "",
-                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\",\"branch\":\"agent-run-12\"}\n",
+                ("Fix the parser.", ""),
             ),
             (
                 "the agent's own, with the branch put right",
@@ -2540,49 +2601,34 @@ mod tests {
                 ("T", "B\nC"),
             ),
             (
-                "a missing message uses the outcome in both request and commit",
+                "a missing message uses only the outcome's first line",
                 "{\"type\":\"push_to_pull_request_branch\"}",
-                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                "{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\",\"branch\":\"agent-run-12\"}\n",
+                ("Fix the parser.", ""),
             ),
             (
                 "an explicit null stays for the collector to refuse",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":null}",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":null,\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                ("Fix the parser.", ""),
             ),
             (
                 "an explicit number stays for the collector to refuse",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":7}",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":7,\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                ("Fix the parser.", ""),
             ),
             (
-                "an empty message is the outcome's",
+                "an empty message uses the fallback subject",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \"}",
                 "{\"type\":\"push_to_pull_request_branch\",\"message\":\" \",\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                ("Fix the parser.", ""),
             ),
             (
                 "a pull request is left for the check to refuse",
                 "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":\"B\"}",
-                "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":\"B\"}\n{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\\n\\nFix the parser.\\nIt dropped the last line.\",\"branch\":\"agent-run-12\"}\n",
-                (
-                    "Fix the parser.",
-                    "Fix the parser.\nIt dropped the last line.",
-                ),
+                "{\"type\":\"create_pull_request\",\"title\":\"T\",\"body\":\"B\"}\n{\"type\":\"push_to_pull_request_branch\",\"message\":\"Fix the parser.\",\"branch\":\"agent-run-12\"}\n",
+                ("Fix the parser.", ""),
             ),
         ];
         for (name, agent_text, text, (title, body)) in cases {
@@ -2591,7 +2637,7 @@ mod tests {
             assert!(got.wants_patch, "{name}");
             assert_eq!(
                 got.message,
-                Some(((*title).to_owned(), (*body).to_owned())),
+                Some(Ok(((*title).to_owned(), (*body).to_owned()))),
                 "{name}"
             );
         }
@@ -3204,8 +3250,10 @@ mod tests {
                     Date: Thu, 1 Jan 1970 00:00:00 +0000\n\n\
                     Why: the parser dropped a line \u{2014} caf\u{e9}.\n\n---\n--- a/x\n+++ b/x\n\
                     @@ -1 +1 @@\ndiff --git a/.github/x b/.github/x\nFrom x Mon Sep 17 00:00:00 2001\n\
-                    Signed-off-by: Somebody Else <human@example.org>";
-        let request = json!({"type": "create_pull_request", "title": "parser: Keep the last line", "body": body});
+                    Signed-off-by: Somebody Else <human@example.org>\n\n```sh\r\n# Example comment\r\n```";
+        let request = json!({"type": "create_pull_request", "title": "Keep the parser's last line",
+            "body": "## Summary\n\nKeep the last line.",
+            "commit_message": format!("parser: Keep the last line\n\n{body}")});
         std::fs::write(
             home.path(AGENT_OUTPUTS),
             format!("{request}\n{{\"type\":\"noop\",\"message\":\"m\"}}\n"),
@@ -3243,6 +3291,7 @@ mod tests {
             "{patch}"
         );
         assert!(patch.contains("\nGenerated-by: AI\n---\n"), "{patch}");
+        assert!(!patch.contains("## Summary"), "{patch}");
         assert_eq!(
             std::fs::read_to_string(home.path("safe-outputs/base.json")).unwrap(),
             format!(
@@ -3256,6 +3305,9 @@ mod tests {
         );
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
+        assert!(verdict.items[0].get(PR_COMMIT_MESSAGE).is_none());
+        let raw = std::fs::read_to_string(home.path("safe-outputs/outputs.jsonl")).unwrap();
+        assert!(!raw.contains(PR_COMMIT_MESSAGE));
         let checked = verdict.patch.unwrap();
         assert_eq!(checked.files, ["a.txt", "sub/new-file.txt"]);
         assert_eq!(checked.base_commit, home.checkout.base_commit);
@@ -3290,6 +3342,43 @@ mod tests {
             sh(&applied, "git diff --name-only HEAD~1"),
             "a.txt\nsub/new-file.txt\n"
         );
+    }
+
+    #[test]
+    fn invalid_commit_message_drops_the_handback() {
+        let commit = config::Commit {
+            trailers: vec!["Generated-by: example".into()],
+            ..config::Commit::default()
+        };
+        for (message, problem) in [
+            (
+                json!("parser: Fix it\n\nDescription."),
+                "equals the pull request body",
+            ),
+            (
+                json!("parser: Fix it\n\nparser: Fix it\n\nDescription."),
+                "equals the pull request body",
+            ),
+            (
+                json!("parser: Fix it\n\n## Verification"),
+                "contains a Markdown heading",
+            ),
+            (
+                json!("parser: Fix it\n\nVerification\n---"),
+                "contains a Markdown heading",
+            ),
+            (json!(7), "must be a nonempty string"),
+        ] {
+            let home = Home::new();
+            let policy = policy(Kind::Branch, pull_requests());
+            sh(&home.checkout.dir, "echo two >> a.txt");
+            let request = json!({"type": "create_pull_request", "title": "Fix the parser",
+                "body": "Description.", "commit_message": message});
+            std::fs::write(home.path(AGENT_OUTPUTS), request.to_string()).unwrap();
+            let change = home.collect(&policy, &commit);
+            assert!(change.dropped.unwrap().contains(problem));
+            assert!(!home.path("safe-outputs/outputs.jsonl").exists());
+        }
     }
 
     /// With `[commit] format`, misformatted Rust the agent leaves is
@@ -3946,17 +4035,17 @@ mod tests {
     }
 
     #[test]
-    fn a_push_without_a_message_uses_the_patch_message() {
+    fn a_push_without_a_message_uses_only_the_subject_and_keeps_its_checkpoint() {
         let home = Home::new();
         let mut policy = crate::policy::tests::push_policy();
         policy.repo = "o/r".into();
-        policy
+        let push = policy
             .safe_outputs
             .push_to_pull_request_branch
             .as_mut()
-            .unwrap()
-            .head
-            .clone_from(&home.checkout.base_commit);
+            .unwrap();
+        push.head.clone_from(&home.checkout.base_commit);
+        push.ready_when_complete = true;
         sh(&home.checkout.dir, "echo two >> a.txt");
         std::fs::write(
             home.path(AGENT_OUTPUTS),
@@ -3965,23 +4054,23 @@ mod tests {
         .unwrap();
         std::fs::write(
             home.path(AGENT_OUTCOME),
-            "{\"summary\":\"parser: Keep the last line\\nIt was dropped.\"}\n",
+            r#"{"summary":"parser: Keep the last line\nIt was dropped.","stopped_early":"time limit"}"#,
         )
         .unwrap();
         let change = home.collect(&policy, &config::Commit::default());
         assert_eq!(change.dropped, None);
         let outputs = std::fs::read_to_string(home.path("safe-outputs/outputs.jsonl")).unwrap();
         let item: Value = serde_json::from_str(outputs.trim()).unwrap();
-        assert_eq!(
-            item["message"],
-            "parser: Keep the last line\n\nparser: Keep the last line\nIt was dropped."
-        );
+        let message = item["message"].as_str().unwrap();
+        assert!(message.starts_with("parser: Keep the last line\n\n```checkpoint\n"));
         let patch =
             std::fs::read_to_string(home.path("safe-outputs/aw-agent-run-12.patch")).unwrap();
         assert!(patch.contains("Subject: [PATCH] parser: Keep the last line\n"));
-        assert!(patch.contains("\nIt was dropped.\n"));
+        assert!(!patch.contains("It was dropped."));
+        assert!(!patch.contains("```checkpoint"));
         let verdict = home.verdict(&policy);
         assert!(verdict.ok, "{:?}", verdict.errors);
+        assert_eq!(verdict.checkpoint.unwrap().left, "time limit");
         assert_eq!(verdict.patch.unwrap().files, ["a.txt"]);
     }
 
@@ -4362,7 +4451,7 @@ mod tests {
             let fields: Vec<&str> = log.trim().split('|').collect();
             assert_eq!(fields[0], "A Bot <bot@example.com>", "{settings}: {log}");
             assert!(!fields[1].contains("1970"), "{settings}: {log}");
-            assert_eq!(&fields[2..], ["T", "B"], "{settings}: {log}");
+            assert_eq!(&fields[2..], ["T", ""], "{settings}: {log}");
         }
     }
 

@@ -2374,14 +2374,26 @@ collector, so a missing or malformed field is refused in the session in
 the words the check job would use. `handback guide` lists each
 allowed type's fields from the same table.
 
-For a `push_to_pull_request_branch` request without `message`, `run` fills
-that field from the outcome summary (or its default run description), the
-same fallback it uses for the patch's commit message. Where the outcome
-has no summary, the default description says the change is partial: an
-agent that wrote none may have been cut off before it could. An explicit `message`
-is preserved, including an invalid value for the collector to refuse. This
-does not validate requests while the producer runs or replace the separate
-check job.
+Write the commit message in `commit_message` on a `create_pull_request`
+request, separate from its `title` and `body`. This optional string has a
+subject on the first line and an optional body after a blank line. Follow
+the deployment's commit-message skill if available. `run` consumes the field
+when making the patch; it is not sent to gh-aw. For
+`push_to_pull_request_branch`, the existing `message` field supplies the
+commit message. If no commit message was supplied, `run` uses only the first
+line of the PR title (or, for an implicit title or a push, the first line of
+the outcome summary, with a run-based default). Configured trailers still
+apply. Checkpoints stay in the PR description or push request. An automatically
+appended checkpoint or a valid trailing checkpoint on a push request does not
+enter the commit.
+
+The risk is copying a publication report, including run links and review notes,
+into permanent commit history. Capture and the independent check refuse an
+ordinary patch whose commit body copies the PR body or contains a Markdown
+heading. The comparison normalizes whitespace as Git does. Capture checks the
+supplied and formatted bodies before appending trailers. Check compares both
+the full mail body and the prose before a final paragraph made entirely of
+valid `Key: value` trailers. A replacement series preserves its existing messages.
 
 ## The check, in two halves
 
