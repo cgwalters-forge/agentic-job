@@ -233,6 +233,71 @@ struct Reader {
     /// Whether a line of the commit message's body was read, and whether
     /// its first paragraph is over.
     body: (bool, bool),
+    /// `None` when reading a patch outside an ordinary handback.
+    commit_body: Option<String>,
+    message_ended: bool,
+}
+
+/// The whitespace cleanup Git applies with `commit --cleanup=whitespace`:
+/// trim trailing whitespace, discard outer blank lines and collapse runs of
+/// blank lines. Do not change indentation within paragraphs.
+fn canonical_prose(text: &str) -> String {
+    let mut prose = String::new();
+    let mut blank = false;
+    for line in text.lines() {
+        let line = line.trim_end_matches([' ', '\t', '\r', '\x0b', '\x0c']);
+        if line.is_empty() {
+            blank = true;
+        } else {
+            if !prose.is_empty() {
+                prose.push('\n');
+                if blank {
+                    prose.push('\n');
+                }
+            }
+            prose.push_str(line);
+            blank = false;
+        }
+    }
+    prose
+}
+
+/// The one-line `Key: value` syntax allowed for configured commit trailers.
+pub fn is_commit_trailer(line: &str) -> bool {
+    line.split_once(": ").is_some_and(|(key, value)| {
+        !key.is_empty()
+            && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && !value.trim().is_empty()
+    }) && !line.chars().any(char::is_control)
+}
+
+/// Reject report prose in a commit, without printing any of it. Compare the
+/// whole body as well as the prose before a final paragraph of valid trailers:
+/// check receives the mail, not the producer's trailer configuration.
+pub fn commit_body_problem<'a>(
+    body: &str,
+    pr_bodies: impl IntoIterator<Item = &'a str>,
+) -> Option<&'static str> {
+    let prose = canonical_prose(body);
+    let before_trailers = prose
+        .rsplit_once("\n\n")
+        .filter(|(_, tail)| tail.lines().all(is_commit_trailer))
+        .map(|(before, _)| before.trim());
+    if pr_bodies.into_iter().any(|description| {
+        let description = canonical_prose(description);
+        let description = description.trim();
+        !description.is_empty()
+            && (description == prose.trim() || Some(description) == before_trailers)
+    }) {
+        return Some("the commit body equals the pull request body");
+    }
+    use pulldown_cmark::{Event, Parser, Tag};
+    if Parser::new(body.trim_matches(['\r', '\n']))
+        .any(|event| matches!(event, Event::Start(Tag::Heading { .. })))
+    {
+        return Some("the commit body contains a Markdown heading");
+    }
+    None
 }
 
 /// The fields `git mailinfo` takes from the start of a message's body
@@ -335,6 +400,15 @@ impl Reader {
 
     /// A line of the commit message.
     fn message(&mut self, line: &str) -> State {
+        if line == "---" {
+            self.message_ended = true;
+        }
+        if !self.message_ended
+            && let Some(body) = &mut self.commit_body
+        {
+            body.push_str(line);
+            body.push('\n');
+        }
         let (started, over) = &mut self.body;
         if line.is_empty() {
             // git skips empty lines before the body.
@@ -627,7 +701,26 @@ pub struct PatchReading {
 
 /// Reads a patch against `base_commit` under `rules`.
 pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> PatchReading {
+    read(patch, rules, base_commit, None)
+}
+
+pub(super) fn read_proposal_patch(
+    patch: &str,
+    rules: &PatchRules<'_>,
+    base_commit: &str,
+    pr_bodies: [Option<&str>; 2],
+) -> PatchReading {
+    read(patch, rules, base_commit, Some(pr_bodies))
+}
+
+fn read(
+    patch: &str,
+    rules: &PatchRules<'_>,
+    base_commit: &str,
+    pr_bodies: Option<[Option<&str>; 2]>,
+) -> PatchReading {
     let mut reader = Reader {
+        commit_body: pr_bodies.map(|_| String::new()),
         github_exempt: rules
             .unprotected_dot_folders
             .iter()
@@ -675,11 +768,17 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
 
     let Reader {
         mut problems,
+        commit_body,
         files,
         base_commit: found,
         from,
         ..
     } = reader;
+    if let (Some(body), Some(pr_bodies)) = (commit_body, pr_bodies)
+        && let Some(problem) = commit_body_problem(&body, pr_bodies.into_iter().flatten())
+    {
+        problems.push(problem.to_owned());
+    }
     if files.is_empty() {
         problems.push("the patch holds no change".to_owned());
     }
@@ -730,6 +829,27 @@ mod tests {
     use crate::contract::PullRequest;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
+
+    #[test]
+    fn compares_canonical_prose_before_a_complete_trailer_block() {
+        let description = "Why it changes.\r\n\r\nDetails.\r\n";
+        let prose = "\nWhy it changes. \n\t\n\nDetails.\t\n";
+        for (tail, copied) in [
+            ("", true),
+            ("\nGenerated-by: Example\nRefs: issue\n", true),
+            ("\nGenerated-by: Example\nMore prose.\n", false),
+            ("\nNot a trailer: more prose.\n", false),
+            ("\nEmpty: \n", false),
+        ] {
+            let body = format!("{prose}{tail}");
+            assert_eq!(
+                commit_body_problem(&body, [description]).is_some(),
+                copied,
+                "{body:?}"
+            );
+            assert!(commit_body_problem(&body, [body.as_str()]).is_some());
+        }
+    }
 
     fn patch_problems(patch: &str, rules: &PullRequest, base_commit: &str) -> Vec<String> {
         read_patch(patch, &rules.rules(), base_commit).problems
