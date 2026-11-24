@@ -51,18 +51,23 @@ jobs:
           clang -std=c11 -O2 -Wall -Wextra -Werror crates/agentic-job/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
           "$RUNNER_TEMP/world-write-test"
       # The scripted agent too: a run with `agent: fake` needs it; and
-      # secure-host, the image's. The standalone safe-outputs CLI is for
-      # callers outside an agent run (#2398). The world-write policy
-      # object goes with them, its checksum in the manifest.
+      # secure-host, the image's. The world-write policy object goes with
+      # them, its checksum in the manifest. The standalone safe-outputs
+      # CLI is for callers outside an agent run (#2398): staged with its
+      # own checksum for the release's manifest, but not one of the
+      # bootstrap's runtime set, which pin.yml's prebuilt artifact and
+      # binary.sh's fallback build hold to the names above.
       - name: Stage the binaries and their checksums
         run: |
           mkdir dist
           bash secure-host/binary.sh object --out dist
           cd dist
-          for name in agentic-job fake-agent secure-host safe-outputs; do
+          for name in agentic-job fake-agent secure-host; do
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
+          cp "../target/$TARGET/release/safe-outputs" "safe-outputs-$TARGET"
+          sha256sum "safe-outputs-$TARGET" > "safe-outputs-$TARGET.sha256"
       # The manifest binds the source digest to the binary checksums.
       - name: The manifest of this build
         shell: bash

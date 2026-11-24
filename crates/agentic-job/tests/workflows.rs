@@ -7937,7 +7937,10 @@ fn nothing_occupies_the_actions_config_directory() {
 /// The image's binary is secure-host's, which build.yml stages, checksums
 /// and pins with the others, and which the image installs on the host
 /// under both its names: CI compares both with the staged file and
-/// refuses agentic-job's in its place.
+/// refuses agentic-job's in its place. The standalone safe-outputs CLI
+/// is staged, pinned and released beside them without joining the
+/// bootstrap's required set, so the prebuilt inventory either
+/// generation of binary.sh verifies stays the same six names.
 #[test]
 fn the_image_holds_and_installs_the_secure_host_binary() {
     let containerfile = workflow("secure-host/Containerfile");
@@ -7949,14 +7952,51 @@ fn the_image_holds_and_installs_the_secure_host_binary() {
         assert!(containerfile.contains(line), "{line}");
     }
     assert!(!containerfile.contains("COPY --chmod=0755 agentic-job-"));
+    // secure-host is built and staged with a checksum; the exact package
+    // and sibling lists are binary.sh's single definition, asserted below
+    // rather than duplicated per workflow.
     let build = workflow("build.yml");
-    assert!(build.contains("for name in agentic-job fake-agent secure-host; do\n"));
-    assert!(build.contains("-p agentic-job -p secure-host\n"));
+    assert!(build.contains(
+        "cargo build --release --locked --target \"$TARGET\" -p agentic-job -p secure-host"
+    ));
+    assert!(build.contains("cp \"../target/$TARGET/release/$name\" \"$name-$TARGET\""));
+    assert!(build.contains("sha256sum \"$name-$TARGET\" > \"$name-$TARGET.sha256\""));
+    // The standalone CLI is staged with its own checksum, outside the
+    // bootstrap's loop, and the manifest pins it.
+    assert!(
+        build.contains("cp \"../target/$TARGET/release/safe-outputs\" \"safe-outputs-$TARGET\"")
+    );
+    assert!(build.contains("sha256sum \"safe-outputs-$TARGET\" > \"safe-outputs-$TARGET.sha256\""));
     let binary = workflow("secure-host/binary.sh");
     assert!(binary.contains("NAMES=(agentic-job fake-agent secure-host)\n"));
+    assert!(!binary.contains("NAMES=(agentic-job fake-agent secure-host safe-outputs)"));
+    assert!(binary.contains("STANDALONE=(safe-outputs)"));
+    // pin checksums the standalone with the bootstrap's set, while the
+    // fallback build and `get` install and require only the set.
+    assert!(binary.contains("for name in \"${NAMES[@]}\" \"$OBJECT\" \"${STANDALONE[@]}\"; do"));
+    assert!(binary.contains(
+        "cargo build --release --locked --target \"$TARGET\" -p agentic-job -p secure-host)"
+    ));
+    // The prebuilt artifact's inventory enumerates the bootstrap's set,
+    // never the standalone binary that dist also holds.
+    let prebuilt = job(&workflow("pin.yml"), "publish");
+    assert!(prebuilt.contains("dist/secure-host-x86_64-unknown-linux-musl"));
+    assert!(!prebuilt.contains("dist/*-x86_64-unknown-linux-musl"));
+    assert!(!prebuilt.contains("safe-outputs"));
+    // The release publishes the standalone with its checksum, and its
+    // version parity runs in the read-only check job, not in publish.
     let release = workflow("release.yml");
     assert!(release.contains("\"secure-host-$TARGET\" \"secure-host-$TARGET.sha256\""));
-    assert!(release.contains("\"secure-host-$TARGET.sha256\"\n"));
+    assert!(release.contains("\"safe-outputs-$TARGET\" \"safe-outputs-$TARGET.sha256\""));
+    let check = job(&release, "check");
+    assert!(
+        check.contains(
+            "test \"$(\"./safe-outputs-$TARGET\" --version)\" = \"safe-outputs ${TAG#v}\""
+        )
+    );
+    let publish = job(&release, "publish");
+    assert!(publish.contains("contents: write"));
+    assert!(!publish.contains("--version"));
     let ci = workflow("ci.yml");
     let image = job(&ci, "secure-host-image");
     for want in [

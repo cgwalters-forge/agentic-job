@@ -39,11 +39,38 @@ target/debug/safe-outputs check --context context.json --input outputs.jsonl --c
 target/debug/safe-outputs apply --context context.json --input outputs.jsonl --checked checked.json
 ```
 
-The release workflow publishes this CLI with the workspace's other
+The release workflow publishes this CLI beside the workspace's other
 binaries, as `safe-outputs-x86_64-unknown-linux-musl` with its SHA-256
-in the attested `release.json` manifest, so a standalone caller can pin
-a release's manifest and checksums rather than building from source
-(partially addressing [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398)).
+in the attested `release.json` manifest and as a release asset with its
+`.sha256` — but outside the bootstrap's required set: `binary.sh get`
+neither requires, fetches nor builds it, and the prebuilt workflow
+artifact holds none of it, so opted-in readers verify the same six-file
+inventory as before.
+
+A standalone caller takes it from a version tag's release. Fetch
+`release.json`, `provenance.jsonl`, the binary and its `.sha256` (for
+example with `secure-host/binary.sh fetch --url … --out FILE` from a
+pinned bootstrap checkout), then bind the manifest to the release
+workflow and the tag's commit before comparing any digest, and only
+then the binary's digest to the signed manifest's:
+
+```sh
+commit=$(gh api repos/OWNER/agentic-job/commits/vX.Y.Z --jq .sha)
+gh attestation verify release.json --bundle provenance.jsonl \
+  --repo OWNER/agentic-job \
+  --cert-identity "https://github.com/OWNER/agentic-job/.github/workflows/release.yml@refs/heads/main" \
+  --source-ref refs/heads/main --source-digest "$commit" \
+  --deny-self-hosted-runners
+sha256sum --check safe-outputs-x86_64-unknown-linux-musl.sha256
+jq -r .sha256.safe-outputs release.json
+```
+
+The commit is the tag's, resolved through the API rather than taken
+from a moving branch or the release's editable metadata. This publishes
+this workspace's copy of the CLI; it does not satisfy
+[#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398)'s
+adoption requirement, which is to take an operator-provided external
+revision of the extracted crate rather than this copy.
 
 The threat is a producer redirecting a privileged write, or changing its content
 after check. The caller supplies trusted JSON bounds/context, outside the
