@@ -118,5 +118,4 @@ jobs:
           cp -- "$RUNNER_TEMP/policy.json" "$checked/"
           agentic-job collect --policy "$checked/policy.json" --outputs "$handback" --collected "$RUNNER_TEMP/collected.json"
           agentic-job check --policy "$checked/policy.json" --outputs "$handback" --collected "$RUNNER_TEMP/collected.json" \
-            --report "$checked/report.json" --run-id "$FORGEJO_RUN_ID"
-          cp -- "$handback/aw-agent-run-$FORGEJO_RUN_ID.patch" "$checked/"
+            --report "$checked/report.json" --run-id "$FORGEJO_RUN_ID" --stage "$checked"

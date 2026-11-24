@@ -990,6 +990,20 @@ pub fn run(args: &Args) -> Result<Exit> {
         eprintln!("warning: a secret-shaped string in {warning}");
     }
     print!("{}", verdict.markdown(&policy));
+    if verdict.ok {
+        for patch in verdict.patch.iter().chain(&verdict.secondary_patch) {
+            // Log only the identity of the bounded bytes check verified,
+            // never patch text that could expose data or issue CI log commands.
+            let bytes = contents
+                .get(&patch.file)
+                .with_context(|| format!("digesting {}: not read by check", patch.file))?;
+            println!(
+                "- patch `{}` digest: {}",
+                patch.file,
+                crate::external::sha256(bytes)
+            );
+        }
+    }
     Ok(if verdict.ok {
         Exit::Success
     } else {
