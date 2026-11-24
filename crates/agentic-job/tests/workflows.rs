@@ -7979,7 +7979,8 @@ fn the_image_holds_and_installs_the_secure_host_binary() {
     ));
     // The prebuilt artifact's inventory enumerates the bootstrap's set,
     // never the standalone binary that dist also holds.
-    let prebuilt = job(&workflow("pin.yml"), "publish");
+    let pin_yml = workflow("pin.yml");
+    let prebuilt = job(&pin_yml, "publish");
     assert!(prebuilt.contains("dist/secure-host-x86_64-unknown-linux-musl"));
     assert!(!prebuilt.contains("dist/*-x86_64-unknown-linux-musl"));
     assert!(!prebuilt.contains("safe-outputs"));
