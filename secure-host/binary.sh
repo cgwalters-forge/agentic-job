@@ -54,8 +54,11 @@ REPOSITORY=${WORKFLOW_REPOSITORY-}
 BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure-host/binary.sh)
 
 # The scripted agent too: a run with `agent: fake` needs it. secure-host
-# is what the image holds: the host's side, with no agent code.
-NAMES=(agentic-job fake-agent secure-host)
+# is what the image holds: the host's side, with no agent code. The
+# standalone safe-outputs CLI is for a caller outside an agent run
+# (#2398): a check and apply job of its own, pinning this release's
+# manifest rather than building.
+NAMES=(agentic-job fake-agent secure-host safe-outputs)
 
 # One static binary, so that it runs on whatever the job's runner is.
 TARGET=x86_64-unknown-linux-musl
@@ -377,7 +380,7 @@ build() {
   fi
   object "$out"
   rustup target add "$TARGET"
-  (cd "$ROOT" && cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host)
+  (cd "$ROOT" && cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host -p safe-outputs)
   for name in "${NAMES[@]}"; do install -m 0755 -- "$ROOT/target/$TARGET/release/$name" "$out/$name"; done
 }
 

@@ -23,7 +23,12 @@ const MAX_LINES: usize = 1000;
 const TOKEN_ENV: &str = "SAFE_OUTPUTS_TOKEN";
 
 #[derive(Parser)]
-#[command(about = "Check bounded safe-output JSONL, then apply in a separate trusted process")]
+// `--version`, as the release workflow's tag-parity check reads of the
+// other binaries: this crate's version is bumped with the workspace's.
+#[command(
+    about = "Check bounded safe-output JSONL, then apply in a separate trusted process",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

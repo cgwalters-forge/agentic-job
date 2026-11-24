@@ -39,6 +39,12 @@ target/debug/safe-outputs check --context context.json --input outputs.jsonl --c
 target/debug/safe-outputs apply --context context.json --input outputs.jsonl --checked checked.json
 ```
 
+The release workflow publishes this CLI with the workspace's other
+binaries, as `safe-outputs-x86_64-unknown-linux-musl` with its SHA-256
+in the attested `release.json` manifest, so a standalone caller can pin
+a release's manifest and checksums rather than building from source
+(partially addressing [#2398](https://github.com/cgwalters-forge/agentic-job/issues/2398)).
+
 The threat is a producer redirecting a privileged write, or changing its content
 after check. The caller supplies trusted JSON bounds/context, outside the
 producer's control. All operations are off unless explicitly listed, and total

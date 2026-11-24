@@ -22,7 +22,7 @@ use tempfile::TempDir;
 
 const REPOSITORY: &str = "example-org/tool";
 const TARGET: &str = "x86_64-unknown-linux-musl";
-const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
+const NAMES: [&str; 4] = ["agentic-job", "fake-agent", "secure-host", "safe-outputs"];
 const OBJECT: &str = "world_write.bpf.o";
 const BYTES: &str = "binary";
 
@@ -87,7 +87,7 @@ const CLANG: &str =
 
 const CARGO: &str = r#"
 echo "cargo $*" >> "$STUB_LOG"; mkdir -p target/x86_64-unknown-linux-musl/release
-for name in agentic-job fake-agent secure-host; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
+for name in agentic-job fake-agent secure-host safe-outputs; do echo built > target/x86_64-unknown-linux-musl/release/$name; done"#;
 
 const STUBS: [(&str, &str); 8] = [
     ("gh", GH),
@@ -503,7 +503,9 @@ fn assets(from: &str, change: impl Fn(&str) -> String) -> Vec<(String, String)> 
 
 /// The build `get` runs where it takes no release.
 fn cargo_build() -> String {
-    format!("cargo build --release --locked --target {TARGET} -p agentic-job -p secure-host")
+    format!(
+        "cargo build --release --locked --target {TARGET} -p agentic-job -p secure-host -p safe-outputs"
+    )
 }
 
 /// What `get` left in OUT, and that every file there is the release's.

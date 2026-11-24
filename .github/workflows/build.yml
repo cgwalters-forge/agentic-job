@@ -45,20 +45,21 @@ jobs:
         if: ${{ inputs.cache }}
         with:
           key: ${{ env.TARGET }}
-      - run: cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host
+      - run: cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host -p safe-outputs
       - name: Check the world-write policy's predicate
         run: |
           clang -std=c11 -O2 -Wall -Wextra -Werror crates/agentic-job/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
           "$RUNNER_TEMP/world-write-test"
       # The scripted agent too: a run with `agent: fake` needs it; and
-      # secure-host, the image's. The world-write policy object goes with
-      # them, its checksum in the manifest.
+      # secure-host, the image's. The standalone safe-outputs CLI is for
+      # callers outside an agent run (#2398). The world-write policy
+      # object goes with them, its checksum in the manifest.
       - name: Stage the binaries and their checksums
         run: |
           mkdir dist
           bash secure-host/binary.sh object --out dist
           cd dist
-          for name in agentic-job fake-agent secure-host; do
+          for name in agentic-job fake-agent secure-host safe-outputs; do
             cp "../target/$TARGET/release/$name" "$name-$TARGET"
             sha256sum "$name-$TARGET" > "$name-$TARGET.sha256"
           done
@@ -72,7 +73,7 @@ jobs:
       # A runner the binary is fetched onto may have another libc, or none.
       - name: The binaries are static and run
         run: |
-          for name in agentic-job secure-host; do
+          for name in agentic-job secure-host safe-outputs; do
             file "dist/$name-$TARGET" | tee /dev/stderr | grep -q 'static'
             "dist/$name-$TARGET" --version
           done
