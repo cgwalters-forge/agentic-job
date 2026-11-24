@@ -1076,7 +1076,7 @@ fn prebuilt_artifacts_verify_across_generations() {
                         ("BUILD_ARTIFACTS", "true"),
                         (
                             "STUB_ARCHIVE",
-                            s(&prebuilt_archive(&parent, &inventory, &release)),
+                            s(&prebuilt_archive(parent.path(), &inventory, &release)),
                         ),
                         ("STUB_INVOCATION", &invocation),
                     ]),
@@ -1113,7 +1113,7 @@ fn prebuilt_artifacts_verify_across_generations() {
                 ("BUILD_ARTIFACTS", "true"),
                 (
                     "STUB_ARCHIVE",
-                    s(&prebuilt_archive(&parent, &refused, &release)),
+                    s(&prebuilt_archive(parent.path(), &refused, &release)),
                 ),
                 ("STUB_INVOCATION", &invocation),
             ]),
