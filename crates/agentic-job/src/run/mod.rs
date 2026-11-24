@@ -1240,6 +1240,7 @@ impl Plan {
         prepared: Prepared,
         run: Option<&Arc<Run>>,
         mcp: Option<&mcp::Local>,
+        security_stop: Arc<crate::security_stop::Latch>,
     ) -> Result<(Options, Option<inference::Counter>, log::Shared)> {
         let mut spec = session::agents::builtin(self.kind.as_str())?;
         if self.kind != Kind::Fake {
@@ -1337,6 +1338,7 @@ impl Plan {
                 std::io::stdout(),
                 condensed,
                 redactor.clone(),
+                Some(security_stop),
             )),
             output,
             restate,
@@ -1360,7 +1362,14 @@ impl Plan {
     /// ([`enter`]): they run programs of the agent's choosing (a filter
     /// of its checkout's git configuration, for one). Once STOPPED is set
     /// no further command is started and nothing is published.
-    fn finish(&self, session: &Session, settled: &Settled, stopped: &AtomicBool) -> Result<bool> {
+    fn finish(
+        &self,
+        session: &Session,
+        settled: &Settled,
+        stopped: &AtomicBool,
+        security_stop: &crate::security_stop::Latch,
+    ) -> Result<bool> {
+        security_stop.check()?;
         let staging = &self.staging;
         let harness_dir = self.work.join(HARNESS_DIR);
         let runner = Stoppable {
@@ -1404,17 +1413,21 @@ impl Plan {
             eprintln!("warning: no change handed back: the session ended in an internal error");
             handback::Change::default()
         } else {
-            let mut change = handback::collect(&handback::Request {
-                runner: &runner,
-                home: &self.sandbox.home,
-                checkout: &session.checkout,
-                policy: &self.policy,
-                commit: &self.commit,
-                run_id: &self.run_id,
-                harness: Some(&harness),
-                run_dir: &staging.run(),
-                safe_outputs: &staging.safe_outputs(),
-            })?;
+            let mut change = handback::collect_with_stop(
+                &handback::Request {
+                    runner: &runner,
+                    home: &self.sandbox.home,
+                    checkout: &session.checkout,
+                    policy: &self.policy,
+                    commit: &self.commit,
+                    run_id: &self.run_id,
+                    harness: Some(&harness),
+                    run_dir: &staging.run(),
+                    safe_outputs: &staging.safe_outputs(),
+                },
+                security_stop,
+            )?;
+            security_stop.check()?;
             // The reasons quote what the agent wrote, and enter the
             // summary after the staged files are redacted.
             session.redactor.with(|redactor| change.redact(redactor));
@@ -1635,9 +1648,10 @@ impl Plan {
             ended: settled.dead,
             fake_agent: self.kind == Kind::Fake,
         };
-        if let Err(err) =
-            staging.check_with_public_addresses(gate, &session.redactor, &session.public_base)
-        {
+        let checked =
+            staging.check_with_public_addresses(gate, &session.redactor, &session.public_base);
+        security_stop.check()?;
+        if let Err(err) = checked {
             if let Err(why) = staging.record_refusal(&self.out, &err) {
                 eprintln!("warning: {}", enter::one_line(&format!("{why:#}")));
             }
@@ -1742,20 +1756,34 @@ impl Signals {
 
 /// Ends RUN at the proxy and records how it stands, for the summary and
 /// for the gate on uploads.
-async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
+async fn end_run(
+    run: Arc<Run>,
+    work: &Path,
+    security_stop: &crate::security_stop::Latch,
+) -> Result<Settled> {
     let ending = Arc::clone(&run);
     // With time for a proxy that is restarting just then (#1796): until
     // the run is ended, nothing of it is uploaded.
-    let ended = tokio::task::spawn_blocking(move || ending.end(Retry::end_of_run()))
-        .await
-        .context("ending the run at the proxy")?;
+    let (ended, notes) = tokio::task::spawn_blocking(move || {
+        let mut notes = Vec::new();
+        (ending.end_noting(Retry::end_of_run(), &mut notes), notes)
+    })
+    .await
+    .context("ending the run at the proxy")?;
+    if security_stop.observe().is_none() {
+        for note in notes {
+            eprintln!("{note}");
+        }
+    }
     let forgotten = matches!(ended, Ok(Ended::Forgotten));
     let (ended, usage) = match ended {
         Ok(Ended::Ended(record)) => (true, record),
         Ok(Ended::Forgotten) => (true, None),
         Ok(Ended::NoRunApi) => (false, None),
         Err(err) => {
-            eprintln!("error: {}", enter::one_line(&format!("{err:#}")));
+            if security_stop.observe().is_none() {
+                eprintln!("error: {}", enter::one_line(&format!("{err:#}")));
+            }
             (false, None)
         }
     };
@@ -1780,7 +1808,7 @@ async fn end_run(run: Arc<Run>, work: &Path) -> Result<Settled> {
 /// Runs PLAN, and leaves no run behind that the proxy still takes a
 /// token for. The agent is this process's own user: what it leaves
 /// behind outside its process group runs until the job ends.
-async fn supervise(plan: Plan) -> Result<Exit> {
+async fn supervise(plan: Plan, security_stop: Arc<crate::security_stop::Latch>) -> Result<Exit> {
     let mut signals = Signals::new()?;
     let plan = Arc::new(plan);
     let shared = Arc::new(Shared::default());
@@ -1805,14 +1833,25 @@ async fn supervise(plan: Plan) -> Result<Exit> {
         Ok(Ok(Ok(prepared))) => {
             let (checkout, model) = (prepared.checkout.clone(), prepared.model.clone());
             let public_base = prepared.public_base.clone();
-            match plan.session(prepared, shared.run().as_ref(), shared.mcp().as_deref()) {
+            match plan.session(
+                prepared,
+                shared.run().as_ref(),
+                shared.mcp().as_deref(),
+                security_stop.clone(),
+            ) {
                 Err(err) => Stage::Broken(err),
                 // Dropped on a signal, the session kills the wrapper it
                 // started; the agent itself is the sandbox user's, below.
                 Ok((options, _counter, redactor)) => {
                     let started = chrono::Utc::now();
                     let limits = options.limits.clone();
-                    match signals.or(session::run(options)).await {
+                    match signals
+                        .or(session::run_with_security_stop(
+                            options,
+                            Some(security_stop.clone()),
+                        ))
+                        .await
+                    {
                         Err(name) => Stage::Interrupted(name),
                         Ok(Err(err)) => {
                             let finished = chrono::Utc::now();
@@ -1856,15 +1895,17 @@ async fn supervise(plan: Plan) -> Result<Exit> {
     // The MCP proxy takes nothing more, whatever else is still running.
     if let Some(mcp) = shared.mcp() {
         mcp.end();
-        eprintln!(
-            "Ended the MCP proxy of {}: {} tool call(s) forwarded",
-            mcp.server().name,
-            mcp.calls()
-        );
+        if security_stop.observe().is_none() {
+            eprintln!(
+                "Ended the MCP proxy of {}: {} tool call(s) forwarded",
+                mcp.server().name,
+                mcp.calls()
+            );
+        }
     }
     // A run that is known is ended now, not after waiting for a thread.
     let mut settled = match shared.run() {
-        Some(run) => Some(end_run(run, &plan.work).await),
+        Some(run) => Some(end_run(run, &plan.work, &security_stop).await),
         None => None,
     };
     if still_preparing {
@@ -1877,8 +1918,20 @@ async fn supervise(plan: Plan) -> Result<Exit> {
             mcp.end();
         }
         if let (None, Some(run)) = (&settled, shared.run()) {
-            settled = Some(end_run(run, &plan.work).await);
+            settled = Some(end_run(run, &plan.work, &security_stop).await);
         }
+    }
+    // `run` withdraws the results and says why.
+    let security_stopped = || {
+        if matches!(&settled, Some(Err(_))) || matches!(&settled, Some(Ok(run)) if !run.dead) {
+            eprintln!(
+                "error: inference cleanup was not confirmed; the run token may still be live"
+            );
+        }
+        Exit::SecurityStop
+    };
+    if security_stop.observe().is_some() {
+        return Ok(security_stopped());
     }
 
     // The results of a session that ended are taken now: the agent's
@@ -1903,7 +1956,8 @@ async fn supervise(plan: Plan) -> Result<Exit> {
             let stopped = Arc::new(AtomicBool::new(false));
             let mut finishing = tokio::task::spawn_blocking({
                 let (plan, stopped) = (Arc::clone(&plan), Arc::clone(&stopped));
-                move || plan.finish(&session, &standing, &stopped)
+                let security_stop = security_stop.clone();
+                move || plan.finish(&session, &standing, &stopped, &security_stop)
             });
             let finished = signals.or(&mut finishing).await;
             if finished.is_err() {
@@ -1912,6 +1966,9 @@ async fn supervise(plan: Plan) -> Result<Exit> {
                 // It may have been moving the results out as it was
                 // told: a run that was stopped publishes none.
                 Staging::withdraw(&plan.out);
+            }
+            if security_stop.observe().is_some() {
+                return Ok(security_stopped());
             }
             match finished {
                 Err(name) => (Stage::Interrupted(name), None),
@@ -2000,12 +2057,48 @@ async fn supervise(plan: Plan) -> Result<Exit> {
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
+    // The stop's one place, the agent's handback root, read by `run`
+    // alone: a stop seen at any point decides the exit last, however else
+    // the run ended, an error included. Planning refuses a run without it.
+    let security_stop = args
+        .runner_home
+        .as_ref()
+        .map(|home| Arc::new(crate::security_stop::Latch::new(home.join("out"))));
+    let mut planned = false;
+    let exit = run_until_stopped(args, security_stop.as_ref(), &mut planned);
+    match security_stop.and_then(|stop| stop.observe()) {
+        // No private publisher exists, and nothing staged is left for one.
+        // Only this run's own: planning refuses an `--out` holding earlier
+        // results, and a stop seen before it leaves that `--out` alone.
+        Some(stop) => {
+            if planned {
+                Staging::withdraw(&args.out);
+            }
+            eprintln!("{}", stop.diagnostic());
+            Ok(Exit::SecurityStop)
+        }
+        None => exit,
+    }
+}
+
+fn run_until_stopped(
+    args: &Args,
+    security_stop: Option<&Arc<crate::security_stop::Latch>>,
+    planned: &mut bool,
+) -> Result<Exit> {
+    if let Some(stop) = security_stop {
+        stop.check()?;
+    }
     let plan = Plan::load(args)?;
+    *planned = true;
+    let security_stop = security_stop
+        .cloned()
+        .context("planned a run without its home")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the async runtime")?;
-    let exit = runtime.block_on(supervise(plan));
+    let exit = runtime.block_on(supervise(plan, security_stop));
     // A step of the preparation that a signal interrupted may still be
     // waiting on a request: it is not waited for.
     runtime.shutdown_background();
