@@ -57,6 +57,15 @@ BUILT_FROM=(Cargo.lock Cargo.toml crates egress skills workflow/review.md secure
 # is what the image holds: the host's side, with no agent code.
 NAMES=(agentic-job fake-agent secure-host)
 
+# The standalone safe-outputs CLI is for a caller outside an agent run
+# (#2398): a check and apply job of its own. It is staged with the
+# others and its checksum joins the release manifest, but it is not one
+# of the bootstrap's runtime set: `get` neither requires, fetches nor
+# builds it, and pin.yml's prebuilt artifact holds none of it, so the
+# inventory an opted-in reader verifies is the same six names in either
+# generation's hands.
+STANDALONE=(safe-outputs)
+
 # One static binary, so that it runs on whatever the job's runner is.
 TARGET=x86_64-unknown-linux-musl
 
@@ -410,12 +419,13 @@ get() {
   [ -z "${GITHUB_OUTPUT-}" ] || printf 'fetched=%s\nsource=%s\n' "$([ -n "$fetched" ] && echo true || echo false)" "$source" >> "$GITHUB_OUTPUT"
 }
 
-# release.json for the files of DIST, as a build of this source left them.
+# release.json for the files of DIST, as a build of this source left
+# them: the bootstrap's set, and the standalone CLI's checksum with it.
 pin() {
   local dist=$1 release=$2 repository=${3:-$REPOSITORY} sums='{}' name file sum source
   [ -n "$dist" ] && [ -n "$release" ] || fail "pin: --dist DIR and --release TAG are required"
   [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "pin: --repository OWNER/NAME is required"
-  for name in "${NAMES[@]}" "$OBJECT"; do
+  for name in "${NAMES[@]}" "$OBJECT" "${STANDALONE[@]}"; do
     file=$name-$TARGET
     [ "$name" != "$OBJECT" ] || file=$name
     sum=$(sha256 < "$dist/$file")

@@ -78,8 +78,14 @@ jobs:
           name: agentic-job-verified
           retention-days: 90
           if-no-files-found: error
+          # The bootstrap's fixed six-file inventory (docs/workflow.md),
+          # enumerated rather than globbed: dist also holds the standalone
+          # CLI's binary and the .sha256 files, which belong to the
+          # versioned release, never to the artifact a reader verifies.
           path: |
             dist/release.json
             dist/provenance.jsonl
-            dist/*-x86_64-unknown-linux-musl
+            dist/agentic-job-x86_64-unknown-linux-musl
+            dist/fake-agent-x86_64-unknown-linux-musl
+            dist/secure-host-x86_64-unknown-linux-musl
             dist/world_write.bpf.o

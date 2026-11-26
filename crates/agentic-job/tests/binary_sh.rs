@@ -23,6 +23,9 @@ use tempfile::TempDir;
 const REPOSITORY: &str = "example-org/tool";
 const TARGET: &str = "x86_64-unknown-linux-musl";
 const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
+/// The standalone CLI the release publishes beside the bootstrap's set,
+/// which `get` never requires, fetches or builds.
+const STANDALONE: &str = "safe-outputs";
 const OBJECT: &str = "world_write.bpf.o";
 const BYTES: &str = "binary";
 
@@ -483,13 +486,15 @@ fn source_with_a_part_missing_has_no_digest() {
 }
 
 fn checksums() -> Value {
-    Value::Object(
-        NAMES
-            .iter()
-            .chain([&OBJECT])
-            .map(|name| ((*name).to_owned(), Value::from(sha256(BYTES))))
-            .collect(),
-    )
+    // A manifest of this source's build holds the standalone CLI's
+    // checksum too, which `take` reads past: only the bootstrap's set
+    // is required of it.
+    NAMES
+        .iter()
+        .chain([&OBJECT])
+        .chain([&STANDALONE])
+        .map(|name| ((*name).to_owned(), Value::from(sha256(BYTES))))
+        .collect()
 }
 
 fn assets(from: &str, change: impl Fn(&str) -> String) -> Vec<(String, String)> {
@@ -1009,6 +1014,169 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
     }
 }
 
+/// The prebuilt artifact's inventory is a contract fixed across
+/// generations of this file: a reader of either generation takes an
+/// artifact and manifest of either generation, where the newer
+/// generation's manifest carries the standalone CLI's checksum and its
+/// release a further asset, but the artifact no further file. Both
+/// sides are hard-coded rather than derived from this checkout's NAMES,
+/// so each is genuinely of its own generation.
+#[test]
+fn prebuilt_artifacts_verify_across_generations() {
+    let tree = tree();
+    let root = tree.path();
+    let source = "c".repeat(64);
+    let base = format!("https://api.github.com/repos/{REPOSITORY}");
+    let commit = "a".repeat(40);
+    let invocation = format!("https://github.com/{REPOSITORY}/actions/runs/1/attempts/1");
+    // What a publisher of either generation uploads: the same six names.
+    let inventory = [
+        "release.json".to_owned(),
+        "provenance.jsonl".to_owned(),
+        format!("agentic-job-{TARGET}"),
+        format!("fake-agent-{TARGET}"),
+        format!("secure-host-{TARGET}"),
+        OBJECT.to_owned(),
+    ];
+    // This file as the previous generation's reader holds it, without the
+    // standalone CLI's checksum in pin's set.
+    let checkout = fs::read_to_string(script()).unwrap();
+    let older = checkout
+        .replace("STANDALONE=(safe-outputs)\n\n", "")
+        .replace(" \"${STANDALONE[@]}\"", "");
+    assert!(
+        !older.contains("STANDALONE"),
+        "the fixture stripped nothing"
+    );
+    for reader in ["current", "older"] {
+        if reader == "older" {
+            write(&root.join("secure-host/binary.sh"), &older);
+        }
+        for standalone_checksum in [true, false] {
+            let parent = tempdir("generation-");
+            let out = parent.path().join("bin");
+            let mut sums: Map<String, Value> = NAMES
+                .iter()
+                .chain([&OBJECT])
+                .map(|name| ((*name).to_owned(), Value::from(sha256(BYTES))))
+                .collect();
+            if standalone_checksum {
+                sums.insert(STANDALONE.to_owned(), Value::from(sha256(BYTES)));
+            }
+            let release = json!({
+                "repository": REPOSITORY, "release": format!("build-{source}"),
+                "target": TARGET, "source": source, "commit": commit, "sha256": sums,
+            });
+            let result = run(
+                root,
+                &["get", "--out", s(&out)],
+                Opts {
+                    files: prebuilt_files(&base),
+                    env: env(&[
+                        ("BUILD_ARTIFACTS", "true"),
+                        (
+                            "STUB_ARCHIVE",
+                            s(&prebuilt_archive(parent.path(), &inventory, &release)),
+                        ),
+                        ("STUB_INVOCATION", &invocation),
+                    ]),
+                    ..Opts::default()
+                },
+            );
+            assert_eq!(
+                result.status,
+                Some(0),
+                "{reader}, standalone checksum {standalone_checksum}: {}",
+                result.stderr
+            );
+            fetched(&out);
+        }
+    }
+    // An artifact that does hold a seventh file — what a publisher that
+    // added the standalone CLI to the bootstrap's set would upload — is
+    // refused by either generation before verification, which is why it
+    // is published beside the artifact, never in it.
+    let parent = tempdir("generation-");
+    let out = parent.path().join("bin");
+    let mut refused = inventory.to_vec();
+    refused.push(format!("{STANDALONE}-{TARGET}"));
+    let release = json!({
+        "repository": REPOSITORY, "release": format!("build-{source}"),
+        "target": TARGET, "source": source, "commit": commit, "sha256": checksums(),
+    });
+    let result = run(
+        root,
+        &["get", "--out", s(&out)],
+        Opts {
+            files: prebuilt_files(&base),
+            env: env(&[
+                ("BUILD_ARTIFACTS", "true"),
+                (
+                    "STUB_ARCHIVE",
+                    s(&prebuilt_archive(parent.path(), &refused, &release)),
+                ),
+                ("STUB_INVOCATION", &invocation),
+            ]),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(result.status, Some(1), "{}", result.stderr);
+    assert!(
+        result.stderr.contains("artifact inventory"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result.log.iter().any(|line| line.starts_with("gh ")));
+    assert!(!out.join("agentic-job").exists());
+    assert!(result.output.is_empty());
+}
+
+/// The Actions API responses a `get` of the selected prebuilt run reads.
+fn prebuilt_files(base: &str) -> Vec<(String, String)> {
+    let run = json!({"workflow_runs": [{"id": 1, "run_attempt": 1, "head_sha": "a".repeat(40),
+        "path": ".github/workflows/pin.yml", "status": "completed", "conclusion": "success",
+        "event": "push", "head_branch": "main"}]});
+    let artifact = json!({"artifacts": [{"id": 2, "name": "agentic-job-verified",
+        "expired": false, "size_in_bytes": 1024}]});
+    vec![
+        (
+            format!(
+                "{base}/actions/workflows/pin.yml/runs?branch=main&event=push&status=success&per_page=1"
+            ),
+            run.to_string(),
+        ),
+        (
+            format!("{base}/actions/runs/1/artifacts?name=agentic-job-verified&per_page=100"),
+            artifact.to_string(),
+        ),
+    ]
+}
+
+/// The payload ZIP the selected prebuilt run serves, holding exactly
+/// these files.
+fn prebuilt_archive(parent: &Path, names: &[String], release: &Value) -> PathBuf {
+    let payload = parent.join("payload");
+    fs::create_dir(&payload).unwrap();
+    for name in names {
+        let bytes = match name.as_str() {
+            "release.json" => release.to_string(),
+            "provenance.jsonl" => "bundle".to_owned(),
+            _ => BYTES.to_owned(),
+        };
+        write(&payload.join(name), bytes);
+    }
+    let archive = parent.join("archive.zip");
+    let zipped = Command::new("zip")
+        .current_dir(&payload)
+        .args(["-q", "-r", s(&archive), "."])
+        .status()
+        .unwrap();
+    assert!(zipped.success());
+    let download = parent.join("download");
+    fs::copy(&archive, &download).unwrap();
+    download
+}
+
 #[test]
 fn artifact_rollout_is_off_by_default() {
     let tree = tree();
@@ -1266,6 +1434,11 @@ fn manifest_binds_the_source_digest_to_the_checksums_of_the_build() {
         write(&dist.path().join(format!("{name}-{TARGET}")), name);
     }
     write(&dist.path().join(OBJECT), OBJECT);
+    // The standalone CLI, which pin checksums with the bootstrap's set.
+    write(
+        &dist.path().join(format!("{STANDALONE}-{TARGET}")),
+        STANDALONE,
+    );
     let dist_path = s(dist.path());
     let pinned = run(
         root,
@@ -1287,6 +1460,7 @@ fn manifest_binds_the_source_digest_to_the_checksums_of_the_build() {
     let sha256s: Map<String, Value> = NAMES
         .iter()
         .chain([&OBJECT])
+        .chain([&STANDALONE])
         .map(|name| ((*name).to_owned(), Value::from(sha256(name))))
         .collect();
     assert_eq!(
