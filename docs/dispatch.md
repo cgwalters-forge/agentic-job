@@ -190,9 +190,38 @@ automatic job token already has write access to that repository.
 | Repository variable | Value |
 | --- | --- |
 | `TRIAL_SCRIPTED` | `true`; accepts only `implement` on the default branch. |
-| `TRIAL_RUNNER` | JSON runner labels for a trusted isolated runner with pinned `agentic-job`, Bash, Git and jq. |
+| `TRIAL_RUNNER` | JSON labels for a trusted, isolated runner with the [trial job image prerequisites](#forgejo-trial-job-image). |
 | `TRIAL_FORGEJO_URL` | Forgejo instance URL. |
-| `AGENT_BOUNDS` | Absolute path to runner-provisioned bounds, not writable by jobs. Admit the public target and base, set `[forgejo].push_repo` to the separate fork, and bound `[forgejo.outputs]` to one `create_pull_request`. |
+| `AGENT_BOUNDS` | Absolute path to the [runner-owned bounds file](#forgejo-trial-bounds), not writable by jobs. |
 
 Success means the one-file patch and draft request passed check, not that
 a pull request was opened.
+
+#### Forgejo trial bounds
+
+Replace the host, repository, base and fork with your own values. Keep the
+one-file and one-output limits for this trial. This example sets an explicit
+byte limit. Omitting `max_patch_bytes` leaves it to the organization bounds
+and artifact ceilings, as described in [configuration files](stable-interfaces.md#configuration-files).
+
+```toml
+hosts = ["forge.example"]
+repos = ["example/target"]
+bases = ["main"]
+max_outputs = 1
+max_patch_bytes = 65536
+max_patch_files = 1
+
+[forgejo]
+push_repo = "bot/target"
+
+[forgejo.outputs]
+create_pull_request = { max = 1 }
+```
+
+#### Forgejo trial job image
+
+Put a pinned `agentic-job` binary compatible with your runner-owned bounds
+file on the job's `PATH` when preparing the image. The workflow uses that
+binary without downloading a replacement. The image also needs Bash, Git
+and `jq`; install `jq` from the image's package repository if it is missing.

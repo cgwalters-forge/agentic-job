@@ -76,6 +76,7 @@ jobs:
         id: produce
         shell: bash
         run: |
+          command -v jq >/dev/null || { echo '::error::The trial job image must provide jq'; exit 1; }
           clone_url="${FORGEJO_URL%/}/$TARGET_REPO"
           agentic-job policy --allow "$AGENT_BOUNDS" --repo "$TARGET_REPO" --base "$TARGET_BASE" \
             --clone-url "$clone_url" --kind branch --outputs create_pull_request --max-outputs 1 > "$RUNNER_TEMP/policy.json"

@@ -101,6 +101,74 @@ fn forgejo_dispatch_has_no_publishing_credential() {
     assert!(trial["continue-on-error"].is_badvalue());
 }
 
+#[test]
+fn forgejo_dispatch_accepts_bounds_without_a_byte_limit() {
+    let doc = dispatch(&dispatch_source());
+    let temp = tempfile::tempdir().unwrap();
+    let bounds = temp.path().join("bounds.toml");
+    std::fs::write(
+        &bounds,
+        r#"hosts = ["forge.example"]
+repos = ["example/target"]
+bases = ["main"]
+max_outputs = 1
+max_patch_files = 1
+
+[forgejo]
+push_repo = "bot/target"
+
+[forgejo.outputs]
+create_pull_request = { max = 1 }
+"#,
+    )
+    .unwrap();
+    // Stub only the remote base lookup; policy, collect and check use the
+    // checkout binary exactly as they would a runner-provided binary.
+    let git = temp.path().join("git");
+    std::fs::write(&git, "#!/bin/sh\nprintf '%040d\\trefs/heads/main\\n' 1\n").unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::var_os("PATH").unwrap();
+    let path = std::env::join_paths(
+        [
+            temp.path().to_owned(),
+            Path::new(BIN).parent().unwrap().to_owned(),
+        ]
+        .into_iter()
+        .chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+    for id in ["admit", "produce", "verify"] {
+        let output = Command::new("bash")
+            .args([
+                "-eo",
+                "pipefail",
+                "-c",
+                step(&doc, "trial", id)["run"].as_str().unwrap(),
+            ])
+            .env("PATH", &path)
+            .env("RUNNER_TEMP", temp.path())
+            .env("AGENT_BOUNDS", &bounds)
+            .env("FORGEJO_URL", "https://forge.example")
+            .env("TARGET_REPO", "example/target")
+            .env("TARGET_BASE", "main")
+            .env("FORGEJO_RUN_ID", "451")
+            .env("FORGEJO_REPOSITORY", "example/dispatch")
+            .env("SCRIPTED", "true")
+            .env("KIND", "implement")
+            .env("DEFAULT_BRANCH", "main")
+            .env("FORGEJO_REF", "refs/heads/main")
+            .output()
+            .unwrap();
+        assert_success(id, &output);
+    }
+    let checked = temp.path().join("checked");
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(checked.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["items"][0]["draft"], true, "{report}");
+    assert!(checked.join("aw-agent-run-451.patch").is_file());
+}
+
 /// One user's way in to the API.
 enum Auth<'a> {
     Basic(&'a str),

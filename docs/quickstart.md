@@ -199,15 +199,16 @@ substitute a provider key; GitLab has no supported inference registration path.
 
 1. Use a dedicated Forgejo Actions dispatch repository, a separate public
    target with an initialized base branch, and a bot fork distinct from the
-   dispatch repository. Use a trusted, isolated runner with Bash, Git, jq
-   and a pinned `agentic-job` binary. It must reach Forgejo directly over HTTPS
-   or [plain HTTP inside a cluster](#plain-http-inside-a-cluster); the trial
+   dispatch repository. Use a trusted, isolated runner with the
+   [job image prerequisites](dispatch.md#forgejo-trial-job-image), including a
+   pinned `agentic-job` binary and `jq`. It must reach Forgejo directly over HTTPS or
+   [plain HTTP inside a cluster](#plain-http-inside-a-cluster); the trial
    reads the base anonymously without a proxy or redirects.
 2. Review and copy the [trial workflow](../workflow/forgejo/dispatch.yml) to
    `.forgejo/workflows/dispatch.yml` on the dispatch repository's protected
    default branch. Set `TRIAL_RUNNER` to its runner labels as JSON (for example
    `["agentic-job"]`), `TRIAL_FORGEJO_URL` to the instance URL, `AGENT_BOUNDS`
-   to the absolute path of the runner-owned [bounds file](dispatch.md#scripted-forgejo-trial),
+   to the absolute path of the runner-owned [bounds file](dispatch.md#forgejo-trial-bounds),
    and `TRIAL_SCRIPTED` to `true`. Admit one `create_pull_request` and one patch
    file; omit `allow_http` for HTTPS. Do not give the dispatch repository or
    its runners a publishing PAT: a runner label does not authorize a workflow
