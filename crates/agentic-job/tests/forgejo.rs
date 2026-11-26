@@ -824,7 +824,7 @@ fn scripted_dispatch(forge: &Forge, dir: &Path) {
     assert_eq!(report["ok"], false, "{report}");
     assert!(!checked.join("aw-agent-run-450.patch").exists());
     std::fs::remove_dir_all(&checked).unwrap();
-    std::fs::write(&patch, original).unwrap();
+    std::fs::write(&patch, &original).unwrap();
 
     assert_success("Forgejo check", &run("verify"));
     let report: Value =
@@ -843,7 +843,10 @@ fn scripted_dispatch(forge: &Forge, dir: &Path) {
         }]),
         "{report}"
     );
-    assert!(checked.join("aw-agent-run-450.patch").exists());
+    assert_eq!(
+        std::fs::read(checked.join("aw-agent-run-450.patch")).unwrap(),
+        original
+    );
     assert!(!checked.join("outputs.jsonl").exists());
 }
 

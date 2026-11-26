@@ -194,5 +194,23 @@ automatic job token already has write access to that repository.
 | `TRIAL_FORGEJO_URL` | Forgejo instance URL. |
 | `AGENT_BOUNDS` | Absolute path to runner-provisioned bounds, not writable by jobs. Admit the public target and base, set `[forgejo].push_repo` to the separate fork, and bound `[forgejo.outputs]` to one `create_pull_request`. |
 
+Example bounds for a public HTTPS target (replace the host, repository,
+base and fork with your own):
+
+```toml
+hosts = ["forge.example.org"]
+repos = ["example-org/target"]
+bases = ["main"]
+max_outputs = 1
+max_patch_bytes = 65536
+max_patch_files = 1
+
+[forgejo]
+push_repo = "example-bot/target"
+
+[forgejo.outputs]
+create_pull_request = { max = 1 }
+```
+
 Success means the one-file patch and draft request passed check, not that
 a pull request was opened.

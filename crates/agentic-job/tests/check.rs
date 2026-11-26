@@ -635,6 +635,7 @@ fn collected_pull_requests_require_one_patch_bound_to_their_branch_and_base() {
         let verdict = run.verdict();
         assert_eq!(verdict["ok"], refusal.is_none(), "{case}: {verdict}");
         let errors = verdict["errors"].as_array().unwrap();
+        let log = String::from_utf8_lossy(&output.stdout);
         if let Some(refusal) = refusal {
             assert!(
                 errors
@@ -642,10 +643,20 @@ fn collected_pull_requests_require_one_patch_bound_to_their_branch_and_base() {
                     .any(|error| error.as_str().unwrap().contains(refusal)),
                 "{case}: {verdict}"
             );
+            assert!(!log.contains("digest: sha256:"), "{case}: {log}");
         } else {
             assert!(errors.is_empty(), "{verdict}");
             assert_eq!(verdict["items"].as_array().unwrap().len(), 1);
             assert_eq!(verdict["patch"]["file"], "aw-agent-run-7.patch");
+            assert!(
+                log.lines().any(|line| line
+                    == concat!(
+                        "- patch `aw-agent-run-7.patch` digest: sha256:",
+                        "2143e45af1dbc7b1079391d3482b1254be40ebd5fef1ef8d72117a7276b78c7a",
+                    )),
+                "{log}"
+            );
+            assert!(!log.contains("diff --git"), "{log}");
         }
     }
 }

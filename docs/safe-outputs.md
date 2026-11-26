@@ -2889,6 +2889,24 @@ such as `noop`, `missing_tool` and `missing_data`, it wraps them in code.
 For Forgejo and GitLab, the applier is `apply`, described below.
 On GitHub, gh-aw's handlers or the opt-in native handlers apply them.
 
+### Retain checked evidence
+
+Retain the check report and any accepted patch together, not a copy of the
+producer's patch. Use `--report` and `--stage` to write into a fresh directory
+owned by the check job. The report and patch are bounded by check, and the
+staged patch is written from the bytes check verified.
+
+| Forge | Where to find checked evidence |
+| --- | --- |
+| GitHub | The reusable check workflow's artifact, named `checked-outputs` by default. |
+| GitLab | The check job's `artifacts: paths` includes `checked/` in the [GitLab example](gitlab.md#minimal-deterministic-pipeline). |
+| Forgejo | The [scripted trial](quickstart.md#forgejo) records log evidence only; it does not upload an artifact. |
+
+Where artifacts are unavailable, use the check log. Its summary identifies
+accepted patches by name, size and SHA-256 of the checked bytes; it does not
+print the full report or patch. The digest identifies bytes, not a publication
+or successful application of the patch.
+
 ### Neutral inline comments
 
 An agent misled by repository text must not comment on another PR/MR or

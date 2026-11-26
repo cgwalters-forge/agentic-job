@@ -268,8 +268,11 @@ apply:
 `collect` exits nonzero for refused lines and `check` for a refused batch,
 so either stops the pipeline before apply. Apply checks the report against
 its own policy before writing. This example handles no patch; adding
-merge requests requires appropriate bounds, the fork and the checked
-patch file, not an unchecked copy of the producer's workspace.
+merge requests requires appropriate bounds and the fork. For that case,
+pin a binary that supports `check --stage` (the example's v0.6.13 predates
+it) and add `--stage checked` to the check command. It puts any accepted
+patch next to the report in the GitLab job artifact, without copying it
+from the producer's workspace after check.
 
 ## Publisher secrets and lifecycle
 

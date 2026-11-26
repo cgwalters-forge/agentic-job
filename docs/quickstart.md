@@ -203,7 +203,8 @@ substitute a provider key; GitLab has no supported inference registration path.
    and a pinned `agentic-job` binary. It must reach Forgejo directly over HTTPS
    or [plain HTTP inside a cluster](#plain-http-inside-a-cluster); the trial
    reads the base anonymously without a proxy or redirects.
-2. Review and copy the [trial workflow](../workflow/forgejo/dispatch.yml) to
+2. Pin the binary and the [trial workflow](../workflow/forgejo/dispatch.yml)
+   from the same reviewed revision, then copy the workflow to
    `.forgejo/workflows/dispatch.yml` on the dispatch repository's protected
    default branch. Set `TRIAL_RUNNER` to its runner labels as JSON (for example
    `["agentic-job"]`), `TRIAL_FORGEJO_URL` to the instance URL, `AGENT_BOUNDS`
@@ -211,12 +212,14 @@ substitute a provider key; GitLab has no supported inference registration path.
    and `TRIAL_SCRIPTED` to `true`. Admit one `create_pull_request` and one patch
    file; omit `allow_http` for HTTPS. Do not give the dispatch repository or
    its runners a publishing PAT: a runner label does not authorize a workflow
-   or ref, and Forgejo's automatic token can write to the dispatch repository.
+   or ref. Do not add remote actions to this job: Forgejo's automatic token can
+   write to the dispatch repository.
 3. In Actions, dispatch `dispatch` on the default branch with `kind=implement`,
    `repo` set to the public target and `base` to its admitted branch. Fill in
    `task`, `item` and `pool` (for example `say hello`, `1` and `trial`). Check
-   should admit one draft request and patch. Read the check step's log; the
-   report and patch stay in the runner's temporary directory, not an uploaded artifact.
+   should admit one draft request and patch. Read the check step's log for
+   the verdict, request type, and patch size and SHA-256. The report and
+   checked patch stay in the runner's temporary directory; no artifact is uploaded.
 
 A trial on an Actions runner over HTTPS remains unverified. The trial does not
 publish or run a model. A [fixture](../crates/agentic-job/tests/forgejo.rs) tests
